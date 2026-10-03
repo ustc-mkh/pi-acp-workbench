@@ -1,0 +1,8 @@
+**/*
+!package.json
+!README.md
+!LICENSE
+!CHANGELOG.md
+!dist/**
+!media/pi.svg
+!THIRD_PARTY_NOTICES.txt

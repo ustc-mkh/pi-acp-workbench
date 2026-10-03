@@ -1,0 +1,177 @@
+{
+  "name": "pi-acp-workbench",
+  "displayName": "Pi ACP Workbench",
+  "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
+  "version": "0.1.0",
+  "publisher": "local-pi",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.cjs",
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onView:piAcp.chat"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Pi can execute commands and edit files in the workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "piAcp",
+          "title": "Pi Agent",
+          "icon": "media/pi.svg"
+        }
+      ]
+    },
+    "views": {
+      "piAcp": [
+        {
+          "id": "piAcp.chat",
+          "name": "Pi Agent",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "piAcp.open",
+        "title": "Pi: Open Chat"
+      },
+      {
+        "command": "piAcp.newSession",
+        "title": "Pi: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "piAcp.attachSelection",
+        "title": "Pi: Add Selection to Chat"
+      },
+      {
+        "command": "piAcp.login",
+        "title": "Pi: Open Login Terminal"
+      },
+      {
+        "command": "piAcp.preview",
+        "title": "Pi: Preview Markdown & Math"
+      },
+      {
+        "command": "piAcp.logs",
+        "title": "Pi: Show Agent Logs"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "piAcp.newSession",
+          "when": "view == piAcp.chat",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "piAcp.attachSelection",
+          "when": "editorHasSelection",
+          "group": "pi"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "piAcp.attachSelection",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Pi ACP",
+      "properties": {
+        "piAcp.command": {
+          "type": "string",
+          "default": "pi-acp",
+          "scope": "machine",
+          "description": "ACP executable. On Windows use node with the adapter's JS entry point in args."
+        },
+        "piAcp.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "description": "Arguments passed directly without a shell."
+        },
+        "piAcp.env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "scope": "machine",
+          "description": "Agent environment overrides. Prefer provider credentials stored by Pi; avoid saving secrets here."
+        },
+        "piAcp.showThoughts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show thought chunks when the agent emits them."
+        },
+        "piAcp.persistHistory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save conversation snapshots in VS Code workspace state. Disabling clears stored snapshots on activation or setting change."
+        },
+        "piAcp.maxContextChars": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "maximum": 500000,
+          "description": "Maximum characters in an attached editor selection or file."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.1.0.vsix",
+    "vscode:prepublish": "npm run check && npm run build",
+    "test:browser": "npm run build && node scripts/browser-smoke.mjs"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0",
+    "dompurify": "3.4.16",
+    "highlight.js": "11.11.1",
+    "katex": "0.19.0",
+    "markdown-it": "15.0.2",
+    "markdown-it-footnote": "4.0.0",
+    "markdown-it-task-lists": "2.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/jsdom": "^21.1.0",
+    "@types/katex": "^0.16.7",
+    "@types/markdown-it": "^14.1.0",
+    "@types/markdown-it-footnote": "^3.0.4",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "1.96.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
