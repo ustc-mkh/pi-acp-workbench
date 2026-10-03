@@ -31,6 +31,17 @@ export const md: ReturnType<typeof MarkdownIt> = new MarkdownIt({
 });
 md.use(taskLists, { enabled: false, label: false });
 md.use(footnotes);
+const originalFence = md.renderer.rules.fence!;
+md.renderer.rules.fence = (tokens, index, options, env, self) => {
+  const token=tokens[index];
+  if(token.info.trim().toLowerCase()!=='mermaid')return originalFence(tokens,index,options,env,self);
+  const lines=String(env?.source||'').split('\n'), last=token.map?lines[token.map[1]-1]||'':'';
+  const closed=new RegExp('^\\s*'+token.markup[0]+'{'+token.markup.length+',}\\s*$').test(last);
+  const code=md.utils.escapeHtml(token.content);
+  if(!closed)return `<pre class="code-block"><button class="copy-code" type="button">复制</button><code>${code}</code></pre>`;
+  return `<figure class="mermaid-diagram diagram-ready"><div class="diagram-canvas" aria-label="流程图"></div><details class="diagram-source"><summary>Mermaid 源码</summary><pre class="code-block"><button class="copy-code" type="button">复制</button><code>${code}</code></pre></details></figure>`;
+};
+
 // Delimiters are parsed as Markdown tokens, never regex-replaced across code spans/fences.
 md.inline.ruler.before('escape', 'pi_math', (state, silent) => {
   const start = state.pos;
@@ -86,7 +97,7 @@ md.renderer.rules.image = (tokens, i) => `<span class="image-placeholder">[图�
 
 export function createRenderer(window: Window) {
   const purify = createDOMPurify(window as any);
-  return (source: string) => purify.sanitize(md.render(source), {
+  return (source: string) => purify.sanitize(md.render(source,{source}), {
     USE_PROFILES: { html: true, mathMl: true, svg: true },
     FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'img', 'foreignObject'],
     FORBID_ATTR: ['src', 'srcset', 'onerror', 'onclick'],

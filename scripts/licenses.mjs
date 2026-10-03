@@ -10,4 +10,4 @@ for (const [location, info] of Object.entries(lock.packages)) {
     try { notices.push(await readFile(`${location}/${file}`, 'utf8')); } catch { /* directories are not license text */ }
   }
 }
-await writeFile('THIRD_PARTY_NOTICES.txt', notices.join('\n'));
+await writeFile('THIRD_PARTY_NOTICES.txt', notices.join('\n').replace(/[ \t]+$/gm, ''));

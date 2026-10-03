@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Bundle an enhanced, pinned Pi ACP adapter with negotiated usage and bounded-summary extension methods.
+- Reuse valid native compaction checkpoints; invalidate affected summaries after edits and rebuild long retained histories in bounded, cancellable chunks.
+- Persist full local conversation files without the former 2 MB snapshot truncation; copy the complete original Markdown independently of compaction.
+- Render closed Mermaid fences locally with theme-aware SVG, source fallback and sanitization.
+- Add model/day/conversation token and cost statistics, cache hit ratios, deduplicated native request usage, and editable USD per-million-token price presets.
+- Preserve billed usage across message deletion; do not rebill inherited history when branching.
+
 ## 0.1.5
 
 - Move history deletion to the right, use more compact rows with slightly larger text, and remove status indicator tooltips.

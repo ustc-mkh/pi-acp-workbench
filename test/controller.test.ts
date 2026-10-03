@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[] }));
 vi.mock('vscode', () => ({
+  env:{clipboard:{writeText:vi.fn(async()=>{})}},
   workspace: {
     isTrusted: true,
     get workspaceFolders() { return [{ uri: { scheme: 'file', fsPath: process.cwd() } }]; },
@@ -285,17 +286,14 @@ it('keeps a cancelled first synchronization pending instead of assuming the peer
   await host.provider.perform({ type: 'send', text: 'continue' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text).toContain('retained-before-cancel');
 });
-it('warns about oversized pending snapshots and refuses to restore their incomplete index', async () => {
+it('rejects oversized reconstruction when the external adapter lacks bounded summary support', async () => {
   await contextAgent();
   host.provider.state.entries = [{ id: 'large', role: 'user', text: 'x'.repeat(2_010_000) }];
+  const original=host.provider.snapshot();
   await edit('branchMessage', 'large');
-  expect(host.provider.snapshot().error).toContain('未能完整保存');
-  const pending = host.provider.snapshot();
-  const saved = (host.stored.get('history') as any[]).find(s => s.id === pending.sessionId);
-  expect(saved.contextComplete).toBe(false); expect(saved.contextPending).toBe(true);
-  await host.provider.perform({ type: 'resume', id: saved.id });
-  expect(host.provider.snapshot().error).toContain('不完整');
-  expect(host.provider.snapshot().entries).toEqual(pending.entries);
+  expect(host.provider.snapshot().error).toContain('安全输入预算');
+  expect(host.provider.snapshot().entries).toEqual(original.entries);
+  expect(host.provider.snapshot().sessionId).toBe(original.sessionId);
 });
 it('does not dispatch cancel before a prompt when the user stops during local persistence', async () => {
   await contextAgent();
@@ -304,4 +302,32 @@ it('does not dispatch cancel before a prompt when the user stops during local pe
   expect(host.provider.snapshot().status).toBe('ready');
   expect(wire().filter(r => r.method === 'session/prompt' || r.method === 'session/cancel')).toHaveLength(0);
   expect(host.provider.snapshot().entries.at(-1).text).toContain('尚未发送');
+});
+
+it('deduplicates billed requests, preserves logical conversations after deletion, and keeps branch spending separate', async()=>{
+  await contextAgent();await host.provider.perform({type:'send',text:'original'});
+  const original=host.provider.snapshot().sessionId;
+  const record={id:'native-request',sessionId:original,model:'p/m',timestamp:Date.now(),kind:'inference',input:100,output:20,cacheRead:80,cacheWrite:0};
+  await host.provider.recordUsage([record]);await host.provider.recordUsage([record]);
+  expect(host.stored.get('usageRecords')).toHaveLength(1);
+  const assistant=host.provider.snapshot().entries.find((e:any)=>e.role==='assistant');
+  await edit('deleteMessage',assistant.id);await host.provider.recordUsage([{...record,id:'after-delete',sessionId:host.provider.snapshot().sessionId}]);
+  expect((host.stored.get('usageRecords') as any[]).map(r=>r.sessionId)).toEqual([original,original]);
+  await edit('branchMessage',host.provider.snapshot().entries[0].id);
+  await host.provider.recordUsage([{...record,id:'branch-request',sessionId:host.provider.snapshot().sessionId}]);
+  expect((host.stored.get('usageRecords') as any[]).find(r=>r.id==='branch-request').sessionId).not.toBe(original);
+});
+it('persists custom prices, rejects invalid numbers and restores defaults',async()=>{
+ await host.provider.perform({type:'setPrice',model:'p/m',price:{input:2,output:3,cacheRead:.2,cacheWrite:2.5}});
+ expect(host.stored.get('prices')).toMatchObject({'p/m':{input:2}});
+ await host.provider.perform({type:'setPrice',model:'p/m',price:{input:-1,output:3,cacheRead:.2,cacheWrite:2.5}});
+ expect(host.stored.get('prices')).toMatchObject({'p/m':{input:2}});
+ await host.provider.perform({type:'setPrice',model:'p/m'});expect(host.stored.get('prices')).toEqual({});
+});
+it('copies original full Markdown even when a compacted checkpoint exists',async()=>{
+ const vscode=await import('vscode');await contextAgent();await host.provider.perform({type:'send',text:'Original equation $x^2$'});
+ host.provider.checkpoints=[{count:2,hash:'irrelevant',text:'short summary',source:'pi',id:'cp'}];
+ await host.provider.perform({type:'copyConversation'});
+ expect(vscode.env.clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining('Original equation $x^2$'));
+ expect(vscode.env.clipboard.writeText).not.toHaveBeenLastCalledWith(expect.stringContaining('short summary'));
 });

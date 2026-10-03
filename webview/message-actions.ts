@@ -10,8 +10,8 @@ export function messageActions(entry: Entry, sessionId: () => string | undefined
   };
   actions.append(copy);
   for (const [type, label, tooltip] of [
-    ['branchMessage', '分支', '保留截至此处的上下文，新建对话'],
-    ['deleteMessage', '删除', '从对话及 Agent 上下文中删除此条'],
+    ['branchMessage', '分支', '保留截至此处的上下文，新建对话；必要时调用模型重建摘要'],
+    ['deleteMessage', '删除', '从对话及 Agent 上下文中删除此条；必要时调用模型重建摘要'],
   ] as const) {
     const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
     button.dataset.contextAction = type; button.dataset.tooltip = tooltip; button.dataset.actionDescription = tooltip;

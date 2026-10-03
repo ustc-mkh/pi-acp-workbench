@@ -8,4 +8,5 @@ await Promise.all([
   copyFile('node_modules/katex/dist/katex.min.css', 'dist/katex.min.css'),
   cp('node_modules/katex/dist/fonts', 'dist/fonts', { recursive: true }),
 ]);
+await (await import('./build-adapter.mjs')).buildAdapter();
 await import('./licenses.mjs');

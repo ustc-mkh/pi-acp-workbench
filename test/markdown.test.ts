@@ -38,3 +38,9 @@ describe('Markdown and mathematics', () => {
     const d = doc(demoMarkdown); expect(d.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(7); expect(d.querySelector('.math-fallback')).toBeNull(); expect(d.querySelector('pre code')?.textContent).toContain('numpy');
   });
 });
+it('waits for the closing Mermaid fence before scheduling a diagram and preserves source',()=>{
+  const source='```mermaid\nflowchart TD\n A[开始] --> B[结束]\n';
+  expect(doc(source).querySelector('.diagram-ready')).toBeNull();
+  const d=doc(source+'```');expect(d.querySelector('.diagram-ready')).not.toBeNull();expect(d.querySelector('code')?.textContent).toContain('flowchart TD');
+  expect(doc('```mermaid\n<script>alert(1)</script>\n```').querySelector('script')).toBeNull();
+});
