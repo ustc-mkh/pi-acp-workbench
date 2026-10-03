@@ -120,3 +120,31 @@ it('does not persist conversation content when history is disabled', async () =>
   await host.provider.perform({ type: 'connect' }); await host.provider.perform({ type: 'send', text: 'hello' });
   expect(host.stored.get('history')).toBeUndefined();
 });
+it('deletes one historical record while preserving other records and the running turn', async () => {
+  await host.provider.perform({ type: 'connect' });
+  host.provider.history.push({ id: 'older-session', title: 'older', cwd: process.cwd(), updated: 1, entries: [] });
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  await host.provider.perform({ type: 'deleteHistory', id: 'older-session' });
+  expect(host.provider.snapshot().status).toBe('busy');
+  expect((host.stored.get('history') as any[]).map(item => item.id)).toEqual(['test-session']);
+  expect((host.stored.get('history') as any[])[0].title).toBe('wait');
+  await host.provider.perform({ type: 'cancel' }); await turn;
+});
+it('does not recreate a deleted current record when the turn completes or the provider saves again', async () => {
+  await host.provider.perform({ type: 'connect' });
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
+  expect(host.provider.snapshot().status).toBe('busy');
+  await host.provider.perform({ type: 'cancel' }); await turn;
+  await host.provider.save();
+  expect(host.stored.get('history')).toBeUndefined();
+  expect(host.provider.snapshot().entries.some((e: any) => e.role === 'user')).toBe(true);
+});
+it('keeps cleared history empty after another automatic save', async () => {
+  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'clearHistory' });
+  await host.provider.perform({ type: 'send', text: 'hello' });
+  expect(host.stored.get('history')).toBeUndefined();
+});

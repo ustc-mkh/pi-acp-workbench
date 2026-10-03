@@ -11,7 +11,8 @@ it('shows short model names without altering full menu labels or submitted IDs',
   expect([...select.options].map(o => o.text)).toEqual(['openai-codex/GPT-6 Astra', 'anthropic/Claude Example']);
   select.value = 'anthropic/claude'; select.dispatchEvent(new Event('change'));
   expect(submitted).toBe('anthropic/claude'); expect(node.querySelector('.selector-label')?.textContent).toBe('Claude Example');
-  expect(select.title).toBe('anthropic/Claude Example');
+  expect(node.dataset.tooltip).toBe('anthropic/Claude Example');
+  expect(select.hasAttribute('title')).toBe(false);
 });
 it('clamps the usage ring while preserving actual token counts in its tooltip', () => {
   expect(contextUsage({ used: 32000, size: 128000 })).toEqual({ known: true, percent: 25, label: '32k/128k' });

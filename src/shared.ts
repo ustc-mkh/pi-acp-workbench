@@ -19,6 +19,6 @@ export type UiMessage =
   | { type: 'permission'; id: string; optionId?: string }
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }
-  | { type: 'resume' | 'removeAttachment'; id: string }
+  | { type: 'resume' | 'removeAttachment' | 'deleteHistory'; id: string }
   | { type: 'diff'; id: string; index: number }
   | { type: 'open'; url: string; line?: number };

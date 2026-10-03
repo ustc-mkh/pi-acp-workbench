@@ -1,20 +1,23 @@
 import { createRenderer } from './markdown';
 import { sessionSelectors, createSessionSelector } from './selectors';
 import { contextUsage } from './usage';
+import { installTooltips } from './tooltips';
+import { HistoryList } from './history';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): { draft?: string } | undefined; setState(state: { draft: string }): void };
 const vscode = acquireVsCodeApi();
 const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
-app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" title="历史记录" aria-label="历史记录">◷</button><button id="export" title="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="new" title="新对话" aria-label="新对话">＋</button></div></header>
-<section id="history" hidden><div class="section-label">最近会话 <button id="clear-history">清除本地历史</button></div><div id="history-items"></div></section>
+app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header>
+<section id="history" hidden><div class="section-label">最近会话 <button id="clear-history" data-tooltip="清除全部本地历史记录">清空</button></div><div id="history-items"></div></section>
 <div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="connect" hidden>重新连接</button></div>
-<div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" title="关闭错误提示">×</button></div>
-<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="pulse">●</span> Pi 正在处理…</div></main>
-<button id="bottom" class="primary" aria-label="回到最新消息" title="回到最新消息" hidden>↓</button></div>
+<div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
+<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
+<button id="bottom" class="primary" aria-label="回到最新消息" data-tooltip="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
-<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" title="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用" aria-describedby="usage-tooltip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg><span id="usage-tooltip" role="tooltip"></span></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" title="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
+<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+installTooltips();
 const input = el<HTMLTextAreaElement>('input');
 input.value = vscode.getState()?.draft || '';
 const send = (message: UiMessage) => vscode.postMessage(message);
@@ -47,7 +50,12 @@ el('attach').onclick = () => send({ type: 'attach' });
 el('export').onclick = () => send({ type: 'export' });
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
-el('history-toggle').onclick = () => { el('history').hidden = !el('history').hidden; };
+const closeHistory = () => { el('history').hidden = true; el('history-toggle').setAttribute('aria-expanded', 'false'); };
+const historyList = new HistoryList(el('history-items'), send, closeHistory);
+el('history-toggle').onclick = () => {
+  el('history').hidden = !el('history').hidden;
+  el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden));
+};
 el('bottom').onclick = () => { followBottom = true; el('transcript').scrollTop = el('transcript').scrollHeight; el('bottom').hidden = true; };
 el('transcript').addEventListener('scroll', () => {
   const t = el('transcript'); followBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
@@ -146,7 +154,7 @@ function paint() {
     if (messages.children[index] !== cached.node) messages.insertBefore(cached.node, messages.children[index] || null);
   }
   const attachments = el('attachments'); attachments.replaceChildren();
-  for (const a of state.attachments) { const b = button(`📎 ${a.name} ×`, () => send({ type: 'removeAttachment', id: a.id })); b.title = '移除此上下文'; attachments.append(b); }
+  for (const a of state.attachments) { const b = button(`📎 ${a.name} ×`, () => send({ type: 'removeAttachment', id: a.id })); b.dataset.tooltip = '移除此上下文'; attachments.append(b); }
   const plan = el('plan'); plan.hidden = !state.plan.length; plan.replaceChildren();
   for (const item of state.plan) { const p = document.createElement('div'); p.textContent = `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'} ${item.content}`; plan.append(p); }
   // Do not replace focused permission buttons on every streaming update.
@@ -170,16 +178,11 @@ function paint() {
     }
   }
   const usage = contextUsage(state.usage);
-  el('usage-tooltip').textContent = usage.label;
+  el('usage').dataset.tooltip = usage.label;
   el('usage').setAttribute('aria-label', usage.known ? `上下文占用 ${usage.label}` : usage.label);
   el('usage').dataset.level = !usage.known ? 'unknown' : usage.percent >= 90 ? 'high' : 'normal';
   el('usage-fill').setAttribute('stroke-dasharray', `${usage.percent} 100`);
-  const history = el('history-items'); history.replaceChildren();
-  for (const snapshot of state.history) {
-    const b = button(snapshot.title, () => { send({ type: 'resume', id: snapshot.id }); el('history').hidden = true; });
-    b.disabled = busy || connecting; b.title = `${snapshot.cwd}\n${new Date(snapshot.updated).toLocaleString()}`; history.append(b);
-  }
-  if (!state.history.length) history.textContent = '还没有保存的会话。';
+  historyList.update(state);
   if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
   commandMenu();
 }

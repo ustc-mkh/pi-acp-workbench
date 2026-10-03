@@ -34,6 +34,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private transitioning = false;
   private autoConnectHandled = false;
   private history: Snapshot[];
+  private forgottenSessions = new Set<string>();
   private permissionResolvers = new Map<string, (response: acp.RequestPermissionResponse) => void>();
   private diffDocs = new Map<string, string>();
   private resources: vscode.Disposable[] = [];
@@ -70,7 +71,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     }, 40);
   }
   private async save() {
-    if (!this.state.sessionId || this.state.preview || !this.config.get('persistHistory', true)) return;
+    if (!this.state.sessionId || this.state.preview || this.forgottenSessions.has(this.state.sessionId) || !this.config.get('persistHistory', true)) return;
     const title = this.state.entries.find(e => e.role === 'user');
     const snapshot: Snapshot = {
       id: this.state.sessionId, cwd: this.cwd, title: title && title.role === 'user' ? title.text.slice(0, 70) : '新对话',
@@ -185,6 +186,20 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if (this.state.error === message.error) this.state.error = undefined;
         this.emit(); return;
       }
+      if (message.type === 'deleteHistory' || message.type === 'clearHistory') {
+        if (message.type === 'deleteHistory') {
+          if (!this.history.some(item => item.id === message.id)) return;
+          this.forgottenSessions.add(message.id);
+          this.history = this.history.filter(item => item.id !== message.id);
+        } else {
+          this.history.forEach(item => this.forgottenSessions.add(item.id));
+          if (this.state.sessionId) this.forgottenSessions.add(this.state.sessionId);
+          this.history = [];
+        }
+        // Forget the local record without interrupting an active agent turn.
+        await this.context.workspaceState.update('history', this.history.length ? this.history : undefined);
+        this.emit(); return;
+      }
       if (message.type === 'logs') { this.log.show(); return; }
       if (message.type === 'login') {
         const cwd = await this.workspaceCwd();
@@ -221,8 +236,6 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       } else if (message.type === 'preview') {
         await this.save(); this.disconnect(); this.state = { ...initialState(), preview: true, entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }] };
         await vscode.commands.executeCommand('piAcp.chat.focus');
-      } else if (message.type === 'clearHistory') {
-        this.history = []; await this.context.workspaceState.update('history', undefined);
       } else if (message.type === 'send') {
         if (typeof message.text !== 'string' || !message.text.trim()) return;
         if (message.text.length > 500000) throw new Error('消息过长。');
@@ -236,8 +249,9 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         }
         this.state.entries.push({ id: nextId(), role: 'user', text: message.text + (attached.length ? '\n\n' + attached.map(a => `📎 ${a.name}`).join(' · ') : '') });
         this.state.attachments = []; this.state.status = 'busy'; this.stopping = false; this.emit();
-        await this.view?.webview.postMessage({ type: 'sent' });
         try {
+          await this.save();
+          await this.view?.webview.postMessage({ type: 'sent' });
           const response = await agent.prompt(this.state.sessionId, prompt);
           if (generation === this.generation && response.stopReason !== 'end_turn') this.state.entries.push({ id: nextId(), role: 'notice', text: `本轮结束：${response.stopReason}` });
         } finally {

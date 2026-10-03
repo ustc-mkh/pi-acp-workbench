@@ -59,7 +59,7 @@ export function createSessionSelector(control: SessionSelector, disabled: boolea
   select.value = control.current;
   const updateLabel = () => {
     const full = control.options.find(option => option.id === select.value)?.name || control.current;
-    label.textContent = selectedLabel(control, full); select.title = full;
+    label.textContent = selectedLabel(control, full); wrapper.dataset.tooltip = full;
   };
   updateLabel(); select.onchange = () => { updateLabel(); change(select.value); };
   wrapper.append(label, select); return wrapper;

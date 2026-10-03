@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Unify hover and keyboard-focus descriptions in immediate, theme-aware tooltips.
+- Add per-session history deletion without interrupting a running turn or restoring deleted records on save.
+- Compact history spacing and limit the visible list to four scrollable rows.
+- Show a spinning ring for active output and a static chat icon for other sessions; preserve list nodes and scroll position during streaming.
+
 ## 0.1.3
 
 - Show context usage immediately in a theme-aware tooltip, without a help cursor.

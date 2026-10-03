@@ -20,15 +20,15 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.3.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.4.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.1.3.vsix
+code --install-extension pi-acp-workbench-0.1.4.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π**，插件会自动连接本地 Agent。连接失败或意外断开时才显示 **重新连接** 按钮。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
 
-上下文圆环在悬停或键盘聚焦时立即显示主题样式的用量提示。上滑阅读历史时，可点击消息区底部居中的圆形箭头回到最新消息。错误提示右侧的 **×** 可关闭当前错误，后续错误仍会正常显示。
+按钮、模型选择器和上下文圆环的说明在悬停或键盘聚焦时立即显示统一的主题浮层，按 Esc 可关闭。上滑阅读历史时，可点击消息区底部居中的圆形箭头回到最新消息。错误提示右侧的 **×** 可关闭当前错误，后续错误仍会正常显示。
 
 **不配置模型也可以体验渲染**：命令面板执行 `Pi: Preview Markdown & Math`。
 
@@ -144,3 +144,7 @@ test/              协议模拟服务、渲染/状态测试、扩展宿主测试
 - [Pi ACP 适配器](https://github.com/svkozak/pi-acp)
 - [VS Code Webview API](https://code.visualstudio.com/api/extension-guides/webview)
 - [KaTeX 支持的函数](https://katex.org/docs/supported.html)
+
+### 历史会话
+
+点击顶部历史按钮展开最近会话。列表最多显示 4 行，其余会话可在列表内滚动查看；每条左侧的垃圾桶按钮可删除单条本地历史记录。旋转圆环表示该会话正在输出，静态对话图标表示未在输出。Agent 输出期间列表会保持滚动位置。删除当前会话的历史记录不会中断当前任务，也不会在自动保存时重新加入；这里管理的是插件的本地历史索引与快照，Pi 自身保存的会话文件仍由 Pi 管理。
