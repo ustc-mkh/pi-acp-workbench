@@ -6,18 +6,19 @@ import type { Snapshot } from './shared';
 export class SnapshotStore {
   constructor(private directory?: string) {}
   private file(id: string) { return join(this.directory!, createHash('sha256').update(id).digest('hex')+'.json'); }
-  async write(snapshot: Snapshot): Promise<Snapshot> {
+  async write(snapshot: Snapshot, storageKey = snapshot.id): Promise<Snapshot> {
     if (!this.directory) return snapshot;
-    await mkdir(this.directory,{recursive:true});
-    const filename=this.file(snapshot.id), temp=filename+'.'+randomUUID()+'.tmp';
-    try {await writeFile(temp,JSON.stringify(snapshot),'utf8'); await rename(temp,filename);}
+    await mkdir(this.directory,{recursive:true,mode:0o700});
+    const filename=this.file(storageKey), temp=filename+'.'+randomUUID()+'.tmp';
+    try {await writeFile(temp,JSON.stringify(snapshot),{encoding:'utf8',mode:0o600}); await rename(temp,filename);}
     finally {await rm(temp,{force:true});}
-    const { entries, checkpoints, preparedContext, ...index } = snapshot;
+    const { entries, checkpoints, ...index } = snapshot;
     return {...index,entries:[],stored:true};
   }
-  async read(snapshot: Snapshot): Promise<Snapshot> {
+  async read(snapshot: Snapshot, storageKey = snapshot.id): Promise<Snapshot> {
     if (!snapshot.stored || !this.directory) return structuredClone(snapshot);
-    const data=JSON.parse(await readFile(this.file(snapshot.id),'utf8')) as Snapshot;
+    // Legacy snapshots duplicated checkpoint text here; it is no longer a source of truth.
+    const { preparedContext: _legacy, ...data } = JSON.parse(await readFile(this.file(storageKey),'utf8')) as Snapshot & {preparedContext?: string};
     if (data.id!==snapshot.id || data.cwd!==snapshot.cwd || !Array.isArray(data.entries)) throw new Error('本地完整历史文件不匹配，未恢复会话。');
     return data;
   }

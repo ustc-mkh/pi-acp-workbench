@@ -9,30 +9,42 @@ import { installImagePaste, imagePreview } from './image-paste';
 import { StatisticsPage } from './statistics';
 import { messageActions } from './message-actions';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
-declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): { draft?: string } | undefined; setState(state: { draft: string }): void };
+import { applyStatePatch } from '../src/state-channel';
+import { TranscriptView } from './transcript';
+import { installComposerResize } from './composer-resize';
+interface UiState {draft?:string;composerHeight?:number;activityExpanded?:boolean}
+declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): UiState | undefined; setState(state: UiState): void };
 const vscode = acquireVsCodeApi();
+const saveUi = (patch:UiState) => vscode.setState({...vscode.getState(),...patch});
 const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">⧉</button><button id="statistics-toggle" data-tooltip="用量统计" aria-label="用量统计" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M5 13V9M10 13V4M15 13V7"/></svg></button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header><div id="chat-page" class="chat-page">
-<section id="history" hidden><div class="section-label">最近会话 <button id="clear-history" data-tooltip="清除全部本地历史记录">清空</button></div><div id="history-items"></div></section>
-<div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="connect" hidden>重新连接</button></div>
+<section id="history" hidden><div class="section-label">会话历史 <span><button id="refresh-history" data-tooltip="刷新共享会话">刷新</button><button id="clear-history" data-tooltip="清除历史记录（共享模式下影响所有客户端）">清空</button></span></div><div id="history-items"></div></section>
+<div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
+<div class="transcript-tools"><button id="toggle-activity" aria-pressed="false" data-tooltip="整体展开或折叠工具调用、思考和中间过程">展开执行过程</button></div>
 <div id="context-operation" hidden role="status"><span id="context-progress"></span><button id="cancel-context">取消</button></div><div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
 <div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
 <button id="bottom" class="primary" aria-label="回到最新消息" data-tooltip="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
-<footer><div id="context-pending" role="status" hidden>上下文已更新，将在下一条消息同步</div><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer></div><section id="statistics" hidden aria-label="用量统计"></section><section id="prices" hidden aria-label="模型价格设置"></section>`;
+<div id="composer-resizer" role="separator" tabindex="0" aria-label="调整输入区高度" aria-orientation="horizontal" aria-controls="input" data-tooltip="拖动调整输入区高度 · 方向键微调 · 双击重置"></div><footer><div id="context-pending" role="status" hidden>上下文已更新，将在下一条消息同步</div><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer></div><section id="statistics" hidden aria-label="用量统计"></section><section id="prices" hidden aria-label="模型价格设置"></section>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
 input.value = vscode.getState()?.draft || '';
+installComposerResize(el('composer-resizer'),input,vscode.getState()?.composerHeight,height=>saveUi({composerHeight:height}));
 const send = (message: UiMessage) => vscode.postMessage(message);
 let state: ChatState | undefined;
+let stateRevision = 0;
 let followBottom = true;
 let sending = false;
 let pasting=false;
 installImagePaste(input,()=>state?.sessionId,send,value=>{pasting=value;updateSend();});
 let paintPending = false;
-const cache = new Map<string, { signature: string; node: HTMLElement }>();
+let activityExpanded = vscode.getState()?.activityExpanded || false;
+const transcriptView = new TranscriptView(el('messages'),contentNode,activityExpanded);
+const updateActivityButton = () => {el('toggle-activity').textContent = activityExpanded ? '折叠执行过程' : '展开执行过程';el('toggle-activity').setAttribute('aria-pressed',String(activityExpanded));};
+updateActivityButton();
+el('toggle-activity').onclick = () => {activityExpanded = !activityExpanded;transcriptView.setExpanded(activityExpanded);saveUi({activityExpanded});updateActivityButton();};
 const button = (text: string, action: () => void, className?: string) => {
   const b = document.createElement('button'); b.textContent = text; b.type = 'button';
   if (className) b.className = className; b.addEventListener('click', action); return b;
@@ -44,11 +56,13 @@ function submit() {
 input.addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
 });
-input.addEventListener('input', () => { vscode.setState({ draft: input.value }); commandMenu(); updateSend(); });
+input.addEventListener('input', () => { saveUi({ draft: input.value }); commandMenu(); updateSend(); });
 el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
 el('start-session').onclick = () => send({ type: 'new' });
 el('connect').onclick = () => send({ type: 'connect' });
+el('release-session').onclick = () => send({type:'releaseSession'});
+el('refresh-history').onclick = () => send({type:'refreshHistory'});
 el('dismiss-error').onclick = () => {
   if (state?.error) send({ type: 'dismissError', error: state.error });
   el('error').hidden = true;
@@ -72,6 +86,7 @@ el('history-toggle').onclick = () => {
   if(statisticsOpen)showStatistics(false);
   el('history').hidden = !el('history').hidden;
   el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden));
+  if(!el('history').hidden) send({type:'refreshHistory'});
 };
 el('bottom').onclick = () => { followBottom = true; el('transcript').scrollTop = el('transcript').scrollHeight; el('bottom').hidden = true; };
 el('messages').addEventListener('load',event=>{if(event.target instanceof HTMLImageElement&&followBottom)el('transcript').scrollTop=el('transcript').scrollHeight;},true);
@@ -101,7 +116,7 @@ function commandMenu() {
   const commands = match ? state?.commands.filter(c => c.name.startsWith(match[1])).slice(0, 8) || [] : [];
   menu.hidden = !commands.length;
   for (const command of commands) {
-    const b = button(`/${command.name} — ${command.description}`, () => { input.value = `/${command.name} `; input.focus(); menu.hidden = true; vscode.setState({ draft: input.value }); updateSend(); });
+    const b = button(`/${command.name} — ${command.description}`, () => { input.value = `/${command.name} `; input.focus(); menu.hidden = true; saveUi({ draft: input.value }); updateSend(); });
     menu.append(b);
   }
 }
@@ -146,8 +161,10 @@ function paint() {
   if (!state) return;
   const busy = state.status === 'busy', connecting = state.status === 'connecting';
   const reconnect = state.status === 'disconnected' && !!state.sessionId && !!state.connectionAttempted && !state.preview;
-  el('connection').hidden = !connecting && !reconnect && !state.preview;
-  el('status').textContent = state.preview ? '渲染预览 · 离线' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
+  el('connection').hidden = !connecting && !reconnect && !state.preview && !state.sessionId;
+  el('release-session').hidden = !state.sessionId || !!state.readOnly || state.preview;
+  el<HTMLButtonElement>('release-session').disabled = busy || connecting;
+  el('status').textContent = state.preview ? '渲染预览 · 离线' : state.readOnly ? '只读查看' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
   el('connect').hidden = !reconnect;
   el<HTMLButtonElement>('connect').disabled = connecting;
@@ -161,21 +178,10 @@ function paint() {
   updateSend();
   const messages = el('messages');
   const visible = state.entries.filter(e => e.role !== 'thought' || state!.showThoughts);
-  const ids = new Set(visible.map(e => e.id));
-  for (const [id, item] of cache) if (!ids.has(id)) { item.node.remove(); cache.delete(id); }
-  for (let index = 0; index < visible.length; index++) {
-    const entry = visible[index]; const signature = JSON.stringify(entry);
-    let cached = cache.get(entry.id);
-    if (!cached || cached.signature !== signature) {
-      const node = contentNode(entry);
-      if (node instanceof HTMLDetailsElement && cached?.node instanceof HTMLDetailsElement) node.open = cached.node.open;
-      if (cached) cached.node.replaceWith(node);
-      cached = { signature, node }; cache.set(entry.id, cached);
-    }
-    if (messages.children[index] !== cached.node) messages.insertBefore(cached.node, messages.children[index] || null);
-  }
+  transcriptView.update(visible,busy);
+  el('toggle-activity').hidden = !visible.some(entry=>entry.role==='tool'||entry.role==='thought');
   for (const action of messages.querySelectorAll<HTMLButtonElement>('[data-context-action]')) {
-    action.disabled = busy || connecting || !!state.preview || !state.sessionId || !state.contextComplete;
+    action.disabled = busy || connecting || !!state.preview || !!state.readOnly || !state.sessionId || !state.contextComplete;
     action.dataset.tooltip = busy ? '请先停止输出再编辑上下文' : !state.contextComplete ? '此历史记录不完整，无法可靠编辑上下文' : action.dataset.actionDescription;
   }
   el('context-pending').hidden = !state.contextPending;
@@ -218,10 +224,16 @@ function paint() {
   commandMenu();
 }
 window.addEventListener('message', event => {
-  if (event.data.type === 'sent') { input.value = ''; vscode.setState({ draft: '' }); sending = false; updateSend(); return; }
-  if (event.data.type !== 'state') return;
-  if (state?.sessionId !== event.data.state?.sessionId) followBottom = true;
-  state = event.data.state;
+  if (event.data.type === 'sent') { input.value = ''; saveUi({ draft: '' }); sending = false; updateSend(); return; }
+  if (event.data.type === 'statePatch') {
+    if (!state || event.data.revision !== stateRevision + 1) { send({type:'ready'}); return; }
+    state = applyStatePatch(state, event.data);
+    stateRevision = event.data.revision;
+  } else if (event.data.type === 'state') {
+    if (state?.sessionId !== event.data.state?.sessionId) followBottom = true;
+    state = event.data.state;
+    stateRevision = event.data.revision || 0;
+  } else return;
   if (state?.status !== 'busy') sending = false;
   if (!paintPending) { paintPending = true; requestAnimationFrame(paint); }
 });

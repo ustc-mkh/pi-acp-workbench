@@ -7,7 +7,7 @@ VS Code 命令 / Webview 操作
            ↓ typed postMessage (src/shared.ts)
 ChatProvider (src/extension.ts)
   ├─ ChatState ← applyUpdate (src/state.ts)
-  ├─ SnapshotStore / workspaceState / SessionCache
+  ├─ SharedHistoryStore / SnapshotStore / workspaceState / SessionCache
   └─ AgentProcess (src/agent.ts)
            ↓ ACP v1 JSON-RPC / NDJSON stdio
       内置增强适配器，或外部 ACP Agent
@@ -15,7 +15,7 @@ ChatProvider (src/extension.ts)
          Pi / 模型
 ```
 
-Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校验操作、存储快照和权限回应；Webview 负责渲染和发送用户意图。更新合并后以约 40ms 防抖发送状态。stderr 进入输出面板，stdout 只能承载 ACP 协议。
+Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校验操作、存储快照和权限回应；Webview 负责渲染和发送用户意图。更新合并后以约 40ms 防抖发送状态。`src/state-channel.ts` 在首次连接、会话切换或 Webview 重载时发送完整状态，其余发送字段和消息增量，避免重复传输历史图片及统计。前端保留未变化消息的对象身份；序号不连续时请求完整同步。当前宿主仍通过序列化比较变化，长历史虚拟列表和基于 revision 的变更追踪尚未实现。stderr 进入输出面板，stdout 只能承载 ACP 协议。
 
 `AgentProcess` 用 SDK 管理请求/通知；初始化检查协议版本，默认初始化超时 20 秒，普通请求超时 30 秒。取消先发送 `session/cancel`，5 秒无响应则终止连接。POSIX 下清理整个进程组；Windows 使用对应进程树终止路径。关闭回调和 generation 标记共同阻止旧连接继续改写当前会话。
 
@@ -29,7 +29,8 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 | 打开已有工作区 | 自动恢复 `activeSession` 对应历史，至多尝试一次 |
 | Webview 重载 / 重复 ready | 保留当前状态，不反复连接 |
 | 顶部 +、欢迎页新建、Pi: New Session | 显式新建空会话并继承最近设置 |
-| 点击历史 | 优先复用缓存，否则加载同一 session ID |
+| 点击历史 | 共享模式先取得会话锁再加载；占用中或工作区不同只读查看。本地模式优先复用缓存 |
+| 释放会话 | 保存并断开 Agent、释放会话锁；另一客户端可重新连接接管 |
 | 重新连接 | 恢复当前会话；没有当前会话时尝试上次活动历史；不自动降级为新建 |
 | 恢复失败或不支持 session/load | 留下错误与原会话记录，等待重试或用户主动新建 |
 | 分支 | 用户显式要求的新分支，包含所选记录之前及本条内容 |
@@ -51,17 +52,23 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 
 | 位置 / 键 | 用途 |
 | --- | --- |
-| workspaceState.history | 最近 20 个快照索引；兼容旧版内嵌 entries |
-| storageUri/conversations | 完整 JSON 快照，包含消息、图片、检查点、待同步标记、设置 |
+| ~/.pi/pi-acp-workbench/history/index.json | 默认共享模式：当前服务器账户的全部会话索引及删除 tombstone |
+| ~/.pi/pi-acp-workbench/history/conversations | 带版本的完整快照，索引提交后清理上一版本；新目录/文件 POSIX 权限为 0700/0600 |
+| workspaceState.history / storageUri/conversations | 本地模式：最近 20 个索引和快照；共享模式首次启动从这里迁移 |
+| workspaceState.sharedHistoryMigrated | 当前工作区旧历史迁移标记；旧快照文件保留作备份 |
 | workspaceState.activeSession | 最后活动的持久化会话 ID，null 表示无 |
 | workspaceState.sessionPreferences | 最近使用的模型 / thinking / mode 值 |
 | workspaceState.usageRecords / usageTitles | 已去重用量和逻辑对话标题 |
 | workspaceState.prices | 用户覆盖单价 |
 | SessionCache（仅内存） | 至多 2 个空闲连接，序列化记录预算 32 MiB，LRU 淘汰 |
 
-当前活跃连接不计入空闲缓存。缓存存放进程、状态、工作目录、检查点等，切换命中不再 initialize/load；死亡缓存转冷加载。预算不代表整个 Pi 进程内存上限。扩展结束或 Webview 销毁时清空空闲缓存；修改启动配置使旧缓存失效。
+共享历史由 `src/shared-history.ts` 管理：进程内事务队列配合 proper-lockfile 的跨进程索引锁，独立快照版本加原子索引替换防止并发写入互相覆盖。会话另有 30 秒 stale / 10 秒心跳的独占租约，持有者可以连接 ACP；其他窗口只读查看。写入还校验 revision，删除 tombstone 阻止旧写入与重复迁移复活已删记录。失去会话租约时终止本窗口 Agent。共享模式不保留空闲连接，切换、显式释放和扩展销毁时释放租约。列表每 5 秒刷新，显示其他客户端最近保存的快照；这不是实时流式协作。不同工作区的历史可以只读查看，启动 Agent 仍要求目录属于当前受信任工作区。
 
-快照写入通过 saveQueue 串行化。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除/清空历史不擦除 Pi 原生文件，不删除统计和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
+`persistHistory=false` 在共享模式下仅隐藏/停止保存，不删除服务器上的已有记录；删除/清空共享历史需要确认。模型偏好、统计和价格仍保持原来的 workspaceState 范围。`sharedHistory` 设置需要重载窗口才切换存储后端。
+
+以下空闲缓存仅用于本地模式。当前活跃连接不计入空闲缓存。缓存存放进程、状态、工作目录、检查点等，切换命中不再 initialize/load；死亡缓存转冷加载。预算不代表整个 Pi 进程内存上限。扩展结束或 Webview 销毁时清空空闲缓存；修改启动配置使旧缓存失效。
+
+快照写入、删除、清空及用量持久化通过 saveQueue 串行化；关闭历史保存会递增存储 epoch，使关闭前排队的快照即使在快速重新开启后也不能复活。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除历史会移除对应统计标题；清空历史或关闭持久化会清空所有统计标题，避免保留首条消息片段。被删除的活动会话不能通过后续用量刷新重建标题。上述操作不擦除 Pi 原生文件，不删除计费记录和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
 
 ## 上下文编辑和压缩
 
@@ -69,7 +76,7 @@ ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 promp
 
 1. 验证快照完整性、附件和用户选择的消息 ID。
 2. 查找与保留前缀指纹匹配的有效压缩检查点。
-3. 超预算时，以固定安全预算进行逐块摘要，不把全部长历史一次提交模型。
+3. 超预算时，以固定安全预算进行逐块摘要，不把全部长历史一次提交模型。摘要仅保存于检查点，不再额外维护 preparedContext 副本；旧快照中的该字段读取时忽略。
 4. 候选 Agent 初始化、新建、恢复原设置成功后才切换。
 5. 标记 contextPending；下一条普通消息携带准备好的历史，同步成功后清除标记。
 
@@ -79,7 +86,7 @@ ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 promp
 
 ## 内置增强适配器
 
-默认 command=pi-acp、空 args 且 useBundledAdapter=true 时，使用扩展 Node 运行时执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，在替换位置不匹配时直接失败。
+默认 command=pi-acp、空 args 且 useBundledAdapter=true 时，使用扩展 Node 运行时执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，每个补丁都断言唯一匹配，位置缺失或重复时直接失败。用量日志解析结果按文件身份、大小和修改时间缓存，避免同一轮分页反复扫描；文件变化后重新解析。宿主收齐分页后一次合并和保存统计。
 
 只有协商 agentCapabilities._meta['pi-workbench'].version=1 后，宿主才使用：
 
@@ -91,8 +98,12 @@ ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 promp
 
 ## 渲染与安全边界
 
+`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。
+
 `webview/markdown.ts` 使用 Markdown token 规则隔离代码和公式，KaTeX trust=false，HTML 经 DOMPurify 净化。Mermaid 只渲染闭合围栏，strict 模式及 SVG 二次净化，禁止图内配置与远程图片。所有资源随包提供，无 CDN。
 
 CSP 不允许 Webview 网络连接；只允许本地资源和 data: 图片预览。粘贴图片的格式、签名和体积在宿主重新检查。外部链接和本地文件打开经过协议、真实路径和工作区检查。
+
+Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文档、16 MiB 总文本预算（至少保留当前一对）。
 
 工作区信任限制宿主启动，ACP 授权卡片仅反映 Agent 的权限请求；Pi 自己的工具权限不由本扩展强制沙箱化。修改这条边界需要显式设计和文档，而非仅增加确认按钮。

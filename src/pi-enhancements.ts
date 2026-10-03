@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Inspection, Price, UsageRecord } from './telemetry';
@@ -24,6 +25,7 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
   return class extends Base {
     private summaryWorkers = new Map<string,{cancel:()=>void}>();
     private summaryUsage: UsageRecord[] = [];
+    private usageCache?: { key: string; records: UsageRecord[] };
     async initialize(params:any) {
       const result=await super.initialize(params);
       result.agentCapabilities._meta={...result.agentCapabilities._meta,'pi-workbench':{version:1,inspect:true,summarize:true}};
@@ -34,6 +36,7 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
       if (!method.startsWith('_pi_workbench/')) throw new Error(`Unsupported extension method: ${method}`);
       const session=this.sessions.get(params.sessionId);
       if (method==='_pi_workbench/cancel_summary') {this.summaryWorkers.get(params.sessionId)?.cancel();return {};}
+      if (!session) throw new Error('Unknown session');
       if (session.pendingTurn) throw new Error('Wait for the current turn to finish before inspecting or summarizing.');
       if (method==='_pi_workbench/inspect') return this.inspect(session,params);
       if (method==='_pi_workbench/summarize') return this.summarize(session,params,PiRpcProcess);
@@ -44,6 +47,10 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
       const model=state.model, modelKey=model?.provider && model?.id ? `${model.provider}/${model.id}` : 'unknown';
       const records:UsageRecord[]=[]; let currentModel=modelKey;
       if (state.sessionFile) {
+        const info = await stat(state.sessionFile).catch(error => { if(error.code !== 'ENOENT') throw error; return undefined; });
+        const key = JSON.stringify([session.sessionId, state.sessionFile, modelKey, info?.ino, info?.size, info?.mtimeMs, info?.ctimeMs]);
+        if (this.usageCache?.key === key) records.push(...this.usageCache.records);
+        else {
         const input=createReadStream(state.sessionFile,{encoding:'utf8'});
         const lines=createInterface({input,crlfDelay:Infinity});
         try {
@@ -55,6 +62,10 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
             if(record)records.push(record);
           }
         } catch(e:any) { if(e.code!=='ENOENT')throw e; } finally {lines.close();input.destroy();}
+        // Do not reuse a parse across an append/truncate that happened during reading.
+        const after = await stat(state.sessionFile).catch(error => { if(error.code !== 'ENOENT') throw error; return undefined; });
+        if (info && after && info.size === after.size && info.mtimeMs === after.mtimeMs && info.ctimeMs === after.ctimeMs && info.ino === after.ino) this.usageCache = {key, records: [...records]};
+        }
       }
       records.push(...this.summaryUsage.filter(r=>r.sessionId===session.sessionId));
       const cursor=Number.isSafeInteger(params.cursor)&&params.cursor>=0?params.cursor:0;

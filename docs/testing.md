@@ -22,7 +22,10 @@ npm run package
 | 标准 ACP 传输 | agent.test.ts + mock-agent.mjs | 独立 NDJSON peer；分片 UTF-8、初始化、超时、取消、退出、权限 |
 | 宿主状态机 | controller.test.ts | mock vscode + 真实子进程；创建/恢复、偏好、缓存、持久化、上下文编辑、图片 |
 | 内置适配器 | bundled-adapter.test.ts | 实际构建增强适配器；协商私有扩展、统计、隔离与取消摘要 |
-| 纯逻辑 | state / context / checkpoints / telemetry / snapshots / session-cache | 合并、预算、检查点、存储和统计 |
+| 纯逻辑 | state / state-channel / context / checkpoints / telemetry / snapshots / session-cache | 合并、增量状态与同步、预算、检查点、存储和统计 |
+| 适配器加固 | build-adapter / usage-cache | 补丁唯一匹配、日志分页缓存及追加/截断失效 |
+| 共享历史 | shared-history / controller | 多实例写入、租约交接、只读查看、旧历史迁移、删除防复活和版本冲突 |
+| 执行过程与输入区 | transcript / composer-resize | 分组边界、流式折叠状态、全局展开、输入区高度与键盘调整 |
 | DOM / 渲染 | markdown / diagrams / selectors / tooltips / image-paste 等 | 数学、净化、模型控件、交互和附件 |
 | 真实浏览器 | scripts/browser-smoke.mjs | 窄视口、深浅色、公式流式、欢迎页显式新建、发送、权限、取消、diff |
 | Extension Host | test/host.cjs | 真正 VS Code 激活、命令、ACP 子进程、编辑器选区 |
@@ -71,6 +74,11 @@ cat "$PI_TEST_ROOT/result.json"
 - 冷启动恢复最后活动 ID；暖缓存恢复不调用 initialize/load/new。
 - 连接失败、不支持 load、取消后重连都不能自动变成空白对话。
 - 删除当前历史后自动保存不重新加入；重启不自动打开另一条历史。
+- 设置持久化失败不能使完成的回复卡在 busy；预览等待保存时禁止发送和新建。
+- 删除/关闭历史会清除统计标题但保留计费记录；并发写入不能在清空后复活。
+- 流式增量不重复传输旧图片；丢失更新后请求完整同步；重复 Diff 预览不无限累积缓存。
+- 两个共享历史实例并发追加不丢会话；超过 20 条不裁剪；只读客户端释放后可接管，删除记录不能被旧窗口或迁移复活。
+- 浏览器中执行过程默认折叠、最终回答可见；拖动分界线改变输入高度，滚动条不显示箭头。
 - 分支保留原对话；删除消息保持逻辑统计归属；待同步和压缩检查点恢复仍正确。
 - 真实 Pi 验证 model/thinking（至少一个非 OpenAI 提供商），检查重启后的原生历史确实恢复。需要账户的验证须明确记录环境，不能把 mock 测试描述为真实模型兼容性结论。
 
@@ -83,4 +91,4 @@ cat "$PI_TEST_ROOT/result.json"
 5. 提交源码，创建与 package 一致的 vX.Y.Z 标签，推送仓库；创建同名 GitHub Release，附上 VSIX、变更说明及 SHA-256。源码由标签关联。
 6. 从 Release 下载 VSIX 并核对摘要，确认发布附件可用。不要用 Marketplace 发布命令代替 GitHub Release 附件上传。
 
-示例摘要命令：`sha256sum ../pi-acp-workbench-0.2.2.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
+示例摘要命令：`sha256sum ../pi-acp-workbench-0.3.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。

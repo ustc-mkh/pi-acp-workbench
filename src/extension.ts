@@ -1,15 +1,18 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import { sessionPreferences, sessionSelectors, type SessionPreference } from './session-settings';
 import { SessionCache } from './session-cache';
+import { StateEncoder } from './state-channel';
 import { validateImage, MAX_ATTACHMENT_IMAGE_BYTES } from './images';
 import { AgentProcess } from './agent';
 import { applyUpdate, initialState, nextId } from './state';
 import { contextSeed, checkPromptSize } from './context';
 import { SnapshotStore } from './snapshots';
+import { SharedHistoryStore, SessionInUseError } from './shared-history';
 import { prepareContext, contextBudget, checkpoint, validCheckpoint, byteSize, type Checkpoint } from './checkpoints';
 import { mergeUsage, validPrice, priceFor, type Inspection, type Statistics, type Price, type UsageRecord } from './telemetry';
 import { presetPrices } from './prices';
@@ -33,12 +36,13 @@ export function activate(context: vscode.ExtensionContext) {
   return { getState: () => provider.snapshot() };
 }
 
-interface CachedConversation {agent:AgentProcess;state:ReturnType<typeof initialState>;cwd:string;checkpoints:Checkpoint[];preparedContext?:string;contextWindow?:number;conversationId?:string}
+interface CachedConversation {agent:AgentProcess;state:ReturnType<typeof initialState>;cwd:string;checkpoints:Checkpoint[];contextWindow?:number;conversationId?:string}
 
 class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private sessions=new SessionCache<CachedConversation>();
   private activeCacheable=true;
   private view?: vscode.WebviewView;
+  private stateEncoder = new StateEncoder();
   private state = initialState();
   private agent?: AgentProcess;
   private cwd = '';
@@ -52,9 +56,14 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private autoConnectHandled = false;
   private history: Snapshot[];
   private snapshots: SnapshotStore;
+  private sharedHistory?: SharedHistoryStore;
+  private historyReady: Promise<void> = Promise.resolve();
+  private historyPoll?: NodeJS.Timeout;
+  private activeLease?: string;
+  private disposed = false;
   private saveQueue: Promise<void> = Promise.resolve();
+  private storageEpoch = 0;
   private checkpoints: Checkpoint[] = [];
-  private preparedContext?: string;
   private contextWindow?: number;
   private conversationId?: string;
   private contextAbort?: AbortController;
@@ -68,23 +77,89 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private resources: vscode.Disposable[] = [];
   private log = vscode.window.createOutputChannel('Pi Agent');
   constructor(private context: vscode.ExtensionContext) {
-    this.snapshots = new SnapshotStore(context.storageUri?.fsPath ? path.join(context.storageUri.fsPath, 'conversations') : undefined);
+    const legacy = new SnapshotStore(context.storageUri?.fsPath ? path.join(context.storageUri.fsPath, 'conversations') : undefined);
+    if (this.config.get('sharedHistory', true)) {
+      this.sharedHistory = new SharedHistoryStore(path.join(homedir(), '.pi', 'pi-acp-workbench', 'history'), id => {
+        if (this.activeLease !== id) return;
+        this.disconnect(); this.state.status = 'disconnected'; this.state.readOnly = true;
+        this.state.error = '共享会话锁已失效，已停止本窗口的 Agent。请重新连接。'; this.emit();
+      });
+    }
+    this.snapshots = this.sharedHistory || legacy;
     this.priceOverrides = context.workspaceState.get('prices', {});
     this.statistics = {records:mergeUsage([],context.workspaceState.get('usageRecords',[])),prices:{...presetPrices,...this.priceOverrides},titles:context.workspaceState.get('usageTitles',{}),available:false};
     this.history = this.config.get<boolean>('persistHistory', true) ? context.workspaceState.get<Snapshot[]>('history', []) : [];
-    if (!this.config.get('persistHistory', true)) { void context.workspaceState.update('history', undefined); void context.workspaceState.update('activeSession', null); void this.snapshots.clear(); }
+    if (this.sharedHistory) {
+      this.historyReady = this.initializeSharedHistory(legacy).catch(error => { this.state.error = String(error); this.emit(); });
+      this.historyPoll = setInterval(() => { void this.refreshSharedHistory().catch(error => { this.state.error = String(error); this.emit(); }); }, 5000);
+      this.historyPoll.unref();
+    }
+    if (!this.config.get('persistHistory', true)) this.disableHistory();
     this.resources.push(this.log, vscode.workspace.registerTextDocumentContentProvider('pi-acp-diff', {
       provideTextDocumentContent: uri => this.diffDocs.get(uri.toString()) || '',
     }), vscode.workspace.onDidChangeConfiguration(e => {
       if (!e.affectsConfiguration('piAcp')) return;
       if(['command','args','env','useBundledAdapter'].some(key=>e.affectsConfiguration('piAcp.'+key))){this.sessions.clear();this.activeCacheable=false;}
-      if (!this.config.get('persistHistory', true)) { this.history = []; void context.workspaceState.update('history', undefined); void context.workspaceState.update('activeSession', null); void this.snapshots.clear(); }
+      if (!this.config.get('persistHistory', true)) this.disableHistory();
+      else if (this.sharedHistory && e.affectsConfiguration('piAcp.persistHistory')) {
+        this.historyReady = this.historyReady.then(() => this.initializeSharedHistory(legacy)).catch(error => { this.state.error = String(error); this.emit(); });
+      }
       this.emit();
     }));
   }
   private get config() { return vscode.workspace.getConfiguration('piAcp'); }
+  private enqueueStorage(operation: () => Promise<void>) {
+    this.saveQueue = this.saveQueue.catch(() => {}).then(operation);
+    return this.saveQueue;
+  }
+  private disableHistory() {
+    this.storageEpoch++;
+    this.history = [];
+    this.statistics.titles = {};
+    this.sessions.clear();
+    void this.enqueueStorage(async () => {
+      if (!this.sharedHistory) await this.context.workspaceState.update('history', undefined);
+      await this.context.workspaceState.update('activeSession', null);
+      await this.context.workspaceState.update('usageTitles', {});
+      // Opting out on one client must not erase other clients' shared history.
+      if (!this.sharedHistory) await this.snapshots.clear();
+    }).catch(error => { this.state.error = String(error); this.emit(); });
+  }
+  private async initializeSharedHistory(legacy: SnapshotStore) {
+    if (!this.sharedHistory || !this.config.get('persistHistory', true)) return;
+    if (!this.context.workspaceState.get('sharedHistoryMigrated', false)) {
+      for (const index of this.context.workspaceState.get<Snapshot[]>('history', [])) await this.sharedHistory.import(await legacy.read(index));
+      await this.context.workspaceState.update('sharedHistoryMigrated', true);
+      await this.context.workspaceState.update('history', undefined);
+      // Keep the old files as migration backups; they are no longer read after the marker.
+    }
+    this.history = await this.sharedHistory.list();
+    this.emit();
+  }
+  private async refreshSharedHistory() {
+    await this.historyReady;
+    if (!this.sharedHistory || this.disposed || !this.config.get('persistHistory', true)) return;
+    await this.enqueueStorage(async () => {
+      const history = await this.sharedHistory!.list();
+      if (this.disposed || !this.config.get('persistHistory', true)) return;
+      const id = this.state.sessionId, previous = this.history.find(s => s.id === id);
+      if (id && previous && !history.some(s => s.id === id)) this.forgottenSessions.add(id);
+      if (this.state.readOnly && id) {
+        const item = history.find(s => s.id === id);
+        if (item && item.revision !== previous?.revision) this.state.entries = (await this.snapshots.read(item)).entries;
+      }
+      this.history = history;
+      this.emit();
+    });
+  }
+  private releaseLease() {
+    const id = this.activeLease;
+    this.activeLease = undefined;
+    if (id && this.sharedHistory) void this.enqueueStorage(() => this.sharedHistory!.release(id)).catch(error => this.log.appendLine(String(error)));
+  }
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
+    this.stateEncoder.reset();
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')] };
     const uri = (file: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', file));
     const nonce = randomBytes(24).toString('base64');
@@ -94,7 +169,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.emit();
   }
   private emit() {
-    if (this.timer) return;
+    if (this.disposed || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.state.history = this.history.map(({ id, cwd, title, updated }) => ({ id, cwd, title, updated }));
@@ -102,42 +177,56 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if(this.state.status==='ready'||this.state.status==='busy')this.statistics.models=models||[];
       this.state.statistics = this.statistics;
       this.state.showThoughts = this.config.get('showThoughts', true);
-      void this.view?.webview.postMessage({ type: 'state', state: this.state });
+      if (this.view) {
+        void this.view.webview.postMessage(this.stateEncoder.encode(this.state)).then(delivered => {
+          if (!delivered) this.stateEncoder.reset();
+        }, () => this.stateEncoder.reset());
+      }
     }, 40);
   }
   private async save() {
-    if (!this.state.sessionId || this.state.preview || this.forgottenSessions.has(this.state.sessionId) || !this.config.get('persistHistory', true)) return;
+    if (!this.state.sessionId || this.state.preview || this.state.readOnly || this.forgottenSessions.has(this.state.sessionId) || !this.config.get('persistHistory', true)) return;
+    const epoch = this.storageEpoch;
     const title = this.state.entries.find(e => e.role === 'user');
     const snapshot: Snapshot = {
       id: this.state.sessionId, cwd: this.cwd, title: title && title.role === 'user' ? title.text.slice(0, 70) : '新对话',
       updated: Date.now(), entries: structuredClone(this.state.entries),
       contextComplete: this.state.contextComplete, contextPending: this.state.contextPending,
       configs: structuredClone(this.state.configs), modes: structuredClone(this.state.modes),
-      checkpoints:structuredClone(this.checkpoints),preparedContext:this.preparedContext,contextWindow:this.contextWindow,conversationId:this.conversationId,
+      checkpoints:structuredClone(this.checkpoints),contextWindow:this.contextWindow,conversationId:this.conversationId,
     };
-    this.saveQueue = this.saveQueue.catch(()=>{}).then(async()=>{
+    await this.enqueueStorage(async()=>{
+      if (epoch !== this.storageEpoch) return;
       const index = await this.snapshots.write(snapshot);
-      if(this.forgottenSessions.has(index.id) || !this.config.get('persistHistory',true)) {await this.snapshots.remove(index.id);return;}
+      if(epoch !== this.storageEpoch || this.forgottenSessions.has(index.id) || !this.config.get('persistHistory',true)) {await this.snapshots.remove(index.id);return;}
       const next=[index,...this.history.filter(s=>s.id!==index.id)];
-      this.history=next.slice(0,20);
-      await this.context.workspaceState.update('history',this.history);
-      for(const old of next.slice(20))await this.snapshots.remove(old.id);
+      if (this.sharedHistory) this.history = await this.sharedHistory.list();
+      else {
+        this.history=next.slice(0,20);
+        await this.context.workspaceState.update('history',this.history);
+        for(const old of next.slice(20))await this.snapshots.remove(old.id);
+      }
       this.emit();
     });
-    await this.saveQueue;
   }
 
   /** null means deliberately no active history; undefined migrates pre-0.2.2 installations. */
   private lastSnapshot() {
     const id = this.context.workspaceState.get<string | null>('activeSession');
-    return id === undefined ? this.history[0] : this.history.find(s => s.id === id);
+    const local = this.history.filter(s => vscode.workspace.workspaceFolders?.some(f => f.uri.fsPath === s.cwd));
+    return id === undefined ? local[0] : local.find(s => s.id === id);
   }
   private currentSnapshot(): Snapshot | undefined {
     if (!this.state.sessionId || this.state.preview) return this.lastSnapshot();
     return { id:this.state.sessionId, cwd:this.cwd, title:'', updated:Date.now(), entries:this.state.entries,
       contextComplete:this.state.contextComplete, contextPending:this.state.contextPending,
       configs:this.state.configs, modes:this.state.modes, checkpoints:this.checkpoints,
-      preparedContext:this.preparedContext, contextWindow:this.contextWindow, conversationId:this.conversationId };
+      contextWindow:this.contextWindow, conversationId:this.conversationId };
+  }
+  private async readSnapshot(snapshot: Snapshot) {
+    // Unsaved in-memory context belongs to our leased session, not to a stale disk snapshot.
+    if (this.sharedHistory && !snapshot.stored && !this.state.readOnly && snapshot.id === this.state.sessionId) return structuredClone(snapshot);
+    return this.snapshots.read(snapshot);
   }
   private async rememberSettings() {
     if (this.state.preview || !this.state.sessionId) return;
@@ -194,23 +283,44 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if(snapshot?.id===this.state.sessionId && this.agent&&!this.agent.isClosed&&this.state.status==='ready')return;
     const cwd = snapshot?.cwd || await this.workspaceCwd();
     if (!vscode.workspace.isTrusted) throw new Error('工作区尚未信任。');
-    if (snapshot && !vscode.workspace.workspaceFolders?.some(f => f.uri.fsPath === cwd)) throw new Error('请先打开该历史会话对应的工作区。');
+    if (snapshot && !vscode.workspace.workspaceFolders?.some(f => f.uri.fsPath === cwd)) {
+      if (!this.sharedHistory) throw new Error('请先打开该历史会话对应的工作区。');
+      await this.save(); this.parkActive();
+      snapshot = await this.snapshots.read(snapshot); this.cwd = cwd;
+      this.state = {...initialState(), sessionId:snapshot.id, entries:structuredClone(snapshot.entries), contextComplete:snapshot.contextComplete,
+        readOnly:true, connectionAttempted:true, error:'只读查看：请打开此会话对应的工作区后再继续对话。'};
+      this.emit(); return;
+    }
     if(this.inspecting)await this.inspecting;
     let cached=snapshot?this.sessions.take(snapshot.id):undefined;
-    if(!cached&&snapshot){snapshot=await this.snapshots.read(snapshot);if(snapshot.contextPending)contextSeed(snapshot.entries,snapshot.contextComplete);}
+    if(!cached&&snapshot){snapshot=await this.readSnapshot(snapshot);if(snapshot.contextPending)contextSeed(snapshot.entries,snapshot.contextComplete);}
     try{await this.save();}catch(error){if(cached)this.sessions.put(snapshot!.id,cached,this.cacheBytes(cached));throw error;}
-    if(cached?.agent.isClosed){cached=undefined;snapshot=await this.snapshots.read(snapshot!);if(snapshot.contextPending)contextSeed(snapshot.entries,snapshot.contextComplete);}
+    if(cached?.agent.isClosed){cached=undefined;snapshot=await this.readSnapshot(snapshot!);if(snapshot.contextPending)contextSeed(snapshot.entries,snapshot.contextComplete);}
     const preferences = sessionPreferences(this.state).length && !this.state.preview
       ? sessionPreferences(this.state)
       : this.context.workspaceState.get<SessionPreference[]>('sessionPreferences', sessionPreferences(this.lastSnapshot() || {}));
     this.parkActive();
     if(cached){
-      this.agent=cached.agent;this.activeCacheable=true;this.state=cached.state;this.cwd=cached.cwd;this.checkpoints=cached.checkpoints;this.preparedContext=cached.preparedContext;this.contextWindow=cached.contextWindow;this.conversationId=cached.conversationId;this.replay=false;
+      this.agent=cached.agent;this.activeCacheable=true;this.state=cached.state;this.cwd=cached.cwd;this.checkpoints=cached.checkpoints;this.contextWindow=cached.contextWindow;this.conversationId=cached.conversationId;this.replay=false;
       this.state.status='ready';await this.rememberActive();this.emit();return;
+    }
+    if (this.sharedHistory && snapshot) {
+      await this.saveQueue.catch(() => {});
+      try {
+        await this.sharedHistory.claim(snapshot.id); this.activeLease = snapshot.id;
+        snapshot = await this.readSnapshot(snapshot);
+      } catch (error) {
+        this.releaseLease();
+        if (!(error instanceof SessionInUseError)) throw error;
+        this.cwd = cwd;
+        this.state = {...initialState(), sessionId:snapshot.id, entries:structuredClone(snapshot.entries), configs:snapshot.configs, modes:snapshot.modes,
+          contextComplete:snapshot.contextComplete, readOnly:true, connectionAttempted:true, error:error.message};
+        this.emit(); return;
+      }
     }
     const generation = this.generation;
     this.cwd = cwd;
-    this.checkpoints = snapshot?.checkpoints || []; this.preparedContext=snapshot?.preparedContext; this.contextWindow=snapshot?.contextWindow;
+    this.checkpoints = snapshot?.checkpoints || []; this.contextWindow=snapshot?.contextWindow;
     this.state = { ...initialState(), status: 'connecting', connectionAttempted: true, attachments: [] };
     this.replay = !!snapshot;
     this.emit();
@@ -220,6 +330,12 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     try {
       const info = await agent.initialize();
       const session = await agent.createSession(snapshot?.contextPending ? undefined : snapshot?.id);
+      if (this.sharedHistory && this.activeLease !== session.sessionId) {
+        await this.saveQueue.catch(() => {});
+        await this.sharedHistory.claim(session.sessionId);
+        if (this.activeLease) await this.sharedHistory.release(this.activeLease);
+        this.activeLease = session.sessionId;
+      }
       if (snapshot?.contextPending) await this.restoreSettings(agent, session, snapshot);
       else if (!snapshot) this.state.error = await this.applyPreferences(agent, session, preferences);
       if (generation !== this.generation) return;
@@ -235,7 +351,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.history = this.history.filter(s => s.id !== snapshot.id);
         this.forgottenSessions.add(snapshot.id);
       }
-      this.state.status = 'ready'; this.replay = false; await this.rememberActive(); await this.refreshTelemetry(); await this.save(); if(snapshot?.contextPending)await this.snapshots.remove(snapshot.id); this.emit();
+      this.state.status = 'ready'; this.replay = false; await this.rememberActive(); await this.refreshTelemetry(); await this.save(); if(snapshot?.contextPending)await this.enqueueStorage(() => this.snapshots.remove(snapshot!.id)); this.emit();
     } catch (error) {
       this.disconnect(); this.state.status = 'disconnected';
       if (snapshot) { this.state.configs=snapshot.configs;this.state.modes=snapshot.modes; this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; this.state.contextComplete = snapshot.contextComplete; this.state.contextPending = snapshot.contextPending; }
@@ -263,7 +379,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         const cachedId=this.sessions.find(agent);if(cachedId){this.sessions.remove(cachedId);return;}
         if (this.agent !== agent) return;
         this.cancelPermissions(); this.state.status = 'disconnected'; this.state.error = error; this.agent = undefined;
-        void this.save(); this.emit();
+        void this.save().catch(error => { this.state.error = String(error); this.emit(); }); this.emit();
       },
     });
     return agent;
@@ -294,9 +410,15 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private async recordUsage(records: UsageRecord[]) {
     this.statistics.records=mergeUsage(this.statistics.records,records.map(r=>({...r,sessionId:this.conversationId||r.sessionId})));
     const first=this.state.entries.find(e=>e.role==='user');
-    if(this.state.sessionId)this.statistics.titles[this.conversationId||this.state.sessionId]=this.config.get('persistHistory',true)&&first?.role==='user'?first.text.slice(0,70):`会话 ${this.state.sessionId.slice(0,8)}`;
-    await this.context.workspaceState.update('usageRecords',this.statistics.records);
-    await this.context.workspaceState.update('usageTitles',this.statistics.titles);
+    if(this.state.sessionId) {
+      const id = this.conversationId || this.state.sessionId;
+      if(this.config.get('persistHistory',true) && !this.forgottenSessions.has(this.state.sessionId) && first?.role==='user') this.statistics.titles[id] = first.text.slice(0,70);
+      else delete this.statistics.titles[id];
+    }
+    await this.enqueueStorage(async () => {
+      await this.context.workspaceState.update('usageRecords',this.statistics.records);
+      await this.context.workspaceState.update('usageTitles',this.statistics.titles);
+    });
   }
   private async refreshTelemetry(settledTurn=false) {
     if(this.inspecting)return this.inspecting;
@@ -307,10 +429,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.inspecting=(async()=>{
       try {
         let cursor:number|undefined;
+        const records: UsageRecord[] = [];
         do {
           const data=await metadataDeadline(agent.connection.agent.request<Inspection>('_pi_workbench/inspect',{sessionId,cursor}));
           if(this.agent!==agent||this.state.sessionId!==sessionId)return;
-          await this.recordUsage(data.records||[]);
+          records.push(...data.records || []);
           if(!cursor) {
             if(data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow>0)this.contextWindow=data.contextWindow;
             for(const [key,value] of Object.entries(data.prices||{}))if(validPrice(value)&&!priceFor(key,presetPrices)&&!['__proto__','constructor','prototype'].includes(key))this.modelPrices[key]=value;
@@ -323,6 +446,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           if(data.cursor!==undefined && (!Number.isSafeInteger(data.cursor)||data.cursor<=(cursor||0)))throw new Error('Invalid usage pagination');
           cursor=data.cursor;
         } while(cursor!==undefined);
+        await this.recordUsage(records);
         this.statistics.note=undefined;
       } catch(error) {this.statistics.note=`用量读取未完成：${error instanceof Error?error.message:String(error)}`;}
       finally {this.emit();}
@@ -340,7 +464,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     },signal);
   }
   private async editContext(message: Extract<UiMessage, { type: 'branchMessage' | 'deleteMessage' }>) {
-    if (this.state.preview || !this.state.sessionId || message.sessionId !== this.state.sessionId) return;
+    if (this.state.preview || this.state.readOnly || !this.state.sessionId || message.sessionId !== this.state.sessionId) return;
     if (!vscode.workspace.isTrusted) throw new Error('工作区尚未信任。');
     const index = this.state.entries.findIndex(e => e.id === message.id);
     if (index < 0 || !['user', 'assistant', 'tool'].includes(this.state.entries[index].role)) return;
@@ -351,6 +475,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.state = { ...previous, status: 'connecting' }; this.emit();
     const pending: acp.SessionNotification[] = [];
     let candidate: AgentProcess | undefined;
+    let candidateLease: string | undefined;
     let session: acp.NewSessionResponse;
     let prepared:Awaited<ReturnType<typeof prepareContext>>;
     this.contextAbort=new AbortController();
@@ -366,15 +491,19 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (candidate.isClosed) throw new Error('新会话连接已关闭，上下文未修改。');
       if (generation !== this.generation) throw new Error('连接状态已改变，上下文未修改。');
       this.contextAbort.signal.throwIfAborted();
+      if (this.sharedHistory) { await this.sharedHistory.claim(session.sessionId); candidateLease = session.sessionId; }
+      this.contextAbort.signal.throwIfAborted();
     } catch (error) {
+      if (candidateLease) await this.sharedHistory?.release(candidateLease);
       candidate?.dispose(); this.state = previous; this.contextAbort=undefined; this.transitioning = false; await this.refreshTelemetry(); this.emit(); throw error;
     }
     this.contextAbort=undefined;
     const keptCheckpoints=this.checkpoints.filter(cp=>validCheckpoint(cp,entries));
-    if(message.type==='branchMessage')this.parkActive(previous);else this.disconnect();
+    if(message.type==='branchMessage')this.parkActive(previous);else { this.disconnect(); this.releaseLease(); }
     this.agent = candidate;this.activeCacheable=true; this.replay = false;
+    if (this.sharedHistory) this.activeLease = session.sessionId;
     if(message.type==='branchMessage')this.conversationId=session.sessionId;
-    this.checkpoints=[...keptCheckpoints,prepared!.checkpoint].slice(-24);this.preparedContext=prepared!.text;
+    this.checkpoints=[...keptCheckpoints,prepared!.checkpoint].slice(-24);
     this.state = { ...initialState(), status: 'ready', connectionAttempted: true, sessionId: session.sessionId,
       agent: previous.agent, attachments: previous.attachments, entries, contextPending: true,
       configs: session.configOptions || undefined, modes: session.modes || undefined };
@@ -386,18 +515,18 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.history = this.history.filter(s => s.id !== oldId); this.forgottenSessions.add(oldId);
       if (forgotten) this.forgottenSessions.add(session.sessionId);
     }
-    try { await this.rememberActive(); await this.save(); if(message.type==='deleteMessage')await this.snapshots.remove(oldId); } finally { this.transitioning = false; this.emit(); }
+    try { await this.rememberActive(); await this.save(); if(message.type==='deleteMessage')await this.enqueueStorage(() => this.snapshots.remove(oldId)); } finally { this.transitioning = false; this.emit(); }
   }
   private cancelPermissions() {
     for (const resolve of this.permissionResolvers.values()) resolve({ outcome: { outcome: 'cancelled' } });
     this.permissionResolvers.clear(); this.state.permissions = [];
   }
-  private cacheBytes(value:CachedConversation){return byteSize(JSON.stringify({entries:value.state.entries,attachments:value.state.attachments,checkpoints:value.checkpoints,preparedContext:value.preparedContext}));}
+  private cacheBytes(value:CachedConversation){return byteSize(JSON.stringify({entries:value.state.entries,attachments:value.state.attachments,checkpoints:value.checkpoints}));}
   private parkActive(state=this.state){
-    if(this.agent&&!this.agent.isClosed&&state.status==='ready'&&state.sessionId&&!state.preview&&this.activeCacheable&&this.config.get('persistHistory',true)&&!this.forgottenSessions.has(state.sessionId)){
-      const cached:CachedConversation={agent:this.agent,state:{...state,statistics:undefined,history:[]},cwd:this.cwd,checkpoints:this.checkpoints,preparedContext:this.preparedContext,contextWindow:this.contextWindow,conversationId:this.conversationId};
+    if(!this.sharedHistory&&this.agent&&!this.agent.isClosed&&state.status==='ready'&&state.sessionId&&!state.preview&&this.activeCacheable&&this.config.get('persistHistory',true)&&!this.forgottenSessions.has(state.sessionId)){
+      const cached:CachedConversation={agent:this.agent,state:{...state,statistics:undefined,history:[]},cwd:this.cwd,checkpoints:this.checkpoints,contextWindow:this.contextWindow,conversationId:this.conversationId};
       this.agent=undefined;this.generation++;this.sessions.put(state.sessionId,cached,this.cacheBytes(cached));
-    }else this.disconnect();
+    }else { this.disconnect(); this.releaseLease(); }
   }
   private disconnect() {
     this.generation++; this.contextAbort?.abort(); this.cancelPermissions();
@@ -422,7 +551,18 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   async perform(message: UiMessage) {
     try {
       if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
+      await this.historyReady;
+      if (this.disposed) return;
+      if (message.type === 'refreshHistory') { await this.refreshSharedHistory(); this.emit(); return; }
+      if (message.type === 'releaseSession') {
+        if (this.transitioning || this.state.status === 'busy' || this.state.status === 'connecting') return;
+        this.transitioning = true;
+        try { await this.save(); this.disconnect(); this.releaseLease(); await this.saveQueue; this.state.status = 'disconnected'; this.state.readOnly = true; }
+        finally { this.transitioning = false; this.emit(); }
+        return;
+      }
       if (message.type === 'ready') {
+        this.stateEncoder.reset();
         // Webview reloads must not reset a session or repeatedly retry a failed start.
         if (!this.autoConnectHandled) {
           this.autoConnectHandled = true;
@@ -436,20 +576,27 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.emit(); return;
       }
       if (message.type === 'deleteHistory' || message.type === 'clearHistory') {
+        if (this.sharedHistory && await vscode.window.showWarningMessage(message.type === 'clearHistory' ? '清空此服务器账户的全部共享会话？所有客户端都会失去这些历史记录。' : '删除此共享会话？所有客户端都会失去这条历史记录。', {modal:true}, '删除') !== '删除') return;
         if (message.type === 'deleteHistory') {
-          if (!this.history.some(item => item.id === message.id)) return;
+          const forgotten = this.history.find(item => item.id === message.id);
+          if (!forgotten) return;
+          delete this.statistics.titles[forgotten.conversationId || forgotten.id];
           this.forgottenSessions.add(message.id);this.sessions.remove(message.id);
           this.history = this.history.filter(item => item.id !== message.id);
-          await this.snapshots.remove(message.id);
         } else {
           this.history.forEach(item => this.forgottenSessions.add(item.id));
           if (this.state.sessionId) this.forgottenSessions.add(this.state.sessionId);
-          this.history = []; this.sessions.clear();await this.snapshots.clear();
+          this.history = []; this.sessions.clear(); this.statistics.titles = {};
         }
         // Forget the local record without interrupting an active agent turn.
-        await this.context.workspaceState.update('history', this.history.length ? this.history : undefined);
-        const active = this.context.workspaceState.get<string | null>('activeSession');
-        if (message.type === 'clearHistory' || message.type === 'deleteHistory' && active === message.id) await this.context.workspaceState.update('activeSession', null);
+        await this.enqueueStorage(async () => {
+          if (message.type === 'deleteHistory') await this.snapshots.remove(message.id);
+          else await this.snapshots.clear();
+          if (!this.sharedHistory) await this.context.workspaceState.update('history', this.history.length ? this.history : undefined);
+          await this.context.workspaceState.update('usageTitles', this.statistics.titles);
+          const active = this.context.workspaceState.get<string | null>('activeSession');
+          if (message.type === 'clearHistory' || message.type === 'deleteHistory' && active === message.id) await this.context.workspaceState.update('activeSession', null);
+        });
         this.emit(); return;
       }
       if(message.type==='copyConversation'){await vscode.env.clipboard.writeText(this.conversationText());return;}
@@ -476,7 +623,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if (this.cancelTimer) clearTimeout(this.cancelTimer);
         if (this.state.status !== 'busy') return;
         this.cancelTimer = setTimeout(() => {
-          this.disconnect(); this.state.status = 'disconnected'; this.state.error = 'Agent 未在 5 秒内响应取消，连接已关闭。可从历史记录恢复。'; void this.save(); this.emit();
+          this.disconnect(); this.state.status = 'disconnected'; this.state.error = 'Agent 未在 5 秒内响应取消，连接已关闭。可从历史记录恢复。'; void this.save().catch(error => { this.state.error = String(error); this.emit(); }); this.emit();
         }, 5000); return;
       }
       if (message.type === 'permission') {
@@ -511,8 +658,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         const snapshot = this.history.find(s => s.id === message.id);
         if (snapshot) await this.start(snapshot);
       } else if (message.type === 'preview') {
-        await this.save(); this.disconnect(); this.state = { ...initialState(), preview: true, entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }] };
-        await vscode.commands.executeCommand('piAcp.chat.focus');
+        this.transitioning = true;
+        try {
+          await this.save(); this.disconnect(); this.releaseLease(); this.state = { ...initialState(), preview: true, entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }] };
+          await vscode.commands.executeCommand('piAcp.chat.focus');
+        } finally { this.transitioning = false; }
       } else if (message.type === 'send') {
         if (typeof message.text !== 'string' || !message.text.trim()&&!this.state.attachments.some(a=>a.kind==='image')) return;
         if (message.text.length > 500000) throw new Error('消息过长。');
@@ -525,7 +675,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           // Include unsynchronized messages left by a cancelled/failed send as well.
           this.transitioning=true;this.state.status='connecting';this.contextAbort=new AbortController();this.emit();
           try {const prepared=await this.prepareEditedContext(this.state.entries,this.contextAbort.signal);
-            this.checkpoints=[...this.checkpoints,prepared.checkpoint].slice(-24);this.preparedContext=prepared.text;
+            this.checkpoints=[...this.checkpoints,prepared.checkpoint].slice(-24);
             seed={type:'text',text:prepared.text+'\n\n当前请求：\n'};
           } finally {this.contextAbort=undefined;this.state.contextOperation=undefined;this.state.status=this.agent?'ready':'disconnected';this.transitioning=false;this.emit();}
         }
@@ -569,7 +719,13 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           if (generation === this.generation) {
             if (this.cancelTimer) clearTimeout(this.cancelTimer);
             this.stopping = false; this.prompting = false; this.cancelPermissions();
-            await this.refreshTelemetry(true);if(this.agent)await this.rememberSettings();this.state.status = this.agent ? 'ready' : 'disconnected'; await this.save(); this.emit();
+            try {
+              await this.refreshTelemetry(true);
+              if(this.agent) await this.rememberSettings();
+            } finally {
+              this.state.status = this.agent ? 'ready' : 'disconnected';
+              try { await this.save(); } finally { this.emit(); }
+            }
           }
         }
       } else if (message.type === 'mode' && this.agent && this.state.sessionId) {
@@ -613,10 +769,15 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if (item?.role !== 'tool' || !Number.isInteger(index)) return;
     const content = item.tool.content?.[index];
     if (content?.type !== 'diff') return;
-    const key = nextId();
+    const key = encodeURIComponent(`${this.state.sessionId || 'preview'}-${id}-${index}`);
     const left = vscode.Uri.from({ scheme: 'pi-acp-diff', path: `/${key}/before/${path.basename(content.path)}` });
     const right = vscode.Uri.from({ scheme: 'pi-acp-diff', path: `/${key}/after/${path.basename(content.path)}` });
+    this.diffDocs.delete(left.toString()); this.diffDocs.delete(right.toString());
     this.diffDocs.set(left.toString(), content.oldText || ''); this.diffDocs.set(right.toString(), content.newText);
+    while (this.diffDocs.size > 40 || [...this.diffDocs.values()].reduce((n, text) => n + byteSize(text), 0) > 16 * 1024 * 1024 && this.diffDocs.size > 2) {
+      this.diffDocs.delete(this.diffDocs.keys().next().value!);
+      this.diffDocs.delete(this.diffDocs.keys().next().value!);
+    }
     await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(content.path)} · Agent 修改`, { preview: true });
   }
   private conversationText() {return this.state.entries.map(e => e.role === 'tool' ? `### 工具：${e.tool.title}\n\n${JSON.stringify(e.tool,null,2)}` : `## ${e.role}\n\n${e.text}`).join('\n\n---\n\n');}
@@ -627,7 +788,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(text));
   }
   dispose() {
-    void this.save(); this.disconnect();this.sessions.clear(); if (this.timer) clearTimeout(this.timer);
+    if (this.disposed) return;
+    void this.save().catch(() => {}); this.disconnect();this.releaseLease();this.sessions.clear();
+    this.disposed = true;
+    if (this.historyPoll) clearInterval(this.historyPoll);
+    if (this.timer) clearTimeout(this.timer);
     this.resources.forEach(r => r.dispose()); this.diffDocs.clear();
   }
 }

@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -128,10 +128,16 @@
           "default": true,
           "description": "Show thought chunks when the agent emits them."
         },
+        "piAcp.sharedHistory": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Share conversation history between clients of the same server account under ~/.pi/pi-acp-workbench/history. Changes require reloading the window."
+        },
         "piAcp.persistHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Save complete local conversation files and recent indices in VS Code workspace storage. Disabling clears these plugin snapshots; usage totals remain."
+          "description": "Save conversation history. In shared mode, disabling only hides/stops saving history on this client; use Clear History to delete server-wide records. In local mode, disabling clears local snapshots. Usage totals remain."
         },
         "piAcp.maxContextChars": {
           "type": "number",
@@ -153,7 +159,7 @@
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.2.2.vsix",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.3.0.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs"
   },
@@ -166,7 +172,8 @@
     "markdown-it-footnote": "4.0.0",
     "markdown-it-task-lists": "2.1.1",
     "mermaid": "11.17.2",
-    "pi-acp": "0.0.34"
+    "pi-acp": "0.0.34",
+    "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
@@ -175,6 +182,7 @@
     "@types/markdown-it": "^14.1.0",
     "@types/markdown-it-footnote": "^3.0.4",
     "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/vscode": "1.96.0",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",

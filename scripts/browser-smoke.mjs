@@ -6,6 +6,9 @@ import { build } from 'esbuild';
 import assert from 'node:assert/strict';
 const demoBundle = await build({ entryPoints: ['src/demo.ts'], bundle: true, platform: 'node', format: 'esm', write: false });
 const { demoMarkdown } = await import('data:text/javascript;base64,' + Buffer.from(demoBundle.outputFiles[0].text).toString('base64'));
+const channelBundle = await build({ entryPoints: ['src/state-channel.ts'], bundle: true, platform: 'node', format: 'esm', write: false });
+const { StateEncoder } = await import('data:text/javascript;base64,' + Buffer.from(channelBundle.outputFiles[0].text).toString('base64'));
+const encoder = new StateEncoder();
 const server = createServer(async (req, res) => {
   try {
     const file = resolve('dist', '.' + req.url);
@@ -25,12 +28,21 @@ try {
   await page.setContent(`<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="${origin}/katex.min.css"><link rel="stylesheet" href="${origin}/style.css"></head><body><div id="app"></div></body></html>`);
   await page.evaluate(() => {
     window.messages = [];
-    window.acquireVsCodeApi = () => ({ postMessage: m => window.messages.push(m), getState: () => ({}), setState: () => {} });
+    window.savedState = {};
+    window.acquireVsCodeApi = () => ({ postMessage: m => window.messages.push(m), getState: () => window.savedState, setState: state => {window.savedState=state;} });
   });
   await page.addScriptTag({ url: origin + '/webview.js' });
   const state = { status: 'disconnected', entries: [], attachments: [], commands: [], plan: [], history: [], permissions: [], showThoughts: true, preview: false };
-  const emit = async s => { await page.evaluate(state => window.postMessage({ type: 'state', state }, '*'), s); await page.waitForTimeout(75); };
+  const emit = async s => { await page.evaluate(message => window.postMessage(message, '*'), encoder.encode(s)); await page.waitForTimeout(75); };
   await emit(state);
+  const inputHeight = await page.locator('#input').evaluate(node=>node.getBoundingClientRect().height);
+  const separator = await page.locator('#composer-resizer').boundingBox();
+  await page.mouse.move(separator.x+separator.width/2,separator.y+separator.height/2);
+  await page.mouse.down(); await page.mouse.move(separator.x+separator.width/2,separator.y-60,{steps:5}); await page.mouse.up();
+  assert((await page.locator('#input').evaluate(node=>node.getBoundingClientRect().height)) > inputHeight+50);
+  assert.equal(await page.locator('#input').evaluate(node=>getComputedStyle(node).resize), 'none');
+  assert.equal(await page.locator('#input').evaluate(node=>getComputedStyle(node,'::-webkit-scrollbar-button').display), 'none');
+  assert((await page.evaluate(()=>window.savedState.composerHeight)) > 100);
   assert(await page.locator('#start-session').isVisible());
   await page.locator('#start-session').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'new'));
@@ -63,8 +75,17 @@ try {
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'permission' && m.optionId === 'deny-1'));
   await page.locator('#stop').click(); assert((await page.evaluate(() => window.messages)).some(m => m.type === 'cancel'));
   state.permissions = []; state.entries = [{ id: 'tool', role: 'tool', tool: { toolCallId: 'edit', title: 'Edit file', status: 'completed', content: [{ type: 'diff', path: '/project/test.ts', oldText: 'a', newText: 'b' }] } }]; await emit(state);
-  await page.locator('summary').first().click(); await page.getByText('查看修改 · /project/test.ts').click();
+  assert.equal(await page.locator('.activity-group').evaluate(node=>node.open), false);
+  await page.locator('#toggle-activity').click();
+  assert.equal(await page.locator('.activity-group').evaluate(node=>node.open), true);
+  await page.locator('.message.tool > summary').click(); await page.getByText('查看修改 · /project/test.ts').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'diff' && m.index === 0));
+  const readyBefore = await page.evaluate(() => window.messages.filter(m => m.type === 'ready').length);
+  await page.evaluate(() => window.postMessage({type:'statePatch',revision:999,fields:{},unset:[],entries:[]}, '*'));
+  await page.waitForTimeout(75);
+  assert.equal(await page.evaluate(() => window.messages.filter(m => m.type === 'ready').length), readyBefore + 1);
+  encoder.reset(); await emit(state);
+  assert.equal(await page.locator('.message.tool').count(), 1);
   assert.deepEqual(errors, []);
-  console.log('Browser smoke passed: dark/light math, narrow viewport, streamed math, send, permission, cancel, diff, no runtime errors.');
+  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, send, permission, cancel, diff, no runtime errors.');
 } finally { await browser?.close(); server.close(); }

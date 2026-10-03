@@ -2,15 +2,20 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[] }));
+const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[], configurationChanged: undefined as undefined | ((event: any) => void), home: undefined as string | undefined }));
+vi.mock('node:os', async importOriginal => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return {...os,homedir:()=>host.home || os.homedir()};
+});
 vi.mock('vscode', () => ({
+  Uri: {from: (parts: {scheme:string;path:string}) => ({toString: () => `${parts.scheme}:${parts.path}`})},
   env:{clipboard:{writeText:vi.fn(async()=>{})}},
   workspace: {
     isTrusted: true,
     get workspaceFolders() { return [{ uri: { scheme: 'file', fsPath: process.cwd() } }]; },
     getConfiguration: () => ({ get: (key: string, fallback: unknown) => host.config[key] ?? fallback }),
     registerTextDocumentContentProvider: () => ({ dispose() {} }),
-    onDidChangeConfiguration: () => ({ dispose() {} }),
+    onDidChangeConfiguration: (callback: (event: any) => void) => { host.configurationChanged = callback; return { dispose() {} }; },
   },
   window: {
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
@@ -24,11 +29,133 @@ vi.mock('vscode', () => ({
 import { activate } from '../src/extension';
 let context: any;
 beforeEach(() => {
-  host.config = { command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear();
+  host.config = { sharedHistory: false, command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear();
   context = { subscriptions: [], workspaceState: { get: (key: string, fallback: unknown) => host.stored.has(key) ? host.stored.get(key) : fallback, update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)) } };
   activate(context);
 });
 afterEach(() => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose()); });
+it('restores ready even when saving session preferences fails after a turn', async () => {
+  await host.provider.perform({type:'new'});
+  const original = context.workspaceState.update;
+  context.workspaceState.update = async (key: string, value: unknown) => {
+    if (key === 'sessionPreferences') throw new Error('disk full');
+    return original(key, value);
+  };
+  await host.provider.perform({type:'send',text:'hello'});
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',error:'disk full'});
+  context.workspaceState.update = original;
+  await host.provider.perform({type:'send',text:'another turn'});
+  expect(host.provider.snapshot().status).toBe('ready');
+});
+it('locks preview before awaiting persistence', async () => {
+  await host.provider.perform({type:'new'});
+  let release!: () => void;
+  vi.spyOn(host.provider, 'save').mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  const preview = host.provider.perform({type:'preview'});
+  await host.provider.perform({type:'send',text:'must not send'});
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().entries).toEqual([]);
+  release(); await preview;
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',preview:true});
+});
+it('removes usage titles and does not recreate them after forgetting an active conversation', async () => {
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'send',text:'private message'});
+  await host.provider.recordUsage([]);
+  expect(host.stored.get('usageTitles')).toEqual({'test-session':'private message'});
+  await host.provider.perform({type:'deleteHistory',id:'test-session'});
+  await host.provider.recordUsage([]);
+  expect(host.stored.get('usageTitles')).toEqual({});
+});
+it('serializes disabling history behind in-flight writes and invalidates their snapshots', async () => {
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'send',text:'private message'});
+  await host.provider.recordUsage([]);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const write = vi.spyOn(host.provider.snapshots, 'write').mockImplementationOnce(async (snapshot: any) => { await gate; return snapshot; });
+  const clear = vi.spyOn(host.provider.snapshots, 'clear');
+  const saving = host.provider.save();
+  await vi.waitFor(() => expect(write).toHaveBeenCalled());
+  host.config.persistHistory = false;
+  host.configurationChanged!({affectsConfiguration:(key:string) => key === 'piAcp' || key === 'piAcp.persistHistory'});
+  expect(clear).not.toHaveBeenCalled();
+  host.config.persistHistory = true; // Old queued writes must not revive after a quick toggle.
+  release(); await saving; await host.provider.saveQueue;
+  expect(clear).toHaveBeenCalledOnce();
+  expect(host.stored.get('history')).toBeUndefined();
+  expect(host.stored.get('usageTitles')).toEqual({});
+});
+it('bounds diff document storage and reuses repeated previews', async () => {
+  await host.provider.perform({type:'new'});
+  for (let i = 0; i < 25; i++) {
+    const entry = {id:`tool-${i}`,role:'tool',tool:{toolCallId:`call-${i}`,title:'edit',content:[{type:'diff',path:'file.ts',oldText:'before',newText:'after'}]}};
+    host.provider.state.entries.push(entry);
+    await host.provider.openDiff(entry.id,0);
+  }
+  expect(host.provider.diffDocs.size).toBe(40);
+  const keys = [...host.provider.diffDocs.keys()];
+  await host.provider.openDiff('tool-24',0);
+  expect([...host.provider.diffDocs.keys()]).toEqual(keys);
+  expect(keys.some((key:any) => key.includes('tool-0-'))).toBe(false);
+});
+it('clears usage titles while preserving billed records and prices', async () => {
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'send',text:'private message'});
+  const record = {id:'request',sessionId:'test-session',model:'model',timestamp:Date.now(),kind:'inference',input:1,output:1,cacheRead:0,cacheWrite:0};
+  await host.provider.recordUsage([record]);
+  const prices = structuredClone(host.provider.statistics.prices);
+  await host.provider.perform({type:'clearHistory'});
+  expect(host.stored.get('usageTitles')).toEqual({});
+  expect(host.stored.get('usageRecords')).toEqual([record]);
+  expect(host.provider.statistics.prices).toEqual(prices);
+});
+it('queues history deletion after in-flight snapshot writes', async () => {
+  await host.provider.perform({type:'new'});
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const write = vi.spyOn(host.provider.snapshots,'write').mockImplementationOnce(async (snapshot:any) => { await gate; return snapshot; });
+  const saving = host.provider.save();
+  await vi.waitFor(() => expect(write).toHaveBeenCalled());
+  const clearing = host.provider.perform({type:'clearHistory'});
+  release(); await Promise.all([saving, clearing]);
+  expect(host.stored.get('history')).toBeUndefined();
+  expect(host.provider.history).toEqual([]);
+});
+it('migrates and shares history across hosts, views occupied sessions, and hands off after release', async () => {
+  const root = mkdtempSync(resolve(tmpdir(),'pi-controller-shared-'));
+  host.provider.dispose(); await host.provider.saveQueue;
+  host.home=root; host.config.sharedHistory=true;
+  const legacy = {id:'legacy',cwd:process.cwd(),title:'old',updated:1,contextComplete:true,entries:[{id:'old-user',role:'user',text:'old message'}]};
+  host.stored.set('history',[legacy]);
+  let first:any, second:any;
+  const other = new Map<string,unknown>();
+  try {
+    activate(context); first=host.provider; await first.historyReady;
+    expect(first.history.map((s:any)=>s.id)).toContain('legacy');
+    expect(host.stored.get('sharedHistoryMigrated')).toBe(true);
+    await first.perform({type:'new'}); await first.perform({type:'send',text:'shared message'});
+    expect(first.snapshot().status).toBe('ready');
+    activate({subscriptions:[],workspaceState:{get:(k:string,d:unknown)=>other.has(k)?other.get(k):d,update:async(k:string,v:unknown)=>other.set(k,structuredClone(v))}} as any);
+    second=host.provider; await second.historyReady;
+    expect(second.history.map((s:any)=>s.id)).toEqual(expect.arrayContaining(['legacy','test-session']));
+    await second.perform({type:'resume',id:'test-session'});
+    expect(second.snapshot()).toMatchObject({readOnly:true,status:'disconnected'});
+    expect(second.snapshot().entries.some((e:any)=>e.text==='shared message')).toBe(true);
+    await second.perform({type:'send',text:'must not send'});
+    expect(second.snapshot().entries.some((e:any)=>e.text==='must not send')).toBe(false);
+    await first.perform({type:'releaseSession'});
+    await second.perform({type:'connect'});
+    expect(second.snapshot()).toMatchObject({status:'ready'});
+    expect(second.snapshot().readOnly).not.toBe(true);
+    await second.perform({type:'send',text:'second machine'});
+    await first.refreshSharedHistory();
+    expect(first.snapshot().entries.some((e:any)=>e.text==='second machine')).toBe(true);
+  } finally {
+    first?.dispose();second?.dispose();await Promise.all([first?.saveQueue,second?.saveQueue]);
+    host.home=undefined;rmSync(root,{recursive:true,force:true});
+  }
+});
 it('does not create a session on ready, reconnect, or send; only explicit new does', async () => {
   const start = vi.spyOn(host.provider, 'start');
   await Promise.all([host.provider.perform({type:'ready'}), host.provider.perform({type:'ready'})]);
