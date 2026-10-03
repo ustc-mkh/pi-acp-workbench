@@ -31,6 +31,10 @@ try {
   const state = { status: 'disconnected', entries: [], attachments: [], commands: [], plan: [], history: [], permissions: [], showThoughts: true, preview: false };
   const emit = async s => { await page.evaluate(state => window.postMessage({ type: 'state', state }, '*'), s); await page.waitForTimeout(75); };
   await emit(state);
+  assert(await page.locator('#start-session').isVisible());
+  await page.locator('#start-session').click();
+  assert((await page.evaluate(() => window.messages)).some(m => m.type === 'new'));
+  assert(!(await page.evaluate(() => window.messages)).some(m => m.type === 'connect'));
   await page.getByText('预览 Markdown 与公式').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'preview'));
   state.preview = true; state.entries = [{ id: 'demo', role: 'assistant', text: demoMarkdown }];

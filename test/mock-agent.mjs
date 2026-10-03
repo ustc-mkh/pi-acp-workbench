@@ -4,10 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 const mode = process.argv[2];
 let sessionId = mode?.startsWith('context') ? randomUUID() : 'test-session';
-const configOptions = [
+let configOptions = [
   { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'default', options: [{value:'default',name:'Default'}, {value:'other',name:'Other'}] },
   { id: 'thinking', name: 'Thinking', category: 'thought_level', type: 'select', currentValue: 'low', options: [{value:'low',name:'Low'}, {value:'high',name:'High'}] },
 ];
+const modes = {currentModeId:'low',availableModes:[{id:'low',name:'Thinking: low'},{id:'high',name:'Thinking: high'}]};
+if(mode==='context-dependent')configOptions[1].options=[{value:'low',name:'Low'}];
+if(mode==='context-legacy')configOptions=configOptions.slice(0,1);
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
 const update = update => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update } }) + '\n');
 let pending, permission;
@@ -18,11 +21,16 @@ createInterface({ input: process.stdin }).on('line', async line => {
   if (r.method === 'initialize') {
     if (mode === 'hang') return;
     reply(r.id, { protocolVersion: mode === 'v2' ? 2 : 1, agentCapabilities: { loadSession: mode !== 'no-load',promptCapabilities:{image:mode==='context-images'} }, agentInfo: { name: 'mock' }, authMethods: [] });
-  } else if (r.method === 'session/new') reply(r.id, { sessionId, ...(mode?.startsWith('context') ? {configOptions} : {}) });
+  } else if (r.method === 'session/new') reply(r.id, { sessionId, ...(mode?.startsWith('context') ? {configOptions,...(['context-dependent','context-legacy'].includes(mode)?{modes}:{})} : {}) });
   else if (r.method === 'session/set_config_option') {
     if (mode === 'context-config-fail') { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32603,message:'config rejected'}}) + '\n'); return; }
     configOptions.find(c => c.id === r.params.configId).currentValue = r.params.value;
+    if(mode==='context-dependent' && r.params.configId==='model') {
+      configOptions[1].options=[{value:'low',name:'Low'},...(r.params.value==='other'?[{value:'high',name:'High'}]:[])];
+      configOptions[1].currentValue='low';
+    }
     reply(r.id, { configOptions });
+  } else if (r.method === 'session/set_mode') { modes.currentModeId=r.params.modeId;reply(r.id,{});
   } else if (r.method === 'session/load') {
     sessionId = r.params.sessionId;
     update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'previous' } }); reply(r.id, {});

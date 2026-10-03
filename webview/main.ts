@@ -17,7 +17,7 @@ app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi
 <section id="history" hidden><div class="section-label">最近会话 <button id="clear-history" data-tooltip="清除全部本地历史记录">清空</button></div><div id="history-items"></div></section>
 <div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="connect" hidden>重新连接</button></div>
 <div id="context-operation" hidden role="status"><span id="context-progress"></span><button id="cancel-context">取消</button></div><div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
-<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
+<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
 <button id="bottom" class="primary" aria-label="回到最新消息" data-tooltip="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
 <footer><div id="context-pending" role="status" hidden>上下文已更新，将在下一条消息同步</div><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer></div><section id="statistics" hidden aria-label="用量统计"></section><section id="prices" hidden aria-label="模型价格设置"></section>`;
@@ -47,6 +47,7 @@ input.addEventListener('keydown', event => {
 input.addEventListener('input', () => { vscode.setState({ draft: input.value }); commandMenu(); updateSend(); });
 el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
+el('start-session').onclick = () => send({ type: 'new' });
 el('connect').onclick = () => send({ type: 'connect' });
 el('dismiss-error').onclick = () => {
   if (state?.error) send({ type: 'dismissError', error: state.error });
@@ -144,7 +145,7 @@ function paint() {
   paintPending = false;
   if (!state) return;
   const busy = state.status === 'busy', connecting = state.status === 'connecting';
-  const reconnect = state.status === 'disconnected' && !!state.connectionAttempted && !state.preview;
+  const reconnect = state.status === 'disconnected' && !!state.sessionId && !!state.connectionAttempted && !state.preview;
   el('connection').hidden = !connecting && !reconnect && !state.preview;
   el('status').textContent = state.preview ? '渲染预览 · 离线' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
@@ -154,6 +155,8 @@ function paint() {
   el('stop').hidden = !busy; el('send').hidden = busy; el('working').hidden = !busy;
   el('error').hidden = !state.error; el('error-message').textContent = state.error || '';
   el('welcome').hidden = !!state.entries.length;
+  el('start-session').hidden = !!state.sessionId || !!state.preview;
+  el<HTMLButtonElement>('start-session').disabled = busy || connecting;
   input.disabled = connecting;
   updateSend();
   const messages = el('messages');

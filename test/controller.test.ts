@@ -25,39 +25,40 @@ import { activate } from '../src/extension';
 let context: any;
 beforeEach(() => {
   host.config = { command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear();
-  context = { subscriptions: [], workspaceState: { get: (key: string, fallback: unknown) => host.stored.get(key) ?? fallback, update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)) } };
+  context = { subscriptions: [], workspaceState: { get: (key: string, fallback: unknown) => host.stored.has(key) ? host.stored.get(key) : fallback, update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)) } };
   activate(context);
 });
 afterEach(() => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose()); });
-it('connects when the chat becomes ready and preserves the session on repeated ready events', async () => {
+it('does not create a session on ready, reconnect, or send; only explicit new does', async () => {
   const start = vi.spyOn(host.provider, 'start');
-  expect(host.provider.snapshot().connectionAttempted).toBeFalsy();
-  await Promise.all([host.provider.perform({ type: 'ready' }), host.provider.perform({ type: 'ready' })]);
-  expect(host.provider.snapshot()).toMatchObject({ status: 'ready', connectionAttempted: true });
-  await host.provider.perform({ type: 'send', text: 'hello' });
-  const entries = host.provider.snapshot().entries;
-  await host.provider.perform({ type: 'ready' });
-  expect(start).toHaveBeenCalledTimes(1);
-  expect(host.provider.snapshot().entries).toEqual(entries);
+  await Promise.all([host.provider.perform({type:'ready'}), host.provider.perform({type:'ready'})]);
+  await host.provider.perform({type:'connect'});
+  await host.provider.perform({type:'send',text:'hello'});
+  expect(start).not.toHaveBeenCalled();
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',entries:[]});
+  await host.provider.perform({type:'new'});
+  const id = host.provider.snapshot().sessionId;
+  await host.provider.perform({type:'ready'});
+  await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot().sessionId).toBe(id);
 });
-it('does not loop after an automatic connection failure and permits a manual retry after dismissing it', async () => {
+it('restores on opening and retries the same failed history without falling back to new', async () => {
+  host.provider.history = [{id:'existing',cwd:process.cwd(),entries:[],contextComplete:true,title:'existing',updated:1}];
   host.config.args = [resolve('test/mock-agent.mjs'), 'v2'];
   const start = vi.spyOn(host.provider, 'start');
-  await host.provider.perform({ type: 'ready' });
-  const failed = host.provider.snapshot();
-  expect(failed).toMatchObject({ status: 'disconnected', connectionAttempted: true });
+  await host.provider.perform({type:'ready'});
+  const failed=host.provider.snapshot();
+  expect(failed).toMatchObject({status:'disconnected',sessionId:'existing'});
   expect(failed.error).toBeTruthy();
-  await host.provider.perform({ type: 'dismissError', error: failed.error });
-  expect(host.provider.snapshot().error).toBeUndefined();
-  expect(host.provider.snapshot().connectionAttempted).toBe(true);
-  await host.provider.perform({ type: 'ready' });
+  await host.provider.perform({type:'dismissError',error:failed.error});
+  await host.provider.perform({type:'ready'});
   expect(start).toHaveBeenCalledTimes(1);
   host.config.args = [resolve('test/mock-agent.mjs')];
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot().status).toBe('ready');
+  await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:'existing'});
 });
 it('allows error dismissal during a turn without dismissing a newer error', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   // No active editor in this host: the attachment action creates an error while streaming.
@@ -79,19 +80,19 @@ it('keeps an explicitly opened offline preview disconnected', async () => {
   expect(host.provider.snapshot().connectionAttempted).toBeFalsy();
 });
 it('runs a complete turn through the controller, saves history, and loads it', async () => {
-  await host.provider.perform({ type: 'connect' }); expect(host.provider.snapshot().status).toBe('ready');
+  await host.provider.perform({ type: 'new' }); expect(host.provider.snapshot().status).toBe('ready');
   await host.provider.perform({ type: 'send', text: 'hello' });
   const state = host.provider.snapshot(); expect(state.status).toBe('ready'); expect(state.entries).toContainEqual(expect.objectContaining({ role: 'assistant', text: '数学 $x^2$' }));
   expect((host.stored.get('history') as any[])[0].title).toBe('hello');
   await host.provider.perform({ type: 'resume', id: 'test-session' });
   expect(host.provider.snapshot().entries[0]).toMatchObject({ role: 'user', text: 'hello' });
 });
-it('serializes concurrent connect requests without orphaning a process', async () => {
-  await Promise.all([host.provider.perform({ type: 'connect' }), host.provider.perform({ type: 'new' })]);
+it('serializes concurrent new requests without orphaning a process', async () => {
+  await Promise.all([host.provider.perform({ type: 'new' }), host.provider.perform({ type: 'new' })]);
   expect(host.provider.snapshot().status).toBe('ready'); expect(host.provider.snapshot().error).toBeUndefined();
 });
 it('cancels pending permission requests when the user stops', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   const turn = host.provider.perform({ type: 'send', text: 'permission' });
   await vi.waitFor(() => expect(host.provider.snapshot().permissions).toHaveLength(1));
   await host.provider.perform({ type: 'cancel' }); await turn;
@@ -99,7 +100,7 @@ it('cancels pending permission requests when the user stops', async () => {
   expect(host.provider.snapshot().entries.at(-1).text).toContain('cancelled');
 });
 it('rejects forged permission option IDs and accepts the displayed option', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   const turn = host.provider.perform({ type: 'send', text: 'permission' });
   await vi.waitFor(() => expect(host.provider.snapshot().permissions).toHaveLength(1));
   const id = host.provider.snapshot().permissions[0].id;
@@ -108,23 +109,23 @@ it('rejects forged permission option IDs and accepts the displayed option', asyn
   expect(host.provider.snapshot().permissions).toHaveLength(0); expect(host.provider.snapshot().status).toBe('ready');
 });
 it('blocks concurrent prompts and new sessions during an active turn', async () => {
-  await host.provider.perform({ type: 'connect' }); const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await host.provider.perform({ type: 'new' }); const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   await host.provider.perform({ type: 'new' }); await host.provider.perform({ type: 'send', text: 'second' });
   expect(host.provider.snapshot().entries.filter((e: any) => e.role === 'user')).toHaveLength(1);
   await host.provider.perform({ type: 'cancel' }); await turn;
 });
 it('keeps a crash disconnected and surfaces an actionable error', async () => {
-  await host.provider.perform({ type: 'connect' }); await host.provider.perform({ type: 'send', text: 'crash' });
+  await host.provider.perform({ type: 'new' }); await host.provider.perform({ type: 'send', text: 'crash' });
   expect(host.provider.snapshot().status).toBe('disconnected'); expect(host.provider.snapshot().error).toBeTruthy();
 });
 it('does not persist conversation content when history is disabled', async () => {
   host.config.persistHistory = false;
-  await host.provider.perform({ type: 'connect' }); await host.provider.perform({ type: 'send', text: 'hello' });
+  await host.provider.perform({ type: 'new' }); await host.provider.perform({ type: 'send', text: 'hello' });
   expect(host.stored.get('history')).toBeUndefined();
 });
 it('deletes one historical record while preserving other records and the running turn', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   host.provider.history.push({ id: 'older-session', title: 'older', cwd: process.cwd(), updated: 1, entries: [] });
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
@@ -135,7 +136,7 @@ it('deletes one historical record while preserving other records and the running
   await host.provider.perform({ type: 'cancel' }); await turn;
 });
 it('does not recreate a deleted current record when the turn completes or the provider saves again', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
@@ -146,7 +147,7 @@ it('does not recreate a deleted current record when the turn completes or the pr
   expect(host.provider.snapshot().entries.some((e: any) => e.role === 'user')).toBe(true);
 });
 it('keeps cleared history empty after another automatic save', async () => {
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'clearHistory' });
   await host.provider.perform({ type: 'send', text: 'hello' });
   expect(host.stored.get('history')).toBeUndefined();
@@ -158,7 +159,7 @@ async function contextAgent(mode='context') {
   auditDir = mkdtempSync(resolve(tmpdir(), 'pi-context-test-'));
   host.config.args = [resolve('test/mock-agent.mjs'), mode];
   host.config.env = { PI_TEST_AUDIT: resolve(auditDir, 'wire.jsonl') };
-  await host.provider.perform({ type: 'connect' });
+  await host.provider.perform({ type: 'new' });
 }
 function wire() { return readFileSync(resolve(auditDir!, 'wire.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)); }
 async function edit(type: 'branchMessage' | 'deleteMessage', id: string) {
@@ -371,4 +372,86 @@ it('rejects stale image pastes and validates an entire batch before adding any a
  await contextAgent();const sessionId=host.provider.snapshot().sessionId;
  await host.provider.perform({type:'attachImages',sessionId:'stale',images:[pastedPng]});expect(host.provider.snapshot().attachments).toEqual([]);
  await host.provider.perform({type:'attachImages',sessionId,images:[pastedPng,{...pastedPng,mimeType:'image/svg+xml'}]});expect(host.provider.snapshot().attachments).toEqual([]);
+});
+
+it('inherits model then thinking after model-dependent options change, without setting duplicate modes', async () => {
+  await contextAgent('context-dependent');
+  await host.provider.perform({type:'config',id:'model',value:'other'});
+  await host.provider.perform({type:'config',id:'thinking',value:'high'});
+  const old=host.provider.snapshot().sessionId, before=wire().length;
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().error).toBeUndefined();
+  expect(host.provider.snapshot().sessionId).not.toBe(old);
+  expect(host.provider.snapshot().configs.map((c:any)=>c.currentValue)).toEqual(['other','high']);
+  expect(wire().slice(before).filter(r=>r.method.startsWith('session/set_')).map(r=>r.params))
+    .toEqual([{sessionId:host.provider.snapshot().sessionId,configId:'model',value:'other'}, {sessionId:host.provider.snapshot().sessionId,configId:'thinking',value:'high'}]);
+});
+it('persists successful selections immediately and inherits them after restart even without history', async () => {
+  host.config.persistHistory=false;
+  await contextAgent();
+  await host.provider.perform({type:'config',id:'model',value:'other'});
+  await host.provider.perform({type:'config',id:'thinking',value:'high'});
+  expect(host.stored.get('sessionPreferences')).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
+  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  const before=wire().length;
+  await host.provider.perform({type:'ready'});
+  expect(wire().length).toBe(before);
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().configs.map((c:any)=>c.currentValue)).toEqual(['other','high']);
+});
+it('inherits legacy reasoning modes when configOptions does not provide thinking', async () => {
+  await contextAgent('context-legacy');
+  await host.provider.perform({type:'mode',value:'high'});
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().modes.currentModeId).toBe('high');
+  expect(wire().filter(r=>r.method==='session/set_mode')).toHaveLength(2);
+});
+it('resumes the last active warm conversation after restart, and reconnects it without session/new', async () => {
+  await contextAgent();const first=host.provider.snapshot().sessionId;
+  await host.provider.perform({type:'send',text:'first'});
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'resume',id:first});
+  expect(host.stored.get('activeSession')).toBe(first);
+  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  const before=wire().length;
+  await host.provider.perform({type:'ready'});
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:first});
+  host.provider.disconnect();host.provider.state.status='disconnected';
+  await host.provider.perform({type:'connect'});
+  expect(wire().slice(before).filter(r=>r.method==='session/new')).toHaveLength(0);
+  expect(wire().slice(before).filter(r=>r.method==='session/load').map(r=>r.params.sessionId)).toEqual([first,first]);
+});
+it('uses the selected historical conversation settings for the next new conversation', async () => {
+  await contextAgent();const first=host.provider.snapshot().sessionId;
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'config',id:'model',value:'other'});
+  await host.provider.perform({type:'resume',id:first});
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
+});
+it('does not replace an unavailable native session with a new one', async () => {
+  await contextAgent();const first=host.provider.snapshot().sessionId;
+  host.provider.disconnect();host.provider.state.status='disconnected';host.config.args=[resolve('test/mock-agent.mjs'),'no-load'];
+  const before=wire().length;
+  await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',sessionId:first});
+  expect(host.provider.snapshot().error).toContain('session/load');
+  expect(wire().slice(before).some(r=>r.method==='session/new')).toBe(false);
+});
+it('does not auto-open a different history after deleting the last active record', async () => {
+  await contextAgent();await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'deleteHistory',id:host.provider.snapshot().sessionId});
+  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  const before=wire().length;
+  await host.provider.perform({type:'ready'});
+  expect(host.provider.snapshot().sessionId).toBeUndefined();expect(wire().length).toBe(before);
+});
+it('warns about unavailable inherited values without retrying or silently creating extra sessions', async () => {
+  await contextAgent();host.provider.dispose();await host.provider.saveQueue;
+  host.stored.set('sessionPreferences',[{kind:'model',value:'removed-model'},{kind:'thinking',value:'removed-level'}]);
+  activate(context);const before=wire().length;
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().status).toBe('ready');
+  expect(host.provider.snapshot().error).toContain('上次的设置当前不可用');
+  expect(wire().slice(before).filter(r=>r.method==='session/new')).toHaveLength(1);
 });

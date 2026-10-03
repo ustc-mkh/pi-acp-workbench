@@ -19,13 +19,13 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.2.1.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.2.2.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.2.1.vsix
+code --install-extension pi-acp-workbench-0.2.2.vsix
 ```
 
-打开并信任项目文件夹 → 点击活动栏的 **π**，插件会自动连接本地 Agent。连接失败或意外断开时才显示 **重新连接** 按钮。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
+打开并信任项目文件夹 → 点击活动栏的 **π**。首次使用点击 **新建会话**；已有历史时自动恢复上次活动会话。只有点击新建（或执行 `Pi: New Session`）才创建空白对话，重新连接只恢复原会话，失败不会偷偷创建新对话。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
 
 按钮、模型选择器和上下文圆环的说明在悬停或键盘聚焦时立即显示统一的主题浮层，按 Esc 可关闭。上滑阅读历史时，可点击消息区底部居中的圆形箭头回到最新消息。错误提示右侧的 **×** 可关闭当前错误，后续错误仍会正常显示。
 
@@ -62,6 +62,7 @@ Windows 也优先使用默认内置适配器。仅在自定义外部适配器时
 ## 使用体验
 
 - **流式聊天**：支持 assistant、thought、tool、plan、usage 更新；用户向上滚动后不强制跳回底部。
+- **新建默认组合**：沿用当前/上次活动会话的模型和 thinking，选择成功即记忆，重启或关闭历史保存后也保留。先恢复模型，再应用其支持的思考选项；原选项已不可用时显示提示，供手动调整。恢复旧会话仍使用该会话自己的组合。
 - **模型和思考模式**：根据 Agent 返回的 `configOptions` / `modes` 动态显示，不硬编码模型名。适配器不提供时不显示。
 - **上下文**：编辑器右键 `Pi: Add Selection to Chat` 或 Ctrl+Alt+P / Cmd+Alt+P；无选区时附加当前文件。发送前可移除。读取当前编辑器内容，包含未保存修改。最多 8 个附件，单个默认上限 60,000 字符，超过会提示缩小选区。
 - **Slash 命令**：输入 `/` 展示 Agent 声明的命令；点击插入。也可以直接发送 `/compact` 等文本命令。
@@ -100,9 +101,11 @@ KaTeX 不是完整 TeX 引擎：**TikZ、任意 LaTeX 宏包和原始 HTML 不�
 
 **ACP 授权卡片不等于 Pi 工具沙箱。** `pi-acp` 底层 Pi 可以直接读写文件、运行命令，并不保证针对所有操作发出授权请求。只有 Agent 发来 `session/request_permission` 时插件才能展示审批。若需要强制逐次审批或严格隔离，应在 Pi/适配器或容器层实现；不要把 UI 中的授权按钮当成强制安全边界。本版不声明 `fs/*` 或 `terminal/*` 委托能力。
 
-完整本地快照保存在扩展的工作区 storage 目录，workspaceState 仅保存最近 20 条会话索引，不再因超过 2 MB 截断。可能包含代码和对话。`piAcp.persistHistory: false` 会清除插件保存的历史；独立存储的用量统计和自定义价格继续保留。清除本地历史不删除 Pi 自己的会话文件。stderr 保留在 `Pi Agent` 输出面板以便诊断，插件不记录环境变量或 stdout 协议原文、不包含遥测。
+最近模型/thinking 偏好按工作区单独保存，不包含对话正文，关闭历史持久化也继续保留。完整本地快照保存在扩展的工作区 storage 目录，workspaceState 仅保存最近 20 条会话索引，不再因超过 2 MB 截断。可能包含代码和对话。`piAcp.persistHistory: false` 会清除插件保存的历史；独立存储的用量统计和自定义价格继续保留。清除本地历史不删除 Pi 自己的会话文件。stderr 保留在 `Pi Agent` 输出面板以便诊断，插件不记录环境变量或 stdout 协议原文、不包含遥测。
 
 ## 开发
+
+请先阅读 [贡献指南](CONTRIBUTING.md)、[架构与会话生命周期](docs/architecture.md) 和 [测试与发布](docs/testing.md)。它们说明了无 API key 调试、数据存储、会话创建边界及如何添加回归测试。
 
 ```bash
 npm ci
@@ -121,6 +124,7 @@ npm run package
 src/agent.ts       ACP SDK / stdio / 进程生命周期
 src/extension.ts   VS Code 侧栏、会话、授权、上下文和 diff
 src/state.ts       流式更新归并
+src/session-settings.ts 模型与思考选项解析、默认组合
 src/shared.ts      Webview 通信类型
 webview/           UI、Markdown / KaTeX token 解析与净化
 scripts/           构建和真实浏览器检查
