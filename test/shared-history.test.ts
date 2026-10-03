@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SharedHistoryStore, SessionInUseError } from '../src/shared-history';
 import type { Snapshot } from '../src/shared';
+import { localSessionId } from '../src/harness';
 const directories:string[] = [], stores:SharedHistoryStore[] = [];
 async function pair() {
   const root = await mkdtemp(join(tmpdir(),'pi-shared-history-')); directories.push(root);
@@ -19,6 +20,13 @@ it('shares all histories without losing concurrent additions or pruning to 20', 
   expect(await b.list()).toHaveLength(24);
   const index = (await b.list())[0];
   expect((await b.read(index)).entries[0]).toMatchObject({text:'hello'});
+});
+it('stores identical native IDs from different harnesses independently',async()=>{
+  const {a,b}=await pair();
+  for(const harness of ['pi','codex','claude'] as const)await a.import({...snapshot(localSessionId(harness,'same')),harness});
+  const history=await b.list();expect(history).toHaveLength(3);
+  expect(new Set(history.map(s=>s.sessionNumber)).size).toBe(3);
+  for(const item of history){await b.claim(item.id);expect((await b.read(item)).harness).toBe(item.harness);}
 });
 it('requires exclusive session ownership, permits viewing, and transfers ownership after release', async()=>{
   const {a,b} = await pair();

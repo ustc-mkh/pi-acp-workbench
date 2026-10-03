@@ -19,10 +19,10 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.3.1.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.4.0.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.3.1.vsix
+code --install-extension pi-acp-workbench-0.4.0.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π**。首次使用点击 **新建会话**；已有历史时自动恢复上次活动会话。只有点击新建（或执行 `Pi: New Session`）才创建空白对话，重新连接只恢复原会话，失败不会偷偷创建新对话。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
@@ -76,6 +76,52 @@ Windows 也优先使用默认内置适配器。仅在自定义外部适配器时
 - **导出**：导出对话正文的原始 Markdown 和工具摘要。
 - **多根工作区**：创建会话时选择一个工作目录，历史会话绑定其原始目录。
 - **远程开发**：扩展运行于 workspace 宿主。在 Remote SSH / WSL / Dev Container 中，需要在远端安装 Pi 和 Node，并在那里配置凭据。
+
+## Harness 切换
+
+左上角的 Harness 下拉框提供 **Pi Agent / Codex / Claude Code**。Pi 为默认，原有 `piAcp.command / args / env / useBundledAdapter` 仅作用于 Pi 配置。切换会保存并断开当前会话，释放共享会话锁；不会自动创建会话或把对话转发给另一家 Agent。目标 harness 已有记录时先只读展示，点击“重新连接”后才启动；没有记录时点击“新建会话”。生成、连接或上下文重建期间禁止切换。
+
+草稿、待发送附件、最近模型偏好和活动会话指针按 harness 隔离。历史列表保留全部记录并标注 Codex / Claude Code，点击历史会切到其所属 harness。旧记录默认仍属于 Pi 配置；Codex / Claude 的原生 Session ID 使用独立的本地命名空间，不会覆盖同名 Pi 会话。请让共享历史的各客户端都升级到支持 harness 的版本，不要用旧版客户端操作非 Pi 记录。
+
+### 安装与认证
+
+**必须安装在扩展宿主上**（Remote SSH 时为服务器）。插件不自动下载、安装或捆绑下面的适配器：
+
+```bash
+npm install -g @agentclientprotocol/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+```
+
+上游旧包 `@zed-industries/codex-acp` / `@zed-industries/claude-agent-acp` 已弃用并更名，优先使用上述新包。可自定义路径及参数：
+
+```json
+{
+  "piAcp.codex.command": "/absolute/path/to/codex-acp",
+  "piAcp.codex.args": [],
+  "piAcp.codex.env": {},
+  "piAcp.claude.command": "/absolute/path/to/claude-agent-acp",
+  "piAcp.claude.args": [],
+  "piAcp.claude.env": {}
+}
+```
+
+不能把普通的 `codex` / `claude` 交互命令当成 ACP 进程。所有命令参数直接传递，不经过 shell；各 profile 的 env 覆盖互不继承，但子进程仍继承扩展宿主的系统环境，这不是凭据或工具执行沙箱。
+
+- **Codex**：可复用远端 Codex 凭据。登录按钮运行 `codex login`，需要另行可用的 Codex CLI（例如安装 `@openai/codex`）；非默认路径用 `piAcp.codex.loginCommand` 配置。SSH 的浏览器/设备码登录方式取决于 Codex CLI，必要时在终端使用其设备码流程。API key 模式使用 `CODEX_API_KEY` 或 `OPENAI_API_KEY`，当前适配器还需 `DEFAULT_AUTH_REQUEST={"methodId":"api-key"}` 选择认证方式。这些变量可由宿主环境提供，或使用 `piAcp.codex.env`；避免将凭据提交到仓库。
+- **Claude Code**：复用远端 Claude 凭据或 `ANTHROPIC_API_KEY`。登录按钮使用适配器的 `--cli /login` 打开其内置 Claude Code 登录流程；无需让插件采集密钥。
+
+### 支持范围
+
+| 能力 | Pi 默认增强适配器 | Codex / Claude Code |
+| --- | --- | --- |
+| ACP v1 流式聊天、工具记录、权限回应、取消 | 支持 | 支持标准协议路径 |
+| 图片、嵌入上下文、模型/思考选择器、slash 命令 | 按声明支持 | 按实际能力/通知显示 |
+| 保存与恢复历史 | 支持 | 保存本地记录；恢复须声明 `session/load`，否则只读，不自动重放 |
+| 分支、删除 Agent 上下文 | 支持 | 第一阶段不提供，仍可复制记录后显式新建 |
+| Pi 详细计费、原生压缩检查点、有界摘要 | 支持 | 不提供，不调用 Pi 私有扩展 |
+| 客户端文件/终端委托、网关认证、原生子 Agent/后台任务扩展 | 不声明 | 不声明，依赖适配器自己的工具能力或标准回退 |
+
+已用真实 `@agentclientprotocol/codex-acp@2.1.1` 与 `@agentclientprotocol/claude-agent-acp@0.85.1` 验证 ACP v1 初始化握手，均声明图片、嵌入上下文和历史恢复能力。此验证使用隔离用户目录且不发送模型请求；**真实登录和付费模型端到端调用仍需在你的环境验证**。模拟协议测试覆盖发送、授权、取消、历史恢复、设置和 ID 隔离。
 
 ## Markdown 与数学支持
 

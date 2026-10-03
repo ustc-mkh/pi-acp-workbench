@@ -19,6 +19,16 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 
 `AgentProcess` 用 SDK 管理请求/通知；初始化检查协议版本，默认初始化超时 20 秒，普通请求超时 30 秒。取消先发送 `session/cancel`，5 秒无响应则终止连接。POSIX 下清理整个进程组；Windows 使用对应进程树终止路径。关闭回调和 generation 标记共同阻止旧连接继续改写当前会话。
 
+## Harness 边界
+
+`src/harness.ts` 定义 Pi、Codex、Claude Code 三个 profile、启动配置和 Session ID 转换。Pi 配置保留旧键；另外两者使用 piAcp.codex.* / piAcp.claude.*，只在扩展宿主启动用户已安装的 ACP 适配器，不自动安装软件。
+
+`AgentProcess.request()` 是带 sessionId 请求的统一边界：非 Pi 本地 ID 为 workbench:<harness>:<编码后的原生ID>，RPC 出站还原原生 ID，通知/权限入站加入命名空间。新 Pi ID 不允许占用保留前缀。完整快照与索引记录 harness，旧记录默认 Pi；丢失新字段的旧客户端记录仍可从非 Pi ID 命名空间识别。租约、编号与历史删除均使用本地 ID。不得在宿主绕过 request() 直接发送带本地 ID 的标准请求。
+
+selectedHarness 按工作区持久化；非 Pi 的 activeSession / sessionPreferences 放在 harness.<id>.* 键下。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/重建期间不允许切换。
+
+Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench/*。标准选择器/图片/历史恢复按 initialize 声明及后续通知处理；缺少 loadSession 时只读展示，不把本地记录自动灌入新会话。不声明尚未实现的文件/终端委托、认证网关或子会话扩展。登录按钮启动本地终端，不接收或保存用户输入的凭据。
+
 ## 创建、恢复与活动会话
 
 `ChatProvider.start()` 必须显式接收 `'new'` 或一个 Snapshot，不能用缺省参数意外创建会话。

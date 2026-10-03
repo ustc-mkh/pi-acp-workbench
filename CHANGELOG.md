@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- 左上角增加 Pi Agent / Codex / Claude Code Harness 切换，Pi 保持默认完整支持，其他适配器通过标准 ACP 部分接入。
+- 隔离各 harness 的启动命令、环境覆盖、模型偏好、草稿、附件与活动会话；保存历史标注所属 harness，使用独立 Session ID 命名空间避免碰撞。
+- 切换保存并释放原会话，不自动创建或发送；目标已有历史先只读展示，缺少 session/load 的适配器不自动重放记录。
+- 增加远端安装/登录提示，非 Pi 暂不开放上下文分支/删除及 Pi 专用统计，不声明未实现的 ACP 客户端能力。
+- 新增 profile 与 ACP stdio 集成测试；真实 Codex/Claude 适配器在隔离目录完成初始化握手，未执行模型请求。
+
 ## 0.3.1
 
 - 修复 VS Code Webview 默认 scrollbar-color 覆盖自定义滚动条的问题；强制使用透明轨道、6px 淡色滑块并隐藏箭头。

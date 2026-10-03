@@ -11,27 +11,31 @@ import { messageActions } from './message-actions';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 import { applyStatePatch } from '../src/state-channel';
 import { sessionLabel } from '../src/session-numbers';
+import { HARNESSES, isHarnessId, type HarnessId } from '../src/harness';
 import { TranscriptView } from './transcript';
 import { installComposerResize } from './composer-resize';
-interface UiState {draft?:string;composerHeight?:number;activityExpanded?:boolean}
+interface UiState {draft?:string;drafts?:Partial<Record<HarnessId,string>>;composerHeight?:number;activityExpanded?:boolean}
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): UiState | undefined; setState(state: UiState): void };
 const vscode = acquireVsCodeApi();
 const saveUi = (patch:UiState) => vscode.setState({...vscode.getState(),...patch});
 const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
-app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">⧉</button><button id="statistics-toggle" data-tooltip="用量统计" aria-label="用量统计" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M5 13V9M10 13V4M15 13V7"/></svg></button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header><div id="chat-page" class="chat-page">
+app.innerHTML = `<header><div class="brand"><span id="harness-logo" class="logo">π</span><select id="harness-switch" aria-label="切换 Harness" data-tooltip="切换 Harness；保存当前会话，不自动发送或创建新会话"><option value="pi">Pi Agent</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">⧉</button><button id="statistics-toggle" data-tooltip="用量统计" aria-label="用量统计" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M5 13V9M10 13V4M15 13V7"/></svg></button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header><div id="chat-page" class="chat-page">
+<details id="harness-help" hidden><summary id="harness-help-title"></summary><p id="harness-note"></p><p id="harness-auth"></p><p>请在扩展宿主（SSH 时为服务器）安装 ACP 适配器：</p><code id="harness-install"></code><p>安装不会自动执行。配置 command / args / env 后新建会话；认证失败时先完成登录或配置该 harness 的 API key。</p><button id="harness-login">打开登录终端</button></details>
 <section id="history" hidden><div class="section-label">会话历史 <span><button id="refresh-history" data-tooltip="刷新共享会话">刷新</button><button id="clear-history" data-tooltip="清除历史记录（共享模式下影响所有客户端）">清空</button></span></div><div id="history-items"></div></section>
 <div id="connection" hidden><span class="status-dot"></span><span id="session-number" class="session-number" hidden></span><span id="status" role="status"></span><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
 <div class="transcript-tools"><button id="toggle-activity" aria-pressed="false" data-tooltip="整体展开或折叠工具调用、思考和中间过程">展开执行过程</button></div>
 <div id="context-operation" hidden role="status"><span id="context-progress"></span><button id="cancel-context">取消</button></div><div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
-<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
+<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br><span id="welcome-harness">让 Pi 在你的工作区里协助你。</span></p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> <span id="working-label">Pi 正在处理…</span></div></main>
 <button id="bottom" class="primary" aria-label="回到最新消息" data-tooltip="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
 <div id="composer-resizer" role="separator" tabindex="0" aria-label="调整输入区高度" aria-orientation="horizontal" aria-controls="input" data-tooltip="拖动调整输入区高度 · 方向键微调 · 双击重置"></div><footer><div id="context-pending" role="status" hidden>上下文已更新，将在下一条消息同步</div><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer></div><section id="statistics" hidden aria-label="用量统计"></section><section id="prices" hidden aria-label="模型价格设置"></section>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
-input.value = vscode.getState()?.draft || '';
+let draftHarness: HarnessId = 'pi';
+input.value = vscode.getState()?.drafts?.pi ?? vscode.getState()?.draft ?? '';
+const saveDraft = () => saveUi({drafts:{...vscode.getState()?.drafts,[draftHarness]:input.value},...(draftHarness==='pi'?{draft:input.value}:{})});
 installComposerResize(el('composer-resizer'),input,vscode.getState()?.composerHeight,height=>saveUi({composerHeight:height}));
 const send = (message: UiMessage) => vscode.postMessage(message);
 let state: ChatState | undefined;
@@ -39,7 +43,7 @@ let stateRevision = 0;
 let followBottom = true;
 let sending = false;
 let pasting=false;
-installImagePaste(input,()=>state?.sessionId,send,value=>{pasting=value;updateSend();});
+installImagePaste(input,()=>state?.sessionId,send,value=>{pasting=value;updateSend();},()=>state?.harness || 'pi');
 let paintPending = false;
 let activityExpanded = vscode.getState()?.activityExpanded || false;
 const transcriptView = new TranscriptView(el('messages'),contentNode,activityExpanded);
@@ -57,7 +61,12 @@ function submit() {
 input.addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
 });
-input.addEventListener('input', () => { saveUi({ draft: input.value }); commandMenu(); updateSend(); });
+input.addEventListener('input', () => { saveDraft(); commandMenu(); updateSend(); });
+el('harness-switch').onchange = () => {
+  const harness=el<HTMLSelectElement>('harness-switch').value;
+  if(isHarnessId(harness)){saveDraft();showStatistics(false);send({type:'switchHarness',harness});}
+};
+el('harness-login').onclick = () => send({type:'login'});
 el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
 el('start-session').onclick = () => send({ type: 'new' });
@@ -117,7 +126,7 @@ function commandMenu() {
   const commands = match ? state?.commands.filter(c => c.name.startsWith(match[1])).slice(0, 8) || [] : [];
   menu.hidden = !commands.length;
   for (const command of commands) {
-    const b = button(`/${command.name} — ${command.description}`, () => { input.value = `/${command.name} `; input.focus(); menu.hidden = true; saveUi({ draft: input.value }); updateSend(); });
+    const b = button(`/${command.name} — ${command.description}`, () => { input.value = `/${command.name} `; input.focus(); menu.hidden = true; saveDraft(); updateSend(); });
     menu.append(b);
   }
 }
@@ -161,6 +170,18 @@ function paint() {
   paintPending = false;
   if (!state) return;
   const busy = state.status === 'busy', connecting = state.status === 'connecting';
+  const harness=state.harness || 'pi', profile=HARNESSES[harness];
+  el<HTMLSelectElement>('harness-switch').value=harness;
+  el<HTMLSelectElement>('harness-switch').disabled=busy||connecting||pasting;
+  el('harness-logo').textContent=harness==='pi'?'π':harness==='codex'?'>_':'C';
+  el('harness-help').hidden=harness==='pi';
+  el('harness-help-title').textContent=`${profile.name} · ACP 部分支持 / 安装与登录`;
+  el('harness-note').textContent=profile.note;
+  el('harness-auth').textContent=profile.loginHint;
+  el('harness-install').textContent=profile.install;
+  el('welcome-harness').textContent=`让 ${profile.name} 在你的工作区里协助你。`;
+  el('working-label').textContent=`${profile.name} 正在处理…`;
+  input.setAttribute('aria-label',`向 ${profile.name} 发送消息`);
   const reconnect = state.status === 'disconnected' && !!state.sessionId && !!state.connectionAttempted && !state.preview;
   el('connection').hidden = !connecting && !reconnect && !state.preview && !state.sessionId;
   el('release-session').hidden = !state.sessionId || !!state.readOnly || state.preview;
@@ -185,8 +206,8 @@ function paint() {
   transcriptView.update(visible,busy);
   el('toggle-activity').hidden = !visible.some(entry=>entry.role==='tool'||entry.role==='thought');
   for (const action of messages.querySelectorAll<HTMLButtonElement>('[data-context-action]')) {
-    action.disabled = busy || connecting || !!state.preview || !!state.readOnly || !state.sessionId || !state.contextComplete;
-    action.dataset.tooltip = busy ? '请先停止输出再编辑上下文' : !state.contextComplete ? '此历史记录不完整，无法可靠编辑上下文' : action.dataset.actionDescription;
+    action.disabled = harness!=='pi' || busy || connecting || !!state.preview || !!state.readOnly || !state.sessionId || !state.contextComplete;
+    action.dataset.tooltip = harness!=='pi' ? '此 harness 暂不支持分支与删除上下文，可复制记录后显式新建会话' : busy ? '请先停止输出再编辑上下文' : !state.contextComplete ? '此历史记录不完整，无法可靠编辑上下文' : action.dataset.actionDescription;
   }
   el('context-pending').hidden = !state.contextPending;
   el('context-operation').hidden=!state.contextOperation;
@@ -211,11 +232,11 @@ function paint() {
       actions.append(button('取消', () => send({ type: 'permission', id: item.id }))); card.append(actions); permissions.append(card);
     }
   }
-  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.modes, state.configs, busy, connecting]);
+  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.modes, state.configs, state.status, state.readOnly]);
   if (selectors.dataset.signature !== selectSignature) {
     selectors.dataset.signature = selectSignature; selectors.replaceChildren();
     for (const control of sessionSelectors(state)) {
-      selectors.append(createSessionSelector(control, busy || connecting, value => send({ ...control.change, value })));
+      selectors.append(createSessionSelector(control, state.status !== 'ready' || !!state.readOnly, value => send({ ...control.change, value })));
     }
   }
   const usage = contextUsage(state.usage);
@@ -228,7 +249,7 @@ function paint() {
   commandMenu();
 }
 window.addEventListener('message', event => {
-  if (event.data.type === 'sent') { input.value = ''; saveUi({ draft: '' }); sending = false; updateSend(); return; }
+  if (event.data.type === 'sent') { input.value = ''; saveDraft(); sending = false; updateSend(); return; }
   if (event.data.type === 'statePatch') {
     if (!state || event.data.revision !== stateRevision + 1) { send({type:'ready'}); return; }
     state = applyStatePatch(state, event.data);
@@ -238,6 +259,12 @@ window.addEventListener('message', event => {
     state = event.data.state;
     stateRevision = event.data.revision || 0;
   } else return;
+  const nextHarness=state?.harness || 'pi';
+  if(nextHarness!==draftHarness){
+    saveDraft();draftHarness=nextHarness;
+    input.value=vscode.getState()?.drafts?.[draftHarness] ?? (draftHarness==='pi'?vscode.getState()?.draft || '':'');
+    followBottom=true;
+  }
   if (state?.status !== 'busy') sending = false;
   if (!paintPending) { paintPending = true; requestAnimationFrame(paint); }
 });

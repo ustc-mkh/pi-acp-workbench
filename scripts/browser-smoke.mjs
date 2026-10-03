@@ -98,6 +98,23 @@ try {
   assert.deepEqual(await page.locator('#history-items .session-number').allTextContents(),['#001','#002']);
   assert.equal(await page.locator('#session-number').textContent(),'#001');
   await page.locator('#history-toggle').click();
+  await page.locator('#input').fill('Pi private draft');
+  await page.locator('#harness-switch').selectOption('codex');
+  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='switchHarness'&&m.harness==='codex'));
+  state.contextComplete=true;state.harness='codex';state.sessionId='workbench:codex:s1';await emit(state);
+  assert.equal(await page.locator('#input').inputValue(),'');
+  assert.equal(await page.locator('#harness-switch').inputValue(),'codex');
+  assert(await page.locator('#harness-help').isVisible());
+  assert(await page.locator('[data-context-action]').first().isDisabled());
+  await page.locator('#input').fill('Codex private draft');
+  state.harness='pi';state.sessionId='s1';await emit(state);
+  assert.equal(await page.locator('#input').inputValue(),'Pi private draft');
+  assert(await page.locator('[data-context-action]').first().isEnabled());
+  state.harness='codex';state.sessionId='workbench:codex:s1';state.status='busy';await emit(state);
+  assert.equal(await page.locator('#input').inputValue(),'Codex private draft');
+  assert(await page.locator('#harness-switch').isDisabled());
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  state.status='ready';await emit(state);
   const readyBefore = await page.evaluate(() => window.messages.filter(m => m.type === 'ready').length);
   await page.evaluate(() => window.postMessage({type:'statePatch',revision:999,fields:{},unset:[],entries:[]}, '*'));
   await page.waitForTimeout(75);
@@ -105,5 +122,5 @@ try {
   encoder.reset(); await emit(state);
   assert.equal(await page.locator('.message.tool').count(), 1);
   assert.deepEqual(errors, []);
-  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, send, permission, cancel, diff, no runtime errors.');
+  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, send, permission, cancel, diff, no runtime errors.');
 } finally { await browser?.close(); server.close(); }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[], configurationChanged: undefined as undefined | ((event: any) => void), home: undefined as string | undefined }));
+const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[], configurationChanged: undefined as undefined | ((event: any) => void), home: undefined as string | undefined, terminals: [] as any[] }));
 vi.mock('node:os', async importOriginal => {
   const os = await importOriginal<typeof import('node:os')>();
   return {...os,homedir:()=>host.home || os.homedir()};
@@ -18,6 +18,7 @@ vi.mock('vscode', () => ({
     onDidChangeConfiguration: (callback: (event: any) => void) => { host.configurationChanged = callback; return { dispose() {} }; },
   },
   window: {
+    createTerminal: (options:any) => {host.terminals.push(options);return {show(){}};},
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
     registerWebviewViewProvider: (_: string, provider: unknown) => { host.provider = provider; return { dispose() {} }; },
   },
@@ -29,11 +30,82 @@ vi.mock('vscode', () => ({
 import { activate } from '../src/extension';
 let context: any;
 beforeEach(() => {
-  host.config = { sharedHistory: false, command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear();
+  host.config = { sharedHistory: false, command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear(); host.terminals = [];
   context = { subscriptions: [], workspaceState: { get: (key: string, fallback: unknown) => host.stored.has(key) ? host.stored.get(key) : fallback, update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)) } };
   activate(context);
 });
 afterEach(() => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose()); });
+function mockHarness(harness:'codex'|'claude',mode='') {
+  host.config[harness+'.command']=process.execPath;
+  host.config[harness+'.args']=[resolve('test/mock-agent.mjs'),mode];
+}
+it('switches harness without auto-creating a session and isolates identical IDs, histories and attachments',async()=>{
+  mockHarness('codex');mockHarness('claude');
+  await host.provider.perform({type:'new'});await host.provider.perform({type:'send',text:'Pi only'});
+  host.provider.state.attachments=[{id:'private',name:'Pi context',uri:'file:///private',text:'do not transfer'}];
+  const pi=host.provider.snapshot();const create=vi.spyOn(host.provider,'createAgent');create.mockClear();
+  await host.provider.perform({type:'switchHarness',harness:'codex'});
+  expect(create).not.toHaveBeenCalled();expect(host.provider.snapshot()).toMatchObject({harness:'codex',status:'disconnected',entries:[],attachments:[]});
+  await host.provider.perform({type:'new'});await host.provider.perform({type:'send',text:'Codex only'});
+  const codex=host.provider.snapshot();expect(codex.sessionId).toBe('workbench:codex:test-session');
+  await host.provider.perform({type:'switchHarness',harness:'claude'});await host.provider.perform({type:'new'});await host.provider.perform({type:'send',text:'Claude only'});
+  expect(host.provider.snapshot().sessionId).toBe('workbench:claude:test-session');
+  expect(new Set(host.provider.history.map((s:any)=>s.id)).size).toBe(3);
+  expect(host.provider.history.map((s:any)=>s.harness).sort()).toEqual(['claude','codex','pi']);
+  await host.provider.perform({type:'resume',id:pi.sessionId});
+  expect(host.provider.snapshot()).toMatchObject({harness:'pi',sessionId:pi.sessionId,status:'ready'});
+  expect(host.provider.snapshot().attachments).toEqual([{id:'private',name:'Pi context',uri:'file:///private',text:'do not transfer'}]);
+  expect(host.provider.snapshot().entries.some((e:any)=>e.text==='Codex only')).toBe(false);
+  expect(host.stored.get('activeSession')).toBe(pi.sessionId);
+  expect(host.stored.get('harness.codex.activeSession')).toBe(codex.sessionId);
+});
+it('keeps model preferences separate and rejects switching during an active prompt',async()=>{
+  await contextAgent();await host.provider.perform({type:'config',id:'model',value:'other'});
+  mockHarness('codex','context');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().configs.find((c:any)=>c.id==='model').currentValue).toBe('default');
+  await host.provider.perform({type:'config',id:'thinking',value:'high'});
+  expect(host.stored.get('sessionPreferences')).not.toEqual(host.stored.get('harness.codex.sessionPreferences'));
+  const turn=host.provider.perform({type:'send',text:'wait'});await vi.waitFor(()=>expect(host.provider.snapshot().status).toBe('busy'));
+  await host.provider.perform({type:'switchHarness',harness:'claude'});expect(host.provider.snapshot().harness).toBe('codex');
+  await host.provider.perform({type:'cancel'});await turn;
+  const id=host.provider.snapshot().sessionId;await host.provider.perform({type:'branchMessage',sessionId:id,id:host.provider.snapshot().entries[0].id});
+  expect(host.provider.snapshot().error).toContain('暂不支持');expect(host.provider.snapshot().sessionId).toBe(id);
+});
+it('retains external history read-only when session/load is unsupported, without fallback new',async()=>{
+  mockHarness('claude');await host.provider.perform({type:'switchHarness',harness:'claude'});await host.provider.perform({type:'new'});await host.provider.perform({type:'send',text:'retained'});
+  const id=host.provider.snapshot().sessionId;await host.provider.perform({type:'releaseSession'});
+  mockHarness('claude','no-load');await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({harness:'claude',sessionId:id,status:'disconnected',readOnly:true});
+  expect(host.provider.snapshot().error).toContain('session/load');
+  expect(host.provider.snapshot().entries.some((e:any)=>e.text==='retained')).toBe(true);
+});
+it('restores the selected harness after restart and rejects stale cross-harness image messages',async()=>{
+  mockHarness('codex');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
+  const id=host.provider.snapshot().sessionId;host.provider.dispose();await host.provider.saveQueue;activate(context);
+  await host.provider.perform({type:'ready'});expect(host.provider.snapshot()).toMatchObject({harness:'codex',sessionId:id,status:'ready'});
+  await host.provider.perform({type:'attachImages',harness:'pi',sessionId:id,images:[]});
+  expect(host.provider.snapshot().error).toContain('Harness 已切换');
+});
+it('keeps the old harness usable if saving before a switch fails',async()=>{
+  await host.provider.perform({type:'new'});
+  vi.spyOn(host.provider,'save').mockRejectedValueOnce(new Error('storage unavailable'));
+  await host.provider.perform({type:'switchHarness',harness:'codex'});
+  expect(host.provider.snapshot()).toMatchObject({harness:'pi',status:'ready',error:'storage unavailable'});
+});
+it('returns to disconnected when a harness launch configuration is invalid',async()=>{
+  await host.provider.perform({type:'switchHarness',harness:'claude'});
+  host.config['claude.args']='not an array';
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot()).toMatchObject({harness:'claude',status:'disconnected'});
+  expect(host.provider.snapshot().error).toContain('启动配置无效');
+});
+it('uses harness-specific login commands and never copies Pi profile environment overrides',async()=>{
+  host.config.env={PI_ONLY:'secret'};mockHarness('codex');host.config['codex.env']={CODEX_ONLY:'value'};
+  await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'login'});
+  expect(host.terminals.at(-1)).toMatchObject({shellPath:'codex',shellArgs:['login'],env:{CODEX_ONLY:'value'}});
+  mockHarness('claude');await host.provider.perform({type:'switchHarness',harness:'claude'});await host.provider.perform({type:'login'});
+  expect(host.terminals.at(-1)).toMatchObject({shellPath:process.execPath,shellArgs:[resolve('test/mock-agent.mjs'),'','--cli','/login'],env:{}});
+});
 it('restores ready even when saving session preferences fails after a turn', async () => {
   await host.provider.perform({type:'new'});
   const original = context.workspaceState.update;

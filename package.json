@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -61,7 +61,7 @@
       },
       {
         "command": "piAcp.login",
-        "title": "Pi: Open Login Terminal"
+        "title": "Pi Workbench: Open Current Harness Login Terminal"
       },
       {
         "command": "piAcp.preview",
@@ -123,6 +123,34 @@
           "scope": "machine",
           "description": "Agent environment overrides. Prefer provider credentials stored by Pi; avoid saving secrets here."
         },
+        "piAcp.codex.command": {
+          "type": "string", "default": "codex-acp", "scope": "machine",
+          "description": "Codex ACP adapter executable (not the interactive codex CLI). Install @agentclientprotocol/codex-acp on the extension host."
+        },
+        "piAcp.codex.args": {
+          "type": "array", "items": {"type": "string"}, "default": [], "scope": "machine",
+          "description": "Arguments for the Codex ACP adapter, passed without a shell."
+        },
+        "piAcp.codex.env": {
+          "type": "object", "additionalProperties": {"type": "string"}, "default": {}, "scope": "machine",
+          "description": "Codex-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
+        },
+        "piAcp.codex.loginCommand": {
+          "type": "string", "default": "codex", "scope": "machine",
+          "description": "Interactive Codex CLI used by Open Login Terminal (runs codex login). This is separate from codex-acp."
+        },
+        "piAcp.claude.command": {
+          "type": "string", "default": "claude-agent-acp", "scope": "machine",
+          "description": "Claude Code ACP adapter executable (not the interactive claude CLI). Install @agentclientprotocol/claude-agent-acp on the extension host."
+        },
+        "piAcp.claude.args": {
+          "type": "array", "items": {"type": "string"}, "default": [], "scope": "machine",
+          "description": "Arguments for the Claude ACP adapter, passed without a shell."
+        },
+        "piAcp.claude.env": {
+          "type": "object", "additionalProperties": {"type": "string"}, "default": {}, "scope": "machine",
+          "description": "Claude-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
+        },
         "piAcp.showThoughts": {
           "type": "boolean",
           "default": true,
@@ -159,7 +187,7 @@
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.3.1.vsix",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.4.0.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs"
   },

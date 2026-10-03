@@ -1,11 +1,13 @@
+import type { HarnessId } from './harness';
 import type { Checkpoint } from './checkpoints';
 import type { Statistics, Price } from './telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
 export type Entry = { id: string; role: 'user' | 'assistant' | 'thought' | 'notice'; text: string; messageId?: string | null; contextBlocks?: acp.ContentBlock[] } | { id: string; role: 'tool'; tool: acp.ToolCall };
 export type Attachment = {kind?:'text'; id:string;name:string;uri:string;text:string} | {kind:'image';id:string;name:string;mimeType:string;data:string};
-export interface Snapshot { sessionNumber?: number; revision?: string; id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; checkpoints?: Checkpoint[]; contextWindow?: number; contextComplete?: boolean; contextPending?: boolean; configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
+export interface Snapshot { harness?: HarnessId; sessionNumber?: number; revision?: string; id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; checkpoints?: Checkpoint[]; contextWindow?: number; contextComplete?: boolean; contextPending?: boolean; configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
 export interface ChatState {
   status: 'disconnected' | 'connecting' | 'ready' | 'busy';
+  harness?: HarnessId;
   connectionAttempted?: boolean;
   readOnly?: boolean;
   sessionId?: string; sessionNumber?: number; agent?: string; error?: string; entries: Entry[]; attachments: Attachment[];
@@ -19,8 +21,9 @@ export interface ChatState {
 }
 export type UiMessage =
   | { type: 'ready' | 'connect' | 'new' | 'cancel' | 'attach' | 'clearHistory' | 'login' | 'logs' | 'preview' | 'export' | 'refreshStatistics' | 'cancelContext' | 'copyConversation' | 'releaseSession' | 'refreshHistory' }
-  | {type:'attachImages';sessionId?:string;images:import('./images').PastedImage[]}
-  | {type:'attachmentError';sessionId?:string;error:string}
+  | {type:'attachImages';harness?:HarnessId;sessionId?:string;images:import('./images').PastedImage[]}
+  | {type:'attachmentError';harness?:HarnessId;sessionId?:string;error:string}
+  | { type: 'switchHarness'; harness: HarnessId }
   | { type: 'setPrice'; model: string; price?: Price }
   | { type: 'send'; text: string }
   | { type: 'dismissError'; error: string }

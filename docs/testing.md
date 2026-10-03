@@ -19,6 +19,7 @@ npm run package
 
 | 范围 | 测试 | 目的 |
 | --- | --- | --- |
+| Harness | harness / harness-agent / controller | profile 配置、ID 命名空间、发送/授权/取消、切换互斥、偏好隔离、缺失 loadSession 的只读回退 |
 | 标准 ACP 传输 | agent.test.ts + mock-agent.mjs | 独立 NDJSON peer；分片 UTF-8、初始化、超时、取消、退出、权限 |
 | 宿主状态机 | controller.test.ts | mock vscode + 真实子进程；创建/恢复、偏好、缓存、持久化、上下文编辑、图片 |
 | 内置适配器 | bundled-adapter.test.ts | 实际构建增强适配器；协商私有扩展、统计、隔离与取消摘要 |
@@ -68,6 +69,10 @@ cat "$PI_TEST_ROOT/result.json"
 ## 会话变更的回归清单
 
 - 空工作区首次打开不发送 session/new；重复 ready 不重试。
+- 左上角切换 harness 不自动创建/发送，不把草稿或附件转给其他 profile；繁忙时拒绝切换。
+- 同一原生 Session ID 在 Pi / Codex / Claude 的历史和租约中互不覆盖；标准 RPC 出站使用原生 ID，通知与权限入站使用本地 ID。
+- 切换回历史使用原 harness，模型偏好和活动指针隔离；不支持 load 时只读，非 Pi 不调用 Pi 私有扩展。
+- 真实适配器初始化握手不等同于真实模型验证。当前开发验证过 codex-acp 2.1.1 / claude-agent-acp 0.85.1（@agentclientprotocol scope），完整认证/模型调用需单独验证。
 - 显式新建恰好创建一个会话，继承上次 model 和 thinking；模型切换后重新读取选项。
 - config thinking 与旧版 modes 同时提供时只保留一个有效控制。
 - 选择后不发送消息，重启仍可继承；关闭历史保存后偏好仍保留。
@@ -93,4 +98,4 @@ cat "$PI_TEST_ROOT/result.json"
 5. 提交源码，创建与 package 一致的 vX.Y.Z 标签，推送仓库；创建同名 GitHub Release，附上 VSIX、变更说明及 SHA-256。源码由标签关联。
 6. 从 Release 下载 VSIX 并核对摘要，确认发布附件可用。不要用 Marketplace 发布命令代替 GitHub Release 附件上传。
 
-示例摘要命令：`sha256sum ../pi-acp-workbench-0.3.1.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
+示例摘要命令：`sha256sum ../pi-acp-workbench-0.4.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
