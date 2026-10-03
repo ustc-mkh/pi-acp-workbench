@@ -24,3 +24,16 @@ it('recognizes grouped thought-level options and reordered levels', () => {
 it('prefers the standard mode config when it replaces legacy modes', () => {
   expect(sessionSelectors({ modes, configs: [{ ...thinking, category: 'mode' }] })).toHaveLength(1);
 });
+it('hides stale legacy thinking modes when another provider supports fewer levels', () => {
+  const controls = sessionSelectors({ modes, configs: [{ ...thinking, options: thinking.options.slice(0, 2) }] });
+  expect(controls).toHaveLength(1); expect(controls[0].options).toHaveLength(2);
+});
+it('recognizes provider thinking labels even when its mode IDs differ', () => {
+  const providerModes = { currentModeId: 'adaptive', availableModes: [{ id: 'adaptive', name: 'Thinking: adaptive' }, { id: 'budget', name: 'Thinking: budget' }] };
+  expect(sessionSelectors({ modes: providerModes, configs: [thinking] })).toHaveLength(1);
+});
+it('keeps only the canonical thought_level config when another alias is also present', () => {
+  const alias = { ...thinking, id: 'reasoning_effort', category: 'model_config', name: 'Reasoning effort' };
+  const controls = sessionSelectors({ modes, configs: [alias, thinking] });
+  expect(controls).toHaveLength(1); expect(controls[0].change).toEqual({ type: 'config', id: 'thinking' });
+});

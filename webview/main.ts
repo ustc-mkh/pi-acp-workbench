@@ -1,5 +1,6 @@
 import { createRenderer } from './markdown';
-import { sessionSelectors } from './selectors';
+import { sessionSelectors, createSessionSelector } from './selectors';
+import { contextUsage } from './usage';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): { draft?: string } | undefined; setState(state: { draft: string }): void };
 const vscode = acquireVsCodeApi();
@@ -12,7 +13,7 @@ app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi
 <main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="pulse">●</span> Pi 正在处理…</div></main>
 <button id="bottom" hidden>↓ 回到最新消息</button>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
-<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" title="添加当前编辑器的选区或文件">＋ 上下文</button><span id="hint">Enter 发送 · Shift+Enter 换行</span><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息">↑</button></div></div><div class="session-bar"><div id="selectors"></div><span id="usage"></span></div><div class="local-note">本地 Agent 可执行命令与修改文件 · 按需显示授权</div></footer>`;
+<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" title="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" title="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = el<HTMLTextAreaElement>('input');
 input.value = vscode.getState()?.draft || '';
@@ -159,16 +160,15 @@ function paint() {
   const selectors = el('selectors'); const selectSignature = JSON.stringify([state.modes, state.configs, busy, connecting]);
   if (selectors.dataset.signature !== selectSignature) {
     selectors.dataset.signature = selectSignature; selectors.replaceChildren();
-    const select = (label: string, current: string, options: { id: string; name: string }[], change: (value: string) => void) => {
-      const s = document.createElement('select'); s.setAttribute('aria-label', label); s.title = label; s.disabled = busy || connecting;
-      for (const o of options) { const opt = document.createElement('option'); opt.value = o.id; opt.textContent = o.name; s.append(opt); }
-      s.value = current; s.onchange = () => change(s.value); selectors.append(s);
-    };
     for (const control of sessionSelectors(state)) {
-      select(control.label, control.current, control.options, value => send({ ...control.change, value }));
+      selectors.append(createSessionSelector(control, busy || connecting, value => send({ ...control.change, value })));
     }
   }
-  el('usage').textContent = state.usage ? `${Math.round(state.usage.used / Math.max(1, state.usage.size) * 100)}% 上下文` : '';
+  const usage = contextUsage(state.usage);
+  el('usage').title = usage.label;
+  el('usage').setAttribute('aria-label', usage.known ? `上下文占用 ${usage.label}` : usage.label);
+  el('usage').dataset.level = !usage.known ? 'unknown' : usage.percent >= 90 ? 'high' : 'normal';
+  el('usage-fill').setAttribute('stroke-dasharray', `${usage.percent} 100`);
   const history = el('history-items'); history.replaceChildren();
   for (const snapshot of state.history) {
     const b = button(snapshot.title, () => { send({ type: 'resume', id: snapshot.id }); el('history').hidden = true; });

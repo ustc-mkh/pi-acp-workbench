@@ -20,10 +20,10 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.1.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.2.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.1.1.vsix
+code --install-extension pi-acp-workbench-0.1.2.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π** → 点击 **连接**。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。

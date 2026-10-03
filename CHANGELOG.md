@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+- Move model/thinking controls and a context usage ring into the composer.
+- Show a short model name when collapsed and the full provider/model names in the native menu.
+- Show token usage in k/k on ring hover; remove the footer advisory.
+- Deduplicate reasoning controls across providers, including stale legacy modes after model switches.
+
 ## 0.1.1
 
 - Remove sender labels and the connected status row to give messages more space.
