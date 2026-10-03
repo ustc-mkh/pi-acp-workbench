@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5
+
+- Move history deletion to the right, use more compact rows with slightly larger text, and remove status indicator tooltips.
+- Add copy, branch and delete actions to user/assistant messages and tool records.
+- Reconstruct edited context in fresh ACP sessions, preserving retained history, text attachments and model/thinking configuration; send it with the next ordinary prompt.
+- Discard stale compaction summaries after editing; preserve complete local transcripts when loading compacted sessions.
+- Persist pending reconstruction, recover ambiguous send failures in a fresh session, and keep the original usable if preparing a replacement fails.
+- Reject incomplete or unsupported history rather than silently changing only the display; serialize context edits with generation and connection changes.
+
 ## 0.1.4
 
 - Unify hover and keyboard-focus descriptions in immediate, theme-aware tooltips.

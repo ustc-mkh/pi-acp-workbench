@@ -5,8 +5,9 @@ import * as path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import { AgentProcess } from './agent';
 import { applyUpdate, initialState, nextId } from './state';
+import { contextSeed, checkPromptSize } from './context';
 import { demoMarkdown } from './demo';
-import type { Snapshot, UiMessage } from './shared';
+import type { Entry, Snapshot, UiMessage } from './shared';
 
 export function activate(context: vscode.ExtensionContext) {
   const provider = new ChatProvider(context);
@@ -31,6 +32,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private timer?: NodeJS.Timeout;
   private cancelTimer?: NodeJS.Timeout;
   private stopping = false;
+  private prompting = false;
   private transitioning = false;
   private autoConnectHandled = false;
   private history: Snapshot[];
@@ -65,7 +67,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.state.history = this.history.map(({ entries: _, ...info }) => info);
+      this.state.history = this.history.map(({ id, cwd, title, updated }) => ({ id, cwd, title, updated }));
       this.state.showThoughts = this.config.get('showThoughts', true);
       void this.view?.webview.postMessage({ type: 'state', state: this.state });
     }, 40);
@@ -76,9 +78,15 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     const snapshot: Snapshot = {
       id: this.state.sessionId, cwd: this.cwd, title: title && title.role === 'user' ? title.text.slice(0, 70) : '新对话',
       updated: Date.now(), entries: structuredClone(this.state.entries),
+      contextComplete: this.state.contextComplete, contextPending: this.state.contextPending,
+      configs: structuredClone(this.state.configs), modes: structuredClone(this.state.modes),
     };
     // Bound storage without silently presenting a partial transcript as a complete one.
-    if (JSON.stringify(snapshot).length > 2_000_000) snapshot.entries = [{ id: nextId(), role: 'notice', text: '此会话过长，本地仅保存索引；恢复时由 Agent 重放历史。' }];
+    if (JSON.stringify(snapshot).length > 2_000_000) {
+      snapshot.contextComplete = false;
+      snapshot.entries = [{ id: nextId(), role: 'notice', text: snapshot.contextPending ? '此会话过长，待同步上下文未能完整保存。请在关闭窗口前发送普通消息完成同步。' : '此会话过长，本地仅保存索引；恢复时由 Agent 重放历史。' }];
+      if (snapshot.contextPending && !this.state.error && snapshot.entries[0].role === 'notice') this.state.error = snapshot.entries[0].text;
+    }
     this.history = [snapshot, ...this.history.filter(s => s.id !== snapshot.id)].slice(0, 20);
     await this.context.workspaceState.update('history', this.history); this.emit();
   }
@@ -101,6 +109,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   }
   private async startSession(snapshot?: Snapshot) {
     if (this.state.status === 'busy' || this.state.status === 'connecting') return;
+    if (snapshot?.contextPending) contextSeed(snapshot.entries, snapshot.contextComplete);
     const cwd = snapshot?.cwd || await this.workspaceCwd();
     if (!vscode.workspace.isTrusted) throw new Error('工作区尚未信任。');
     if (snapshot && !vscode.workspace.workspaceFolders?.some(f => f.uri.fsPath === cwd)) throw new Error('请先打开该历史会话对应的工作区。');
@@ -111,40 +120,109 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.replay = !!snapshot;
     this.emit();
     const pending: acp.SessionNotification[] = [];
-    const agent = new AgentProcess({
-      cwd, command: this.config.get('command', 'pi-acp'), args: this.config.get('args', []), env: this.config.get('env', {}),
-      log: text => this.log.append(text),
-      update: notification => {
-        if (generation !== this.generation) return;
-        if (!this.state.sessionId) { pending.push(notification); return; }
-        if (notification.sessionId === this.state.sessionId) { applyUpdate(this.state, notification.update, this.replay); this.emit(); }
-      },
-      permission: request => {
-        if (generation !== this.generation || this.stopping || request.sessionId !== this.state.sessionId) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
-        const id = nextId();
-        return new Promise(resolve => { this.permissionResolvers.set(id, resolve); this.state.permissions.push({ id, request }); this.emit(); });
-      },
-      closed: error => {
-        if (generation !== this.generation) return;
-        this.cancelPermissions(); this.state.status = 'disconnected'; this.state.error = error; this.agent = undefined;
-        void this.save(); this.emit();
-      },
-    });
+    const agent = this.createAgent(cwd, pending);
     this.agent = agent;
     try {
       const info = await agent.initialize();
-      const session = await agent.createSession(snapshot?.id);
+      const session = await agent.createSession(snapshot?.contextPending ? undefined : snapshot?.id);
+      if (snapshot?.contextPending) await this.restoreSettings(agent, session, snapshot);
       if (generation !== this.generation) return;
       this.state.sessionId = session.sessionId; this.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
       this.state.modes = session.modes || undefined; this.state.configs = session.configOptions || undefined;
       for (const notification of pending) if (notification.sessionId === session.sessionId) applyUpdate(this.state, notification.update, this.replay);
-      if (snapshot && !this.state.entries.length) this.state.entries = structuredClone(snapshot.entries);
+      if (snapshot && (snapshot.contextComplete || !this.state.entries.length)) this.state.entries = structuredClone(snapshot.entries);
+      this.state.contextComplete = snapshot ? snapshot.contextComplete === true : true;
+      this.state.contextPending = snapshot?.contextPending || false;
+      if (snapshot?.contextPending) {
+        this.state.usage = undefined;
+        this.history = this.history.filter(s => s.id !== snapshot.id);
+        this.forgottenSessions.add(snapshot.id);
+      }
       this.state.status = 'ready'; this.replay = false; await this.save(); this.emit();
     } catch (error) {
       this.disconnect(); this.state.status = 'disconnected';
-      if (snapshot) { this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; }
+      if (snapshot) { this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; this.state.contextComplete = snapshot.contextComplete; this.state.contextPending = snapshot.contextPending; }
       throw error;
     }
+  }
+  private createAgent(cwd: string, pending: acp.SessionNotification[]) {
+    const agent = new AgentProcess({
+      cwd, command: this.config.get('command', 'pi-acp'), args: this.config.get('args', []), env: this.config.get('env', {}),
+      log: text => this.log.append(text),
+      update: notification => {
+        if (this.agent !== agent || !this.state.sessionId) { pending.push(notification); return; }
+        if (notification.sessionId === this.state.sessionId) { applyUpdate(this.state, notification.update, this.replay); this.emit(); }
+      },
+      permission: request => {
+        if (this.agent !== agent || this.stopping || request.sessionId !== this.state.sessionId) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
+        const id = nextId();
+        return new Promise(resolve => { this.permissionResolvers.set(id, resolve); this.state.permissions.push({ id, request }); this.emit(); });
+      },
+      closed: error => {
+        if (this.agent !== agent) return;
+        this.cancelPermissions(); this.state.status = 'disconnected'; this.state.error = error; this.agent = undefined;
+        void this.save(); this.emit();
+      },
+    });
+    return agent;
+  }
+  private async restoreSettings(agent: AgentProcess, session: acp.NewSessionResponse, previous: Pick<Snapshot, 'configs' | 'modes'>) {
+    // Set the model first: changing it can replace the available reasoning options.
+    const configs = [...previous.configs || []].sort((a, b) => Number(b.category === 'model') - Number(a.category === 'model'));
+    for (const config of configs) {
+      const target = session.configOptions?.find(c => c.id === config.id);
+      if (target?.currentValue === config.currentValue) continue;
+      if (!target || config.type !== 'select' || target.type !== 'select' || !target.options.flatMap(o => 'options' in o ? o.options : [o]).some(o => o.value === config.currentValue)) {
+        throw new Error(`无法在新会话中保留设置「${config.name}」，上下文未修改。`);
+      }
+      const response = await agent.withTimeout(agent.connection.agent.request('session/set_config_option', { sessionId: session.sessionId, configId: config.id, value: config.currentValue }));
+      session.configOptions = response.configOptions;
+    }
+    const mode = previous.modes?.currentModeId;
+    if (mode && session.modes?.currentModeId !== mode) {
+      if (!session.modes?.availableModes.some(m => m.id === mode)) throw new Error('无法保留当前会话模式，上下文未修改。');
+      await agent.withTimeout(agent.connection.agent.request('session/set_mode', { sessionId: session.sessionId, modeId: mode }));
+      session.modes.currentModeId = mode;
+    }
+  }
+  private async editContext(message: Extract<UiMessage, { type: 'branchMessage' | 'deleteMessage' }>) {
+    if (this.state.preview || !this.state.sessionId || message.sessionId !== this.state.sessionId) return;
+    if (!vscode.workspace.isTrusted) throw new Error('工作区尚未信任。');
+    const index = this.state.entries.findIndex(e => e.id === message.id);
+    if (index < 0 || !['user', 'assistant', 'tool'].includes(this.state.entries[index].role)) return;
+    const entries: Entry[] = structuredClone(message.type === 'branchMessage' ? this.state.entries.slice(0, index + 1) : this.state.entries.filter(e => e.id !== message.id));
+    contextSeed(entries, this.state.contextComplete);
+    const previous = this.state, oldId = previous.sessionId!, generation = this.generation;
+    this.transitioning = true;
+    this.state = { ...previous, status: 'connecting' }; this.emit();
+    const pending: acp.SessionNotification[] = [];
+    let candidate: AgentProcess | undefined;
+    let session: acp.NewSessionResponse;
+    try {
+      await this.save();
+      candidate = this.createAgent(this.cwd, pending);
+      await candidate.initialize();
+      session = await candidate.createSession();
+      if (session.sessionId === oldId) throw new Error('Agent 未返回独立的新会话，无法安全编辑上下文。');
+      await this.restoreSettings(candidate, session, previous);
+      if (candidate.isClosed) throw new Error('新会话连接已关闭，上下文未修改。');
+      if (generation !== this.generation) throw new Error('连接状态已改变，上下文未修改。');
+    } catch (error) {
+      candidate?.dispose(); this.state = previous; this.transitioning = false; this.emit(); throw error;
+    }
+    this.disconnect(); this.agent = candidate; this.replay = false;
+    this.state = { ...initialState(), status: 'ready', connectionAttempted: true, sessionId: session.sessionId,
+      agent: previous.agent, attachments: previous.attachments, entries, contextPending: true,
+      configs: session.configOptions || undefined, modes: session.modes || undefined };
+    for (const notification of pending) {
+      if (notification.sessionId === session.sessionId && ['available_commands_update', 'current_mode_update', 'config_option_update'].includes(notification.update.sessionUpdate)) applyUpdate(this.state, notification.update);
+    }
+    if (message.type === 'deleteMessage') {
+      const forgotten = this.forgottenSessions.has(oldId);
+      this.history = this.history.filter(s => s.id !== oldId); this.forgottenSessions.add(oldId);
+      if (forgotten) this.forgottenSessions.add(session.sessionId);
+    }
+    try { await this.save(); } finally { this.transitioning = false; this.emit(); }
   }
   private cancelPermissions() {
     for (const resolve of this.permissionResolvers.values()) resolve({ outcome: { outcome: 'cancelled' } });
@@ -153,7 +231,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private disconnect() {
     this.generation++; this.cancelPermissions();
     if (this.cancelTimer) clearTimeout(this.cancelTimer);
-    this.stopping = false; this.agent?.dispose(); this.agent = undefined;
+    this.stopping = false; this.prompting = false; this.agent?.dispose(); this.agent = undefined;
   }
   async attach() {
     try {
@@ -208,6 +286,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (message.type === 'cancel') {
         if (!this.agent || this.state.status !== 'busy' || !this.state.sessionId) return;
         this.stopping = true; this.cancelPermissions(); this.emit();
+        if (!this.prompting) return;
         await this.agent.cancel(this.state.sessionId);
         if (this.cancelTimer) clearTimeout(this.cancelTimer);
         if (this.state.status !== 'busy') return;
@@ -229,7 +308,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (message.type === 'export') { await this.exportChat(); return; }
       if (this.transitioning || this.state.status === 'busy' || this.state.status === 'connecting') return;
       this.state.error = undefined;
-      if (message.type === 'connect' || message.type === 'new') await this.start();
+      if (message.type === 'connect' || message.type === 'new') {
+        const pending = message.type === 'connect' && this.state.contextPending && this.state.sessionId;
+        await this.start(pending ? { id: this.state.sessionId!, cwd: this.cwd, title: '', updated: Date.now(), entries: this.state.entries, contextComplete: this.state.contextComplete, contextPending: true, configs: this.state.configs, modes: this.state.modes } : undefined);
+      }
+      else if (message.type === 'branchMessage' || message.type === 'deleteMessage') await this.editContext(message);
       else if (message.type === 'resume') {
         const snapshot = this.history.find(s => s.id === message.id);
         if (snapshot) await this.start(snapshot);
@@ -240,24 +323,46 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if (typeof message.text !== 'string' || !message.text.trim()) return;
         if (message.text.length > 500000) throw new Error('消息过长。');
         if (!this.agent || !this.state.sessionId || this.state.status !== 'ready') throw new Error('请先连接 Agent 或从历史记录恢复会话。');
+        if (this.state.contextPending && message.text.trimStart().startsWith('/')) throw new Error('请先发送普通消息同步修改后的上下文，再使用 /compact 等命令。');
         const agent = this.agent, generation = this.generation;
+        const seed = this.state.contextPending ? contextSeed(this.state.entries, this.state.contextComplete) : undefined;
         const prompt: acp.ContentBlock[] = [{ type: 'text', text: message.text }];
         const attached = this.state.attachments;
         for (const a of attached) {
           if (agent.info?.agentCapabilities?.promptCapabilities?.embeddedContext) prompt.push({ type: 'resource', resource: { uri: a.uri, mimeType: 'text/plain', text: a.text } });
           else prompt.push({ type: 'text', text: `\n附加代码上下文：${a.name} (${a.uri})\n${a.text}` });
         }
-        this.state.entries.push({ id: nextId(), role: 'user', text: message.text + (attached.length ? '\n\n' + attached.map(a => `📎 ${a.name}`).join(' · ') : '') });
+        const contextBlocks = structuredClone(prompt);
+        if (seed) prompt.unshift(seed);
+        checkPromptSize(prompt);
+        this.state.entries.push({ id: nextId(), role: 'user', contextBlocks, text: message.text + (attached.length ? '\n\n' + attached.map(a => `📎 ${a.name}`).join(' · ') : '') });
         this.state.attachments = []; this.state.status = 'busy'; this.stopping = false; this.emit();
         try {
           await this.save();
           await this.view?.webview.postMessage({ type: 'sent' });
+          if (this.stopping || generation !== this.generation) {
+            if (generation === this.generation) this.state.entries.push({ id: nextId(), role: 'notice', text: '本轮已停止，消息尚未发送给 Agent。' });
+            return;
+          }
+          this.prompting = true;
           const response = await agent.prompt(this.state.sessionId, prompt);
+          if (generation === this.generation) this.state.contextPending = !!seed && response.stopReason === 'cancelled';
           if (generation === this.generation && response.stopReason !== 'end_turn') this.state.entries.push({ id: nextId(), role: 'notice', text: `本轮结束：${response.stopReason}` });
+          if (seed && response.stopReason === 'cancelled' && generation === this.generation) {
+            // Cancellation does not prove that the peer retained the historical seed.
+            this.disconnect(); this.state.status = 'disconnected'; await this.save(); this.emit();
+          }
+        } catch (error) {
+          if (seed && generation === this.generation) {
+            // The peer may have accepted some of the seed before failing. Never resend into it.
+            this.disconnect(); this.state.status = 'disconnected'; this.state.contextPending = true;
+            await this.save(); this.emit();
+          }
+          throw error;
         } finally {
           if (generation === this.generation) {
             if (this.cancelTimer) clearTimeout(this.cancelTimer);
-            this.stopping = false; this.cancelPermissions();
+            this.stopping = false; this.prompting = false; this.cancelPermissions();
             this.state.status = this.agent ? 'ready' : 'disconnected'; await this.save(); this.emit();
           }
         }

@@ -3,6 +3,7 @@ import { sessionSelectors, createSessionSelector } from './selectors';
 import { contextUsage } from './usage';
 import { installTooltips } from './tooltips';
 import { HistoryList } from './history';
+import { messageActions } from './message-actions';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): { draft?: string } | undefined; setState(state: { draft: string }): void };
 const vscode = acquireVsCodeApi();
@@ -15,7 +16,7 @@ app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi
 <div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
 <button id="bottom" class="primary" aria-label="回到最新消息" data-tooltip="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
-<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
+<footer><div id="context-pending" role="status" hidden>上下文已更新，将在下一条消息同步</div><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" data-tooltip="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
@@ -118,8 +119,8 @@ function contentNode(entry: Entry): HTMLElement {
     if (entry.role === 'thought') { const summary = document.createElement('summary'); summary.textContent = '思考过程'; node.append(summary); }
     const body = document.createElement('div'); body.className = 'markdown';
     body.innerHTML = renderMarkdown(entry.text); node.append(body);
-    if (entry.role === 'assistant') node.append(button('复制 Markdown', async () => { try { await navigator.clipboard.writeText(entry.text); } catch { /* clipboard can be unavailable in browser previews */ } }, 'copy-message'));
   }
+  if (entry.role === 'assistant' || entry.role === 'user' || entry.role === 'tool') node.append(messageActions(entry, () => state?.sessionId, send));
   return node;
 }
 function paint() {
@@ -153,6 +154,11 @@ function paint() {
     }
     if (messages.children[index] !== cached.node) messages.insertBefore(cached.node, messages.children[index] || null);
   }
+  for (const action of messages.querySelectorAll<HTMLButtonElement>('[data-context-action]')) {
+    action.disabled = busy || connecting || !!state.preview || !state.sessionId || !state.contextComplete;
+    action.dataset.tooltip = busy ? '请先停止输出再编辑上下文' : !state.contextComplete ? '此历史记录不完整，无法可靠编辑上下文' : action.dataset.actionDescription;
+  }
+  el('context-pending').hidden = !state.contextPending;
   const attachments = el('attachments'); attachments.replaceChildren();
   for (const a of state.attachments) { const b = button(`📎 ${a.name} ×`, () => send({ type: 'removeAttachment', id: a.id })); b.dataset.tooltip = '移除此上下文'; attachments.append(b); }
   const plan = el('plan'); plan.hidden = !state.plan.length; plan.replaceChildren();
@@ -189,6 +195,7 @@ function paint() {
 window.addEventListener('message', event => {
   if (event.data.type === 'sent') { input.value = ''; vscode.setState({ draft: '' }); sending = false; updateSend(); return; }
   if (event.data.type !== 'state') return;
+  if (state?.sessionId !== event.data.state?.sessionId) followBottom = true;
   state = event.data.state;
   if (state?.status !== 'busy') sending = false;
   if (!paintPending) { paintPending = true; requestAnimationFrame(paint); }

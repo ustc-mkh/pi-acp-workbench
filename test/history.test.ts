@@ -10,6 +10,7 @@ it('deletes the requested row without opening it and keeps older rows available'
   const state: Pick<ChatState, 'history' | 'status' | 'sessionId'> = { history, status: 'ready', sessionId: '0' };
   list.update(state);
   expect(container.children).toHaveLength(7);
+  expect(container.firstElementChild?.lastElementChild?.className).toBe('history-delete');
   (container.querySelector('[data-id="3"] .history-delete') as HTMLButtonElement).click();
   expect(messages).toEqual([{ type: 'deleteHistory', id: '3' }]); expect(opens).toBe(0);
   list.update({ ...state, history: history.filter(item => item.id !== '3') });
@@ -25,6 +26,7 @@ it('preserves row identity and scroll position during output and updates busy in
   expect(container.firstElementChild).toBe(row); expect(container.scrollTop).toBe(68);
   expect(container.querySelectorAll('.running')).toHaveLength(1);
   expect(container.querySelector('.running')?.getAttribute('aria-label')).toBe('正在输出');
+  expect(container.querySelector('.running')?.hasAttribute('data-tooltip')).toBe(false);
   expect((container.querySelector('.history-delete') as HTMLButtonElement).disabled).toBe(false);
   list.update({ ...state, status: 'ready' });
   expect(container.firstElementChild).toBe(row); expect(container.querySelectorAll('.running')).toHaveLength(0);

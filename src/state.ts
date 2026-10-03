@@ -3,7 +3,7 @@ import type { ChatState, Entry } from './shared';
 let serial = 0;
 export const nextId = () => `entry-${Date.now()}-${++serial}`;
 export function initialState(): ChatState {
-  return { status: 'disconnected', entries: [], attachments: [], commands: [], plan: [], history: [], permissions: [], showThoughts: true, preview: false };
+  return { status: 'disconnected', entries: [], attachments: [], commands: [], plan: [], history: [], permissions: [], showThoughts: true, preview: false, contextComplete: true, contextPending: false };
 }
 export function appendText(state: ChatState, role: 'user' | 'assistant' | 'thought' | 'notice', text: string, messageId?: string | null) {
   const last = state.entries.at(-1);
@@ -19,7 +19,12 @@ export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay 
       const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : update.sessionUpdate === 'agent_thought_chunk' ? 'thought' : 'assistant';
       const c = update.content;
       const text = c.type === 'text' ? c.text : c.type === 'resource_link' ? `[${c.name}](${c.uri})` : c.type === 'resource' ? ('text' in c.resource ? c.resource.text : '[二进制资源]') : `[${c.type} 内容]`;
-      appendText(state, role, text, update.messageId); break;
+      appendText(state, role, text, update.messageId);
+      if (c.type !== 'text') {
+        const entry = state.entries.at(-1)!;
+        if (entry.role !== 'tool') (entry.contextBlocks ||= []).push(structuredClone(c));
+      }
+      break;
     }
     case 'tool_call':
     case 'tool_call_update': {

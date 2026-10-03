@@ -15,6 +15,7 @@ export class AgentProcess {
   info?: acp.InitializeResponse;
   private disposed = false;
   private exited = false;
+  get isClosed() { return this.disposed; }
   constructor(private options: AgentOptions) {
     this.child = spawn(options.command, options.args, {
       cwd: options.cwd, env: { ...process.env, ...options.env }, shell: false,
@@ -45,7 +46,7 @@ export class AgentProcess {
   async initialize() {
     try {
       this.info = await this.withTimeout(this.connection.agent.request('initialize', {
-        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.1.4' },
+        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.1.5' },
         // Pi performs its own local file and terminal operations. Do not advertise unimplemented delegation.
         clientCapabilities: {},
       }), this.options.requestTimeoutMs ?? 20000);

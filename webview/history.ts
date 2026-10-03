@@ -21,13 +21,12 @@ export class HistoryList {
         const status = document.createElement('span'); status.className = 'session-indicator'; status.role = 'img'; status.innerHTML = chat;
         const open = document.createElement('button'); open.className = 'history-open'; open.type = 'button';
         open.onclick = () => { this.send({ type: 'resume', id: item.id }); this.onOpen(); };
-        row.append(remove, status, open); entry = { row, remove, open, status }; this.rows.set(item.id, entry);
+        row.append(status, open, remove); entry = { row, remove, open, status }; this.rows.set(item.id, entry);
       }
       const current = state.sessionId === item.id, running = current && state.status === 'busy';
       entry.remove.setAttribute('aria-label', `删除会话：${item.title}`);
       entry.status.classList.toggle('running', running);
       entry.status.setAttribute('aria-label', running ? '正在输出' : '未在输出');
-      entry.status.dataset.tooltip = running ? '正在输出' : '未在输出';
       entry.row.classList.toggle('current', current);
       if (current) entry.open.setAttribute('aria-current', 'true'); else entry.open.removeAttribute('aria-current');
       if (entry.open.textContent !== item.title) entry.open.textContent = item.title;
