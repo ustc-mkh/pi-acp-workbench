@@ -17,7 +17,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
   if (!r.method) { if (r.id === 'permission-1') { permission = r.result; reply(pending, { stopReason: permission.outcome.outcome === 'cancelled' ? 'cancelled' : 'end_turn' }); } return; }
   if (r.method === 'initialize') {
     if (mode === 'hang') return;
-    reply(r.id, { protocolVersion: mode === 'v2' ? 2 : 1, agentCapabilities: { loadSession: mode !== 'no-load' }, agentInfo: { name: 'mock' }, authMethods: [] });
+    reply(r.id, { protocolVersion: mode === 'v2' ? 2 : 1, agentCapabilities: { loadSession: mode !== 'no-load',promptCapabilities:{image:mode==='context-images'} }, agentInfo: { name: 'mock' }, authMethods: [] });
   } else if (r.method === 'session/new') reply(r.id, { sessionId, ...(mode?.startsWith('context') ? {configOptions} : {}) });
   else if (r.method === 'session/set_config_option') {
     if (mode === 'context-config-fail') { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32603,message:'config rejected'}}) + '\n'); return; }
@@ -28,7 +28,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
     update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'previous' } }); reply(r.id, {});
   } else if (r.method === 'session/prompt') {
     pending = r.id;
-    const text = mode?.startsWith('context') ? r.params.prompt.filter(b => b.type === 'text').at(-1).text : r.params.prompt[0].text;
+    const text = mode?.startsWith('context') ? r.params.prompt.filter(b => b.type === 'text').at(-1)?.text || '' : r.params.prompt[0].text;
     if (text === 'crash') process.exit(7);
     if (text === 'wait') return;
     if (text === 'permission') {

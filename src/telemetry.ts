@@ -3,7 +3,7 @@ export interface UsageRecord extends TokenUsage {
   id: string; sessionId: string; model: string; timestamp: number; kind: string; reportedCost?: number;
 }
 export interface Price { input: number; output: number; cacheRead: number; cacheWrite: number; source?: string; updated?: string }
-export interface Statistics { records: UsageRecord[]; prices: Record<string, Price>; titles: Record<string, string>; available: boolean; note?: string }
+export interface Statistics { models?:{id:string;name:string}[]; records: UsageRecord[]; prices: Record<string, Price>; titles: Record<string, string>; available: boolean; note?: string }
 export interface Inspection { records: UsageRecord[]; cursor?: number; context?: string; checkpointId?: string; contextWindow?: number; model?: string; prices?: Record<string, Price> }
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
 export function validPrice(value: unknown): value is Price {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- Remove the Pi-reported cost column from statistics.
+- Move pricing to a dedicated page with a four-field card for every configured model, including unused models.
+- Cache up to two idle ACP connections in memory (32 MiB retained-record budget) for warm conversation switching; release on disposal, eviction, history removal or transport configuration changes.
+- Support clipboard raster images with previews, removal, image-only messages, validated ACP image transport and local history persistence.
+- Reject stale or oversized image pastes and keep drafts when the agent does not support image input.
+
 ## 0.2.0
 
 - Bundle an enhanced, pinned Pi ACP adapter with negotiated usage and bounded-summary extension methods.

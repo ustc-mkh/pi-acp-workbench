@@ -154,9 +154,9 @@ it('keeps cleared history empty after another automatic save', async () => {
 
 let auditDir: string | undefined;
 afterEach(() => { if (auditDir) { rmSync(auditDir, { recursive: true, force: true }); auditDir = undefined; } });
-async function contextAgent() {
+async function contextAgent(mode='context') {
   auditDir = mkdtempSync(resolve(tmpdir(), 'pi-context-test-'));
-  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  host.config.args = [resolve('test/mock-agent.mjs'), mode];
   host.config.env = { PI_TEST_AUDIT: resolve(auditDir, 'wire.jsonl') };
   await host.provider.perform({ type: 'connect' });
 }
@@ -214,7 +214,7 @@ it('removes an assistant message without removing adjacent user or tool messages
 });
 it('preserves the complete visible transcript when resuming a remotely compacted session', async () => {
   await contextAgent(); await host.provider.perform({ type: 'send', text: 'uncompacted-history' });
-  const original = host.provider.snapshot();
+  const original = host.provider.snapshot();host.provider.disconnect();host.provider.state.status='disconnected';
   await host.provider.perform({ type: 'resume', id: original.sessionId });
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   await edit('branchMessage', original.entries[1].id);
@@ -330,4 +330,45 @@ it('copies original full Markdown even when a compacted checkpoint exists',async
  await host.provider.perform({type:'copyConversation'});
  expect(vscode.env.clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining('Original equation $x^2$'));
  expect(vscode.env.clipboard.writeText).not.toHaveBeenLastCalledWith(expect.stringContaining('short summary'));
+});
+
+it('switches cached conversations without initializing/loading again and preserves model settings',async()=>{
+ await contextAgent();await host.provider.perform({type:'send',text:'first'});const first=host.provider.snapshot(),agent=host.provider.agent;
+ await host.provider.perform({type:'config',id:'model',value:'other'});
+ await host.provider.perform({type:'new'});const second=host.provider.snapshot().sessionId;await host.provider.perform({type:'send',text:'second'});
+ const before=wire().length;await host.provider.perform({type:'resume',id:first.sessionId});
+ expect(host.provider.agent).toBe(agent);expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:first.sessionId,entries:first.entries});expect(host.provider.snapshot().configs[0].currentValue).toBe('other');
+ expect(wire().slice(before).filter(r=>['initialize','session/load','session/new'].includes(r.method))).toHaveLength(0);
+ await host.provider.perform({type:'resume',id:second});expect(host.provider.snapshot().entries[0].text).toBe('second');
+});
+it('evicts idle LRU connections and falls back to native loading for an evicted conversation',async()=>{
+ await contextAgent();const first=host.provider.snapshot().sessionId,agent=host.provider.agent;
+ for(let i=0;i<3;i++)await host.provider.perform({type:'new'});
+ expect(host.provider.sessions.size).toBe(2);expect(agent.isClosed).toBe(true);
+ await host.provider.perform({type:'resume',id:first});expect(wire().filter(r=>r.method==='session/load').at(-1).params.sessionId).toBe(first);
+});
+it('reconnects dead cached agents and clears live caches on history deletion and disposal',async()=>{
+ await contextAgent();const first=host.provider.snapshot().sessionId,agent=host.provider.agent;await host.provider.perform({type:'new'});agent.dispose();
+ await host.provider.perform({type:'resume',id:first});expect(host.provider.agent).not.toBe(agent);expect(host.provider.snapshot().status).toBe('ready');
+ await host.provider.perform({type:'new'});const cached=host.provider.sessions.get(first).agent;
+ await host.provider.perform({type:'deleteHistory',id:first});expect(cached.isClosed).toBe(true);expect(host.provider.sessions.get(first)).toBeUndefined();
+ const current=host.provider.agent;host.provider.dispose();expect(current.isClosed).toBe(true);expect(host.provider.sessions.size).toBe(0);
+});
+const pastedPng={name:'clipboard.png',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII='};
+it('sends image-only messages as ACP image blocks and preserves the original image in local history',async()=>{
+ await contextAgent('context-images');const sessionId=host.provider.snapshot().sessionId;
+ await host.provider.perform({type:'attachImages',sessionId,images:[pastedPng]});expect(host.provider.snapshot().attachments[0].kind).toBe('image');
+ await host.provider.perform({type:'send',text:''});const prompt=wire().filter(r=>r.method==='session/prompt').at(-1).params.prompt;
+ expect(prompt).toEqual([{type:'image',mimeType:pastedPng.mimeType,data:pastedPng.data}]);expect(host.provider.snapshot().attachments).toEqual([]);
+ expect(host.provider.snapshot().entries[0].contextBlocks).toEqual(prompt);expect((host.stored.get('history') as any[])[0].entries[0].contextBlocks).toEqual(prompt);
+});
+it('retains image drafts when the agent lacks image support and permits removal',async()=>{
+ await contextAgent();const sessionId=host.provider.snapshot().sessionId;await host.provider.perform({type:'attachImages',sessionId,images:[pastedPng]});
+ await host.provider.perform({type:'send',text:'image'});expect(host.provider.snapshot().error).toContain('未声明图片支持');expect(wire().some(r=>r.method==='session/prompt')).toBe(false);
+ const id=host.provider.snapshot().attachments[0].id;await host.provider.perform({type:'removeAttachment',id});expect(host.provider.snapshot().attachments).toEqual([]);
+});
+it('rejects stale image pastes and validates an entire batch before adding any attachment',async()=>{
+ await contextAgent();const sessionId=host.provider.snapshot().sessionId;
+ await host.provider.perform({type:'attachImages',sessionId:'stale',images:[pastedPng]});expect(host.provider.snapshot().attachments).toEqual([]);
+ await host.provider.perform({type:'attachImages',sessionId,images:[pastedPng,{...pastedPng,mimeType:'image/svg+xml'}]});expect(host.provider.snapshot().attachments).toEqual([]);
 });

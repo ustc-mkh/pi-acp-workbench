@@ -67,7 +67,8 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
           const text=JSON.stringify(historicalMessages(messages));
           if(Buffer.byteLength(text)<4*1024*1024) {result.context=text; result.checkpointId=hash(JSON.stringify(summaries));}
         }
-        if(model?.cost && validPrice(model.cost))result.prices={[modelKey]:{...model.cost,source:'Pi 模型配置',updated:new Date().toISOString().slice(0,10)}};
+        const available=await session.proc.getAvailableModels();
+        result.prices=Object.fromEntries((available?.models||[]).filter((m:any)=>m.provider&&m.id&&validPrice(m.cost)).map((m:any)=>[`${m.provider}/${m.id}`,{...m.cost,source:'Pi 模型配置',updated:new Date().toISOString().slice(0,10)}]));
       }
       return result;
     }

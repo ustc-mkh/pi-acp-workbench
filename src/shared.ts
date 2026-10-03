@@ -2,7 +2,7 @@ import type { Checkpoint } from './checkpoints';
 import type { Statistics, Price } from './telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
 export type Entry = { id: string; role: 'user' | 'assistant' | 'thought' | 'notice'; text: string; messageId?: string | null; contextBlocks?: acp.ContentBlock[] } | { id: string; role: 'tool'; tool: acp.ToolCall };
-export interface Attachment { id: string; name: string; uri: string; text: string }
+export type Attachment = {kind?:'text'; id:string;name:string;uri:string;text:string} | {kind:'image';id:string;name:string;mimeType:string;data:string};
 export interface Snapshot { id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; checkpoints?: Checkpoint[]; preparedContext?: string; contextWindow?: number; contextComplete?: boolean; contextPending?: boolean; configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
 export interface ChatState {
   status: 'disconnected' | 'connecting' | 'ready' | 'busy';
@@ -18,6 +18,8 @@ export interface ChatState {
 }
 export type UiMessage =
   | { type: 'ready' | 'connect' | 'new' | 'cancel' | 'attach' | 'clearHistory' | 'login' | 'logs' | 'preview' | 'export' | 'refreshStatistics' | 'cancelContext' | 'copyConversation' }
+  | {type:'attachImages';sessionId?:string;images:import('./images').PastedImage[]}
+  | {type:'attachmentError';sessionId?:string;error:string}
   | { type: 'setPrice'; model: string; price?: Price }
   | { type: 'send'; text: string }
   | { type: 'dismissError'; error: string }
