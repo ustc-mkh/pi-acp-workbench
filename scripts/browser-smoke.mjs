@@ -1,6 +1,7 @@
 import { chromium } from '@playwright/test';
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
@@ -9,6 +10,8 @@ const { demoMarkdown } = await import('data:text/javascript;base64,' + Buffer.fr
 const channelBundle = await build({ entryPoints: ['src/state-channel.ts'], bundle: true, platform: 'node', format: 'esm', write: false });
 const { StateEncoder } = await import('data:text/javascript;base64,' + Buffer.from(channelBundle.outputFiles[0].text).toString('base64'));
 const encoder = new StateEncoder();
+const artifacts = resolve('test-results/browser');
+await mkdir(artifacts, {recursive:true});
 const server = createServer(async (req, res) => {
   try {
     const file = resolve('dist', '.' + req.url);
@@ -20,7 +23,8 @@ const server = createServer(async (req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 let browser;
 try {
-  browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  const executablePath = process.env.CHROME_PATH || (existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' : chromium.executablePath());
+  browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 460, height: 940 }, colorScheme: 'dark' });
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -67,21 +71,21 @@ try {
   assert(await page.locator('.katex').count() >= 7);
   assert.equal(await page.locator('.math-fallback').count(), 0);
   await page.evaluate(() => { document.querySelector('#transcript').scrollTop = 0; });
-  await page.screenshot({ path: '../preview-dark.png' });
+  await page.screenshot({ path: resolve(artifacts, 'preview-dark.png') });
   await page.setViewportSize({ width: 320, height: 740 });
   await emit(state);
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.emulateMedia({ colorScheme: 'light' });
   await page.addStyleTag({ content: ':root{--bg:#fafafa;--fg:#242424;--muted:#666;--border:#ddd;--input:#f0f0f0;--vscode-textCodeBlock-background:#f3f3f3}' });
   await page.evaluate(() => { document.querySelector('#transcript').scrollTop = 0; });
-  await page.screenshot({ path: '../preview-light.png' });
+  await page.screenshot({ path: resolve(artifacts, 'preview-light.png') });
   state.preview = false; state.status = 'ready';
   await emit(state);
   await page.locator('#input').fill('推导这个公式'); await page.locator('#input').press('Enter');
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'send' && m.text === '推导这个公式'));
   await page.evaluate(() => window.postMessage({ type: 'sent' }, '*')); await page.waitForTimeout(40); assert.equal(await page.locator('#input').inputValue(), '');
   state.status = 'busy'; state.entries = [{ id: 'stream', role: 'assistant', text: '$$\\frac{1}' }]; await emit(state);
-  state.entries[0].text += '{2}$$'; await emit(state); assert.equal(await page.locator('.katex').count(), 1);
+  state.entries[0] = {...state.entries[0], text:state.entries[0].text + '{2}$$'}; await emit(state); assert.equal(await page.locator('.katex').count(), 1);
   state.permissions = [{ id: 'p1', request: { sessionId: 's', toolCall: { title: 'Edit test.ts', toolCallId: 't1' }, options: [{ optionId: 'deny-1', name: '拒绝本次', kind: 'reject_once' }] } }]; await emit(state);
   await page.getByText('拒绝本次', { exact: true }).click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'permission' && m.optionId === 'deny-1'));
@@ -92,6 +96,8 @@ try {
   assert.equal(await page.locator('.activity-group').evaluate(node=>node.open), true);
   await page.locator('.message.tool > summary').click(); await page.getByText('查看修改 · /project/test.ts').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'diff' && m.index === 0));
+  state.entries.push({id:'native-answer',role:'assistant',text:'可原生回溯的回答'});
+  state.nativeForks={'native-answer':{entryId:'native-node',hash:'verified'}};
   state.history = [{id:'s1',sessionNumber:1,title:'相同标题',cwd:'/project',updated:2},{id:'s2',sessionNumber:2,title:'相同标题',cwd:'/project',updated:1}];
   state.sessionId='s1'; state.sessionNumber=1; state.status='ready'; await emit(state);
   await page.locator('#history-toggle').click();
@@ -107,7 +113,7 @@ try {
   }));
   const popup=await page.locator('#commands').boundingBox(),field=await page.locator('#input').boundingBox();
   assert(popup.y>=0&&popup.y+popup.height<=field.y);
-  await page.screenshot({path:'../preview-command-menu.png'});
+  await page.screenshot({path:resolve(artifacts, 'preview-command-menu.png')});
   const sentBefore=await page.evaluate(()=>window.messages.filter(m=>m.type==='send').length);
   for(let i=0;i<12;i++)await page.locator('#input').press('ArrowDown');
   await page.locator('#input').press('Enter');assert.equal(await page.locator('#input').inputValue(),'/command12 ');
@@ -119,7 +125,19 @@ try {
   await page.locator('#input').fill('Pi private draft');
   await page.locator('#harness-switch').selectOption('codex');
   assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='switchHarness'&&m.harness==='codex'));
+  state.configs=[
+    {id:'model',name:'Model',type:'select',currentValue:'m',options:[{value:'m',name:'Model'}]},
+    {id:'reasoning',name:'Reasoning',type:'select',currentValue:'high',options:[{value:'high',name:'High'}]},
+    {id:'mode',name:'Permissions',category:'mode',type:'select',currentValue:'ask',options:[{value:'ask',name:'Ask'}]},
+    {id:'fast-mode',name:'Fast mode',type:'select',currentValue:'off',options:[{value:'off',name:'Off'},{value:'on',name:'On'}]},
+    {id:'collaboration_mode',name:'Collaboration mode',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'plan',name:'Plan'}]}
+  ];
   state.contextComplete=true;state.harness='codex';state.sessionId='workbench:codex:s1';await emit(state);
+  assert.equal(await page.locator('#selectors select').count(),3);
+  assert.equal(await page.locator('#selectors select[aria-label="Fast mode"]').count(),0);
+  assert.equal(await page.locator('#selectors select[aria-label="Collaboration mode"]').count(),0);
+  assert.equal(await page.locator('[data-context-action="deleteMessage"]').count(),0);
+  assert.equal(await page.locator('.message.tool [data-context-action]').count(),0);
   assert.equal(await page.locator('#input').inputValue(),'');
   assert.equal(await page.locator('#harness-switch').inputValue(),'codex');
   assert(await page.locator('#harness-help').isVisible());
@@ -128,6 +146,15 @@ try {
   state.harness='pi';state.sessionId='s1';await emit(state);
   assert.equal(await page.locator('#input').inputValue(),'Pi private draft');
   assert(await page.locator('[data-context-action]').first().isEnabled());
+  await page.locator('[data-context-action]').first().click();
+  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='branchMessage'&&m.id==='native-answer'&&m.sessionId==='s1'));
+  state.status='connecting';state.contextOperation={kind:'fork'};await emit(state);
+  assert(await page.locator('#context-operation').isVisible());
+  assert.equal(await page.locator('#context-progress').textContent(),'正在创建原生分支…');
+  assert(await page.locator('#stop').isHidden());
+  await page.locator('#cancel-context').click();
+  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='cancelContext'));
+  state.contextOperation=undefined;
   state.harness='codex';state.sessionId='workbench:codex:s1';state.status='busy';await emit(state);
   assert.equal(await page.locator('#input').inputValue(),'Codex private draft');
   assert(await page.locator('#harness-switch').isDisabled());

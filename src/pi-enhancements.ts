@@ -1,7 +1,11 @@
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { stat, mkdtemp, copyFile, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,dirname} from 'node:path';
 import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {nativePath,nativeForkPoints,NATIVE_FORK_MARKER} from './native-branch';
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -24,23 +28,70 @@ function historicalMessages(messages:any[]) {
 export function enhancePiAgent(Base:any, PiRpcProcess:any) {
   return class extends Base {
     private summaryWorkers = new Map<string,{cancel:()=>void}>();
+    private forkWorkers = new Map<string,{dispose:()=>void}>();
     private summaryUsage: UsageRecord[] = [];
     private usageCache?: { key: string; records: UsageRecord[] };
     async initialize(params:any) {
       const result=await super.initialize(params);
-      result.agentCapabilities._meta={...result.agentCapabilities._meta,'pi-workbench':{version:1,inspect:true,summarize:true}};
+      result.agentCapabilities._meta={...result.agentCapabilities._meta,'pi-workbench':{version:1,inspect:true,summarize:true,nativeFork:true}};
       return result;
     }
-    dispose() { for(const worker of this.summaryWorkers.values())worker.cancel(); super.dispose(); }
+    dispose() { for(const worker of this.summaryWorkers.values())worker.cancel(); for(const worker of this.forkWorkers.values())worker.dispose(); super.dispose(); }
     async extMethod(method:string, params:any):Promise<any> {
       if (!method.startsWith('_pi_workbench/')) throw new Error(`Unsupported extension method: ${method}`);
       const session=this.sessions.get(params.sessionId);
       if (method==='_pi_workbench/cancel_summary') {this.summaryWorkers.get(params.sessionId)?.cancel();return {};}
+      if (method==='_pi_workbench/cancel_fork') {this.forkWorkers.get(params.sessionId)?.dispose();return {};}
       if (!session) throw new Error('Unknown session');
       if (session.pendingTurn) throw new Error('Wait for the current turn to finish before inspecting or summarizing.');
+      if (method==='_pi_workbench/fork') return this.forkNative(session,params,PiRpcProcess);
       if (method==='_pi_workbench/inspect') return this.inspect(session,params);
       if (method==='_pi_workbench/summarize') return this.summarize(session,params,PiRpcProcess);
       throw new Error('Unknown workbench method');
+    }
+    private async forkNative(session:any,params:any,Process:any) {
+      if(this.forkWorkers.has(session.sessionId))throw new Error('Native fork already in progress');
+      let worker:any,cancelled=false,stage:string|undefined;
+      this.forkWorkers.set(session.sessionId,{dispose:()=>{cancelled=true;worker?.dispose();}});
+      try {
+        const state=await session.proc.getState();
+        if(cancelled)throw new Error('原生分支已取消。');
+        if(state.isStreaming||state.isCompacting||!state.sessionFile)throw new Error('请等待原生会话空闲且历史已保存后再分支。');
+        const entries=await session.proc.request({type:'get_entries'});
+        if(cancelled)throw new Error('原生分支已取消。');
+        if(!entries.success)throw new Error('当前 Pi 不支持读取原生历史节点，请更新 Pi。');
+        const point=nativeForkPoints(nativePath(entries.data.entries,entries.data.leafId)).find(p=>p.safe&&p.entryId===params.entryId&&p.hash===params.hash);
+        if(!point)throw new Error('原生分支位置已变化或无法安全回溯，请刷新后重试。');
+        stage=await mkdtemp(join(tmpdir(),'pi-native-fork-'));const stagedFile=join(stage,'source.jsonl');
+        // Opening a session may migrate old formats or append fallback settings. Never do that to the source.
+        await copyFile(state.sessionFile,stagedFile);
+        if(cancelled)throw new Error('原生分支已取消。');
+        worker=await Process.spawn({cwd:session.cwd,sessionPath:stagedFile,piCommand:process.env.PI_ACP_PI_COMMAND,
+          workbenchFork:fileURLToPath(new URL('./pi-native-fork.mjs',import.meta.url)),workbenchForkSessionDir:dirname(state.sessionFile)});
+        if(cancelled)throw new Error('原生分支已取消。');
+        await worker.prompt('/workbench-native-fork '+JSON.stringify({entryId:point.entryId,hash:point.hash}));
+        const fork=await worker.getState();
+        if(!fork.sessionId||fork.sessionId===state.sessionId||!fork.sessionFile||fork.sessionFile===state.sessionFile)throw new Error('Pi 未创建独立的原生分支。');
+        await worker.prompt('/workbench-native-seal '+JSON.stringify({sourceSessionId:session.sessionId,hash:point.hash}));
+        const check=await worker.request({type:'get_entries'});
+        if(!check.success||!check.data.entries.some((e:any)=>e.type==='custom'&&e.customType===NATIVE_FORK_MARKER&&e.data?.sourceSessionId===session.sessionId))throw new Error('原生分支校验未完成，未切换会话。');
+        worker.dispose();
+        await new Promise<void>((resolve,reject)=>{
+          if(worker.child.exitCode!==null||worker.child.signalCode!==null){resolve();return;}
+          const timer=setTimeout(()=>{worker.child.kill('SIGKILL');reject(new Error('原生分支进程未退出，未切换会话。'));},5000);
+          worker.child.once('exit',()=>{clearTimeout(timer);resolve();});
+        });
+        if(cancelled)throw new Error('原生分支已取消。');
+        if(dirname(fork.sessionFile)!==dirname(state.sessionFile))throw new Error('原生分支保存位置异常。');
+        const raw=await readFile(fork.sessionFile,'utf8'),line=raw.indexOf('\n'),header=JSON.parse(raw.slice(0,line));
+        if(header.type!=='session'||header.id!==fork.sessionId||header.parentSession!==stagedFile)throw new Error('原生分支文件头不匹配。');
+        header.parentSession=state.sessionFile;
+        const temp=fork.sessionFile+'.'+randomUUID()+'.tmp';
+        try {await writeFile(temp,JSON.stringify(header)+raw.slice(line),{mode:0o600});await rename(temp,fork.sessionFile);}
+        finally {await rm(temp,{force:true});}
+        this.store.upsert({sessionId:fork.sessionId,cwd:session.cwd,sessionFile:fork.sessionFile});
+        return {sessionId:fork.sessionId};
+      } finally {worker?.dispose();this.forkWorkers.delete(session.sessionId);if(stage)await rm(stage,{recursive:true,force:true});}
     }
     private async inspect(session:any, params:any):Promise<Inspection> {
       const state=await session.proc.getState();
@@ -58,6 +109,7 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
             let e:any;try{e=JSON.parse(line);}catch{continue;} // In-progress final lines are retried next time.
             if(e.type==='model_change' && e.provider && e.modelId) currentModel=`${e.provider}/${e.modelId}`;
             if(e.message?.provider && e.message?.model)currentModel=`${e.message.provider}/${e.message.model}`;
+            if(e.type==='custom'&&e.customType===NATIVE_FORK_MARKER)records.length=0;
             const record=usageRecord(`${session.sessionId}:${e.id}`,session.sessionId,e.message||e,currentModel,e.type==='message'?'inference':e.type,e.message?.timestamp||e.timestamp);
             if(record)records.push(record);
           }
@@ -72,6 +124,10 @@ export function enhancePiAgent(Base:any, PiRpcProcess:any) {
       const result:Inspection={records:records.slice(cursor,cursor+500),model:modelKey,contextWindow:model?.contextWindow};
       if(cursor+500<records.length)result.cursor=cursor+500;
       if (!cursor) {
+        try {
+          const native=await session.proc.request({type:'get_entries'});
+          if(native.success)result.forkPoints=nativeForkPoints(nativePath(native.data.entries,native.data.leafId));
+        } catch { /* Older Pi versions remain usable, but cannot safely expose native branch points. */ }
         const data=await session.proc.getMessages(), messages=Array.isArray(data?.messages)?data.messages:[];
         const summaries=messages.filter((m:any)=>m.role==='compactionSummary' || m.role==='branchSummary');
         if(summaries.length) {

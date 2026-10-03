@@ -9,12 +9,10 @@ export function messageActions(entry: Entry, sessionId: () => string | undefined
     setTimeout(() => { copy.textContent = '复制'; }, 1500);
   };
   actions.append(copy);
-  for (const [type, label, tooltip] of [
-    ['branchMessage', '分支', '保留截至此处的上下文，新建对话；必要时调用模型重建摘要'],
-    ['deleteMessage', '删除', '从对话及 Agent 上下文中删除此条；必要时调用模型重建摘要'],
-  ] as const) {
+  if (entry.role==='user'||entry.role==='assistant') {
+    const type='branchMessage',label='分支',tooltip='回溯到此消息后的原生上下文；保留当时的压缩记录，不重新生成摘要';
     const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
-    button.dataset.contextAction = type; button.dataset.tooltip = tooltip; button.dataset.actionDescription = tooltip;
+    button.dataset.contextAction = type; button.dataset.entryId = entry.id; button.dataset.tooltip = tooltip; button.dataset.actionDescription = tooltip;
     button.onclick = () => { const id = sessionId(); if (id) send({ type, id: entry.id, sessionId: id }); };
     actions.append(button);
   }

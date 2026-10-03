@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -186,11 +186,14 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
-    "test": "vitest run",
-    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.4.1.vsix",
+    "test": "npm run check && vitest run --changed --passWithNoTests",
+    "test:all": "npm run check && vitest run",
+    "verify": "npm run test:all && npm run test:browser",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.5.0.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs",
-    "test:harness": "node scripts/harness-reconnect-smoke.mjs"
+    "test:harness": "node scripts/harness-reconnect-smoke.mjs",
+    "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",

@@ -73,7 +73,7 @@ it('keeps model preferences separate and rejects switching during an active prom
 });
 it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as const)('reconnects missing empty %s sessions (shared=%s) without sending messages',async(harness,shared)=>{
   const root=mkdtempSync(resolve(tmpdir(),'pi-empty-reconnect-'));
-  if(shared){host.provider.dispose();await host.provider.saveQueue;host.home=root;host.config.sharedHistory=true;activate(context);await host.provider.historyReady;}
+  if(shared){host.provider.dispose();await host.provider.persistence.pending;host.home=root;host.config.sharedHistory=true;activate(context);await host.provider.historyReady;}
   const audit=resolve(root,'wire.jsonl');host.config[harness+'.env']={PI_TEST_AUDIT:audit};
   mockHarness(harness,`context-missing-${harness}`);
   try {
@@ -90,7 +90,7 @@ it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as con
       if(shared)expect(await host.provider.sharedHistory.list()).toHaveLength(1);
     }
     expect(readFileSync(audit,'utf8')).not.toContain('session/prompt');
-  }finally{host.provider.dispose();await host.provider.saveQueue;host.home=undefined;rmSync(root,{recursive:true,force:true});}
+  }finally{host.provider.dispose();await host.provider.persistence.pending;host.home=undefined;rmSync(root,{recursive:true,force:true});}
 });
 it.each([['codex',true],['claude',true],['codex',false],['claude',false]] as const)('never recreates missing %s sessions unless proven empty (content=%s)',async(harness,withContent)=>{
   mockHarness(harness,`context-missing-${harness}`);await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
@@ -123,7 +123,7 @@ it('retains external history read-only when session/load is unsupported, without
 });
 it('restores the selected harness after restart and rejects stale cross-harness image messages',async()=>{
   mockHarness('codex');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
-  const id=host.provider.snapshot().sessionId;host.provider.dispose();await host.provider.saveQueue;activate(context);
+  const id=host.provider.snapshot().sessionId;host.provider.dispose();await host.provider.persistence.pending;activate(context);
   await host.provider.perform({type:'ready'});expect(host.provider.snapshot()).toMatchObject({harness:'codex',sessionId:id,status:'ready'});
   await host.provider.perform({type:'attachImages',harness:'pi',sessionId:id,images:[]});
   expect(host.provider.snapshot().error).toContain('Harness 已切换');
@@ -140,6 +140,17 @@ it('returns to disconnected when a harness launch configuration is invalid',asyn
   await host.provider.perform({type:'new'});
   expect(host.provider.snapshot()).toMatchObject({harness:'claude',status:'disconnected'});
   expect(host.provider.snapshot().error).toContain('启动配置无效');
+});
+it('keeps Codex fast mode off and collaboration default on creation and load, rejecting stale switch controls',async()=>{
+  mockHarness('codex','context-codex-options');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
+  for(let i=0;i<2;i++){
+    const configs=host.provider.snapshot().configs;
+    expect(configs.find((c:any)=>c.id==='fast-mode').currentValue).toBe('off');
+    expect(configs.find((c:any)=>c.id==='collaboration_mode').currentValue).toBe('default');
+    await host.provider.perform({type:'config',id:'fast-mode',value:'on'});expect(host.provider.snapshot().error).toContain('默认值');
+    await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
+    expect(host.provider.snapshot().status).toBe('ready');
+  }
 });
 it('uses harness-specific login commands and never copies Pi profile environment overrides',async()=>{
   host.config.env={PI_ONLY:'secret'};mockHarness('codex');host.config['codex.env']={CODEX_ONLY:'value'};
@@ -181,24 +192,45 @@ it('removes usage titles and does not recreate them after forgetting an active c
   await host.provider.recordUsage([]);
   expect(host.stored.get('usageTitles')).toEqual({});
 });
-it('serializes disabling history behind in-flight writes and invalidates their snapshots', async () => {
-  await host.provider.perform({type:'new'});
-  await host.provider.perform({type:'send',text:'private message'});
-  await host.provider.recordUsage([]);
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const write = vi.spyOn(host.provider.snapshots, 'write').mockImplementationOnce(async (snapshot: any) => { await gate; return snapshot; });
-  const clear = vi.spyOn(host.provider.snapshots, 'clear');
-  const saving = host.provider.save();
-  await vi.waitFor(() => expect(write).toHaveBeenCalled());
-  host.config.persistHistory = false;
-  host.configurationChanged!({affectsConfiguration:(key:string) => key === 'piAcp' || key === 'piAcp.persistHistory'});
-  expect(clear).not.toHaveBeenCalled();
-  host.config.persistHistory = true; // Old queued writes must not revive after a quick toggle.
-  release(); await saving; await host.provider.saveQueue;
-  expect(clear).toHaveBeenCalledOnce();
-  expect(host.stored.get('history')).toBeUndefined();
-  expect(host.stored.get('usageTitles')).toEqual({});
+it.each([false, true])('disables local persistence during writes without deleting shared history (shared=%s)', async shared => {
+  const root = mkdtempSync(resolve(tmpdir(), 'pi-persistence-race-'));
+  host.provider.dispose(); await host.provider.persistence.pending;
+  host.home = root; host.config.sharedHistory = shared; activate(context);
+  const provider = host.provider;
+  try {
+    await provider.perform({type:'new'});
+    await provider.perform({type:'send',text:'private message'});
+    await provider.recordUsage([]);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const originalWrite = provider.snapshots.write.bind(provider.snapshots);
+    const write = vi.spyOn(provider.snapshots, 'write').mockImplementationOnce(async (snapshot: any) => {
+      await gate;
+      return originalWrite(snapshot);
+    });
+    const clear = vi.spyOn(provider.snapshots, 'clear');
+    const saving = provider.save();
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+    host.config.persistHistory = false;
+    host.configurationChanged!({affectsConfiguration:(key:string) => key === 'piAcp' || key === 'piAcp.persistHistory'});
+    expect(clear).not.toHaveBeenCalled();
+    host.config.persistHistory = true; // Even a quick toggle must invalidate the in-flight local save.
+    release(); await saving; await provider.persistence.pending;
+    expect(provider.history).toEqual([]);
+    expect(host.stored.get('history')).toBeUndefined();
+    expect(host.stored.get('usageTitles')).toEqual({});
+    if (shared) {
+      expect(clear).not.toHaveBeenCalled();
+      const history = await provider.sharedHistory.list();
+      expect(history).toHaveLength(1);
+      expect((await provider.sharedHistory.read(history[0])).entries.some((e:any) => e.text === 'private message')).toBe(true);
+      await provider.save(); // No tombstone was created; future saves still work.
+      expect(await provider.sharedHistory.list()).toHaveLength(1);
+    } else expect(clear).toHaveBeenCalledOnce();
+  } finally {
+    provider.dispose(); await provider.persistence.pending;
+    host.home = undefined; rmSync(root, {recursive:true, force:true});
+  }
 });
 it('bounds diff document storage and reuses repeated previews', async () => {
   await host.provider.perform({type:'new'});
@@ -238,7 +270,7 @@ it('queues history deletion after in-flight snapshot writes', async () => {
 });
 it('migrates and shares history across hosts, views occupied sessions, and hands off after release', async () => {
   const root = mkdtempSync(resolve(tmpdir(),'pi-controller-shared-'));
-  host.provider.dispose(); await host.provider.saveQueue;
+  host.provider.dispose(); await host.provider.persistence.pending;
   host.home=root; host.config.sharedHistory=true;
   const legacy = {id:'legacy',cwd:process.cwd(),title:'old',updated:1,contextComplete:true,entries:[{id:'old-user',role:'user',text:'old message'}]};
   host.stored.set('history',[legacy]);
@@ -266,7 +298,7 @@ it('migrates and shares history across hosts, views occupied sessions, and hands
     await first.refreshSharedHistory();
     expect(first.snapshot().entries.some((e:any)=>e.text==='second machine')).toBe(true);
   } finally {
-    first?.dispose();second?.dispose();await Promise.all([first?.saveQueue,second?.saveQueue]);
+    first?.dispose();second?.dispose();await Promise.all([first?.persistence.pending,second?.persistence.pending]);
     host.home=undefined;rmSync(root,{recursive:true,force:true});
   }
 });
@@ -402,22 +434,23 @@ async function contextAgent(mode='context') {
   host.config.env = { PI_TEST_AUDIT: resolve(auditDir, 'wire.jsonl') };
   await host.provider.perform({ type: 'new' });
 }
-it('assigns distinct branch numbers and preserves them when deleting messages replaces the backend', async () => {
-  await contextAgent(); await host.provider.perform({type:'send',text:'same title'});
+it('assigns distinct native branch numbers and rejects message deletion without replacing the backend', async () => {
+  await contextAgent('context-native'); await host.provider.perform({type:'send',text:'same title'});
   const original=host.provider.snapshot(); expect(original.sessionNumber).toBe(1);
   await host.provider.perform({type:'branchMessage',sessionId:original.sessionId,id:original.entries[0].id});
   const branch=host.provider.snapshot(); expect(branch.sessionNumber).toBe(2);
   expect(host.provider.history.map((s:any)=>s.title)).toEqual(['same title','same title']);
   await host.provider.perform({type:'deleteMessage',sessionId:branch.sessionId,id:branch.entries[0].id});
-  expect(host.provider.snapshot().sessionId).not.toBe(branch.sessionId);
+  expect(host.provider.snapshot().sessionId).toBe(branch.sessionId);
+  expect(host.provider.snapshot().error).toContain('已移除');
   expect(host.provider.snapshot().sessionNumber).toBe(2);
 });
 function wire() { return readFileSync(resolve(auditDir!, 'wire.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)); }
 async function edit(type: 'branchMessage' | 'deleteMessage', id: string) {
   await host.provider.perform({ type, id, sessionId: host.provider.snapshot().sessionId });
 }
-it('branches inclusively into a fresh ACP session, keeps the original, and seeds exactly once on the next prompt', async () => {
-  await contextAgent();
+it('branches at the native node, keeps historical settings, and never sends a textual seed or summary request', async () => {
+  await contextAgent('context-native');
   await host.provider.perform({ type: 'send', text: 'retained-first' });
   const old = host.provider.snapshot(), selected = old.entries.find((e: any) => e.role === 'assistant');
   await host.provider.perform({ type: 'send', text: 'excluded-later' });
@@ -426,21 +459,22 @@ it('branches inclusively into a fresh ACP session, keeps the original, and seeds
   await edit('branchMessage', selected.id);
   const branch = host.provider.snapshot();
   expect(branch.error).toBeUndefined(); expect(branch.sessionId).not.toBe(old.sessionId);
-  expect(branch.entries).toEqual(old.entries.slice(0, 2)); expect(branch.contextPending).toBe(true); expect(branch.usage).toBeUndefined();
-  expect(branch.configs.map((c: any) => c.currentValue)).toEqual(['other', 'high']);
+  expect(branch.entries).toEqual(old.entries.slice(0, 2)); expect(branch.contextPending).toBe(false); expect(branch.usage).toBeUndefined();
+  expect(branch.configs.map((c: any) => c.currentValue)).toEqual(['default', 'low']);
   expect((host.stored.get('history') as any[]).find(s => s.id === old.sessionId).entries.some((e: any) => e.text === 'excluded-later')).toBe(true);
   expect(wire().filter(r => r.method === 'session/prompt')).toHaveLength(2);
-  expect(wire().some(r => r.method === 'session/load')).toBe(false);
+  expect(wire().filter(r => r.method === 'session/load')).toHaveLength(1);
+  expect(wire().filter(r => r.method === 'session/new')).toHaveLength(1);
+  expect(wire().some(r => r.method === '_pi_workbench/summarize')).toBe(false);
   await host.provider.perform({ type: 'send', text: 'continue-here' });
   const prompt = wire().filter(r => r.method === 'session/prompt').at(-1).params;
   expect(prompt.sessionId).toBe(branch.sessionId);
-  expect(prompt.prompt[0].text).toContain('retained-first'); expect(prompt.prompt[0].text).toContain('数学');
-  expect(prompt.prompt[0].text).not.toContain('excluded-later'); expect(prompt.prompt[1].text).toBe('continue-here');
+  expect(prompt.prompt).toEqual([{type:'text',text:'continue-here'}]);
   expect(host.provider.snapshot().contextPending).toBe(false);
   await host.provider.perform({ type: 'send', text: 'one-more' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt).toEqual([{ type: 'text', text: 'one-more' }]);
 });
-it('deletes an individual user message including its attached content from the next actual ACP prompt', async () => {
+it('rejects obsolete user deletion requests and preserves attached history', async () => {
   await contextAgent();
   host.provider.state.attachments = [{ id: 'a', name: 'private.ts', uri: 'file:///private.ts', text: 'SECRET_ATTACHMENT_BODY' }];
   await host.provider.perform({ type: 'send', text: 'DELETE_THIS_USER' });
@@ -448,35 +482,36 @@ it('deletes an individual user message including its attached content from the n
   expect(removed.contextBlocks).toBeDefined();
   await host.provider.perform({ type: 'send', text: 'keep-this-user' });
   await edit('deleteMessage', removed.id);
-  expect(host.provider.snapshot().entries.some((e: any) => e.id === removed.id)).toBe(false);
-  expect((host.stored.get('history') as any[]).some(s => s.id === old.sessionId)).toBe(false);
+  expect(host.provider.snapshot().entries.some((e: any) => e.id === removed.id)).toBe(true);
+  expect(host.provider.snapshot().error).toContain('已移除');
+  expect((host.stored.get('history') as any[]).some(s => s.id === old.sessionId)).toBe(true);
   await host.provider.perform({ type: 'send', text: 'next-request' });
   const payload = JSON.stringify(wire().filter(r => r.method === 'session/prompt').at(-1));
-  expect(payload).not.toContain('DELETE_THIS_USER'); expect(payload).not.toContain('SECRET_ATTACHMENT_BODY'); expect(payload).toContain('keep-this-user');
-  expect(payload).toContain('tool');
+  expect(payload).not.toContain('DELETE_THIS_USER'); expect(payload).not.toContain('SECRET_ATTACHMENT_BODY'); expect(payload).toContain('next-request');
+  expect(host.provider.snapshot().entries[0].contextBlocks).toEqual(removed.contextBlocks);
 });
-it('removes an assistant message without removing adjacent user or tool messages', async () => {
+it('rejects obsolete assistant deletion requests without changing the transcript', async () => {
   await contextAgent(); await host.provider.perform({ type: 'send', text: 'keep-user' });
   const old = host.provider.snapshot(), selected = old.entries.find((e: any) => e.role === 'assistant');
   await edit('deleteMessage', selected.id);
-  expect(host.provider.snapshot().entries.map((e: any) => e.role)).toEqual(['user', 'tool']);
+  expect(host.provider.snapshot().entries).toEqual(old.entries);
   await host.provider.perform({ type: 'send', text: 'continue' });
   const seed = wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text;
-  expect(seed).toContain('keep-user'); expect(seed).not.toContain('数学');
+  expect(seed).toBe('continue');
 });
-it('preserves the complete visible transcript when resuming a remotely compacted session', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'uncompacted-history' });
+it('preserves the visible transcript across native load and never re-injects it on a branch', async () => {
+  await contextAgent('context-native'); await host.provider.perform({ type: 'send', text: 'uncompacted-history' });
   const original = host.provider.snapshot();host.provider.disconnect();host.provider.state.status='disconnected';
   await host.provider.perform({ type: 'resume', id: original.sessionId });
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   await edit('branchMessage', original.entries[1].id);
   await host.provider.perform({ type: 'send', text: 'continue' });
   const seed = wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text;
-  expect(seed).toContain('uncompacted-history'); expect(seed).not.toContain('previous');
+  expect(seed).toBe('continue');
 });
-it('persists unsent reconstructed context across extension restart and blocks slash commands until it is sent', async () => {
+it('supports legacy unsent reconstructed snapshots across restart and blocks slash commands until synchronized', async () => {
   await contextAgent(); await host.provider.perform({ type: 'send', text: 'retain-after-restart' });
-  await edit('branchMessage', host.provider.snapshot().entries[1].id);
+  host.provider.state.contextPending=true;await host.provider.save(); // Legacy pre-native-fork snapshot.
   const branch = host.provider.snapshot();
   context.subscriptions.forEach((d: any) => d.dispose()); context.subscriptions = []; activate(context);
   await host.provider.perform({ type: 'resume', id: branch.sessionId });
@@ -488,20 +523,19 @@ it('persists unsent reconstructed context across extension restart and blocks sl
   await host.provider.perform({ type: 'send', text: 'continue' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text).toContain('retain-after-restart');
 });
-it('retains the original session and its usable agent when preparing a replacement fails', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'original' });
+it('retains the original session and its usable agent when native forking fails', async () => {
+  await contextAgent('context-native-fail'); await host.provider.perform({ type: 'send', text: 'original' });
   await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
   const original = host.provider.snapshot();
-  host.config.args = [resolve('test/mock-agent.mjs'), 'context-config-fail'];
-  await edit('deleteMessage', original.entries[0].id);
+  await edit('branchMessage', original.entries[0].id);
   expect(host.provider.snapshot()).toMatchObject({ sessionId: original.sessionId, entries: original.entries, status: 'ready' });
   expect(host.provider.snapshot().error).toBeTruthy();
   await host.provider.perform({ type: 'send', text: 'still-usable' });
   expect(host.provider.snapshot().error).toBeUndefined(); expect(host.provider.snapshot().status).toBe('ready');
 });
-it('reconstructs in another fresh session after an ambiguous seeded-prompt failure', async () => {
+it('recovers a legacy seeded-prompt failure in another fresh session', async () => {
   await contextAgent(); await host.provider.perform({ type: 'send', text: 'retained' });
-  await edit('branchMessage', host.provider.snapshot().entries[1].id);
+  host.provider.state.contextPending=true;await host.provider.save(); // Legacy unsynchronized context.
   const branch = host.provider.snapshot();
   await host.provider.perform({ type: 'send', text: 'crash' });
   expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', contextPending: true });
@@ -513,23 +547,23 @@ it('reconstructs in another fresh session after an ambiguous seeded-prompt failu
   expect(sent.sessionId).toBe(resumed.sessionId); expect(sent.prompt[0].text).toContain('retained');
   expect(host.provider.snapshot().contextPending).toBe(false);
 });
-it('blocks stale session actions, edits during generation and incomplete saved histories', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'original' });
+it('blocks stale branch actions, branching during generation, and unlocatable display messages', async () => {
+  await contextAgent('context-native'); await host.provider.perform({ type: 'send', text: 'original' });
   const original = host.provider.snapshot();
-  await host.provider.perform({ type: 'deleteMessage', id: original.entries[0].id, sessionId: 'stale-session' });
+  await host.provider.perform({ type: 'branchMessage', id: original.entries[0].id, sessionId: 'stale-session' });
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
-  await edit('deleteMessage', original.entries[0].id);
+  await edit('branchMessage', original.entries[0].id);
   expect(host.provider.snapshot().entries[0]).toEqual(original.entries[0]);
   await host.provider.perform({ type: 'cancel' }); await turn;
-  host.provider.state.contextComplete = false;
-  await edit('branchMessage', original.entries[0].id);
-  expect(host.provider.snapshot().sessionId).toBe(original.sessionId); expect(host.provider.snapshot().error).toContain('不完整');
+  host.provider.state.entries.push({id:'unmapped',role:'user',text:'not in native history'});
+  await edit('branchMessage', 'unmapped');
+  expect(host.provider.snapshot().sessionId).toBe(original.sessionId); expect(host.provider.snapshot().error).toContain('无法唯一');
 });
-it('keeps a cancelled first synchronization pending instead of assuming the peer retained it', async () => {
+it('keeps cancelled legacy synchronization pending instead of assuming the peer retained it', async () => {
   await contextAgent(); await host.provider.perform({ type: 'send', text: 'retained-before-cancel' });
-  await edit('branchMessage', host.provider.snapshot().entries[1].id);
+  host.provider.state.contextPending=true;await host.provider.save(); // Legacy unsynchronized context.
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(wire().filter(r => r.method === 'session/prompt')).toHaveLength(2));
   await host.provider.perform({ type: 'cancel' }); await turn;
@@ -538,12 +572,12 @@ it('keeps a cancelled first synchronization pending instead of assuming the peer
   await host.provider.perform({ type: 'send', text: 'continue' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text).toContain('retained-before-cancel');
 });
-it('rejects oversized reconstruction when the external adapter lacks bounded summary support', async () => {
+it('never falls back to large textual reconstruction when an adapter lacks native fork support', async () => {
   await contextAgent();
   host.provider.state.entries = [{ id: 'large', role: 'user', text: 'x'.repeat(2_010_000) }];
   const original=host.provider.snapshot();
   await edit('branchMessage', 'large');
-  expect(host.provider.snapshot().error).toContain('安全输入预算');
+  expect(host.provider.snapshot().error).toContain('不支持原生分支');
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   expect(host.provider.snapshot().sessionId).toBe(original.sessionId);
 });
@@ -556,8 +590,8 @@ it('does not dispatch cancel before a prompt when the user stops during local pe
   expect(host.provider.snapshot().entries.at(-1).text).toContain('尚未发送');
 });
 
-it('deduplicates billed requests, preserves logical conversations after deletion, and keeps branch spending separate', async()=>{
-  await contextAgent();await host.provider.perform({type:'send',text:'original'});
+it('deduplicates billed requests, rejects deletion, and keeps native branch spending separate', async()=>{
+  await contextAgent('context-native');await host.provider.perform({type:'send',text:'original'});
   const original=host.provider.snapshot().sessionId;
   const record={id:'native-request',sessionId:original,model:'p/m',timestamp:Date.now(),kind:'inference',input:100,output:20,cacheRead:80,cacheWrite:0};
   await host.provider.recordUsage([record]);await host.provider.recordUsage([record]);
@@ -568,6 +602,56 @@ it('deduplicates billed requests, preserves logical conversations after deletion
   await edit('branchMessage',host.provider.snapshot().entries[0].id);
   await host.provider.recordUsage([{...record,id:'branch-request',sessionId:host.provider.snapshot().sessionId}]);
   expect((host.stored.get('usageRecords') as any[]).find(r=>r.id==='branch-request').sessionId).not.toBe(original);
+});
+it('keeps both shared histories and releases the source lease after native branching',async()=>{
+  const root=mkdtempSync(resolve(tmpdir(),'pi-native-shared-'));
+  host.provider.dispose();await host.provider.persistence.pending;host.home=root;host.config.sharedHistory=true;activate(context);await host.provider.historyReady;
+  const {SharedHistoryStore}=await import('../src/shared-history');let reader:any;
+  try{
+    await contextAgent('context-native');await host.provider.perform({type:'send',text:'original'});
+    const original=host.provider.snapshot();await host.provider.perform({type:'send',text:'later'});
+    await edit('branchMessage',original.entries[1].id);
+    const branch=host.provider.snapshot();expect(branch.error).toBeUndefined();expect(branch.sessionId).not.toBe(original.sessionId);
+    reader=new SharedHistoryStore(host.provider.sharedHistory.root);const history=await reader.list();expect(history).toHaveLength(2);
+    const saved=await reader.read(history.find((s:any)=>s.id===original.sessionId));expect(saved.entries.some((e:any)=>e.text==='later')).toBe(true);
+    await reader.claim(original.sessionId);await expect(reader.claim(branch.sessionId)).rejects.toThrow('另一个窗口');
+  }finally{await reader?.releaseAll();host.provider.dispose();await host.provider.persistence.pending;host.home=undefined;rmSync(root,{recursive:true,force:true});}
+});
+it('cancels native branch preparation without discarding the original connection',async()=>{
+  await contextAgent('context-native');await host.provider.perform({type:'send',text:'original'});
+  const before=host.provider.snapshot(),agent=host.provider.agent,request=agent.request.bind(agent);let rejectFork:((e:Error)=>void)|undefined;
+  vi.spyOn(agent,'request').mockImplementation((method:any,params:any)=>{
+    if(method==='_pi_workbench/fork')return new Promise((_,reject)=>{rejectFork=reject;});
+    if(method==='_pi_workbench/cancel_fork'){rejectFork?.(new Error('cancelled native fork'));return Promise.resolve({});}
+    return request(method,params);
+  });
+  const operation=edit('branchMessage',before.entries[1].id);await vi.waitFor(()=>expect(rejectFork).toBeDefined());
+  expect(host.provider.snapshot().contextOperation).toEqual({kind:'fork'});
+  await host.provider.perform({type:'cancelContext'});await operation;
+  expect(host.provider.snapshot().contextOperation).toBeUndefined();
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:before.sessionId,entries:before.entries});expect(host.provider.agent).toBe(agent);
+  expect(wire().some(r=>r.method==='_pi_workbench/summarize')).toBe(false);
+});
+it('keeps a source disconnect during native branching disconnected and reconnectable', async () => {
+  await contextAgent('context-native'); await host.provider.perform({type:'send',text:'original'});
+  const provider = host.provider, before = provider.snapshot(), agent = provider.agent;
+  const request = agent.request.bind(agent);
+  vi.spyOn(agent, 'request').mockImplementation((method:any, params:any) => {
+    if (method !== '_pi_workbench/fork') return request(method, params);
+    agent.dispose(); agent.options.closed('source disconnected during fork');
+    return Promise.reject(new Error('ACP connection closed'));
+  });
+  await edit('branchMessage', before.entries[1].id);
+  expect(provider.snapshot()).toMatchObject({status:'disconnected',sessionId:before.sessionId,entries:before.entries});
+  expect(provider.snapshot().contextOperation).toBeUndefined();
+  expect(provider.agent).toBeUndefined();
+  await provider.perform({type:'connect'});
+  expect(provider.snapshot()).toMatchObject({status:'ready',sessionId:before.sessionId});
+});
+it('refuses a changed target adapter rather than replaying history into it',async()=>{
+  await contextAgent('context-native');await host.provider.perform({type:'send',text:'original'});const before=host.provider.snapshot();
+  host.config.args=[resolve('test/mock-agent.mjs'),'context'];await edit('branchMessage',before.entries[0].id);
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:before.sessionId,entries:before.entries});expect(host.provider.snapshot().error).toContain('目标适配器');
 });
 it('persists custom prices, rejects invalid numbers and restores defaults',async()=>{
  await host.provider.perform({type:'setPrice',model:'p/m',price:{input:2,output:3,cacheRead:.2,cacheWrite:2.5}});
@@ -643,7 +727,7 @@ it('persists successful selections immediately and inherits them after restart e
   await host.provider.perform({type:'config',id:'model',value:'other'});
   await host.provider.perform({type:'config',id:'thinking',value:'high'});
   expect(host.stored.get('sessionPreferences')).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
-  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  host.provider.dispose();await host.provider.persistence.pending;activate(context);
   const before=wire().length;
   await host.provider.perform({type:'ready'});
   expect(wire().length).toBe(before);
@@ -663,7 +747,7 @@ it('resumes the last active warm conversation after restart, and reconnects it w
   await host.provider.perform({type:'new'});
   await host.provider.perform({type:'resume',id:first});
   expect(host.stored.get('activeSession')).toBe(first);
-  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  host.provider.dispose();await host.provider.persistence.pending;activate(context);
   const before=wire().length;
   await host.provider.perform({type:'ready'});
   expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:first});
@@ -692,13 +776,13 @@ it('does not replace an unavailable native session with a new one', async () => 
 it('does not auto-open a different history after deleting the last active record', async () => {
   await contextAgent();await host.provider.perform({type:'new'});
   await host.provider.perform({type:'deleteHistory',id:host.provider.snapshot().sessionId});
-  host.provider.dispose();await host.provider.saveQueue;activate(context);
+  host.provider.dispose();await host.provider.persistence.pending;activate(context);
   const before=wire().length;
   await host.provider.perform({type:'ready'});
   expect(host.provider.snapshot().sessionId).toBeUndefined();expect(wire().length).toBe(before);
 });
 it('warns about unavailable inherited values without retrying or silently creating extra sessions', async () => {
-  await contextAgent();host.provider.dispose();await host.provider.saveQueue;
+  await contextAgent();host.provider.dispose();await host.provider.persistence.pending;
   host.stored.set('sessionPreferences',[{kind:'model',value:'removed-model'},{kind:'thinking',value:'removed-level'}]);
   activate(context);const before=wire().length;
   await host.provider.perform({type:'new'});

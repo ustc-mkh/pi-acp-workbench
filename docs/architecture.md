@@ -15,7 +15,7 @@ ChatProvider (src/extension.ts)
          Pi / 模型
 ```
 
-Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校验操作、存储快照和权限回应；Webview 负责渲染和发送用户意图。更新合并后以约 40ms 防抖发送状态。`src/state-channel.ts` 在首次连接、会话切换或 Webview 重载时发送完整状态，其余发送字段和消息增量，避免重复传输历史图片及统计。前端保留未变化消息的对象身份；序号不连续时请求完整同步。当前宿主仍通过序列化比较变化，长历史虚拟列表和基于 revision 的变更追踪尚未实现。stderr 进入输出面板，stdout 只能承载 ACP 协议。
+Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校验操作、存储快照和权限回应；Webview 负责渲染和发送用户意图。更新合并后以约 40ms 防抖发送状态。`src/state-channel.ts` 在首次连接、会话切换或 Webview 重载时发送完整状态，其余发送字段和消息增量，避免重复传输历史图片及统计。前端保留未变化消息的对象身份；序号不连续时请求完整同步。宿主对消息、附件、统计和原生节点映射使用对象身份比较：修改时替换对象，不能原地修改已发布的内容；`Entry` 顶层字段为只读。小型可变字段仍按值比较。流式更新不再序列化旧图片及全部统计，长历史虚拟列表尚未实现。stderr 进入输出面板，stdout 只能承载 ACP 协议。
 
 `AgentProcess` 用 SDK 管理请求/通知；初始化检查协议版本，默认初始化超时 20 秒，普通请求超时 30 秒。取消先发送 `session/cancel`，5 秒无响应则终止连接。POSIX 下清理整个进程组；Windows 使用对应进程树终止路径。关闭回调和 generation 标记共同阻止旧连接继续改写当前会话。
 
@@ -24,6 +24,8 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 `src/harness.ts` 定义 Pi、Codex、Claude Code 三个 profile、启动配置和 Session ID 转换。Pi 配置保留旧键；另外两者使用 piAcp.codex.* / piAcp.claude.*，只在扩展宿主启动用户已安装的 ACP 适配器，不自动安装软件。
 
 `AgentProcess.request()` 是带 sessionId 请求的统一边界：非 Pi 本地 ID 为 workbench:<harness>:<编码后的原生ID>，RPC 出站还原原生 ID，通知/权限入站加入命名空间。新 Pi ID 不允许占用保留前缀。完整快照与索引记录 harness，旧记录默认 Pi；丢失新字段的旧客户端记录仍可从非 Pi ID 命名空间识别。租约、编号与历史删除均使用本地 ID。不得在宿主绕过 request() 直接发送带本地 ID 的标准请求。
+
+Codex 的 fast-mode 和 collaboration_mode 选择器隐藏，创建/恢复时通过标准 set_config_option 固定为 off/default；拒绝旧 UI 修改这两个配置，偏好保存也排除它们。其他模型、思考和权限配置照常，Pi/Claude 不应用这些覆盖。
 
 selectedHarness 按工作区持久化；非 Pi 的 activeSession / sessionPreferences 放在 harness.<id>.* 键下。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/重建期间不允许切换。
 
@@ -48,7 +50,6 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench
 | 重新连接 | 恢复当前会话；没有当前会话时尝试上次活动历史；不自动降级为新建 |
 | 恢复失败或不支持 session/load | 留下错误与原会话记录，等待重试或用户主动新建 |
 | 分支 | 用户显式要求的新分支，包含所选记录之前及本条内容 |
-| 删除消息 | 使用替换的后台 ACP 会话重建上下文；保留原逻辑对话的统计归属，不增加一个无关空白对话 |
 
 旧版本没有活动指针时，首次迁移使用最近历史。`activeSession: null` 表示明确无可恢复活动历史，避免删除当前历史后重启又打开另一段对话。删除本地历史不会中断正在运行的 Agent。关闭历史持久化时，重启回到欢迎页，但当前运行内仍可重连活跃会话。
 
@@ -56,7 +57,7 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench
 
 ### 模型与 thinking 继承
 
-`src/session-settings.ts` 提供宿主和 UI 共用的选择器解析，识别 configOptions 的 model / thought_level、常见 thinking 名称及旧版 modes。已有 thinking config 时隐藏重复的旧 modes 控件。
+`src/session-configuration.ts` 统一设置验证与 RPC 应用，新会话偏好不可用时提示，恢复已有设置时严格失败；每次模型切换后重新读取选项。`src/session-settings.ts` 提供宿主和 UI 共用的选择器解析，识别 configOptions 的 model / thought_level、常见 thinking 名称及旧版 modes。已有 thinking config 时隐藏重复的旧 modes 控件。
 
 成功的模型/思考选择立即保存 `sessionPreferences`，无需先发送消息；完成一轮后也捕获 Agent 更新的设置。恢复历史尊重该会话原有设置，并将其作为后续新建的默认组合。新建优先取当前会话组合，没有当前组合时取工作区保存的偏好（旧版可从历史快照迁移）。偏好不包含对话正文，关闭历史存储仍保留。
 
@@ -82,23 +83,23 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench
 
 以下空闲缓存仅用于本地模式。当前活跃连接不计入空闲缓存。缓存存放进程、状态、工作目录、检查点等，切换命中不再 initialize/load；死亡缓存转冷加载。预算不代表整个 Pi 进程内存上限。扩展结束或 Webview 销毁时清空空闲缓存；修改启动配置使旧缓存失效。
 
-快照写入、删除、清空及用量持久化通过 saveQueue 串行化；关闭历史保存会递增存储 epoch，使关闭前排队的快照即使在快速重新开启后也不能复活。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除历史会移除对应统计标题；清空历史或关闭持久化会清空所有统计标题，避免保留首条消息片段。被删除的活动会话不能通过后续用量刷新重建标题。上述操作不擦除 Pi 原生文件，不删除计费记录和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
+快照写入、删除、清空及用量持久化通过 `src/history-persistence.ts` 的队列串行化；关闭历史保存会递增存储 epoch，使关闭前排队的快照即使在快速重新开启后也不能回到本机列表。已完成的本地失效写入会清理；共享写入一旦提交则保留，关闭本机保存不能调用共享删除或写入 tombstone。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除历史会移除对应统计标题；清空历史或关闭持久化会清空所有统计标题，避免保留首条消息片段。被删除的活动会话不能通过后续用量刷新重建标题。上述操作不擦除 Pi 原生文件，不删除计费记录和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
 
 会话编号由 `src/session-numbers.ts` 按逻辑 conversationId 分配，分支获得新号，后台上下文替换保留旧号。共享模式在索引事务内分配/迁移，额外保留编号映射，以兼容旧客户端保存时丢掉快照内的新字段。本地模式使用 workspaceState.nextSessionNumber。编号与标题分开展示，不随历史排序改变；清空不重置计数器。未持久化会话显示完整 Session ID 作为后备标识。
 
-## 上下文编辑和压缩
+## 原生上下文分支
 
-ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 prompt 注入保留的历史来实现上下文编辑；界面记录和原始复制结果仍保留本地全文。新后台 ID 与统计所用 logical conversationId 必须区分。
+逐条消息删除已移除，宿主拒绝旧 `deleteMessage` 请求。Pi 分支不再使用 `session/new` + 文本摘要注入，而通过 `_pi_workbench/fork` 保存原生会话路径，再用 `session/load` 加载。Codex/Claude 不调用该私有扩展。
 
-1. 验证快照完整性、附件和用户选择的消息 ID。
-2. 查找与保留前缀指纹匹配的有效压缩检查点。
-3. 超预算时，以固定安全预算进行逐块摘要，不把全部长历史一次提交模型。摘要仅保存于检查点，不再额外维护 preparedContext 副本；旧快照中的该字段读取时忽略。
-4. 候选 Agent 初始化、新建、恢复原设置成功后才切换。
-5. 标记 contextPending；下一条普通消息携带准备好的历史，同步成功后清除标记。
+1. `src/native-branch.ts` 验证原生 parent 链、消息内容指纹、工具调用/结果配对及 compaction/context_edit 边界。显示消息通过唯一内容匹配、时间戳或已验证映射定位；歧义、孤立结果、未完成工具调用等失败关闭。
+2. `_pi_workbench/inspect` 返回 forkPoints；完整快照保存 nativeForks（显示 ID → 原生 ID/前缀 SHA-256），轻量索引不保存这些字段。流式 assistant/thought 更新携带原生时间戳 messageId，避免重复文本误定位。
+3. 原生操作先复制源文件到私有临时目录，避免 Pi 启动迁移/设置回退改写源文件。隔离 RPC worker 仅加载 `dist/pi-native-fork.mjs`，通过 `ctx.fork(entryId,{position:'at'})` 创建独立原生会话；禁止该 worker 自动 cache warming。
+4. 再次验证原生前缀并写入不进入模型上下文的 `pi-acp-workbench/native-fork` 元数据。规范化仅忽略 parent 链重接、labels 及其 compaction 边界映射；消息/图片/压缩记录必须保持一致。worker 退出后将新文件 header 的 parentSession 关联回真实源文件，再登记到 adapter store。
+5. 候选 Agent 加载成功后才切换并释放旧共享租约。准备期间使用 `contextOperation.kind=fork` 展示进度和取消入口；失败回滚根据源 Agent 的实际存活状态恢复 ready/disconnected，不覆盖已经失去的租约状态。使用分支时的模型/思考设置，不覆盖为源会话当前偏好；contextPending=false，下一条 prompt 只含新输入。继承的旧 usage 在标记处清零，之后的新请求正常累计。原文件和原会话历史保留。
 
-删除摘要覆盖范围的内容会使该检查点失效；优先使用更早有效检查点，否则有界重建。摘要可取消，失败不静默丢弃记录。历史工具调用只成为文本上下文，不执行工具回放；不会提升为系统指令。待同步时禁止 slash 命令；首轮同步结果不确定时断开，重连时重建独立后台会话避免重复注入。这是恢复同一逻辑对话的内部替换，不是隐式创建一个用户可见空白对话。
+这避免了新增摘要请求与人为内容改写，但不是缓存命中保证：新 Session ID 可能改变 provider 的缓存路由（openai-codex 的 prompt_cache_key 派生自 sessionId），还受系统提示、模型和有效期影响。不会回滚工作区文件或重新执行工具。
 
-当前保留历史中含图片时拒绝文本摘要重建；必须先移除相关消息。不要通过丢弃图片来“修复”此限制。
+旧版本已经持久化的 contextPending 快照仍兼容原有有界摘要/首次同步流程；不支持图片重建，失败不静默截断。新分支不再进入该路径。
 
 ## 内置增强适配器
 
@@ -106,7 +107,8 @@ ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 promp
 
 只有协商 agentCapabilities._meta['pi-workbench'].version=1 后，宿主才使用：
 
-- `_pi_workbench/inspect`：分页读取真实 usage、模型价格、原生有效上下文和检查点。
+- `_pi_workbench/inspect`：分页读取真实 usage、模型价格、原生有效上下文、检查点和 forkPoints。
+- `_pi_workbench/fork` / `cancel_fork`：原生分支及取消，需额外协商 `nativeFork=true`。
 - `_pi_workbench/summarize`：有界摘要工作进程，关闭工具/扩展/技能/模板/会话保存。
 - `_pi_workbench/cancel_summary`：取消摘要。
 

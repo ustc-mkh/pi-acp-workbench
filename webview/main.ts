@@ -198,12 +198,14 @@ function paint() {
   transcriptView.update(visible,busy);
   el('toggle-activity').hidden = !visible.some(entry=>entry.role==='tool'||entry.role==='thought');
   for (const action of messages.querySelectorAll<HTMLButtonElement>('[data-context-action]')) {
-    action.disabled = harness!=='pi' || busy || connecting || !!state.preview || !!state.readOnly || !state.sessionId || !state.contextComplete;
-    action.dataset.tooltip = harness!=='pi' ? '此 harness 暂不支持分支与删除上下文，可复制记录后显式新建会话' : busy ? '请先停止输出再编辑上下文' : !state.contextComplete ? '此历史记录不完整，无法可靠编辑上下文' : action.dataset.actionDescription;
+    const nativePoint=!!state.nativeForks?.[action.dataset.entryId || ''];
+    action.disabled = harness!=='pi' || state.status!=='ready' || !!state.preview || !!state.readOnly || !state.sessionId || !!state.contextPending || !nativePoint;
+    action.dataset.tooltip = harness!=='pi' ? '此 harness 暂不支持原生分支' : busy ? '请先停止输出再分支' : !nativePoint ? '此消息没有可验证的安全原生位置；不会退回摘要重建' : action.dataset.actionDescription;
   }
   el('context-pending').hidden = !state.contextPending;
   el('context-operation').hidden=!state.contextOperation;
-  el('context-progress').textContent=state.contextOperation?`正在重建摘要 ${state.contextOperation.done}/${state.contextOperation.total} · 计入用量`:'';
+  el('context-progress').textContent = state.contextOperation?.kind === 'fork' ? '正在创建原生分支…'
+    : state.contextOperation?.kind === 'summary' ? `正在重建摘要 ${state.contextOperation.done}/${state.contextOperation.total} · 计入用量` : '';
   if(!statisticsOpen)renderDiagrams(messages);
   if(statisticsOpen&&!pricesOpen)statisticsPage.update(state.statistics);
   if(pricesOpen)pricesPage.update(state.statistics);
@@ -224,7 +226,7 @@ function paint() {
       actions.append(button('取消', () => send({ type: 'permission', id: item.id }))); card.append(actions); permissions.append(card);
     }
   }
-  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.modes, state.configs, state.status, state.readOnly]);
+  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.harness, state.modes, state.configs, state.status, state.readOnly]);
   if (selectors.dataset.signature !== selectSignature) {
     selectors.dataset.signature = selectSignature; selectors.replaceChildren();
     for (const control of sessionSelectors(state)) {

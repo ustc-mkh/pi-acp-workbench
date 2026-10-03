@@ -5,19 +5,19 @@ export type StateMessage =
   | { type: 'state'; state: ChatState; revision: number }
   | { type: 'statePatch'; revision: number; fields: Partial<Fields>; unset: (keyof Fields)[]; entries: Entry[]; order?: string[] };
 
-/** Keep large immutable history/image payloads off the streaming transport. */
+/** Large fields and entries use replacement semantics; small mutable fields use value comparison. */
 export class StateEncoder {
   private revision = 0;
   private session?: string;
-  private fields = new Map<string, string | undefined>();
-  private entries = new Map<string, string>();
+  private fields = new Map<string, unknown>();
+  private entries = new Map<string, Entry>();
   reset() { this.revision = 0; this.fields.clear(); this.entries.clear(); }
   encode(state: ChatState): StateMessage {
     if (state.sessionId !== this.session) this.reset();
     this.session = state.sessionId;
     const { entries, ...fields } = state;
-    const nextFields = new Map(Object.entries(fields).map(([key, value]) => [key, JSON.stringify(value)]));
-    const nextEntries = new Map(entries.map(entry => [entry.id, JSON.stringify(entry)]));
+    const nextFields = new Map(Object.entries(fields).map(([key, value]) => [key, ['statistics','attachments','nativeForks'].includes(key) ? value : JSON.stringify(value)]));
+    const nextEntries = new Map(entries.map(entry => [entry.id, entry]));
     const revision = ++this.revision;
     let message: StateMessage;
     if (revision === 1) message = { type: 'state', state, revision };

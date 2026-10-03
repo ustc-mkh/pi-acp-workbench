@@ -1,50 +1,57 @@
 # 测试与发布
 
-从仓库根目录执行。单元和模拟协议测试不调用付费模型。
+从仓库根目录执行。日常只需一个命令；所有自动单元、模拟协议与浏览器测试都不调用付费模型。
 
-## 日常命令
+## 两个主要入口
 
-```bash
-npm ci
-npm run check
-npm test
-npm run build
-npm run test:browser
-npm run package
-```
-
-`npm run package` 会构建并由 VSCE 的 prepublish 钩子执行类型检查/构建，输出父目录 `pi-acp-workbench-<version>.vsix`。它不自动执行全部测试，因此发布前仍需 `npm test`。构建会生成适配器、渲染资源和第三方许可证声明。
-
-## 分层测试
-
-| 范围 | 测试 | 目的 |
+| 场景 | 命令 | 执行内容 |
 | --- | --- | --- |
-| Harness | harness / harness-agent / controller | profile 配置、ID 命名空间、发送/授权/取消、切换互斥、偏好隔离、缺失 loadSession 的只读回退 |
-| 标准 ACP 传输 | agent.test.ts + mock-agent.mjs | 独立 NDJSON peer；分片 UTF-8、初始化、超时、取消、退出、权限 |
-| 宿主状态机 | controller.test.ts | mock vscode + 真实子进程；创建/恢复、偏好、缓存、持久化、上下文编辑、图片 |
-| 内置适配器 | bundled-adapter.test.ts | 实际构建增强适配器；协商私有扩展、统计、隔离与取消摘要 |
-| 纯逻辑 | state / state-channel / context / checkpoints / telemetry / snapshots / session-cache | 合并、增量状态与同步、预算、检查点、存储和统计 |
-| 适配器加固 | build-adapter / usage-cache | 补丁唯一匹配、日志分页缓存及追加/截断失效 |
-| 共享历史 | shared-history / controller | 多实例写入、租约交接、只读查看、旧历史迁移、删除防复活和版本冲突 |
-| 执行过程与输入区 | transcript / composer-resize | 分组边界、流式折叠状态、全局展开、输入区高度与键盘调整 |
-| DOM / 渲染 | markdown / diagrams / selectors / tooltips / image-paste 等 | 数学、净化、模型控件、交互和附件 |
-| 真实浏览器 | scripts/browser-smoke.mjs | 窄视口、深浅色、公式流式、欢迎页显式新建、发送、权限、取消、diff |
-| Extension Host | test/host.cjs | 真正 VS Code 激活、命令、ACP 子进程、编辑器选区 |
+| 日常修改 | `npm test` | 类型检查 + 受未提交改动影响的测试 |
+| 提交 / 发布前 | `npm run verify` | 类型检查 + 全部自动测试 + 构建 + 真实浏览器冒烟 |
 
-只跑相关文件：
+`npm test` 包含已暂存、未暂存及未跟踪文件，通过 Vitest 的依赖图选择测试。工作区没有相关改动时仅类型检查，不代表执行过完整回归。包配置、锁文件、构建脚本、模拟进程和原生适配器代码变更会自动触发全部测试，因为子进程加载不在普通导入图中。CSS / 布局变更应执行 `verify`。
+
+只需要完整单元和模拟协议测试（不需要浏览器）时，用 `npm run test:all`。已有提交、干净检出或 CI 应使用 `test:all` / `verify`，不要依赖默认的改动筛选。
+
+调试单个问题仍可直接指定：
 
 ```bash
-npx vitest run test/controller.test.ts test/selectors.test.ts
-npx vitest run test/controller.test.ts -t 'inherits'
+npx vitest run test/controller.test.ts -t 'native branch'
 ```
 
-浏览器脚本默认使用 `/usr/bin/google-chrome`，其他路径：
+## 浏览器与打包
+
+`verify` 已包含构建和浏览器验证，无需再依次手动执行 check、test、build、test:browser。单独验证 UI 可运行 `npm run test:browser`。
+
+浏览器依次使用 `CHROME_PATH`、系统 `/usr/bin/google-chrome`、Playwright 安装的 Chromium。未安装时执行一次 `npx playwright install chromium`，或指定已有浏览器：
 
 ```bash
 CHROME_PATH=/absolute/path/to/chromium npm run test:browser
 ```
 
-脚本启动本地临时 HTTP 服务和 headless 浏览器，在项目父目录输出 preview-dark.png / preview-light.png。运行环境需要允许本地端口和子进程。此测试不等价于 VS Code 的完整 Webview 宿主和 CSP 测试。
+截图统一放在已忽略的 `test-results/browser/`。测试需要允许本地端口和子进程；它不等价于真实 VS Code Webview 的 CSP / 宿主集成验证。
+
+验证后用 `npm run package` 打包。VSCE 的 prepublish 钩子执行一次类型检查与构建，输出父目录 `pi-acp-workbench-<version>.vsix`，不再重复构建。打包本身不运行完整测试。构建同时生成增强适配器、渲染资源与第三方许可证声明。
+
+## 保留的关键自动覆盖
+
+- 会话生命周期：显式新建、恢复、Harness 隔离、偏好继承、暖缓存与失败回退。
+- 数据完整性：共享租约、版本冲突、删除防复活、关闭本机保存时保护共享记录。
+- 原生分支：节点与工具边界、历史设置、继承用量排除、取消和断连恢复。
+- 协议与渲染：ACP 流式/权限/取消、图片限制、Markdown / 数学 / SVG 净化。
+- 状态同步：消息对象替换、旧图片与统计不重复序列化、增量更新和丢包重同步。
+
+这些行为已由自动测试覆盖，不要求每次修改再手动遍历一份重复清单。新测试优先补现有文件中缺失的行为；不为同一行为重复增加单元、宿主与浏览器断言。浏览器只验证真实布局、交互及 DOM 环境无法代替的链路。
+
+## 按需运行的外部集成验证
+
+以下不放入日常或 `verify`，只在对应集成发生变化时运行：
+
+- `npm run test:native-fork`：要求安装支持 `ctx.fork(...,{position:'at'})` 的 Pi，可用 `PI_ACP_PI_COMMAND` 指定路径。在临时目录验证原生图片/压缩前缀、历史设置、源文件不变、ACP fork/load 和继承用量，不提交模型请求；会读取已有 Pi 配置。
+- `npm run test:harness`：要求安装 Codex / Claude ACP 适配器并准备凭据。通过 `CODEX_ACP_COMMAND` / `CLAUDE_ACP_COMMAND` 指定命令，`CODEX_ACP_ARGS` / `CLAUDE_ACP_ARGS` 传 JSON 参数数组。新建并恢复临时空会话，不调用 `session/prompt`，可能留下原生空会话元数据。
+- 下方 Extension Host 测试：仅在 VS Code API、编辑器上下文或激活逻辑变化时需要。
+
+上述验证都不代表真实付费模型、所有供应商或 Windows / Remote SSH 已验证。
 
 ## Extension Host 测试
 
@@ -66,44 +73,13 @@ cat "$PI_TEST_ROOT/result.json"
 
 需要桌面显示环境（Linux CI 通常使用虚拟显示器）。此测试故意设置工作区信任，以便启动 mock Agent。结果文件中的 passed=true 才表示执行完成；VS Code 启动成功不代表测试通过。
 
-## 会话变更的回归清单
-
-- 空工作区首次打开不发送 session/new；重复 ready 不重试。
-- 左上角切换 harness 不自动创建/发送，不把草稿或附件转给其他 profile；繁忙时拒绝切换。
-- 同一原生 Session ID 在 Pi / Codex / Claude 的历史和租约中互不覆盖；标准 RPC 出站使用原生 ID，通知与权限入站使用本地 ID。
-- 切换回历史使用原 harness，模型偏好和活动指针隔离；不支持 load 时只读，非 Pi 不调用 Pi 私有扩展。
-- 真实适配器初始化握手不等同于真实模型验证。当前开发验证过 codex-acp 2.1.1 / claude-agent-acp 0.85.1（@agentclientprotocol scope），完整认证/模型调用需单独验证。
-- 显式新建恰好创建一个会话，继承上次 model 和 thinking；模型切换后重新读取选项。
-- config thinking 与旧版 modes 同时提供时只保留一个有效控制。
-- 选择后不发送消息，重启仍可继承；关闭历史保存后偏好仍保留。
-- 冷启动恢复最后活动 ID；暖缓存恢复不调用 initialize/load/new。
-- 连接失败、不支持 load、取消后重连都不能自动变成空白对话。
-- 删除当前历史后自动保存不重新加入；重启不自动打开另一条历史。
-- 设置持久化失败不能使完成的回复卡在 busy；预览等待保存时禁止发送和新建。
-- 删除/关闭历史会清除统计标题但保留计费记录；并发写入不能在清空后复活。
-- 流式增量不重复传输旧图片；丢失更新后请求完整同步；重复 Diff 预览不无限累积缓存。
-- 两个共享历史实例并发追加不丢会话；超过 20 条不裁剪；只读客户端释放后可接管，删除记录不能被旧窗口或迁移复活。
-- 浏览器中执行过程默认折叠、最终回答可见；拖动分界线改变输入高度，滚动条不显示箭头。
-- 注入 VS Code 默认的 html scrollbar-color 后，仍使用透明轨道、6px 滚动条；同时检查标准属性和实际 gutter 宽度，不能只检查伪元素样式。
-- 同名分支编号不同；旧历史自动补号，跨客户端、排序和删除消息重建后编号保持稳定，清空后不复用。
-- 分支保留原对话；删除消息保持逻辑统计归属；待同步和压缩检查点恢复仍正确。
-- 真实 Pi 验证 model/thinking（至少一个非 OpenAI 提供商），检查重启后的原生历史确实恢复。需要账户的验证须明确记录环境，不能把 mock 测试描述为真实模型兼容性结论。
-
-## 可选真实 Harness 恢复测试
-
-安装 ACP 适配器并准备凭据后运行 `npm run test:harness`。默认从 PATH 启动 `codex-acp` 和 `claude-agent-acp`；可通过 `CODEX_ACP_COMMAND` / `CLAUDE_ACP_COMMAND` 指定绝对命令路径，通过 `CODEX_ACP_ARGS` / `CLAUDE_ACP_ARGS` 传入 JSON 参数数组（例如 Node 路径加适配器入口）。
-
-此测试会使用当前用户的配置与凭据，在临时工作目录新建空会话，关闭进程，再恢复并验证命令通知；不会调用 session/prompt。适配器可能在原生索引中留下空会话元数据。它不是付费模型回复或真实 VS Code GUI 联调测试，不纳入默认 npm test。
-
-回归覆盖：本地/共享存储下的空会话重复恢复、编号/设置保留、旧记录清理、已有内容和不完整记录不重建、普通内部错误不重建；浏览器覆盖菜单实际命中测试、20 条命令、异步通知、滚动与 Enter 不误发送。
-
 ## 发布
 
-1. 完成类型检查、完整测试、构建及相关 UI / Extension Host 验证。
+1. 执行 `npm run verify`；涉及 VS Code API 时再执行 Extension Host 验证。
 2. 更新 package.json.version、package-lock.json 中根版本、src/agent.ts 的 clientInfo.version、package 脚本的 VSIX 文件名；同步 README 安装示例和 CHANGELOG。
 3. `npm run package`，检查 VSIX 内容包含 dist/pi-adapter.mjs、Webview/KaTeX 字体、许可证及 README；不包含密钥、测试历史和 node_modules。
 4. 在干净测试 profile 通过 Install from VSIX 安装，检查欢迎/恢复、模型继承、数学、Mermaid、图片与统计基本行为。记录未覆盖的平台。
 5. 提交源码，创建与 package 一致的 vX.Y.Z 标签，推送仓库；创建同名 GitHub Release，附上 VSIX、变更说明及 SHA-256。源码由标签关联。
 6. 从 Release 下载 VSIX 并核对摘要，确认发布附件可用。不要用 Marketplace 发布命令代替 GitHub Release 附件上传。
 
-示例摘要命令：`sha256sum ../pi-acp-workbench-0.4.1.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
+示例摘要命令：`sha256sum ../pi-acp-workbench-0.5.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。

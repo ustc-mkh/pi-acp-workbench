@@ -12,7 +12,7 @@ export class SnapshotStore {
     const filename=this.file(storageKey), temp=filename+'.'+randomUUID()+'.tmp';
     try {await writeFile(temp,JSON.stringify(snapshot),{encoding:'utf8',mode:0o600}); await rename(temp,filename);}
     finally {await rm(temp,{force:true});}
-    const { entries, checkpoints, ...index } = snapshot;
+    const { entries, checkpoints, nativeForks, ...index } = snapshot;
     return {...index,entries:[],stored:true};
   }
   async read(snapshot: Snapshot, storageKey = snapshot.id): Promise<Snapshot> {

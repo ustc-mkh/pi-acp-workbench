@@ -12,8 +12,10 @@ const thinkingPrefix = /^(?:thinking|reasoning(?: effort)?)\s*[:：]\s*/i;
 const levelName = /^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabled|on)$/i;
 const compactThinking = (name: string) => name.replace(thinkingPrefix, '').trim();
 
-export function sessionSelectors({ modes, configs }: Pick<ChatState, 'modes' | 'configs'>): SessionSelector[] {
+export const codexFixedConfigs: Readonly<Record<string,string>> = {'fast-mode':'off',collaboration_mode:'default'};
+export function sessionSelectors({ modes, configs, harness }: Pick<ChatState, 'modes' | 'configs' | 'harness'>): SessionSelector[] {
   const controls = (configs || []).flatMap(config => {
+    if(harness==='codex'&&Object.hasOwn(codexFixedConfigs,config.id))return [];
     if (config.type !== 'select') return [];
     const thinking = config.category === 'thought_level' || thinkingName.test(config.id) || thinkingName.test(config.name);
     const kind: SessionSelector['kind'] = config.category === 'model' || config.id === 'model' ? 'model' : thinking ? 'thinking' : config.category === 'mode' ? 'mode' : 'other';
@@ -45,7 +47,7 @@ export function sessionSelectors({ modes, configs }: Pick<ChatState, 'modes' | '
 export interface SessionPreference { kind: SessionSelector['kind']; value: string }
 
 /** Store values, not an old model's option catalogue; never carry duplicate thinking controls. */
-export function sessionPreferences(state: Pick<ChatState, 'modes' | 'configs'>): SessionPreference[] {
+export function sessionPreferences(state: Pick<ChatState, 'modes' | 'configs' | 'harness'>): SessionPreference[] {
   return sessionSelectors(state).filter(c => ['model', 'thinking', 'mode'].includes(c.kind))
     .map(c => ({ kind: c.kind, value: c.current }))
     .sort((a, b) => Number(b.kind === 'model') - Number(a.kind === 'model'));

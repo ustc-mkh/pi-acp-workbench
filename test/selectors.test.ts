@@ -8,6 +8,13 @@ it('uses one config selector for Pi modes and thought_level without changing pro
   expect(controls).toHaveLength(1);
   expect(controls[0]).toMatchObject({ current: 'low', change: { type: 'config', id: 'thinking' }, options: [{ id: 'low', name: 'low' }, { id: 'medium', name: 'medium' }, { id: 'high', name: 'high' }] });
 });
+it('hides only Codex fast mode and collaboration mode, retaining reasoning and permissions',()=>{
+  const configs=[thinking,{...thinking,id:'fast-mode',name:'Fast mode',category:'model_config'},
+    {...thinking,id:'collaboration_mode',name:'Collaboration mode',category:'collaboration_mode'},
+    {...thinking,id:'mode',name:'Permissions',category:'mode'}];
+  expect(sessionSelectors({harness:'codex',configs}).map(c=>c.change)).toEqual([{type:'config',id:'thinking'},{type:'config',id:'mode'}]);
+  expect(sessionSelectors({harness:'pi',configs})).toHaveLength(4);
+});
 it('retains the legacy mode API when config options are absent', () => {
   expect(sessionSelectors({ modes })[0]).toMatchObject({ change: { type: 'mode' }, options: [{ id: 'low', name: 'low' }, { id: 'medium', name: 'medium' }, { id: 'high', name: 'high' }] });
 });

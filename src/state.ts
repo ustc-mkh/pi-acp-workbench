@@ -1,5 +1,5 @@
 import type * as acp from '@agentclientprotocol/sdk';
-import type { ChatState, Entry } from './shared';
+import type { ChatState } from './shared';
 let serial = 0;
 export const nextId = () => `entry-${Date.now()}-${++serial}`;
 export function initialState(): ChatState {
@@ -7,8 +7,9 @@ export function initialState(): ChatState {
 }
 export function appendText(state: ChatState, role: 'user' | 'assistant' | 'thought' | 'notice', text: string, messageId?: string | null) {
   const last = state.entries.at(-1);
-  if (last?.role === role && role !== 'notice' && (!messageId || last.messageId === messageId)) last.text += text;
-  else state.entries.push({ id: nextId(), messageId, role, text });
+  if (last?.role === role && role !== 'notice' && (!messageId || last.messageId === messageId)) {
+    state.entries[state.entries.length - 1] = {...last, text:last.text + text};
+  } else state.entries.push({ id: nextId(), messageId, role, text });
 }
 export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay = false) {
   switch (update.sessionUpdate) {
@@ -22,15 +23,18 @@ export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay 
       appendText(state, role, text, update.messageId);
       if (c.type !== 'text') {
         const entry = state.entries.at(-1)!;
-        if (entry.role !== 'tool') (entry.contextBlocks ||= []).push(structuredClone(c));
+        if (entry.role !== 'tool') {
+          state.entries[state.entries.length - 1] = {...entry, contextBlocks:[...entry.contextBlocks || [], structuredClone(c)]};
+        }
       }
       break;
     }
     case 'tool_call':
     case 'tool_call_update': {
-      const old = state.entries.find((e): e is Extract<Entry, { role: 'tool' }> => e.role === 'tool' && e.tool.toolCallId === update.toolCallId);
+      const index = state.entries.findIndex(e => e.role === 'tool' && e.tool.toolCallId === update.toolCallId);
+      const old = state.entries[index];
       const fields = Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null));
-      if (old) Object.assign(old.tool, fields);
+      if (old?.role === 'tool') state.entries[index] = {...old, tool:{...old.tool, ...fields}};
       else state.entries.push({ id: nextId(), role: 'tool', tool: { title: '工具调用', status: 'pending', ...fields, toolCallId: update.toolCallId } as acp.ToolCall });
       break;
     }

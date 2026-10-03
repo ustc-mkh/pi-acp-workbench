@@ -12,9 +12,8 @@
 git clone https://github.com/ustc-mkh/pi-acp-workbench.git
 cd pi-acp-workbench
 npm ci
-npm run check
-npm test
-npm run build
+npm test             # 类型检查 + 与未提交改动相关的测试
+npm run build        # 启动调试前构建
 ```
 
 用 VS Code 打开仓库根目录，按 F5 选择 **Run Pi ACP Extension**。启动配置会先构建，再打开 Extension Development Host；在新窗口打开并信任一个测试项目，点击 π。首次使用点击“新建会话”；已有历史时恢复上次活动会话。
@@ -60,7 +59,7 @@ npm run build
 1. 从当前 main 建立聚焦主题的分支；先描述可复现的问题或期望行为。
 2. 保持 `src/shared.ts` 中宿主和 Webview 消息类型一致。在宿主再次验证消息、会话 ID 和附件；不要把 Webview 当可信授权源。
 3. 为生命周期、协议、上下文和数据持久化变更添加行为回归测试。UI 变更检查窄侧栏、暗色/浅色主题、键盘操作和流式输出。
-4. 执行类型检查、相关测试；提交前执行完整 `npm test` 和构建。渲染或交互变更执行浏览器测试。
+4. 日常执行 `npm test`；提交前执行 `npm run verify`，一次完成完整测试、构建和浏览器验证。只需完整非浏览器测试时用 `npm run test:all`。默认 `npm test` 在干净工作区不会运行完整回归。
 5. 更新 README/架构说明及 CHANGELOG。不要提交密钥、Pi 会话文件、node_modules、dist 或本地 VSIX。
 6. PR 写明问题、改变后的行为、验证命令和限制；UI 变更附截图。避免将无关格式化或依赖升级混在同一修复中。
 
