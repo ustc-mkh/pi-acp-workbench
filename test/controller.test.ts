@@ -26,6 +26,55 @@ beforeEach(() => {
   activate(context);
 });
 afterEach(() => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose()); });
+it('connects when the chat becomes ready and preserves the session on repeated ready events', async () => {
+  const start = vi.spyOn(host.provider, 'start');
+  expect(host.provider.snapshot().connectionAttempted).toBeFalsy();
+  await Promise.all([host.provider.perform({ type: 'ready' }), host.provider.perform({ type: 'ready' })]);
+  expect(host.provider.snapshot()).toMatchObject({ status: 'ready', connectionAttempted: true });
+  await host.provider.perform({ type: 'send', text: 'hello' });
+  const entries = host.provider.snapshot().entries;
+  await host.provider.perform({ type: 'ready' });
+  expect(start).toHaveBeenCalledTimes(1);
+  expect(host.provider.snapshot().entries).toEqual(entries);
+});
+it('does not loop after an automatic connection failure and permits a manual retry after dismissing it', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'v2'];
+  const start = vi.spyOn(host.provider, 'start');
+  await host.provider.perform({ type: 'ready' });
+  const failed = host.provider.snapshot();
+  expect(failed).toMatchObject({ status: 'disconnected', connectionAttempted: true });
+  expect(failed.error).toBeTruthy();
+  await host.provider.perform({ type: 'dismissError', error: failed.error });
+  expect(host.provider.snapshot().error).toBeUndefined();
+  expect(host.provider.snapshot().connectionAttempted).toBe(true);
+  await host.provider.perform({ type: 'ready' });
+  expect(start).toHaveBeenCalledTimes(1);
+  host.config.args = [resolve('test/mock-agent.mjs')];
+  await host.provider.perform({ type: 'connect' });
+  expect(host.provider.snapshot().status).toBe('ready');
+});
+it('allows error dismissal during a turn without dismissing a newer error', async () => {
+  await host.provider.perform({ type: 'connect' });
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  // No active editor in this host: the attachment action creates an error while streaming.
+  await host.provider.perform({ type: 'attach' });
+  const error = host.provider.snapshot().error;
+  expect(error).toBeTruthy();
+  await host.provider.perform({ type: 'dismissError', error: 'an older error' });
+  expect(host.provider.snapshot().error).toBe(error);
+  await host.provider.perform({ type: 'dismissError', error });
+  expect(host.provider.snapshot()).toMatchObject({ status: 'busy', error: undefined });
+  await host.provider.perform({ type: 'attach' });
+  expect(host.provider.snapshot().error).toBeTruthy();
+  await host.provider.perform({ type: 'cancel' }); await turn;
+});
+it('keeps an explicitly opened offline preview disconnected', async () => {
+  await host.provider.perform({ type: 'preview' });
+  await host.provider.perform({ type: 'ready' });
+  expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', preview: true });
+  expect(host.provider.snapshot().connectionAttempted).toBeFalsy();
+});
 it('runs a complete turn through the controller, saves history, and loads it', async () => {
   await host.provider.perform({ type: 'connect' }); expect(host.provider.snapshot().status).toBe('ready');
   await host.provider.perform({ type: 'send', text: 'hello' });

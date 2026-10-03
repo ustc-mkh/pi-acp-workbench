@@ -4,6 +4,7 @@ export interface Attachment { id: string; name: string; uri: string; text: strin
 export interface Snapshot { id: string; cwd: string; title: string; updated: number; entries: Entry[] }
 export interface ChatState {
   status: 'disconnected' | 'connecting' | 'ready' | 'busy';
+  connectionAttempted?: boolean;
   sessionId?: string; agent?: string; error?: string; entries: Entry[]; attachments: Attachment[];
   modes?: acp.SessionModeState;
   configs?: acp.SessionConfigOption[]; commands: acp.AvailableCommand[];
@@ -14,6 +15,7 @@ export interface ChatState {
 export type UiMessage =
   | { type: 'ready' | 'connect' | 'new' | 'cancel' | 'attach' | 'clearHistory' | 'login' | 'logs' | 'preview' | 'export' }
   | { type: 'send'; text: string }
+  | { type: 'dismissError'; error: string }
   | { type: 'permission'; id: string; optionId?: string }
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }

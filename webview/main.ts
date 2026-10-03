@@ -8,12 +8,12 @@ const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" title="历史记录" aria-label="历史记录">◷</button><button id="export" title="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="new" title="新对话" aria-label="新对话">＋</button></div></header>
 <section id="history" hidden><div class="section-label">最近会话 <button id="clear-history">清除本地历史</button></div><div id="history-items"></div></section>
-<div id="connection"><span class="status-dot"></span><span id="status" role="status"></span><button id="connect">连接</button></div>
-<div id="error" role="alert" hidden></div>
-<main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="pulse">●</span> Pi 正在处理…</div></main>
-<button id="bottom" hidden>↓ 回到最新消息</button>
+<div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="connect" hidden>重新连接</button></div>
+<div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" title="关闭错误提示">×</button></div>
+<div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="pulse">●</span> Pi 正在处理…</div></main>
+<button id="bottom" class="primary" aria-label="回到最新消息" title="回到最新消息" hidden>↓</button></div>
 <section id="plan" aria-label="执行计划" hidden></section><section id="permissions" aria-label="操作授权" aria-live="polite"></section>
-<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" title="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" title="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
+<footer><div id="attachments"></div><div class="composer"><textarea id="input" aria-label="向 Pi 发送消息" placeholder="描述任务，或输入 / 查看命令…" rows="3"></textarea><div id="commands" hidden></div><div class="composer-tools"><button id="attach" title="添加当前编辑器的选区或文件">＋ 上下文</button><div id="selectors"></div><span id="hint">Enter 发送 · Shift+Enter 换行</span><div class="composer-actions"><div id="usage" role="img" tabindex="0" aria-label="上下文占用" aria-describedby="usage-tooltip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="8"/><circle id="usage-fill" cx="12" cy="12" r="8" pathLength="100" transform="rotate(-90 12 12)"/></svg><span id="usage-tooltip" role="tooltip"></span></div><button id="stop" hidden>■ 停止</button><button id="send" class="primary" aria-label="发送消息" title="Enter 发送 · Shift+Enter 换行">↑</button></div></div></div></footer>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const input = el<HTMLTextAreaElement>('input');
 input.value = vscode.getState()?.draft || '';
@@ -38,6 +38,10 @@ input.addEventListener('input', () => { vscode.setState({ draft: input.value });
 el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
 el('connect').onclick = () => send({ type: 'connect' });
+el('dismiss-error').onclick = () => {
+  if (state?.error) send({ type: 'dismissError', error: state.error });
+  el('error').hidden = true;
+};
 el('new').onclick = () => send({ type: 'new' });
 el('attach').onclick = () => send({ type: 'attach' });
 el('export').onclick = () => send({ type: 'export' });
@@ -114,14 +118,15 @@ function paint() {
   paintPending = false;
   if (!state) return;
   const busy = state.status === 'busy', connecting = state.status === 'connecting';
-  el('connection').hidden = state.status === 'ready' || busy;
+  const reconnect = state.status === 'disconnected' && !!state.connectionAttempted && !state.preview;
+  el('connection').hidden = !connecting && !reconnect && !state.preview;
   el('status').textContent = state.preview ? '渲染预览 · 离线' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
-  el('connect').hidden = state.status === 'ready' || busy;
+  el('connect').hidden = !reconnect;
   el<HTMLButtonElement>('connect').disabled = connecting;
   el<HTMLButtonElement>('new').disabled = busy || connecting;
   el('stop').hidden = !busy; el('send').hidden = busy; el('working').hidden = !busy;
-  el('error').hidden = !state.error; el('error').textContent = state.error || '';
+  el('error').hidden = !state.error; el('error-message').textContent = state.error || '';
   el('welcome').hidden = !!state.entries.length;
   input.disabled = connecting;
   updateSend();
@@ -165,7 +170,7 @@ function paint() {
     }
   }
   const usage = contextUsage(state.usage);
-  el('usage').title = usage.label;
+  el('usage-tooltip').textContent = usage.label;
   el('usage').setAttribute('aria-label', usage.known ? `上下文占用 ${usage.label}` : usage.label);
   el('usage').dataset.level = !usage.known ? 'unknown' : usage.percent >= 90 ? 'high' : 'normal';
   el('usage-fill').setAttribute('stroke-dasharray', `${usage.percent} 100`);

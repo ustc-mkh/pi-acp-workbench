@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Show context usage immediately in a theme-aware tooltip, without a help cursor.
+- Center a circular scroll-to-latest button at the bottom of the message area.
+- Connect automatically when the chat opens; show manual reconnect after failure.
+- Add a dismiss button to error banners without hiding subsequent errors.
+
 ## 0.1.2
 
 - Move model/thinking controls and a context usage ring into the composer.

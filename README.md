@@ -20,13 +20,15 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.2.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.3.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.1.2.vsix
+code --install-extension pi-acp-workbench-0.1.3.vsix
 ```
 
-打开并信任项目文件夹 → 点击活动栏的 **π** → 点击 **连接**。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
+打开并信任项目文件夹 → 点击活动栏的 **π**，插件会自动连接本地 Agent。连接失败或意外断开时才显示 **重新连接** 按钮。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
+
+上下文圆环在悬停或键盘聚焦时立即显示主题样式的用量提示。上滑阅读历史时，可点击消息区底部居中的圆形箭头回到最新消息。错误提示右侧的 **×** 可关闭当前错误，后续错误仍会正常显示。
 
 **不配置模型也可以体验渲染**：命令面板执行 `Pi: Preview Markdown & Math`。
 

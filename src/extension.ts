@@ -32,6 +32,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private cancelTimer?: NodeJS.Timeout;
   private stopping = false;
   private transitioning = false;
+  private autoConnectHandled = false;
   private history: Snapshot[];
   private permissionResolvers = new Map<string, (response: acp.RequestPermissionResponse) => void>();
   private diffDocs = new Map<string, string>();
@@ -92,6 +93,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   snapshot() { return structuredClone(this.state); }
   private async start(snapshot?: Snapshot) {
     if (this.transitioning) return;
+    this.autoConnectHandled = true;
+    this.state.connectionAttempted = true;
     this.transitioning = true;
     try { await this.startSession(snapshot); } finally { this.transitioning = false; }
   }
@@ -103,7 +106,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     await this.save(); this.disconnect();
     const generation = this.generation;
     this.cwd = cwd;
-    this.state = { ...initialState(), status: 'connecting', attachments: this.state.attachments };
+    this.state = { ...initialState(), status: 'connecting', connectionAttempted: true, attachments: this.state.attachments };
     this.replay = !!snapshot;
     this.emit();
     const pending: acp.SessionNotification[] = [];
@@ -169,7 +172,19 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   async perform(message: UiMessage) {
     try {
       if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
-      if (message.type === 'ready') { this.emit(); return; }
+      if (message.type === 'ready') {
+        // Webview reloads must not reset a session or repeatedly retry a failed start.
+        if (!this.autoConnectHandled) {
+          this.autoConnectHandled = true;
+          if (this.state.status === 'disconnected' && !this.state.preview) await this.perform({ type: 'connect' });
+        }
+        this.emit(); return;
+      }
+      if (message.type === 'dismissError') {
+        // A click on an older banner must not dismiss a newer error in flight.
+        if (this.state.error === message.error) this.state.error = undefined;
+        this.emit(); return;
+      }
       if (message.type === 'logs') { this.log.show(); return; }
       if (message.type === 'login') {
         const cwd = await this.workspaceCwd();
