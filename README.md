@@ -20,10 +20,10 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.0.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.1.1.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.1.0.vsix
+code --install-extension pi-acp-workbench-0.1.1.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π** → 点击 **连接**。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
@@ -54,7 +54,7 @@ Windows 推荐绕过 `.cmd` 启动器，直接使用 Node 和适配器的 JS 入
 }
 ```
 
-同样支持其他 **ACP v1 stdio agent**：修改 command / args 即可。登录按钮针对 `pi-acp --terminal-login`；其他 Agent 应在其自己的终端工具中完成认证。ACP v2 草案不在本版支持范围内。
+同样支持其他 **ACP v1 stdio agent**：修改 command / args 即可。命令面板中的 `Pi: Open Login Terminal` 针对 `pi-acp --terminal-login`；其他 Agent 应在其自己的终端工具中完成认证。ACP v2 草案不在本版支持范围内。
 
 ## 使用体验
 

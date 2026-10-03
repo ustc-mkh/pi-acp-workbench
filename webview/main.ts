@@ -1,4 +1,5 @@
 import { createRenderer } from './markdown';
+import { sessionSelectors } from './selectors';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): { draft?: string } | undefined; setState(state: { draft: string }): void };
 const vscode = acquireVsCodeApi();
@@ -6,7 +7,7 @@ const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" title="历史记录" aria-label="历史记录">◷</button><button id="export" title="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="new" title="新对话" aria-label="新对话">＋</button></div></header>
 <section id="history" hidden><div class="section-label">最近会话 <button id="clear-history">清除本地历史</button></div><div id="history-items"></div></section>
-<div id="connection"><span class="status-dot"></span><span id="status" role="status"></span><button id="connect">连接</button><button id="login">登录</button><button id="logs" title="查看日志">日志</button></div>
+<div id="connection"><span class="status-dot"></span><span id="status" role="status"></span><button id="connect">连接</button></div>
 <div id="error" role="alert" hidden></div>
 <main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="pulse">●</span> Pi 正在处理…</div></main>
 <button id="bottom" hidden>↓ 回到最新消息</button>
@@ -38,8 +39,6 @@ el('stop').onclick = () => send({ type: 'cancel' });
 el('connect').onclick = () => send({ type: 'connect' });
 el('new').onclick = () => send({ type: 'new' });
 el('attach').onclick = () => send({ type: 'attach' });
-el('login').onclick = () => send({ type: 'login' });
-el('logs').onclick = () => send({ type: 'logs' });
 el('export').onclick = () => send({ type: 'export' });
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
@@ -104,7 +103,6 @@ function contentNode(entry: Entry): HTMLElement {
     node.append(body);
   } else {
     if (entry.role === 'thought') { const summary = document.createElement('summary'); summary.textContent = '思考过程'; node.append(summary); }
-    else if (entry.role !== 'notice') { const label = document.createElement('div'); label.className = 'speaker'; label.textContent = entry.role === 'user' ? '你' : 'π  PI'; node.append(label); }
     const body = document.createElement('div'); body.className = 'markdown';
     body.innerHTML = renderMarkdown(entry.text); node.append(body);
     if (entry.role === 'assistant') node.append(button('复制 Markdown', async () => { try { await navigator.clipboard.writeText(entry.text); } catch { /* clipboard can be unavailable in browser previews */ } }, 'copy-message'));
@@ -115,8 +113,8 @@ function paint() {
   paintPending = false;
   if (!state) return;
   const busy = state.status === 'busy', connecting = state.status === 'connecting';
-  const statuses = { disconnected: '未连接', connecting: '正在连接…', ready: '已连接', busy: '正在工作' };
-  el('status').textContent = state.preview ? '渲染预览 · 离线' : `${statuses[state.status]}${state.agent ? ' · ' + state.agent : ''}`;
+  el('connection').hidden = state.status === 'ready' || busy;
+  el('status').textContent = state.preview ? '渲染预览 · 离线' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
   el('connect').hidden = state.status === 'ready' || busy;
   el<HTMLButtonElement>('connect').disabled = connecting;
@@ -166,10 +164,8 @@ function paint() {
       for (const o of options) { const opt = document.createElement('option'); opt.value = o.id; opt.textContent = o.name; s.append(opt); }
       s.value = current; s.onchange = () => change(s.value); selectors.append(s);
     };
-    if (state.modes && !state.configs?.some(c => c.category === 'mode')) select('思考 / 会话模式', state.modes.currentModeId, state.modes.availableModes, value => send({ type: 'mode', value }));
-    for (const config of state.configs || []) if (config.type === 'select') {
-      const options = config.options.flatMap(o => 'options' in o ? o.options : [o]);
-      select(config.name, config.currentValue, options.map(o => ({ id: o.value, name: o.name })), value => send({ type: 'config', id: config.id, value }));
+    for (const control of sessionSelectors(state)) {
+      select(control.label, control.current, control.options, value => send({ ...control.change, value }));
     }
   }
   el('usage').textContent = state.usage ? `${Math.round(state.usage.used / Math.max(1, state.usage.size) * 100)}% 上下文` : '';
