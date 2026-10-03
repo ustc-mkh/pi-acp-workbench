@@ -71,6 +71,48 @@ it('keeps model preferences separate and rejects switching during an active prom
   const id=host.provider.snapshot().sessionId;await host.provider.perform({type:'branchMessage',sessionId:id,id:host.provider.snapshot().entries[0].id});
   expect(host.provider.snapshot().error).toContain('暂不支持');expect(host.provider.snapshot().sessionId).toBe(id);
 });
+it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as const)('reconnects missing empty %s sessions (shared=%s) without sending messages',async(harness,shared)=>{
+  const root=mkdtempSync(resolve(tmpdir(),'pi-empty-reconnect-'));
+  if(shared){host.provider.dispose();await host.provider.saveQueue;host.home=root;host.config.sharedHistory=true;activate(context);await host.provider.historyReady;}
+  const audit=resolve(root,'wire.jsonl');host.config[harness+'.env']={PI_TEST_AUDIT:audit};
+  mockHarness(harness,`context-missing-${harness}`);
+  try {
+    await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
+    await host.provider.perform({type:'config',id:'model',value:'other'});
+    const first=host.provider.snapshot();
+    for(let i=0;i<2;i++){
+      await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
+      const state=host.provider.snapshot();
+      expect(state).toMatchObject({status:'ready',entries:[],sessionNumber:first.sessionNumber});
+      expect(state.sessionId).not.toBe(first.sessionId);expect(state.error).toContain('尚未落盘');
+      expect(state.configs[0].currentValue).toBe('other');expect(state.commands[0].name).toBe('status');
+      expect(host.provider.history).toHaveLength(1);
+      if(shared)expect(await host.provider.sharedHistory.list()).toHaveLength(1);
+    }
+    expect(readFileSync(audit,'utf8')).not.toContain('session/prompt');
+  }finally{host.provider.dispose();await host.provider.saveQueue;host.home=undefined;rmSync(root,{recursive:true,force:true});}
+});
+it.each([['codex',true],['claude',true],['codex',false],['claude',false]] as const)('never recreates missing %s sessions unless proven empty (content=%s)',async(harness,withContent)=>{
+  mockHarness(harness,`context-missing-${harness}`);await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
+  if(withContent)await host.provider.perform({type:'send',text:'retained'});
+  else host.provider.state.contextComplete=false;
+  const before=host.provider.snapshot();
+  await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',readOnly:true,sessionId:before.sessionId,entries:before.entries});
+  expect(host.provider.snapshot().error).toContain('不会自动新建');expect(host.provider.history).toHaveLength(1);
+});
+it.each(['codex','claude'] as const)('loads existing %s conversations after release without replacing the ID or entries',async harness=>{
+  mockHarness(harness,'context');await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'send',text:'keep this conversation'});const before=host.provider.snapshot();
+  await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',sessionId:before.sessionId,entries:before.entries,sessionNumber:before.sessionNumber});
+  expect(host.provider.history).toHaveLength(1);expect(host.provider.snapshot().error).toBeUndefined();
+});
+it('does not turn arbitrary internal errors into new empty sessions',async()=>{
+  mockHarness('codex','context-load-fail');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
+  const before=host.provider.snapshot();await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',readOnly:true,sessionId:before.sessionId,error:'Internal error'});
+});
 it('retains external history read-only when session/load is unsupported, without fallback new',async()=>{
   mockHarness('claude');await host.provider.perform({type:'switchHarness',harness:'claude'});await host.provider.perform({type:'new'});await host.provider.perform({type:'send',text:'retained'});
   const id=host.provider.snapshot().sessionId;await host.provider.perform({type:'releaseSession'});

@@ -59,7 +59,7 @@ export class AgentProcess {
   async initialize() {
     try {
       this.info = await this.withTimeout(this.request('initialize', {
-        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.4.0' },
+        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.4.1' },
         // Adapters must handle their own files/terminals. Never advertise unimplemented delegation.
         clientCapabilities: {},
       }), this.options.requestTimeoutMs ?? 20000);
@@ -67,12 +67,23 @@ export class AgentProcess {
       return this.info;
     } catch (error) { this.dispose(); throw error; }
   }
-  async createSession(id?: string): Promise<acp.NewSessionResponse> {
+  async createSession(id?: string, recoverMissingEmpty = false): Promise<acp.NewSessionResponse> {
     const params = { cwd: this.options.cwd, mcpServers: [] };
     if (id) {
       if (!this.info?.agentCapabilities?.loadSession) throw new Error('此 Agent 未声明 session/load 能力，无法恢复远端会话。');
-      const result = await this.withTimeout(this.request('session/load', { ...params, sessionId: id }));
-      return { ...result, sessionId: id };
+      try {
+        const result = await this.withTimeout(this.request('session/load', { ...params, sessionId: id }));
+        return { ...result, sessionId: id };
+      } catch (error) {
+        const e = error as {code?:number;data?:{uri?:string;details?:string}};
+        const native = nativeSessionId(this.harness,id);
+        const missing = this.harness === 'claude' && e?.code === -32002 && e.data?.uri === native
+          || this.harness === 'codex' && e?.code === -32603 && e.data?.details === `no rollout found for thread id ${native}`;
+        if (!missing) throw error;
+        if (!recoverMissingEmpty) throw new Error('原生会话不存在：可能尚未落盘或已被删除。本地历史已保留，不会自动新建或重放已有对话。', {cause:error});
+        // The controller must prove the saved history is complete and entirely empty.
+        // Never retry authentication, timeout, or arbitrary internal errors as session/new.
+      }
     }
     return this.withTimeout(this.request('session/new', { cwd: params.cwd, mcpServers: [] }));
   }

@@ -27,6 +27,10 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 
 selectedHarness 按工作区持久化；非 Pi 的 activeSession / sessionPreferences 放在 harness.<id>.* 键下。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/重建期间不允许切换。
 
+恢复非 Pi 会话仍先请求 session/load。仅当本地快照 contextComplete=true、entries 为空，并且后端返回精确的原生 ID 不存在错误（Claude -32002/uri；Codex -32603/no rollout found），才允许 session/new 建立替代空会话。保留 conversationId、编号和设置，不发送 prompt；新快照保存后删除旧空记录。共享模式直到替换完成仍持有旧租约，失败恢复只读状态并释放锁。不根据泛化的 Internal error、认证或超时错误重建。
+
+SlashCommands 将菜单挂载到 Webview body，以 fixed 定位绕过 footer 的 overflow:auto 裁剪；内容始终来自当前会话 available_commands_update，不硬编码 CLI 命令。键盘补全会阻止默认 Enter 发送。
+
 Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench/*。标准选择器/图片/历史恢复按 initialize 声明及后续通知处理；缺少 loadSession 时只读展示，不把本地记录自动灌入新会话。不声明尚未实现的文件/终端委托、认证网关或子会话扩展。登录按钮启动本地终端，不接收或保存用户输入的凭据。
 
 ## 创建、恢复与活动会话

@@ -89,6 +89,14 @@ cat "$PI_TEST_ROOT/result.json"
 - 分支保留原对话；删除消息保持逻辑统计归属；待同步和压缩检查点恢复仍正确。
 - 真实 Pi 验证 model/thinking（至少一个非 OpenAI 提供商），检查重启后的原生历史确实恢复。需要账户的验证须明确记录环境，不能把 mock 测试描述为真实模型兼容性结论。
 
+## 可选真实 Harness 恢复测试
+
+安装 ACP 适配器并准备凭据后运行 `npm run test:harness`。默认从 PATH 启动 `codex-acp` 和 `claude-agent-acp`；可通过 `CODEX_ACP_COMMAND` / `CLAUDE_ACP_COMMAND` 指定绝对命令路径，通过 `CODEX_ACP_ARGS` / `CLAUDE_ACP_ARGS` 传入 JSON 参数数组（例如 Node 路径加适配器入口）。
+
+此测试会使用当前用户的配置与凭据，在临时工作目录新建空会话，关闭进程，再恢复并验证命令通知；不会调用 session/prompt。适配器可能在原生索引中留下空会话元数据。它不是付费模型回复或真实 VS Code GUI 联调测试，不纳入默认 npm test。
+
+回归覆盖：本地/共享存储下的空会话重复恢复、编号/设置保留、旧记录清理、已有内容和不完整记录不重建、普通内部错误不重建；浏览器覆盖菜单实际命中测试、20 条命令、异步通知、滚动与 Enter 不误发送。
+
 ## 发布
 
 1. 完成类型检查、完整测试、构建及相关 UI / Extension Host 验证。
@@ -98,4 +106,4 @@ cat "$PI_TEST_ROOT/result.json"
 5. 提交源码，创建与 package 一致的 vX.Y.Z 标签，推送仓库；创建同名 GitHub Release，附上 VSIX、变更说明及 SHA-256。源码由标签关联。
 6. 从 Release 下载 VSIX 并核对摘要，确认发布附件可用。不要用 Marketplace 发布命令代替 GitHub Release 附件上传。
 
-示例摘要命令：`sha256sum ../pi-acp-workbench-0.4.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
+示例摘要命令：`sha256sum ../pi-acp-workbench-0.4.1.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。

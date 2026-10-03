@@ -381,6 +381,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.replay = !!snapshot;
     this.emit();
     const pending: acp.SessionNotification[] = [];
+    let recoveryLease: string | undefined;
     try {
       const agent = this.createAgent(cwd, pending);
       this.agent = agent;this.activeCacheable=true;
@@ -392,15 +393,21 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           error:'当前 ACP 适配器未声明 session/load 能力，仅查看本地记录。需要继续时请显式新建会话；不会自动重放历史。'};
         this.emit(); return;
       }
-      const session = await agent.createSession(snapshot?.contextPending ? undefined : snapshot?.id);
+      const session = await agent.createSession(snapshot?.contextPending ? undefined : snapshot?.id,
+        !!snapshot && this.harness !== 'pi' && snapshot.contextComplete === true && snapshot.entries.length === 0);
+      const recoveredEmpty = !!snapshot && !snapshot.contextPending && session.sessionId !== snapshot.id;
       if (this.sharedHistory && this.activeLease !== session.sessionId) {
         await this.saveQueue.catch(() => {});
         await this.sharedHistory.claim(session.sessionId);
-        if (this.activeLease) await this.sharedHistory.release(this.activeLease);
+        if (this.activeLease) {
+          if (recoveredEmpty) recoveryLease = this.activeLease;
+          else await this.sharedHistory.release(this.activeLease);
+        }
         this.activeLease = session.sessionId;
       }
-      if (snapshot?.contextPending) await this.restoreSettings(agent, session, snapshot);
+      if (snapshot && (snapshot.contextPending || recoveredEmpty)) await this.restoreSettings(agent, session, snapshot);
       else if (!snapshot) this.state.error = await this.applyPreferences(agent, session, preferences);
+      if (recoveredEmpty) this.state.error = '原空会话尚未落盘，已重新建立空连接并保留会话编号；未发送任何消息。';
       if (generation !== this.generation) return;
       this.conversationId=snapshot?.conversationId||snapshot?.id||session.sessionId;
       this.state.sessionId = session.sessionId; this.state.sessionNumber = snapshot?.sessionNumber; this.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
@@ -409,16 +416,24 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (snapshot && (snapshot.contextComplete || !this.state.entries.length)) this.state.entries = structuredClone(snapshot.entries);
       this.state.contextComplete = snapshot ? snapshot.contextComplete === true : true;
       this.state.contextPending = snapshot?.contextPending || false;
-      if (snapshot?.contextPending) {
+      if (snapshot && (snapshot.contextPending || recoveredEmpty)) {
         this.state.usage = undefined;
         this.history = this.history.filter(s => s.id !== snapshot.id);
         this.forgottenSessions.add(snapshot.id);
       }
-      this.state.status = 'ready'; this.replay = false; await this.rememberActive(); await this.refreshTelemetry(); await this.save(); if(snapshot?.contextPending)await this.enqueueStorage(() => this.snapshots.remove(snapshot!.id)); this.emit();
+      this.state.status = 'ready'; this.replay = false; await this.rememberActive(); await this.refreshTelemetry(); await this.save();
+      if (snapshot && (snapshot.contextPending || recoveredEmpty)) {
+        await this.enqueueStorage(() => this.snapshots.remove(snapshot!.id));
+        this.history = this.history.filter(item => item.id !== snapshot.id);
+      }
+      this.emit();
     } catch (error) {
       this.disconnect(); this.state.status = 'disconnected';
+      if (snapshot && this.harness !== 'pi') { this.releaseLease(); this.state.readOnly = true; }
       if (snapshot) { this.state.configs=snapshot.configs;this.state.modes=snapshot.modes; this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; this.state.sessionNumber = snapshot.sessionNumber; this.state.contextComplete = snapshot.contextComplete; this.state.contextPending = snapshot.contextPending; }
       throw error;
+    } finally {
+      if (recoveryLease) await this.sharedHistory!.release(recoveryLease);
     }
   }
   private createAgent(cwd: string, pending: acp.SessionNotification[]) {

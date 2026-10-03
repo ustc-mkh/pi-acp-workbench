@@ -19,10 +19,10 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.4.0.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.4.1.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.4.0.vsix
+code --install-extension pi-acp-workbench-0.4.1.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π**。首次使用点击 **新建会话**；已有历史时自动恢复上次活动会话。只有点击新建（或执行 `Pi: New Session`）才创建空白对话，重新连接只恢复原会话，失败不会偷偷创建新对话。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
@@ -83,6 +83,10 @@ Windows 也优先使用默认内置适配器。仅在自定义外部适配器时
 
 草稿、待发送附件、最近模型偏好和活动会话指针按 harness 隔离。历史列表保留全部记录并标注 Codex / Claude Code，点击历史会切到其所属 harness。旧记录默认仍属于 Pi 配置；Codex / Claude 的原生 Session ID 使用独立的本地命名空间，不会覆盖同名 Pi 会话。请让共享历史的各客户端都升级到支持 harness 的版本，不要用旧版客户端操作非 Pi 记录。
 
+**空会话恢复**：Codex / Claude 在第一条消息之前可能只分配 Session ID，而不保存原生会话。释放后恢复时，如果适配器明确返回该 ID 不存在，且本地记录完整、没有任何消息，插件会重新建立空连接，保留会话编号与设置并显示提示；不会发送消息。已有内容、记录不完整、认证失败或其他错误不会触发此回退。无法恢复的原记录保留为只读，释放占用锁。
+
+**Slash 命令**：连接就绪后，在输入框开头输入 `/` 查看适配器通过 ACP 宣告的命令，继续输入可筛选；支持滚动、方向键、Enter / Tab 补全和 Escape 关闭。选择命令只填入输入框，不立即执行。列表可异步更新，并不等同于终端 CLI 的全部命令；尚未连接或尚未收到列表时会显示提示。
+
 ### 安装与认证
 
 **必须安装在扩展宿主上**（Remote SSH 时为服务器）。插件不自动下载、安装或捆绑下面的适配器：
@@ -121,7 +125,7 @@ npm install -g @agentclientprotocol/claude-agent-acp
 | Pi 详细计费、原生压缩检查点、有界摘要 | 支持 | 不提供，不调用 Pi 私有扩展 |
 | 客户端文件/终端委托、网关认证、原生子 Agent/后台任务扩展 | 不声明 | 不声明，依赖适配器自己的工具能力或标准回退 |
 
-已用真实 `@agentclientprotocol/codex-acp@2.1.1` 与 `@agentclientprotocol/claude-agent-acp@0.85.1` 验证 ACP v1 初始化握手，均声明图片、嵌入上下文和历史恢复能力。此验证使用隔离用户目录且不发送模型请求；**真实登录和付费模型端到端调用仍需在你的环境验证**。模拟协议测试覆盖发送、授权、取消、历史恢复、设置和 ID 隔离。
+已用真实 `@agentclientprotocol/codex-acp@2.1.1` 与 `@agentclientprotocol/claude-agent-acp@0.85.1` 验证 ACP v1 初始化握手，均声明图片、嵌入上下文和历史恢复能力。初始化验证使用隔离用户目录；此外使用已有凭据验证了新建空会话、释放进程、恢复空连接和重新获取命令列表，没有发送 `session/prompt`。**真实模型端到端调用仍需在你的环境验证**。模拟协议测试覆盖发送、授权、取消、历史恢复、设置和 ID 隔离。
 
 ## Markdown 与数学支持
 

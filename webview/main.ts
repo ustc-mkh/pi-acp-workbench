@@ -14,6 +14,7 @@ import { sessionLabel } from '../src/session-numbers';
 import { HARNESSES, isHarnessId, type HarnessId } from '../src/harness';
 import { TranscriptView } from './transcript';
 import { installComposerResize } from './composer-resize';
+import { SlashCommands } from './slash-commands';
 interface UiState {draft?:string;drafts?:Partial<Record<HarnessId,string>>;composerHeight?:number;activityExpanded?:boolean}
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): UiState | undefined; setState(state: UiState): void };
 const vscode = acquireVsCodeApi();
@@ -54,14 +55,15 @@ const button = (text: string, action: () => void, className?: string) => {
   const b = document.createElement('button'); b.textContent = text; b.type = 'button';
   if (className) b.className = className; b.addEventListener('click', action); return b;
 };
+const slashCommands = new SlashCommands(input,el('commands'),()=>{saveDraft();updateSend();});
 function submit() {
   if ((!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || state?.status !== 'ready' || sending || pasting) return;
   sending = true; send({ type: 'send', text: input.value });
 }
 input.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
+  if (!event.defaultPrevented && event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit(); }
 });
-input.addEventListener('input', () => { saveDraft(); commandMenu(); updateSend(); });
+input.addEventListener('input', () => { saveDraft(); updateSend(); });
 el('harness-switch').onchange = () => {
   const harness=el<HTMLSelectElement>('harness-switch').value;
   if(isHarnessId(harness)){saveDraft();showStatistics(false);send({type:'switchHarness',harness});}
@@ -120,16 +122,6 @@ app.addEventListener('click', async event => {
   }
 });
 function updateSend() { el<HTMLButtonElement>('send').disabled = state?.status !== 'ready' || (!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || sending || pasting; }
-function commandMenu() {
-  const menu = el('commands'); menu.replaceChildren();
-  const match = input.value.match(/^\/([^\s]*)$/);
-  const commands = match ? state?.commands.filter(c => c.name.startsWith(match[1])).slice(0, 8) || [] : [];
-  menu.hidden = !commands.length;
-  for (const command of commands) {
-    const b = button(`/${command.name} — ${command.description}`, () => { input.value = `/${command.name} `; input.focus(); menu.hidden = true; saveDraft(); updateSend(); });
-    menu.append(b);
-  }
-}
 function contentNode(entry: Entry): HTMLElement {
   const node = document.createElement(entry.role === 'tool' || entry.role === 'thought' ? 'details' : 'article');
   node.className = `message ${entry.role}`;
@@ -246,7 +238,7 @@ function paint() {
   el('usage-fill').setAttribute('stroke-dasharray', `${usage.percent} 100`);
   historyList.update(state);
   if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
-  commandMenu();
+  slashCommands.update(state.commands,state.status);
 }
 window.addEventListener('message', event => {
   if (event.data.type === 'sent') { input.value = ''; saveDraft(); sending = false; updateSend(); return; }

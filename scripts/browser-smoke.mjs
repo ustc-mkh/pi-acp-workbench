@@ -98,6 +98,24 @@ try {
   assert.deepEqual(await page.locator('#history-items .session-number').allTextContents(),['#001','#002']);
   assert.equal(await page.locator('#session-number').textContent(),'#001');
   await page.locator('#history-toggle').click();
+  state.commands=[];await emit(state);await page.locator('#input').fill('/');
+  assert(await page.locator('#commands').isVisible());
+  state.commands=Array.from({length:20},(_,i)=>({name:`command${i}`,description:'ACP command'}));await emit(state);
+  assert.equal(await page.locator('#commands button').count(),20);
+  assert(await page.locator('#commands button').first().evaluate(button=>{
+    const r=button.getBoundingClientRect();return !!document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('#commands');
+  }));
+  const popup=await page.locator('#commands').boundingBox(),field=await page.locator('#input').boundingBox();
+  assert(popup.y>=0&&popup.y+popup.height<=field.y);
+  await page.screenshot({path:'../preview-command-menu.png'});
+  const sentBefore=await page.evaluate(()=>window.messages.filter(m=>m.type==='send').length);
+  for(let i=0;i<12;i++)await page.locator('#input').press('ArrowDown');
+  await page.locator('#input').press('Enter');assert.equal(await page.locator('#input').inputValue(),'/command12 ');
+  assert.equal(await page.evaluate(()=>window.messages.filter(m=>m.type==='send').length),sentBefore);
+  await page.locator('#input').fill('/command19');await page.locator('#commands button').click();
+  assert.equal(await page.locator('#input').inputValue(),'/command19 ');
+  await page.locator('#input').fill('/');await page.locator('#input').press('Escape');await emit(state);
+  assert(await page.locator('#commands').isHidden());
   await page.locator('#input').fill('Pi private draft');
   await page.locator('#harness-switch').selectOption('codex');
   assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='switchHarness'&&m.harness==='codex'));
@@ -122,5 +140,5 @@ try {
   encoder.reset(); await emit(state);
   assert.equal(await page.locator('.message.tool').count(), 1);
   assert.deepEqual(errors, []);
-  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, send, permission, cancel, diff, no runtime errors.');
+  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, diff, no runtime errors.');
 } finally { await browser?.close(); server.close(); }

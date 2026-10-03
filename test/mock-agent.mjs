@@ -21,7 +21,13 @@ createInterface({ input: process.stdin }).on('line', async line => {
   if (r.method === 'initialize') {
     if (mode === 'hang') return;
     reply(r.id, { protocolVersion: mode === 'v2' ? 2 : 1, agentCapabilities: { loadSession: mode !== 'no-load',promptCapabilities:{image:mode==='context-images'} }, agentInfo: { name: 'mock' }, authMethods: [] });
-  } else if (r.method === 'session/new') reply(r.id, { sessionId, ...(mode?.startsWith('context') ? {configOptions,...(['context-dependent','context-legacy'].includes(mode)?{modes}:{})} : {}) });
+  } else if (r.method === 'session/new') {
+    if (mode?.startsWith('context-missing')) {
+      sessionId=randomUUID();
+      update({sessionUpdate:'available_commands_update',availableCommands:[{name:'status',description:'Session status'}]});
+    }
+    reply(r.id, { sessionId, ...(mode?.startsWith('context') ? {configOptions,...(['context-dependent','context-legacy'].includes(mode)?{modes}:{})} : {}) });
+  }
   else if (r.method === 'session/set_config_option') {
     if (mode === 'context-config-fail') { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32603,message:'config rejected'}}) + '\n'); return; }
     configOptions.find(c => c.id === r.params.configId).currentValue = r.params.value;
@@ -32,6 +38,12 @@ createInterface({ input: process.stdin }).on('line', async line => {
     reply(r.id, { configOptions });
   } else if (r.method === 'session/set_mode') { modes.currentModeId=r.params.modeId;reply(r.id,{});
   } else if (r.method === 'session/load') {
+    if (mode?.startsWith('context-missing') || mode==='context-load-fail') {
+      const native=r.params.sessionId;
+      const error=mode==='context-missing-claude'?{code:-32002,message:`Resource not found: ${native}`,data:{uri:native}}
+        :{code:-32603,message:'Internal error',data:{details:mode==='context-missing-codex'?`no rollout found for thread id ${native}`:'permission denied'}};
+      process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error})+'\n');return;
+    }
     sessionId = r.params.sessionId;
     update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'previous' } }); reply(r.id, {});
   } else if (r.method === 'session/prompt') {
