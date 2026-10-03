@@ -3,9 +3,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { lock } from 'proper-lockfile';
 import { SnapshotStore } from './snapshots';
+import { allocateSessionNumber, migrateSessionNumbers, type SessionNumberIndex } from './session-numbers';
 import type { Snapshot } from './shared';
 
-interface Index { sessions: Snapshot[]; deleted: string[] }
+interface Index extends SessionNumberIndex { deleted: string[] }
 export class SessionInUseError extends Error {
   constructor() { super('此会话正在另一个窗口中使用，当前仅查看。请在原窗口释放会话或关闭窗口后重新连接。'); }
 }
@@ -42,7 +43,9 @@ export class SharedHistoryStore extends SnapshotStore {
     this.transactionError = undefined;
     const release = await lock(this.root, {realpath:false, stale:30000, update:10000, retries:{retries:20,minTimeout:50,maxTimeout:500,randomize:true}, onCompromised:error => { compromised = error; this.transactionError = error; }});
     try {
-      const result = await operation(await this.index());
+      const index = await this.index();
+      if (migrateSessionNumbers(index)) await this.commit(index);
+      const result = await operation(index);
       if (compromised) throw compromised;
       return result;
     } finally { if (!compromised) await release(); }
@@ -86,7 +89,7 @@ export class SharedHistoryStore extends SnapshotStore {
       }
       const data = await this.raw.read(current, this.key(current));
       this.seen.set(data.id, data.revision);
-      return data;
+      return {...data, sessionNumber:current.sessionNumber};
     });
   }
   async write(snapshot: Snapshot): Promise<Snapshot> {
@@ -95,7 +98,7 @@ export class SharedHistoryStore extends SnapshotStore {
       const current = index.sessions.find(s => s.id === snapshot.id);
       if (index.deleted.includes(snapshot.id)) throw new Error('此会话已从共享历史删除，不会重新保存。');
       if (current && current.revision !== this.seen.get(snapshot.id)) throw new Error('会话已被另一个窗口更新，请重新连接。');
-      const version = {...snapshot, revision:randomUUID()};
+      const version = {...snapshot, sessionNumber:allocateSessionNumber(index,snapshot), revision:randomUUID()};
       const saved = await this.raw.write(version, this.key(version));
       index.sessions = [saved, ...index.sessions.filter(s => s.id !== snapshot.id)];
       await this.commit(index);
@@ -108,7 +111,7 @@ export class SharedHistoryStore extends SnapshotStore {
   async import(snapshot: Snapshot) {
     await this.transaction(async index => {
       if (index.sessions.some(s => s.id === snapshot.id) || index.deleted.includes(snapshot.id)) return;
-      const version = {...snapshot, revision:randomUUID()};
+      const version = {...snapshot, sessionNumber:allocateSessionNumber(index,snapshot), revision:randomUUID()};
       const saved = await this.raw.write(version, this.key(version));
       index.sessions.push(saved); await this.commit(index);
     });

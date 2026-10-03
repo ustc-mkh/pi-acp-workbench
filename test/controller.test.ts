@@ -288,6 +288,16 @@ async function contextAgent(mode='context') {
   host.config.env = { PI_TEST_AUDIT: resolve(auditDir, 'wire.jsonl') };
   await host.provider.perform({ type: 'new' });
 }
+it('assigns distinct branch numbers and preserves them when deleting messages replaces the backend', async () => {
+  await contextAgent(); await host.provider.perform({type:'send',text:'same title'});
+  const original=host.provider.snapshot(); expect(original.sessionNumber).toBe(1);
+  await host.provider.perform({type:'branchMessage',sessionId:original.sessionId,id:original.entries[0].id});
+  const branch=host.provider.snapshot(); expect(branch.sessionNumber).toBe(2);
+  expect(host.provider.history.map((s:any)=>s.title)).toEqual(['same title','same title']);
+  await host.provider.perform({type:'deleteMessage',sessionId:branch.sessionId,id:branch.entries[0].id});
+  expect(host.provider.snapshot().sessionId).not.toBe(branch.sessionId);
+  expect(host.provider.snapshot().sessionNumber).toBe(2);
+});
 function wire() { return readFileSync(resolve(auditDir!, 'wire.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)); }
 async function edit(type: 'branchMessage' | 'deleteMessage', id: string) {
   await host.provider.perform({ type, id, sessionId: host.provider.snapshot().sessionId });

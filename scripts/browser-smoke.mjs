@@ -26,6 +26,12 @@ try {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(origin + '/style.css');
   await page.setContent(`<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="${origin}/katex.min.css"><link rel="stylesheet" href="${origin}/style.css"></head><body><div id="app"></div></body></html>`);
+  // Reproduce the VS Code Webview defaults, including inherited standard
+  // scrollbar-color (which overrides WebKit pseudo-elements in Chromium).
+  await page.addStyleTag({content:`html { scrollbar-color: #888888 #112233; }
+    ::-webkit-scrollbar { width:10px; height:10px; }
+    ::-webkit-scrollbar-corner { background-color:#112233; }
+    ::-webkit-scrollbar-thumb { background-color:#888888; }`});
   await page.evaluate(() => {
     window.messages = [];
     window.savedState = {};
@@ -42,6 +48,12 @@ try {
   assert((await page.locator('#input').evaluate(node=>node.getBoundingClientRect().height)) > inputHeight+50);
   assert.equal(await page.locator('#input').evaluate(node=>getComputedStyle(node).resize), 'none');
   assert.equal(await page.locator('#input').evaluate(node=>getComputedStyle(node,'::-webkit-scrollbar-button').display), 'none');
+  for (const selector of ['html','#transcript','#input','#history-items','#statistics']) {
+    assert.equal(await page.locator(selector).evaluate(node=>getComputedStyle(node).scrollbarColor), 'auto');
+    assert.equal(await page.locator(selector).evaluate(node=>getComputedStyle(node,'::-webkit-scrollbar').width), '6px');
+    assert.equal(await page.locator(selector).evaluate(node=>getComputedStyle(node,'::-webkit-scrollbar-track').backgroundColor), 'rgba(0, 0, 0, 0)');
+  }
+  assert.equal(await page.locator('#transcript').evaluate(node=>node.offsetWidth-node.clientWidth),6);
   assert((await page.evaluate(()=>window.savedState.composerHeight)) > 100);
   assert(await page.locator('#start-session').isVisible());
   await page.locator('#start-session').click();
@@ -80,6 +92,12 @@ try {
   assert.equal(await page.locator('.activity-group').evaluate(node=>node.open), true);
   await page.locator('.message.tool > summary').click(); await page.getByText('查看修改 · /project/test.ts').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'diff' && m.index === 0));
+  state.history = [{id:'s1',sessionNumber:1,title:'相同标题',cwd:'/project',updated:2},{id:'s2',sessionNumber:2,title:'相同标题',cwd:'/project',updated:1}];
+  state.sessionId='s1'; state.sessionNumber=1; state.status='ready'; await emit(state);
+  await page.locator('#history-toggle').click();
+  assert.deepEqual(await page.locator('#history-items .session-number').allTextContents(),['#001','#002']);
+  assert.equal(await page.locator('#session-number').textContent(),'#001');
+  await page.locator('#history-toggle').click();
   const readyBefore = await page.evaluate(() => window.messages.filter(m => m.type === 'ready').length);
   await page.evaluate(() => window.postMessage({type:'statePatch',revision:999,fields:{},unset:[],entries:[]}, '*'));
   await page.waitForTimeout(75);

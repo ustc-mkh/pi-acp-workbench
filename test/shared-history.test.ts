@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SharedHistoryStore, SessionInUseError } from '../src/shared-history';
@@ -15,6 +15,7 @@ it('shares all histories without losing concurrent additions or pruning to 20', 
   const {a,b} = await pair();
   await Promise.all(Array.from({length:24},(_,i)=>(i%2?a:b).import(snapshot(String(i)))));
   expect(await a.list()).toHaveLength(24);
+  expect(new Set((await a.list()).map(s=>s.sessionNumber)).size).toBe(24);
   expect(await b.list()).toHaveLength(24);
   const index = (await b.list())[0];
   expect((await b.read(index)).entries[0]).toMatchObject({text:'hello'});
@@ -42,6 +43,20 @@ it('keeps the previous full snapshot readable if committing its replacement fail
   vi.spyOn(a as any,'commit').mockRejectedValueOnce(new Error('disk full'));
   await expect(a.write({...snapshot('one'),entries:[{id:'new',role:'user',text:'replacement'}]})).rejects.toThrow('disk full');
   expect((await b.read(original)).entries[0]).toMatchObject({text:'hello'});
+});
+it('migrates v0.3.0 indices without rewriting snapshots and retains numbers across clients', async()=>{
+  const {a,b} = await pair(); await a.import(snapshot('older')); await a.import(snapshot('newer'));
+  const file=join(a.root,'index.json');const legacy=JSON.parse(await readFile(file,'utf8'));
+  delete legacy.nextSessionNumber; delete legacy.sessionNumbers;
+  for(const item of legacy.sessions)delete item.sessionNumber;
+  await writeFile(file,JSON.stringify(legacy));
+  const migrated=await a.list();
+  expect(migrated.every(s=>Number.isSafeInteger(s.sessionNumber))).toBe(true);
+  expect((await b.list()).map(s=>[s.id,s.sessionNumber])).toEqual(migrated.map(s=>[s.id,s.sessionNumber]));
+  for(const item of migrated)expect((await b.read(item)).sessionNumber).toBe(item.sessionNumber);
+  const previousMax=Math.max(...migrated.map(s=>s.sessionNumber!));
+  await a.clear();await b.import(snapshot('after-clear'));
+  expect((await a.list())[0].sessionNumber).toBe(previousMax+1);
 });
 it('detects stale revisions even after another client releases its lock', async()=>{
   const {a,b} = await pair(); await a.claim('one'); const old = await a.write(snapshot('one'));

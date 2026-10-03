@@ -16,6 +16,16 @@ it('deletes the requested row without opening it and keeps older rows available'
   list.update({ ...state, history: history.filter(item => item.id !== '3') });
   expect(container.querySelector('[data-id="3"]')).toBeNull(); expect(container.children).toHaveLength(6);
 });
+it('distinguishes identical titles with persistent numbers independently of row order', () => {
+  const container=document.createElement('div');const list=new HistoryList(container,()=>{},()=>{});
+  const items=[{id:'parent',sessionNumber:7,title:'same',cwd:'/project',updated:1},{id:'branch',sessionNumber:8,title:'same',cwd:'/project',updated:2}];
+  list.update({history:items,status:'ready'});
+  expect([...container.querySelectorAll('.session-number')].map(n=>n.textContent)).toEqual(['#007','#008']);
+  expect(container.querySelector('[data-id=branch] .history-open')?.getAttribute('aria-label')).toBe('#008 same');
+  list.update({history:[...items].reverse(),status:'ready'});
+  expect(container.querySelector('[data-id=parent] .session-number')?.textContent).toBe('#007');
+  expect((container.querySelector('[data-id=branch] .history-open') as HTMLElement).dataset.tooltip).toContain('Session ID: branch');
+});
 it('preserves row identity and scroll position during output and updates busy indicators', () => {
   const container = document.createElement('div');
   const list = new HistoryList(container, () => {}, () => {});

@@ -12,6 +12,7 @@ import { AgentProcess } from './agent';
 import { applyUpdate, initialState, nextId } from './state';
 import { contextSeed, checkPromptSize } from './context';
 import { SnapshotStore } from './snapshots';
+import { allocateSessionNumber, migrateSessionNumbers } from './session-numbers';
 import { SharedHistoryStore, SessionInUseError } from './shared-history';
 import { prepareContext, contextBudget, checkpoint, validCheckpoint, byteSize, type Checkpoint } from './checkpoints';
 import { mergeUsage, validPrice, priceFor, type Inspection, type Statistics, type Price, type UsageRecord } from './telemetry';
@@ -94,6 +95,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.historyPoll = setInterval(() => { void this.refreshSharedHistory().catch(error => { this.state.error = String(error); this.emit(); }); }, 5000);
       this.historyPoll.unref();
     }
+    if (!this.sharedHistory) this.historyReady = this.initializeLocalNumbers().catch(error => { this.state.error = String(error); this.emit(); });
     if (!this.config.get('persistHistory', true)) this.disableHistory();
     this.resources.push(this.log, vscode.workspace.registerTextDocumentContentProvider('pi-acp-diff', {
       provideTextDocumentContent: uri => this.diffDocs.get(uri.toString()) || '',
@@ -124,6 +126,13 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       // Opting out on one client must not erase other clients' shared history.
       if (!this.sharedHistory) await this.snapshots.clear();
     }).catch(error => { this.state.error = String(error); this.emit(); });
+  }
+  private async initializeLocalNumbers() {
+    const index = {sessions:this.history,nextSessionNumber:this.context.workspaceState.get<number>('nextSessionNumber',1)};
+    if (migrateSessionNumbers(index)) {
+      await this.context.workspaceState.update('nextSessionNumber',index.nextSessionNumber);
+      await this.context.workspaceState.update('history',this.history);
+    }
   }
   private async initializeSharedHistory(legacy: SnapshotStore) {
     if (!this.sharedHistory || !this.config.get('persistHistory', true)) return;
@@ -172,7 +181,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if (this.disposed || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.state.history = this.history.map(({ id, cwd, title, updated }) => ({ id, cwd, title, updated }));
+      this.state.history = this.history.map(({ id, cwd, title, updated, sessionNumber }) => ({ id, cwd, title, updated, sessionNumber }));
       const models=this.state.configs?.filter(c=>c.category==='model'||c.id==='model').flatMap(c=>c.type==='select'?c.options.flatMap(o=>'options' in o?o.options:[o]):[]).map(o=>({id:o.value,name:o.name}));
       if(this.state.status==='ready'||this.state.status==='busy')this.statistics.models=models||[];
       this.state.statistics = this.statistics;
@@ -189,7 +198,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     const epoch = this.storageEpoch;
     const title = this.state.entries.find(e => e.role === 'user');
     const snapshot: Snapshot = {
-      id: this.state.sessionId, cwd: this.cwd, title: title && title.role === 'user' ? title.text.slice(0, 70) : '新对话',
+      id: this.state.sessionId, sessionNumber:this.state.sessionNumber, cwd: this.cwd, title: title && title.role === 'user' ? title.text.slice(0, 70) : '新对话',
       updated: Date.now(), entries: structuredClone(this.state.entries),
       contextComplete: this.state.contextComplete, contextPending: this.state.contextPending,
       configs: structuredClone(this.state.configs), modes: structuredClone(this.state.modes),
@@ -197,7 +206,13 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     };
     await this.enqueueStorage(async()=>{
       if (epoch !== this.storageEpoch) return;
+      if (!this.sharedHistory) {
+        const numbering = {sessions:this.history,nextSessionNumber:this.context.workspaceState.get<number>('nextSessionNumber',1)};
+        snapshot.sessionNumber ??= allocateSessionNumber(numbering,snapshot);
+        await this.context.workspaceState.update('nextSessionNumber',numbering.nextSessionNumber);
+      }
       const index = await this.snapshots.write(snapshot);
+      if (this.state.sessionId === index.id) this.state.sessionNumber = index.sessionNumber;
       if(epoch !== this.storageEpoch || this.forgottenSessions.has(index.id) || !this.config.get('persistHistory',true)) {await this.snapshots.remove(index.id);return;}
       const next=[index,...this.history.filter(s=>s.id!==index.id)];
       if (this.sharedHistory) this.history = await this.sharedHistory.list();
@@ -218,7 +233,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   }
   private currentSnapshot(): Snapshot | undefined {
     if (!this.state.sessionId || this.state.preview) return this.lastSnapshot();
-    return { id:this.state.sessionId, cwd:this.cwd, title:'', updated:Date.now(), entries:this.state.entries,
+    return { id:this.state.sessionId, sessionNumber:this.state.sessionNumber, cwd:this.cwd, title:'', updated:Date.now(), entries:this.state.entries,
       contextComplete:this.state.contextComplete, contextPending:this.state.contextPending,
       configs:this.state.configs, modes:this.state.modes, checkpoints:this.checkpoints,
       contextWindow:this.contextWindow, conversationId:this.conversationId };
@@ -226,7 +241,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private async readSnapshot(snapshot: Snapshot) {
     // Unsaved in-memory context belongs to our leased session, not to a stale disk snapshot.
     if (this.sharedHistory && !snapshot.stored && !this.state.readOnly && snapshot.id === this.state.sessionId) return structuredClone(snapshot);
-    return this.snapshots.read(snapshot);
+    const data = await this.snapshots.read(snapshot);
+    return {...data,sessionNumber:data.sessionNumber ?? snapshot.sessionNumber};
   }
   private async rememberSettings() {
     if (this.state.preview || !this.state.sessionId) return;
@@ -287,7 +303,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (!this.sharedHistory) throw new Error('请先打开该历史会话对应的工作区。');
       await this.save(); this.parkActive();
       snapshot = await this.snapshots.read(snapshot); this.cwd = cwd;
-      this.state = {...initialState(), sessionId:snapshot.id, entries:structuredClone(snapshot.entries), contextComplete:snapshot.contextComplete,
+      this.state = {...initialState(), sessionId:snapshot.id, sessionNumber:snapshot.sessionNumber, entries:structuredClone(snapshot.entries), contextComplete:snapshot.contextComplete,
         readOnly:true, connectionAttempted:true, error:'只读查看：请打开此会话对应的工作区后再继续对话。'};
       this.emit(); return;
     }
@@ -313,7 +329,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.releaseLease();
         if (!(error instanceof SessionInUseError)) throw error;
         this.cwd = cwd;
-        this.state = {...initialState(), sessionId:snapshot.id, entries:structuredClone(snapshot.entries), configs:snapshot.configs, modes:snapshot.modes,
+        this.state = {...initialState(), sessionId:snapshot.id, sessionNumber:snapshot.sessionNumber, entries:structuredClone(snapshot.entries), configs:snapshot.configs, modes:snapshot.modes,
           contextComplete:snapshot.contextComplete, readOnly:true, connectionAttempted:true, error:error.message};
         this.emit(); return;
       }
@@ -340,7 +356,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       else if (!snapshot) this.state.error = await this.applyPreferences(agent, session, preferences);
       if (generation !== this.generation) return;
       this.conversationId=snapshot?.conversationId||snapshot?.id||session.sessionId;
-      this.state.sessionId = session.sessionId; this.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
+      this.state.sessionId = session.sessionId; this.state.sessionNumber = snapshot?.sessionNumber; this.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
       this.state.modes = session.modes || snapshot?.modes; this.state.configs = session.configOptions || snapshot?.configs;
       for (const notification of pending) if (notification.sessionId === session.sessionId) applyUpdate(this.state, notification.update, this.replay);
       if (snapshot && (snapshot.contextComplete || !this.state.entries.length)) this.state.entries = structuredClone(snapshot.entries);
@@ -354,7 +370,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.state.status = 'ready'; this.replay = false; await this.rememberActive(); await this.refreshTelemetry(); await this.save(); if(snapshot?.contextPending)await this.enqueueStorage(() => this.snapshots.remove(snapshot!.id)); this.emit();
     } catch (error) {
       this.disconnect(); this.state.status = 'disconnected';
-      if (snapshot) { this.state.configs=snapshot.configs;this.state.modes=snapshot.modes; this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; this.state.contextComplete = snapshot.contextComplete; this.state.contextPending = snapshot.contextPending; }
+      if (snapshot) { this.state.configs=snapshot.configs;this.state.modes=snapshot.modes; this.state.entries = snapshot.entries; this.state.sessionId = snapshot.id; this.state.sessionNumber = snapshot.sessionNumber; this.state.contextComplete = snapshot.contextComplete; this.state.contextPending = snapshot.contextPending; }
       throw error;
     }
   }
@@ -505,6 +521,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if(message.type==='branchMessage')this.conversationId=session.sessionId;
     this.checkpoints=[...keptCheckpoints,prepared!.checkpoint].slice(-24);
     this.state = { ...initialState(), status: 'ready', connectionAttempted: true, sessionId: session.sessionId,
+      sessionNumber:message.type === 'deleteMessage' ? previous.sessionNumber : undefined,
       agent: previous.agent, attachments: previous.attachments, entries, contextPending: true,
       configs: session.configOptions || undefined, modes: session.modes || undefined };
     for (const notification of pending) {

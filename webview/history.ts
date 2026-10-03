@@ -1,10 +1,11 @@
 import type { ChatState, UiMessage } from '../src/shared';
+import { sessionLabel } from '../src/session-numbers';
 const trash = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M7 5.5V3h6v2.5M5 5.5l.8 11h8.4l.8-11M8 8v5.5M12 8v5.5"/></svg>';
 const chat = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-5 3v-3H3V4.5a1 1 0 0 1 1-1Z"/></svg>';
 
 /** Keep rows and the scroll position stable while token updates stream in. */
 export class HistoryList {
-  private rows = new Map<string, { row: HTMLElement; remove: HTMLButtonElement; open: HTMLButtonElement; status: HTMLElement }>();
+  private rows = new Map<string, { row: HTMLElement; remove: HTMLButtonElement; open: HTMLButtonElement; status: HTMLElement; number: HTMLElement }>();
   constructor(private container: HTMLElement, private send: (message: UiMessage) => void, private onOpen: () => void) {}
   update(state: Pick<ChatState, 'history' | 'sessionId' | 'status'>) {
     const ids = new Set(state.history.map(item => item.id));
@@ -21,16 +22,21 @@ export class HistoryList {
         const status = document.createElement('span'); status.className = 'session-indicator'; status.role = 'img'; status.innerHTML = chat;
         const open = document.createElement('button'); open.className = 'history-open'; open.type = 'button';
         open.onclick = () => { this.send({ type: 'resume', id: item.id }); this.onOpen(); };
-        row.append(status, open, remove); entry = { row, remove, open, status }; this.rows.set(item.id, entry);
+        const number = document.createElement('span'); number.className = 'session-number';
+        row.append(status, number, open, remove); entry = { row, remove, open, status, number }; this.rows.set(item.id, entry);
       }
       const current = state.sessionId === item.id, running = current && state.status === 'busy';
-      entry.remove.setAttribute('aria-label', `删除会话：${item.title}`);
+      const label = sessionLabel(item.sessionNumber,item.id);
+      entry.number.textContent = label;
+      entry.number.dataset.tooltip = `${label}\nSession ID: ${item.id}`;
+      entry.open.setAttribute('aria-label', `${label} ${item.title}`);
+      entry.remove.setAttribute('aria-label', `删除会话：${label} ${item.title}`);
       entry.status.classList.toggle('running', running);
       entry.status.setAttribute('aria-label', running ? '正在输出' : '未在输出');
       entry.row.classList.toggle('current', current);
       if (current) entry.open.setAttribute('aria-current', 'true'); else entry.open.removeAttribute('aria-current');
       if (entry.open.textContent !== item.title) entry.open.textContent = item.title;
-      entry.open.dataset.tooltip = `${item.title}\n${item.cwd}\n${new Date(item.updated).toLocaleString()}`;
+      entry.open.dataset.tooltip = `${label} ${item.title}\nSession ID: ${item.id}\n${item.cwd}\n${new Date(item.updated).toLocaleString()}`;
       entry.open.disabled = state.status === 'busy' || state.status === 'connecting';
       if (this.container.children[index] !== entry.row) this.container.insertBefore(entry.row, this.container.children[index] || null);
     });

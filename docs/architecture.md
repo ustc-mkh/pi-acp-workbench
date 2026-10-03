@@ -52,7 +52,7 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 
 | 位置 / 键 | 用途 |
 | --- | --- |
-| ~/.pi/pi-acp-workbench/history/index.json | 默认共享模式：当前服务器账户的全部会话索引及删除 tombstone |
+| ~/.pi/pi-acp-workbench/history/index.json | 默认共享模式：全部会话索引、删除 tombstone、nextSessionNumber 和逻辑会话编号映射 |
 | ~/.pi/pi-acp-workbench/history/conversations | 带版本的完整快照，索引提交后清理上一版本；新目录/文件 POSIX 权限为 0700/0600 |
 | workspaceState.history / storageUri/conversations | 本地模式：最近 20 个索引和快照；共享模式首次启动从这里迁移 |
 | workspaceState.sharedHistoryMigrated | 当前工作区旧历史迁移标记；旧快照文件保留作备份 |
@@ -69,6 +69,8 @@ Webview 不直接访问模型、磁盘或网络。宿主负责启动进程、校
 以下空闲缓存仅用于本地模式。当前活跃连接不计入空闲缓存。缓存存放进程、状态、工作目录、检查点等，切换命中不再 initialize/load；死亡缓存转冷加载。预算不代表整个 Pi 进程内存上限。扩展结束或 Webview 销毁时清空空闲缓存；修改启动配置使旧缓存失效。
 
 快照写入、删除、清空及用量持久化通过 saveQueue 串行化；关闭历史保存会递增存储 epoch，使关闭前排队的快照即使在快速重新开启后也不能复活。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除历史会移除对应统计标题；清空历史或关闭持久化会清空所有统计标题，避免保留首条消息片段。被删除的活动会话不能通过后续用量刷新重建标题。上述操作不擦除 Pi 原生文件，不删除计费记录和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
+
+会话编号由 `src/session-numbers.ts` 按逻辑 conversationId 分配，分支获得新号，后台上下文替换保留旧号。共享模式在索引事务内分配/迁移，额外保留编号映射，以兼容旧客户端保存时丢掉快照内的新字段。本地模式使用 workspaceState.nextSessionNumber。编号与标题分开展示，不随历史排序改变；清空不重置计数器。未持久化会话显示完整 Session ID 作为后备标识。
 
 ## 上下文编辑和压缩
 
@@ -98,7 +100,7 @@ ACP v1 没有通用删除消息 API。本插件用新后台会话和首次 promp
 
 ## 渲染与安全边界
 
-`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。
+`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。显式重置 html/body/后代的 scrollbar-color 和 scrollbar-width 为 auto，避免 VS Code 注入的标准属性压过 Chromium 的 WebKit 伪元素规则。
 
 `webview/markdown.ts` 使用 Markdown token 规则隔离代码和公式，KaTeX trust=false，HTML 经 DOMPurify 净化。Mermaid 只渲染闭合围栏，strict 模式及 SVG 二次净化，禁止图内配置与远程图片。所有资源随包提供，无 CDN。
 

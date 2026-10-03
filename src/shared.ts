@@ -3,12 +3,12 @@ import type { Statistics, Price } from './telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
 export type Entry = { id: string; role: 'user' | 'assistant' | 'thought' | 'notice'; text: string; messageId?: string | null; contextBlocks?: acp.ContentBlock[] } | { id: string; role: 'tool'; tool: acp.ToolCall };
 export type Attachment = {kind?:'text'; id:string;name:string;uri:string;text:string} | {kind:'image';id:string;name:string;mimeType:string;data:string};
-export interface Snapshot { revision?: string; id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; checkpoints?: Checkpoint[]; contextWindow?: number; contextComplete?: boolean; contextPending?: boolean; configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
+export interface Snapshot { sessionNumber?: number; revision?: string; id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; checkpoints?: Checkpoint[]; contextWindow?: number; contextComplete?: boolean; contextPending?: boolean; configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
 export interface ChatState {
   status: 'disconnected' | 'connecting' | 'ready' | 'busy';
   connectionAttempted?: boolean;
   readOnly?: boolean;
-  sessionId?: string; agent?: string; error?: string; entries: Entry[]; attachments: Attachment[];
+  sessionId?: string; sessionNumber?: number; agent?: string; error?: string; entries: Entry[]; attachments: Attachment[];
   modes?: acp.SessionModeState;
   configs?: acp.SessionConfigOption[]; commands: acp.AvailableCommand[];
   plan: acp.PlanEntry[]; usage?: { used: number; size: number }; history: Omit<Snapshot, 'entries'>[];

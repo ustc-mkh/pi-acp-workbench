@@ -10,6 +10,7 @@ import { StatisticsPage } from './statistics';
 import { messageActions } from './message-actions';
 import type { ChatState, Entry, UiMessage } from '../src/shared';
 import { applyStatePatch } from '../src/state-channel';
+import { sessionLabel } from '../src/session-numbers';
 import { TranscriptView } from './transcript';
 import { installComposerResize } from './composer-resize';
 interface UiState {draft?:string;composerHeight?:number;activityExpanded?:boolean}
@@ -20,7 +21,7 @@ const renderMarkdown = createRenderer(window);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><div class="brand"><span class="logo">π</span><span>Pi <b>Workbench</b></span><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">⧉</button><button id="statistics-toggle" data-tooltip="用量统计" aria-label="用量统计" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M5 13V9M10 13V4M15 13V7"/></svg></button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header><div id="chat-page" class="chat-page">
 <section id="history" hidden><div class="section-label">会话历史 <span><button id="refresh-history" data-tooltip="刷新共享会话">刷新</button><button id="clear-history" data-tooltip="清除历史记录（共享模式下影响所有客户端）">清空</button></span></div><div id="history-items"></div></section>
-<div id="connection" hidden><span class="status-dot"></span><span id="status" role="status"></span><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
+<div id="connection" hidden><span class="status-dot"></span><span id="session-number" class="session-number" hidden></span><span id="status" role="status"></span><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
 <div class="transcript-tools"><button id="toggle-activity" aria-pressed="false" data-tooltip="整体展开或折叠工具调用、思考和中间过程">展开执行过程</button></div>
 <div id="context-operation" hidden role="status"><span id="context-progress"></span><button id="cancel-context">取消</button></div><div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
 <div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br>让 Pi 在你的工作区里协助你。</p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> Pi 正在处理…</div></main>
@@ -166,6 +167,9 @@ function paint() {
   el<HTMLButtonElement>('release-session').disabled = busy || connecting;
   el('status').textContent = state.preview ? '渲染预览 · 离线' : state.readOnly ? '只读查看' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
+  el('session-number').hidden = !state.sessionId || state.preview;
+  el('session-number').textContent = sessionLabel(state.sessionNumber,state.sessionId);
+  el('session-number').dataset.tooltip = `会话 ${sessionLabel(state.sessionNumber,state.sessionId)}\nSession ID: ${state.sessionId || ''}`;
   el('connect').hidden = !reconnect;
   el<HTMLButtonElement>('connect').disabled = connecting;
   el<HTMLButtonElement>('new').disabled = busy || connecting;
