@@ -8,7 +8,11 @@ import {SessionServer,SessionClient} from '../src/session-wire';
 import {TelegramSessions} from '../src/telegram-sessions';
 import {RemoteAgent} from '../src/remote-agent';
 import {createHash} from 'node:crypto';
-import {writeTelegramJson,TelegramEvents} from '../src/telegram-events';
+import {TelegramEvents} from '../src/telegram-events';
+import {writeAtomicJson} from '../src/atomic-json';
+import {requestFingerprint} from '../src/request-journal';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 const cleanup:(()=>Promise<unknown>|void)[]=[];
 afterEach(async()=>{for(const fn of cleanup.splice(0).reverse())await fn();});
 async function fixture(maxWorkers=2,idleMs=900000,mode='context'){
@@ -25,11 +29,11 @@ it('shares a running task between desktop and phone; detaching desktop does not 
  const state=vi.fn(),agent=new RemoteAgent({cwd:root,command:'unused',args:[],update:()=>{},permission:vi.fn(),closed:()=>{},log:()=>{}},state,socket);cleanup.push(()=>agent.dispose());
  await agent.initialize();const session=await agent.createSession();
  const pending=agent.prompt(session.sessionId,[{type:'text',text:'wait'}]);const rejected=expect(pending).rejects.toThrow('不会自动重发');
- await vi.waitFor(async()=>expect((await host.control(session.sessionId,'status')).busy).toBe(true));agent.dispose();await rejected;
- expect((await host.control(session.sessionId,'status')).busy).toBe(true);
+ await vi.waitFor(async()=>expect((await host.status(session.sessionId)).busy).toBe(true));agent.dispose();await rejected;
+ expect((await host.status(session.sessionId)).busy).toBe(true);
  await host.cancel(session.sessionId);
- await vi.waitFor(async()=>expect((await host.control(session.sessionId,'status')).busy).toBe(false));
- const result=await host.run(session.sessionId,'中文😀',{update:()=>{},permission:()=>{}});expect(result.status).toBe('completed');
+ await vi.waitFor(async()=>expect((await host.status(session.sessionId)).busy).toBe(false));
+ const result=await host.run(session.sessionId,'中文😀',{permission:()=>{}});expect(result.status).toBe('completed');
  expect((await host.history(session.sessionId)).some(e=>'text'in e&&e.text==='中文😀')).toBe(true);
  await expect(client.call('create',{cwd:'/forbidden'})).rejects.toThrow();
 },15000);
@@ -39,6 +43,8 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
  await vi.waitFor(async()=>expect((await readFile(audit,'utf8')).includes('"text":"wait"')).toBe(true));
  const queued=client.call('prompt',{sessionId:b.id,prompt:[{type:'text',text:'second'}]},'second',0);
  const duplicate=service.handle('prompt',{sessionId:a.id,prompt:[{type:'text',text:'wait'}]},'once');
+ await expect(service.handle('prompt',{sessionId:b.id,prompt:[{type:'text',text:'wait'}]},'once')).rejects.toThrow('请求 ID');
+ await expect(service.handle('prompt',{sessionId:a.id,prompt:[{type:'text',text:'different'}]},'once')).rejects.toThrow('请求 ID');
  await host.cancel(a.id);await first;await duplicate;await queued;
  const wire=await readFile(audit,'utf8');expect(wire.split('\n').filter(l=>l.includes('session/prompt')&&l.includes('"text":"wait"'))).toHaveLength(1);
  expect((service as any).runtimes.size).toBeLessThanOrEqual(1);
@@ -48,7 +54,7 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
 },20000);
 it('shares permission tickets and accepts only the first valid response',async()=>{
  const {host,client}=await fixture();const session=await host.create();let permission:any;
- const turn=host.run(session.id,'permission',{update:()=>{},permission:p=>{permission=p;}});
+ const turn=host.run(session.id,'permission',{permission:p=>{permission=p;}});
  await vi.waitFor(()=>expect(permission).toBeDefined());
  expect(await host.permission(session.id,permission.id,'invalid')).toBe(false);
  const option=permission.request.options[0].optionId;
@@ -58,7 +64,7 @@ it('shares permission tickets and accepts only the first valid response',async()
 
 it('marks unfinished durable requests interrupted on restart without re-running tools',async()=>{
  const {root,host,audit}=await fixture();const session=await host.create();
- const id='interrupted-request';await writeTelegramJson(join(root,'service','requests',createHash('sha256').update(id).digest('hex')+'.json'),{id,sessionId:session.id,status:'running'});
+ const id='interrupted-request';await writeAtomicJson(join(root,'service','requests',createHash('sha256').update(id).digest('hex')+'.json'),{id,sessionId:session.id,fingerprint:requestFingerprint('prompt',{sessionId:session.id,prompt:[{type:'text',text:'never repeat'}]}),status:'running'});
  const recovered=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000},()=>{},()=>{});cleanup.push(()=>recovered.dispose());
  const before=await readFile(audit,'utf8');await recovered.initialize();
  await expect(recovered.handle('prompt',{sessionId:session.id,prompt:[{type:'text',text:'never repeat'}]},id)).rejects.toThrow('不会自动重放');
@@ -66,15 +72,38 @@ it('marks unfinished durable requests interrupted on restart without re-running 
  expect((await new TelegramEvents(join(root,'telegram','events')).list())[0]).toMatchObject({status:'failed',sessionId:session.id});
 },10000);
 it('loads native fork settings, preserves source history and leaves separate durable sessions',async()=>{
- const {host,client}=await fixture(1,900000,'context-native');const session=await host.create();
- await host.run(session.id,'first',{update:()=>{},permission:()=>{}});
+ const {host,client,service,audit}=await fixture(1,900000,'context-native');const session=await host.create();
+ await host.run(session.id,'first',{permission:()=>{}});
  const inspection:any=await client.call('request',{sessionId:session.id,method:'_pi_workbench/inspect',params:{force:true}},undefined,0);
  await client.call('request',{sessionId:session.id,method:'session/set_config_option',params:{configId:'model',value:'other'}},undefined,0);
  const point=inspection.forkPoints.find((p:any)=>p.role==='assistant');
- const fork:any=await client.call('request',{sessionId:session.id,method:'_pi_workbench/fork',params:point},undefined,0);
+ const params={sessionId:session.id,method:'_pi_workbench/fork',params:point};
+ const fork:any=await client.call('request',params,'fork-once',0);
+ const before=await readFile(audit,'utf8');
+ expect(await service.handle('request',{params:point,method:params.method,sessionId:session.id},'fork-once')).toEqual(fork);
+ expect(await readFile(audit,'utf8')).toBe(before);
+ await expect(service.handle('request',{...params,method:'session/set_mode',params:{modeId:'other'}},'fork-once')).rejects.toThrow('请求 ID');
  const state:any=await client.call('state',{sessionId:fork.sessionId});expect(state.snapshot.configs[0].currentValue).toBe('default');
  expect((await host.list())).toHaveLength(2);expect((await host.history(session.id)).some(e=>'text'in e&&e.text==='first')).toBe(true);
 },15000);
+
+it('does not start a worker when the initial durable receipt cannot be written',async()=>{
+ const {root,service,agents}=await fixture();
+ const write=vi.spyOn((service as any).journal,'write').mockRejectedValueOnce(new Error('sync failed'));
+ await expect(service.handle('create',{cwd:root},'sync-failure')).rejects.toThrow('sync failed');
+ expect(agents).toHaveLength(0);write.mockRestore();
+});
+
+it('persists create receipts across service restarts and rejects ID reuse for different payloads',async()=>{
+ const {root,service,audit}=await fixture();
+ const session=await service.handle('create',{cwd:root},'create-once');
+ const before=await readFile(audit,'utf8');
+ const restarted=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000},()=>{},()=>{});
+ cleanup.push(()=>restarted.dispose());await restarted.initialize();
+ expect(await restarted.handle('create',{cwd:root},'create-once')).toEqual(session);
+ await expect(restarted.handle('create',{cwd:join(root,'other')},'create-once')).rejects.toThrow('请求 ID');
+ expect(await readFile(audit,'utf8')).toBe(before);expect(await restarted.list()).toHaveLength(1);
+},10000);
 
 it('never dispatches a prompt if saving its user message fails, and never retries that request ID',async()=>{
  const {host,service,audit}=await fixture();const session=await host.create();
@@ -85,13 +114,40 @@ it('never dispatches a prompt if saving its user message fails, and never retrie
  expect((await readFile(audit,'utf8')).includes('"method":"session/prompt"')).toBe(false);
 },10000);
 
+it.each(['normal','wait','crash'])('persists a final consolidated workspace diff on %s completion',async outcome=>{
+ const {root,host,client,service}=await fixture(1,900000,'context-diff');
+ const git=promisify(execFile);
+ await git('git',['init','--quiet',root]);
+ await writeFile(join(root,'.gitignore'),'history/\nservice/\ntelegram/\naudit.jsonl*\n');
+ await writeFile(join(root,'change.txt'),'staged baseline\n');await git('git',['-C',root,'add','.']);
+ const index=await readFile(join(root,'.git/index'));
+ await writeFile(join(root,'change.txt'),'preexisting dirty contents\n');
+ const session=await host.create();
+ const text=outcome==='normal'?'edit-workspace':`edit-workspace-${outcome}`;
+ const task=client.call('prompt',{sessionId:session.id,prompt:[{type:'text',text}]},undefined,0).then(value=>({value,error:undefined}),error=>({value:undefined,error}));
+ if(outcome==='wait'){
+   await vi.waitFor(async()=>expect(await readFile(join(root,'change.txt'),'utf8')).toBe('agent final\n'));
+   await host.cancel(session.id);
+ }
+ const result=await task;
+ if(outcome==='crash')expect(result.error).toBeTruthy();else expect(result.error).toBeUndefined();
+ const state=await service.state(session.id),entry=state.snapshot.entries.at(-1)!;
+ expect(entry.role).toBe('diff');if(entry.role!=='diff')throw new Error('missing diff');
+ expect(entry.diff.files.map(file=>file.path)).toEqual(['change.txt','created.txt']);
+ expect(entry.diff.files[0]).toMatchObject({before:'preexisting dirty contents\n',after:'agent final\n',added:1,removed:1});
+ expect((await (service as any).store.read(state.snapshot)).entries.at(-1)).toEqual(entry);
+ const event=(await new TelegramEvents(join(root,'telegram','events')).list()).at(-1)!;
+ expect(event.text).toContain('本轮修改');expect(event.text).toContain('change.txt');
+ expect(await readFile(join(root,'.git/index'))).toEqual(index);
+},15000);
+
 it('uses arbitrary directories from desktop and Telegram without workspace registration',async()=>{
  const {root,client,host}=await fixture();
  const directory=join(root,'unlisted project'),alias=join(root,'project-link'),file=join(root,'file');
  await mkdir(directory);await symlink(directory,alias);await writeFile(file,'not a directory');
  const desktop:any=await client.call('create',{cwd:alias});expect(desktop.cwd).toBe(directory);
  expect((await host.list()).some(s=>s.id===desktop.id)).toBe(true);
- expect((await host.run(desktop.id,'hello',{update:()=>{},permission:()=>{}})).status).toBe('completed');
+ expect((await host.run(desktop.id,'hello',{permission:()=>{}})).status).toBe('completed');
  expect((await host.history(desktop.id)).some(e=>'text'in e&&e.text==='hello')).toBe(true);
  expect((await new TelegramEvents(join(root,'telegram','events')).list())[0].inputText).toBeUndefined();
  await client.call('prompt',{sessionId:desktop.id,prompt:[{type:'text',text:'desktop input'}]});

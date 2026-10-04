@@ -6,6 +6,7 @@
 
 - **Telegram 远程控制**：每个会话对应一个群组话题，支持流式回复、完成通知、工具授权、停止任务，以及旧会话与历史消息同步。桌面输入和 Pi 回复可同步到手机。
 - **桌面编码助手**：侧栏对话、模型与思考强度选择、代码选区和文件上下文、粘贴图片、工具调用与 diff 查看。
+- **每轮总 Diff**：输出末尾展示该轮工作区的文件和增删行数汇总，可展开补丁或打开编辑器对比；支持 Pi / Codex / Claude。[采集范围与限制](docs/turn-diff.md)。
 - **会话管理**：保存与恢复历史、跨端继续对话、Pi 原生会话分支、Markdown 导出。
 - **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。
 - **其他 Agent**：可选接入 Codex / Claude Code 的 ACP 适配器；Telegram 和独立会话服务目前用于 Pi。
@@ -57,6 +58,8 @@ systemctl --user enable --now pi-sessions
 打开并信任项目文件夹，点击活动栏 **π** → **新建会话**。Enter 发送，Shift+Enter 换行；编辑器右键可将选区加入对话。
 
 插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，自定义路径使用 VS Code 设置 `piAcp.serviceSocket`。历史记录默认保存在该服务器账户的 `~/.pi/pi-acp-workbench/history/`。
+
+模型与 thinking 组合固定保存在 `~/.pi/pi-acp-workbench/preferences/{pi,codex,claude}.json`，按 harness 隔离、跨工作区共享。成功选择立即保存，新建自动读取；恢复旧会话保留其自身设置，不覆盖默认组合，实际发送或修改设置后才更新。关闭历史保存也不影响偏好。Pi 桌面与 Telegram 共用服务端偏好；自定义 `--data-dir` 时 Pi 使用该目录下的 `preferences/pi.json`。旧工作区偏好不自动迁移。
 
 ## 接入 Telegram
 

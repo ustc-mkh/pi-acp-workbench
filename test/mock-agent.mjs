@@ -68,6 +68,11 @@ createInterface({ input: process.stdin }).on('line', async line => {
     pending = r.id;
     const text = mode?.startsWith('context') ? r.params.prompt.filter(b => b.type === 'text').at(-1)?.text || '' : r.params.prompt[0].text;
     if(native){addPoint('user',text);persistNative();}
+    if (mode==='context-diff'&&text.startsWith('edit-workspace')) {
+      writeFileSync('change.txt','intermediate\n');writeFileSync('change.txt','agent final\n');writeFileSync('created.txt','new file\n');
+      if(text==='edit-workspace-crash')process.exit(7);
+      if(text==='edit-workspace-wait')return;
+    }
     if (text === 'crash') process.exit(7);
     if (text === 'wait') return;
     if (text === 'permission') {

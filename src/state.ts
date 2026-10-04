@@ -23,7 +23,7 @@ export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay 
       appendText(state, role, text, update.messageId);
       if (c.type !== 'text') {
         const entry = state.entries.at(-1)!;
-        if (entry.role !== 'tool') {
+        if (entry.role === 'user' || entry.role === 'assistant' || entry.role === 'thought') {
           state.entries[state.entries.length - 1] = {...entry, contextBlocks:[...entry.contextBlocks || [], structuredClone(c)]};
         }
       }

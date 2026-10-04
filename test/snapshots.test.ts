@@ -6,11 +6,11 @@ import {SnapshotStore} from '../src/snapshots';
 import type {Snapshot} from '../src/shared';
 it('persists a complete multi-megabyte transcript and native fork mappings across restart',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-snapshots-'));
- try{const store=new SnapshotStore(dir);const snapshot:Snapshot={id:'../../arbitrary-id',cwd:'/project',title:'large',updated:1,entries:[{id:'1',role:'user',text:'中文'.repeat(500000)}],contextComplete:true,conversationId:'logical'};
+ try{const store=new SnapshotStore(dir);const snapshot:Snapshot={harness:'pi',id:'../../arbitrary-id',cwd:'/project',title:'large',updated:1,entries:[{id:'1',role:'user',text:'中文'.repeat(500000)}],contextComplete:true,conversationId:'logical'};
  snapshot.nativeForks={'1':{entryId:'native',hash:'verified'}};
  const index=await store.write(snapshot);expect(index.entries).toEqual([]);expect(index.nativeForks).toBeUndefined();expect(index.stored).toBe(true);
  expect(await new SnapshotStore(dir).read(index)).toEqual(snapshot);expect(await readdir(dir)).toHaveLength(1);
- await writeFile(join(dir,(await readdir(dir))[0]),JSON.stringify({...snapshot,contextPending:true}));await expect(store.read(index)).rejects.toThrow('不再支持');
+ await writeFile(join(dir,(await readdir(dir))[0]),JSON.stringify({...snapshot,contextPending:true}));await expect(store.read(index)).rejects.toThrow('格式不受支持');
  await writeFile(join(dir,(await readdir(dir))[0]),JSON.stringify({...snapshot,id:'wrong'}));await expect(store.read(index)).rejects.toThrow('不匹配');
  await store.remove(snapshot.id);expect(await readdir(dir)).toEqual([]);
  }finally{await rm(dir,{recursive:true,force:true});}

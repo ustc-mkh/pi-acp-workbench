@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[], configurationChanged: undefined as undefined | ((event: any) => void), home: undefined as string | undefined, terminals: [] as any[] }));
+const host = vi.hoisted(() => ({ provider: undefined as any, config: {} as Record<string, unknown>, stored: new Map<string, unknown>(), commands: new Map<string, Function>(), updates: [] as unknown[], configurationChanged: undefined as undefined | ((event: any) => void), home: undefined as string | undefined, cwd: undefined as string | undefined, terminals: [] as any[] }));
 vi.mock('node:os', async importOriginal => {
   const os = await importOriginal<typeof import('node:os')>();
   return {...os,homedir:()=>host.home || os.homedir()};
@@ -12,12 +12,13 @@ vi.mock('vscode', () => ({
   env:{clipboard:{writeText:vi.fn(async()=>{})}},
   workspace: {
     isTrusted: true,
-    get workspaceFolders() { return [{ uri: { scheme: 'file', fsPath: process.cwd() } }]; },
+    get workspaceFolders() { return [{ uri: { scheme: 'file', fsPath: host.cwd || process.cwd() } }]; },
     getConfiguration: () => ({ get: (key: string, fallback: unknown) => host.config[key] ?? fallback }),
     registerTextDocumentContentProvider: () => ({ dispose() {} }),
     onDidChangeConfiguration: (callback: (event: any) => void) => { host.configurationChanged = callback; return { dispose() {} }; },
   },
   window: {
+    showTextDocument:vi.fn(async()=>{}),
     createTerminal: (options:any) => {host.terminals.push(options);return {show(){}};},
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
     registerWebviewViewProvider: (_: string, provider: unknown) => { host.provider = provider; return { dispose() {} }; },
@@ -30,14 +31,17 @@ vi.mock('vscode', () => ({
 import { activate as activateExtension } from '../src/extension';
 import {AgentProcess} from '../src/agent';
 // Exercise the shared UI controller with an injected ACP transport. Service lifetime is tested separately.
-const activate=(context:any)=>activateExtension(context,options=>new AgentProcess(options));
+const activate=(context:any)=>activateExtension(context,options=>new AgentProcess({...options,...(options.harness==='pi'?{command:host.config.command as string,args:host.config.args as string[],env:host.config.env as Record<string,string>}: {})}));
 let context: any;
+let preferencesHome:string;
 beforeEach(() => {
+  preferencesHome=mkdtempSync(resolve(tmpdir(),'pi-controller-home-'));host.home=preferencesHome;
   host.config = { sharedHistory: false, command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear(); host.terminals = [];
   context = { subscriptions: [], workspaceState: { get: (key: string, fallback: unknown) => host.stored.has(key) ? host.stored.get(key) : fallback, update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)) } };
   activate(context);
 });
-afterEach(() => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose()); });
+afterEach(async () => { context.subscriptions.forEach((d: { dispose(): void }) => d.dispose());await host.provider.persistence.pending;host.cwd=undefined;host.home=undefined;rmSync(preferencesHome,{recursive:true,force:true}); });
+const preferences=(harness='pi')=>JSON.parse(readFileSync(resolve(host.home!,'.pi','pi-acp-workbench','preferences',`${harness}.json`),'utf8')).preferences;
 function mockHarness(harness:'codex'|'claude',mode='') {
   host.config[harness+'.command']=process.execPath;
   host.config[harness+'.args']=[resolve('test/mock-agent.mjs'),mode];
@@ -67,14 +71,14 @@ it('keeps model preferences separate and rejects switching during an active prom
   mockHarness('codex','context');await host.provider.perform({type:'switchHarness',harness:'codex'});await host.provider.perform({type:'new'});
   expect(host.provider.snapshot().configs.find((c:any)=>c.id==='model').currentValue).toBe('default');
   await host.provider.perform({type:'config',id:'thinking',value:'high'});
-  expect(host.stored.get('sessionPreferences')).not.toEqual(host.stored.get('harness.codex.sessionPreferences'));
+  expect(preferences()).not.toEqual(preferences('codex'));
   const turn=host.provider.perform({type:'send',text:'wait'});await vi.waitFor(()=>expect(host.provider.snapshot().status).toBe('busy'));
   await host.provider.perform({type:'switchHarness',harness:'claude'});expect(host.provider.snapshot().harness).toBe('codex');
   await host.provider.perform({type:'cancel'});await turn;
   const id=host.provider.snapshot().sessionId;await host.provider.perform({type:'branchMessage',sessionId:id,id:host.provider.snapshot().entries[0].id});
   expect(host.provider.snapshot().error).toContain('暂不支持');expect(host.provider.snapshot().sessionId).toBe(id);
 });
-it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as const)('reconnects missing empty %s sessions (shared=%s) without sending messages',async(harness,shared)=>{
+it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as const)('keeps missing empty %s sessions (shared=%s) disconnected without replacing history',async(harness,shared)=>{
   const root=mkdtempSync(resolve(tmpdir(),'pi-empty-reconnect-'));
   if(shared){host.provider.dispose();await host.provider.persistence.pending;host.home=root;host.config.sharedHistory=true;activate(context);await host.provider.historyReady;}
   const audit=resolve(root,'wire.jsonl');host.config[harness+'.env']={PI_TEST_AUDIT:audit};
@@ -86,23 +90,22 @@ it.each([['codex',false],['claude',false],['codex',true],['claude',true]] as con
     for(let i=0;i<2;i++){
       await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
       const state=host.provider.snapshot();
-      expect(state).toMatchObject({status:'ready',entries:[],sessionNumber:first.sessionNumber});
-      expect(state.sessionId).not.toBe(first.sessionId);expect(state.error).toContain('尚未落盘');
-      expect(state.configs[0].currentValue).toBe('other');expect(state.commands[0].name).toBe('status');
+      expect(state).toMatchObject({status:'disconnected',readOnly:true,entries:[],sessionNumber:first.sessionNumber,sessionId:first.sessionId});
+      expect(state.error).toBeTruthy();expect(state.configs[0].currentValue).toBe('other');
       expect(host.provider.history).toHaveLength(1);
       if(shared)expect(await host.provider.sharedHistory.list()).toHaveLength(1);
     }
-    expect(readFileSync(audit,'utf8')).not.toContain('session/prompt');
+    const requests=readFileSync(audit,'utf8');expect(requests).not.toContain('session/prompt');
+    expect(requests.split('\n').filter(line=>line.includes('session/new'))).toHaveLength(1);
   }finally{host.provider.dispose();await host.provider.persistence.pending;host.home=undefined;rmSync(root,{recursive:true,force:true});}
 });
-it.each([['codex',true],['claude',true],['codex',false],['claude',false]] as const)('never recreates missing %s sessions unless proven empty (content=%s)',async(harness,withContent)=>{
+it.each([['codex',true],['claude',true],['codex',false],['claude',false]] as const)('never recreates missing %s sessions (content=%s)',async(harness,withContent)=>{
   mockHarness(harness,`context-missing-${harness}`);await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
   if(withContent)await host.provider.perform({type:'send',text:'retained'});
-  else host.provider.state.contextComplete=false;
   const before=host.provider.snapshot();
   await host.provider.perform({type:'releaseSession'});await host.provider.perform({type:'connect'});
   expect(host.provider.snapshot()).toMatchObject({status:'disconnected',readOnly:true,sessionId:before.sessionId,entries:before.entries});
-  expect(host.provider.snapshot().error).toContain('不会自动新建');expect(host.provider.history).toHaveLength(1);
+  expect(host.provider.snapshot().error).toBeTruthy();expect(host.provider.history).toHaveLength(1);
 });
 it.each(['codex','claude'] as const)('loads existing %s conversations after release without replacing the ID or entries',async harness=>{
   mockHarness(harness,'context');await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
@@ -162,16 +165,11 @@ it('uses harness-specific login commands and never copies Pi profile environment
   mockHarness('claude');await host.provider.perform({type:'switchHarness',harness:'claude'});await host.provider.perform({type:'login'});
   expect(host.terminals.at(-1)).toMatchObject({shellPath:process.execPath,shellArgs:[resolve('test/mock-agent.mjs'),'','--cli','/login'],env:{}});
 });
-it('restores ready even when saving session preferences fails after a turn', async () => {
+it('restores ready even when saving account preferences fails before a turn', async () => {
   await host.provider.perform({type:'new'});
-  const original = context.workspaceState.update;
-  context.workspaceState.update = async (key: string, value: unknown) => {
-    if (key === 'sessionPreferences') throw new Error('disk full');
-    return original(key, value);
-  };
+  vi.spyOn(host.provider.preferences,'save').mockRejectedValueOnce(new Error('disk full'));
   await host.provider.perform({type:'send',text:'hello'});
   expect(host.provider.snapshot()).toMatchObject({status:'ready',error:'disk full'});
-  context.workspaceState.update = original;
   await host.provider.perform({type:'send',text:'another turn'});
   expect(host.provider.snapshot().status).toBe('ready');
 });
@@ -235,17 +233,35 @@ it.each([false, true])('disables local persistence during writes without deletin
     host.home = undefined; rmSync(root, {recursive:true, force:true});
   }
 });
+it.each(['codex','claude'] as const)('shows %s turn diffs after the answer and opens a consolidated read-only document',async harness=>{
+ const {execFileSync}=await import('node:child_process');const {writeFileSync}=await import('node:fs');
+ const root=mkdtempSync(resolve(tmpdir(),'pi-local-diff-'));host.cwd=root;
+ try {
+   execFileSync('git',['init','--quiet',root]);writeFileSync(resolve(root,'change.txt'),'base\n');execFileSync('git',['-C',root,'add','.']);
+   writeFileSync(resolve(root,'change.txt'),'dirty before\n');
+   mockHarness(harness,'context-diff');await host.provider.perform({type:'switchHarness',harness});await host.provider.perform({type:'new'});
+   await host.provider.perform({type:'send',text:'edit-workspace'});
+   const state=host.provider.snapshot(),summary=state.entries.at(-1);
+   expect(state.status).toBe('ready');expect(summary.role).toBe('diff');
+   expect(summary.diff.files[0]).toMatchObject({path:'change.txt',before:'dirty before\n',after:'agent final\n'});
+   await host.provider.perform({type:'diff',id:summary.id,index:-1});
+   const previews=[...host.provider.documents.previews.values()] as {documents:Map<string,string>}[];
+   expect([...previews.at(-1)!.documents.values()][0]).toContain('-dirty before');
+   expect(host.provider.snapshot().error).toBeUndefined();
+   expect((host.stored.get('history') as any[])[0].entries.at(-1).role).toBe('diff');
+ } finally {host.provider.dispose();await host.provider.persistence.pending;host.cwd=undefined;rmSync(root,{recursive:true,force:true});}
+});
 it('bounds diff document storage and reuses repeated previews', async () => {
   await host.provider.perform({type:'new'});
   for (let i = 0; i < 25; i++) {
     const entry = {id:`tool-${i}`,role:'tool',tool:{toolCallId:`call-${i}`,title:'edit',content:[{type:'diff',path:'file.ts',oldText:'before',newText:'after'}]}};
     host.provider.state.entries.push(entry);
-    await host.provider.openDiff(entry.id,0);
+    await host.provider.perform({type:'diff',id:entry.id,index:0});
   }
-  expect(host.provider.diffDocs.size).toBe(40);
-  const keys = [...host.provider.diffDocs.keys()];
-  await host.provider.openDiff('tool-24',0);
-  expect([...host.provider.diffDocs.keys()]).toEqual(keys);
+  expect(host.provider.documents.previews.size).toBe(20);
+  const keys = [...host.provider.documents.previews.keys()];
+  await host.provider.perform({type:'diff',id:'tool-24',index:0});
+  expect([...host.provider.documents.previews.keys()]).toEqual(keys);
   expect(keys.some((key:any) => key.includes('tool-0-'))).toBe(false);
 });
 it('clears usage titles while preserving billed records and prices', async () => {
@@ -374,7 +390,8 @@ it('cancels pending permission requests when the user stops', async () => {
   await vi.waitFor(() => expect(host.provider.snapshot().permissions).toHaveLength(1));
   await host.provider.perform({ type: 'cancel' }); await turn;
   expect(host.provider.snapshot().permissions).toHaveLength(0); expect(host.provider.snapshot().status).toBe('ready');
-  expect(host.provider.snapshot().entries.at(-1).text).toContain('cancelled');
+  expect(host.provider.snapshot().entries.some((entry:any)=>entry.role==='notice'&&entry.text.includes('cancelled'))).toBe(true);
+  expect(host.provider.snapshot().entries.at(-1).role).toBe('diff');
 });
 it('rejects forged permission option IDs and accepts the displayed option', async () => {
   await host.provider.perform({ type: 'new' });
@@ -438,19 +455,15 @@ async function contextAgent(mode='context') {
   host.config.env = { PI_TEST_AUDIT: resolve(auditDir, 'wire.jsonl') };
   await host.provider.perform({ type: 'new' });
 }
-it('assigns distinct native branch numbers and rejects message deletion without replacing the backend', async () => {
+it('assigns distinct native branch numbers without replacing the source backend', async () => {
   await contextAgent('context-native'); await host.provider.perform({type:'send',text:'same title'});
   const original=host.provider.snapshot(); expect(original.sessionNumber).toBe(1);
   await host.provider.perform({type:'branchMessage',sessionId:original.sessionId,id:original.entries[0].id});
   const branch=host.provider.snapshot(); expect(branch.sessionNumber).toBe(2);
   expect(host.provider.history.map((s:any)=>s.title)).toEqual(['same title','same title']);
-  await host.provider.perform({type:'deleteMessage',sessionId:branch.sessionId,id:branch.entries[0].id});
-  expect(host.provider.snapshot().sessionId).toBe(branch.sessionId);
-  expect(host.provider.snapshot().error).toContain('已移除');
-  expect(host.provider.snapshot().sessionNumber).toBe(2);
 });
 function wire() { return readFileSync(resolve(auditDir!, 'wire.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)); }
-async function edit(type: 'branchMessage' | 'deleteMessage', id: string) {
+async function edit(type: 'branchMessage', id: string) {
   await host.provider.perform({ type, id, sessionId: host.provider.snapshot().sessionId });
 }
 it('branches at the native node, keeps historical settings, and never sends a textual seed or summary request', async () => {
@@ -476,31 +489,6 @@ it('branches at the native node, keeps historical settings, and never sends a te
   expect(prompt.prompt).toEqual([{type:'text',text:'continue-here'}]);
   await host.provider.perform({ type: 'send', text: 'one-more' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt).toEqual([{ type: 'text', text: 'one-more' }]);
-});
-it('rejects obsolete user deletion requests and preserves attached history', async () => {
-  await contextAgent();
-  host.provider.state.attachments = [{ id: 'a', name: 'private.ts', uri: 'file:///private.ts', text: 'SECRET_ATTACHMENT_BODY' }];
-  await host.provider.perform({ type: 'send', text: 'DELETE_THIS_USER' });
-  const old = host.provider.snapshot(), removed = old.entries[0];
-  expect(removed.contextBlocks).toBeDefined();
-  await host.provider.perform({ type: 'send', text: 'keep-this-user' });
-  await edit('deleteMessage', removed.id);
-  expect(host.provider.snapshot().entries.some((e: any) => e.id === removed.id)).toBe(true);
-  expect(host.provider.snapshot().error).toContain('已移除');
-  expect((host.stored.get('history') as any[]).some(s => s.id === old.sessionId)).toBe(true);
-  await host.provider.perform({ type: 'send', text: 'next-request' });
-  const payload = JSON.stringify(wire().filter(r => r.method === 'session/prompt').at(-1));
-  expect(payload).not.toContain('DELETE_THIS_USER'); expect(payload).not.toContain('SECRET_ATTACHMENT_BODY'); expect(payload).toContain('next-request');
-  expect(host.provider.snapshot().entries[0].contextBlocks).toEqual(removed.contextBlocks);
-});
-it('rejects obsolete assistant deletion requests without changing the transcript', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'keep-user' });
-  const old = host.provider.snapshot(), selected = old.entries.find((e: any) => e.role === 'assistant');
-  await edit('deleteMessage', selected.id);
-  expect(host.provider.snapshot().entries).toEqual(old.entries);
-  await host.provider.perform({ type: 'send', text: 'continue' });
-  const seed = wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text;
-  expect(seed).toBe('continue');
 });
 it('preserves the visible transcript across native load and never re-injects it on a branch', async () => {
   await contextAgent('context-native'); await host.provider.perform({ type: 'send', text: 'uncompacted-history' });
@@ -554,14 +542,13 @@ it('does not dispatch cancel before a prompt when the user stops during local pe
   expect(host.provider.snapshot().entries.at(-1).text).toContain('尚未发送');
 });
 
-it('deduplicates billed requests, rejects deletion, and keeps native branch spending separate', async()=>{
+it('deduplicates billed requests and keeps native branch spending separate', async()=>{
   await contextAgent('context-native');await host.provider.perform({type:'send',text:'original'});
   const original=host.provider.snapshot().sessionId;
   const record={id:'native-request',sessionId:original,model:'p/m',timestamp:Date.now(),kind:'inference',input:100,output:20,cacheRead:80,cacheWrite:0};
   await host.provider.recordUsage([record]);await host.provider.recordUsage([record]);
   expect(host.stored.get('usageRecords')).toHaveLength(1);
-  const assistant=host.provider.snapshot().entries.find((e:any)=>e.role==='assistant');
-  await edit('deleteMessage',assistant.id);await host.provider.recordUsage([{...record,id:'after-delete',sessionId:host.provider.snapshot().sessionId}]);
+  await host.provider.recordUsage([{...record,id:'next-request',sessionId:host.provider.snapshot().sessionId}]);
   expect((host.stored.get('usageRecords') as any[]).map(r=>r.sessionId)).toEqual([original,original]);
   await edit('branchMessage',host.provider.snapshot().entries[0].id);
   await host.provider.recordUsage([{...record,id:'branch-request',sessionId:host.provider.snapshot().sessionId}]);
@@ -689,11 +676,24 @@ it('persists successful selections immediately and inherits them after restart e
   await contextAgent();
   await host.provider.perform({type:'config',id:'model',value:'other'});
   await host.provider.perform({type:'config',id:'thinking',value:'high'});
-  expect(host.stored.get('sessionPreferences')).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
+  expect(preferences()).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
+  host.stored.clear(); // A different workspace has no workspaceState preferences/history.
   host.provider.dispose();await host.provider.persistence.pending;activate(context);
   const before=wire().length;
   await host.provider.perform({type:'ready'});
   expect(wire().length).toBe(before);
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().configs.map((c:any)=>c.currentValue)).toEqual(['other','high']);
+});
+it('does not save a rejected model selection as the account default',async()=>{
+  await contextAgent('context-config-fail');const saved=preferences();
+  await host.provider.perform({type:'config',id:'model',value:'other'});
+  expect(host.provider.snapshot()).toMatchObject({status:'ready',error:'config rejected'});
+  expect(preferences()).toEqual(saved);
+});
+it('reads the latest account pair instead of the currently displayed conversation when creating',async()=>{
+  await contextAgent();expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
+  writeFileSync(resolve(host.home!,'.pi','pi-acp-workbench','preferences','pi.json'),JSON.stringify({version:1,preferences:[{kind:'model',value:'other'},{kind:'thinking',value:'high'}]}));
   await host.provider.perform({type:'new'});
   expect(host.provider.snapshot().configs.map((c:any)=>c.currentValue)).toEqual(['other','high']);
 });
@@ -719,13 +719,14 @@ it('resumes the last active warm conversation after restart, and reconnects it w
   expect(wire().slice(before).filter(r=>r.method==='session/new')).toHaveLength(0);
   expect(wire().slice(before).filter(r=>r.method==='session/load').map(r=>r.params.sessionId)).toEqual([first,first]);
 });
-it('uses the selected historical conversation settings for the next new conversation', async () => {
+it('does not overwrite account preferences by merely reopening an older conversation', async () => {
   await contextAgent();const first=host.provider.snapshot().sessionId;
   await host.provider.perform({type:'new'});
   await host.provider.perform({type:'config',id:'model',value:'other'});
   await host.provider.perform({type:'resume',id:first});
-  await host.provider.perform({type:'new'});
   expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
+  await host.provider.perform({type:'new'});
+  expect(host.provider.snapshot().configs[0].currentValue).toBe('other');
 });
 it('does not replace an unavailable native session with a new one', async () => {
   await contextAgent();const first=host.provider.snapshot().sessionId;
@@ -746,7 +747,7 @@ it('does not auto-open a different history after deleting the last active record
 });
 it('warns about unavailable inherited values without retrying or silently creating extra sessions', async () => {
   await contextAgent();host.provider.dispose();await host.provider.persistence.pending;
-  host.stored.set('sessionPreferences',[{kind:'model',value:'removed-model'},{kind:'thinking',value:'removed-level'}]);
+  writeFileSync(resolve(host.home!,'.pi','pi-acp-workbench','preferences','pi.json'),JSON.stringify({version:1,preferences:[{kind:'model',value:'removed-model'},{kind:'thinking',value:'removed-level'}]}));
   activate(context);const before=wire().length;
   await host.provider.perform({type:'new'});
   expect(host.provider.snapshot().status).toBe('ready');

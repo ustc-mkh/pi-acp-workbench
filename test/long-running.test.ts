@@ -29,6 +29,38 @@ it('keeps only a bounded Telegram preview and rejects an overflowing send queue'
  const sends=Array.from({length:100},()=>api.call('sendMessage',{text:'x'}).then(()=>true,()=>false));
  release();const results=await Promise.all(sends);expect(results.filter(Boolean)).toHaveLength(64);expect((api as any).queued).toBe(0);
 });
+it('fragments large history responses and broadcasts only to subscribed sessions',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'pi-wire-history-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const text='中文😀'.repeat(1800000); // >16 MiB, including multi-byte characters and surrogate pairs.
+ const server=new SessionServer(join(root,'service.sock'),async method=>method==='state'?{text}:'ok');
+ await server.listen();cleanup.push(()=>server.dispose());
+ const events=vi.fn(),otherEvents=vi.fn(),lost=vi.fn();
+ const client=new SessionClient(join(root,'service.sock'),events,lost),other=new SessionClient(join(root,'service.sock'),otherEvents,lost);
+ cleanup.push(()=>client.dispose());cleanup.push(()=>other.dispose());
+ await client.watch('large');await other.watch('other');
+ expect(await client.call('state')).toEqual({text});
+ server.broadcast({type:'state',snapshot:{id:'large',entries:[{text}]}});
+ await vi.waitFor(()=>expect(events).toHaveBeenCalledOnce(),{timeout:10000});
+ expect(events.mock.calls[0][0].snapshot.entries[0].text).toBe(text);
+ expect(otherEvents).not.toHaveBeenCalled();expect(lost).not.toHaveBeenCalled();
+ expect(await other.call('hello')).toBe('ok');
+ await client.watch('large',false);server.broadcast({type:'state',snapshot:{id:'large'}});
+ expect(await client.call('hello')).toBe('ok');expect(events).toHaveBeenCalledOnce();
+ await vi.waitFor(()=>expect((server as any).outgoingBytes).toBe(0));
+},20000);
+it('reports oversized responses without disconnecting unrelated clients',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'pi-wire-oversize-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const limit=WIRE_LIMITS.responseBytes;WIRE_LIMITS.responseBytes=1024;
+ cleanup.push(()=>{WIRE_LIMITS.responseBytes=limit;});
+ const server=new SessionServer(join(root,'service.sock'),async method=>method==='large'?'x'.repeat(2048):'ok');await server.listen();cleanup.push(()=>server.dispose());
+ const events=vi.fn(),lost=vi.fn();const client=new SessionClient(join(root,'service.sock'),events,lost),other=new SessionClient(join(root,'service.sock'),()=>{},lost);
+ cleanup.push(()=>client.dispose());cleanup.push(()=>other.dispose());
+ await client.watch('large');await other.watch('other');
+ await expect(client.call('large')).rejects.toThrow('响应超过');
+ server.broadcast({type:'state',snapshot:{id:'large',text:'x'.repeat(2048)}});
+ await vi.waitFor(()=>expect(events).toHaveBeenCalledOnce());expect(events.mock.calls[0][0].type).toBe('serviceError');
+ expect(await other.call('hello')).toBe('ok');expect(await client.call('hello')).toBe('ok');expect(lost).not.toHaveBeenCalled();
+});
 it('bounds socket connections and in-flight requests, releases them, and handles serialization errors',async()=>{
  const root=await mkdtemp(join(tmpdir(),'pi-wire-bounds-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});

@@ -3,7 +3,8 @@ import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {lock} from 'proper-lockfile';
-import {SessionService,type ServiceConfig} from './session-service';
+import {SessionService} from './session-service';
+import type {ServiceConfig} from './session-protocol';
 import {SessionServer} from './session-wire';
 async function main(){
  const args=process.argv.slice(2);if(args.includes('--help')){console.log('node dist/session-daemon.mjs --config /absolute/path/sessions.json [--data-dir /path]');return;}

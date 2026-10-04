@@ -18,6 +18,7 @@ export class AgentProcess {
   readonly harness: HarnessId;
   private disposed = false;
   private exited = false;
+  private termination:Promise<void>=Promise.resolve();
   get isClosed() { return this.disposed; }
   constructor(private options: AgentOptions) {
     this.harness = options.harness || 'pi';
@@ -67,25 +68,12 @@ export class AgentProcess {
       return this.info;
     } catch (error) { this.dispose(); throw error; }
   }
-  async createSession(id?: string, recoverMissingEmpty = false): Promise<acp.NewSessionResponse> {
+  async createSession(id?: string): Promise<acp.NewSessionResponse> {
     const params = { cwd: this.options.cwd, mcpServers: [] };
-    if (id) {
-      if (!this.info?.agentCapabilities?.loadSession) throw new Error('此 Agent 未声明 session/load 能力，无法恢复远端会话。');
-      try {
-        const result = await this.withTimeout(this.request('session/load', { ...params, sessionId: id }));
-        return { ...result, sessionId: id };
-      } catch (error) {
-        const e = error as {code?:number;data?:{uri?:string;details?:string}};
-        const native = nativeSessionId(this.harness,id);
-        const missing = this.harness === 'claude' && e?.code === -32002 && e.data?.uri === native
-          || this.harness === 'codex' && e?.code === -32603 && e.data?.details === `no rollout found for thread id ${native}`;
-        if (!missing) throw error;
-        if (!recoverMissingEmpty) throw new Error('原生会话不存在：可能尚未落盘或已被删除。本地历史已保留，不会自动新建或重放已有对话。', {cause:error});
-        // The controller must prove the saved history is complete and entirely empty.
-        // Never retry authentication, timeout, or arbitrary internal errors as session/new.
-      }
-    }
-    return this.withTimeout(this.request('session/new', { cwd: params.cwd, mcpServers: [] }));
+    if (!id) return this.withTimeout(this.request('session/new', params));
+    if (!this.info?.agentCapabilities?.loadSession) throw new Error('此 Agent 未声明 session/load 能力，无法恢复远端会话。');
+    const result = await this.withTimeout(this.request('session/load', { ...params, sessionId: id }));
+    return { ...result, sessionId: id };
   }
   withTimeout<T>(request: Promise<T>, ms = this.options.requestTimeoutMs ?? 30000): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -100,6 +88,8 @@ export class AgentProcess {
     return this.request('session/prompt', { sessionId, prompt });
   }
   cancel(sessionId: string) { return this.connection.agent.notify('session/cancel', { sessionId:nativeSessionId(this.harness,sessionId) }); }
+  /** Wait until process-group escalation has run before reusing a worker slot. */
+  async stop(){this.dispose();await this.termination;}
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
@@ -111,8 +101,13 @@ export class AgentProcess {
       if (!this.exited) spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on('error', () => this.child.kill());
     } else {
       try { process.kill(-pid, 'SIGTERM'); } catch { /* already gone */ }
-      const timer = setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ } }, 1500);
-      timer.unref();
+      this.termination=new Promise<void>(resolve=>{
+        const timer=setTimeout(()=>{
+          try {process.kill(-pid,'SIGKILL');}catch { /* already gone */ }
+          if(this.exited)resolve();else this.child.once('exit',()=>resolve());
+        },1500);
+        timer.unref();
+      });
     }
   }
 }

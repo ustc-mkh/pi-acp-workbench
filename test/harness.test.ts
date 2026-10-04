@@ -1,11 +1,10 @@
 import {expect,it} from 'vitest';
 import {harnessKey,launchSettings,localSessionId,nativeSessionId,snapshotHarness,type HarnessConfig} from '../src/harness';
-it('keeps Pi defaults and requires explicit history metadata, with separate profile overrides',()=>{
+it('uses only current external harness settings and requires explicit history metadata',()=>{
   const values:Record<string,unknown>={env:{PI_ONLY:'secret'},'codex.env':{CODEX_ONLY:'value'},'claude.args':['--example']};
   const config:HarnessConfig={get:<T>(key:string,fallback:T)=>(values[key]??fallback) as T};
-  expect(launchSettings(config,'pi')).toMatchObject({command:'pi-acp',bundled:true,env:{PI_ONLY:'secret'}});
-  expect(launchSettings(config,'codex')).toMatchObject({command:'codex-acp',bundled:false,env:{CODEX_ONLY:'value'}});
-  expect(launchSettings(config,'claude')).toMatchObject({command:'claude-agent-acp',bundled:false,env:{},args:['--example']});
+  expect(launchSettings(config,'codex')).toMatchObject({command:'codex-acp',env:{CODEX_ONLY:'value'}});
+  expect(launchSettings(config,'claude')).toMatchObject({command:'claude-agent-acp',env:{},args:['--example']});
   expect(()=>snapshotHarness({})).toThrow();expect(snapshotHarness({harness:'pi'})).toBe('pi'); expect(()=>snapshotHarness({harness:'unknown'})).toThrow();
   expect(()=>snapshotHarness({id:'workbench:codex:old-client'})).toThrow();
   expect(()=>snapshotHarness({id:'workbench:codex:session',harness:'pi'})).toThrow();

@@ -1,6 +1,5 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type { Agent as AgentProcess } from './remote-agent';
-import type { Snapshot } from './shared';
 import { sessionSelectors, type SessionPreference, type SessionSelector } from './session-settings';
 
 /** Validate against the latest catalogue; model changes can replace other options. */
@@ -35,20 +34,4 @@ export async function applyPreferences(agent: AgentProcess, session: acp.NewSess
     }
   }
   return unavailable.length ? `上次的设置当前不可用（${unavailable.join('、')}），请检查本次模型与思考选项。` : undefined;
-}
-
-/** Replacing an existing session requires preserving every saved setting. */
-export async function restoreSettings(agent: AgentProcess, session: acp.NewSessionResponse, previous: Pick<Snapshot, 'configs' | 'modes'>) {
-  const isModel = (c: acp.SessionConfigOption) => c.category === 'model' || c.id === 'model';
-  const configs = [...previous.configs || []].sort((a,b) => Number(isModel(b)) - Number(isModel(a)));
-  for (const config of configs) {
-    if (session.configOptions?.find(c => c.id === config.id)?.currentValue === config.currentValue) continue;
-    if (config.type !== 'select' || !await applySelection(agent, session, {type:'config', id:config.id}, config.currentValue)) {
-      throw new Error(`无法在新会话中保留设置「${config.name}」，上下文未修改。`);
-    }
-  }
-  const mode = previous.modes?.currentModeId;
-  if (mode && !await applySelection(agent, session, {type:'mode'}, mode)) {
-    throw new Error('无法保留当前会话模式，上下文未修改。');
-  }
 }

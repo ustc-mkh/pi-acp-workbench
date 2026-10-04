@@ -1,5 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rm } from 'node:fs/promises';
+import {writeAtomicJson} from './atomic-json';
+import {snapshotHarness} from './harness';
 import { join } from 'node:path';
 import type { Snapshot } from './shared';
 /** Full local records survive compaction and restart; workspaceState stores small indices only. */
@@ -9,9 +11,7 @@ export class SnapshotStore {
   async write(snapshot: Snapshot, storageKey = snapshot.id): Promise<Snapshot> {
     if (!this.directory) return snapshot;
     await mkdir(this.directory,{recursive:true,mode:0o700});
-    const filename=this.file(storageKey), temp=filename+'.'+randomUUID()+'.tmp';
-    try {await writeFile(temp,JSON.stringify(snapshot),{encoding:'utf8',mode:0o600}); await rename(temp,filename);}
-    finally {await rm(temp,{force:true});}
+    await writeAtomicJson(this.file(storageKey),snapshot);
     const { entries, nativeForks, ...index } = snapshot;
     return {...index,entries:[],stored:true};
   }
@@ -25,8 +25,10 @@ export class SnapshotStore {
   async clear() { if(this.directory) await rm(this.directory,{force:true,recursive:true}); }
 }
 
-/** Reject obsolete reconstructed contexts rather than resuming unrelated native history. */
+/** Current complete snapshots only. Validation never migrates, fills, or rewrites history. */
 export function validateSnapshot(snapshot: Snapshot): Snapshot {
-  if ((snapshot as Snapshot & {contextPending?:unknown}).contextPending) throw new Error('不再支持旧版待重建上下文快照。原文件未修改，可手动备份原文件并创建原生会话。');
+  if (!snapshot || typeof snapshot.id!=='string' || typeof snapshot.cwd!=='string' || !Array.isArray(snapshot.entries)
+    || snapshot.contextComplete!==true || Object.hasOwn(snapshot,'contextPending')) throw new Error('历史格式不受支持：需要当前完整快照。原文件未修改。');
+  snapshotHarness(snapshot);
   return snapshot;
 }

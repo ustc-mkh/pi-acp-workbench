@@ -97,6 +97,19 @@ try {
   await page.locator('.message.tool > summary').click(); await page.getByText('查看修改 · /project/test.ts').click();
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'diff' && m.index === 0));
   state.entries.push({id:'native-answer',role:'assistant',text:'可原生回溯的回答'});
+  state.entries.push({id:'turn-diff',role:'diff',text:'本轮修改',diff:{status:'complete',warnings:['本轮工作区净变化；不是回滚点。'],files:[{path:'test.ts',status:'modified',before:'before\n',after:'after\n',added:1,removed:1,patch:'@@ -1 +1 @@\n-before\n+after\n'}]}});
+  await emit(state);
+  assert.equal(await page.locator('#messages > .turn-diff').count(),1);
+  assert.equal(await page.locator('.activity-body .turn-diff').count(),0);
+  await page.getByText('查看总 Diff',{exact:true}).click();
+  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='diff'&&m.id==='turn-diff'&&m.index===-1));
+  await page.locator('.turn-diff-file > summary').click();
+  await page.getByText('在编辑器中对比',{exact:true}).click();
+  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='diff'&&m.id==='turn-diff'&&m.index===0));
+  assert.equal(await page.locator('.turn-diff .diff-add').count(),1);
+  assert.equal(await page.locator('.turn-diff .diff-remove').count(),1);
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.screenshot({path:resolve(artifacts,'preview-turn-diff.png')});
   state.nativeForks={'native-answer':{entryId:'native-node',hash:'verified'}};
   state.history = [{id:'s1',sessionNumber:1,title:'相同标题',cwd:'/project',updated:2},{id:'s2',sessionNumber:2,title:'相同标题',cwd:'/project',updated:1}];
   state.sessionId='s1'; state.sessionNumber=1; state.status='ready'; await emit(state);
@@ -136,7 +149,6 @@ try {
   assert.equal(await page.locator('#selectors select').count(),3);
   assert.equal(await page.locator('#selectors select[aria-label="Fast mode"]').count(),0);
   assert.equal(await page.locator('#selectors select[aria-label="Collaboration mode"]').count(),0);
-  assert.equal(await page.locator('[data-context-action="deleteMessage"]').count(),0);
   assert.equal(await page.locator('.message.tool [data-context-action]').count(),0);
   assert.equal(await page.locator('#input').inputValue(),'');
   assert.equal(await page.locator('#harness-switch').inputValue(),'codex');
@@ -168,5 +180,5 @@ try {
   assert.equal(await page.locator('.message.tool').count(), 1);
   state.status='ready';await emit(state);
   assert.deepEqual(errors, []);
-  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, diff, no runtime errors.');
+  console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, per-tool/per-turn diffs, no runtime errors.');
 } finally { await browser?.close(); server.close(); }

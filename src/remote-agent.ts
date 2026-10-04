@@ -1,7 +1,7 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type {AgentOptions,AgentProcess} from './agent';
 import {SessionClient} from './session-wire';
-import type {ServiceState} from './session-service';
+import type {ServiceState} from './session-protocol';
 export type Agent=Pick<AgentProcess,'harness'|'info'|'isClosed'|'initialize'|'createSession'|'request'|'withTimeout'|'prompt'|'cancel'|'dispose'>;
 /** ACP-shaped UI facade; disposing it only detaches the client. */
 export class RemoteAgent implements Agent {
@@ -11,13 +11,15 @@ export class RemoteAgent implements Agent {
   this.client=new SessionClient(socket,event=>{
    if(event.type==='state'&&event.snapshot.id===this.id){this.latest=event;this.state(event);}
    if(event.type==='update'&&event.notification.sessionId===this.id)options.update(event.notification);
+   if(event.type==='serviceError'&&event.sessionId===this.id){this.isClosed=true;options.closed(event.error);}
   },error=>{this.isClosed=true;options.closed(error);});
  }
  async initialize(){return this.info=await this.client.call<acp.InitializeResponse>('hello');}
  async sync(){if(this.id){this.latest=await this.client.call<ServiceState>('state',{sessionId:this.id});this.state(this.latest);}return this.latest;}
  async createSession(id?:string):Promise<acp.NewSessionResponse>{
   if(!id){const snapshot=await this.client.call('create',{cwd:this.options.cwd},undefined,0);id=snapshot.id;}
-  this.id=id;const current=await this.sync();return {sessionId:id!,configOptions:current!.snapshot.configs,modes:current!.snapshot.modes};
+  if(this.id&&this.id!==id)await this.client.watch(this.id,false);
+  this.id=id;await this.client.watch(id!);const current=await this.sync();return {sessionId:id!,configOptions:current!.snapshot.configs,modes:current!.snapshot.modes};
  }
  request<Method extends acp.AgentRequestMethod>(method:Method,params:acp.AgentRequestParamsByMethod[Method]):Promise<acp.AgentRequestResponsesByMethod[Method]>;
  request<Response=unknown, Params=unknown>(method:string,params?:Params):Promise<Response>;

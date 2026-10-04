@@ -23,7 +23,10 @@ export class SharedHistoryStore extends SnapshotStore {
     super();
     this.raw = new SnapshotStore(join(root, 'conversations'));
   }
-  private key(snapshot: Snapshot) { return snapshot.revision ? `${snapshot.id}:${snapshot.revision}` : snapshot.id; }
+  private key(snapshot: Snapshot) {
+    if(!snapshot.revision)throw new Error('共享历史缺少版本标识，拒绝读取或覆盖。');
+    return `${snapshot.id}:${snapshot.revision}`;
+  }
   private async initialize() { await mkdir(this.root, {recursive:true, mode:0o700}); }
   private async index(): Promise<Index> {
     try {

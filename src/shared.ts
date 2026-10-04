@@ -1,9 +1,10 @@
 import type { HarnessId } from './harness';
 import type { NativeBranchTarget } from './native-branch';
 import type { Statistics, Price } from './telemetry';
+import type {TurnDiff} from './turn-diff';
 import type * as acp from '@agentclientprotocol/sdk';
 // Entries are replaced on update; the state channel uses their identity for change tracking.
-export type Entry = Readonly<{ id: string; role: 'user' | 'assistant' | 'thought' | 'notice'; text: string; messageId?: string | null; contextBlocks?: acp.ContentBlock[] } | { id: string; role: 'tool'; tool: acp.ToolCall }>;
+export type Entry = Readonly<{ id: string; role: 'user' | 'assistant' | 'thought' | 'notice'; text: string; messageId?: string | null; contextBlocks?: acp.ContentBlock[] } | { id: string; role: 'tool'; tool: acp.ToolCall } | {id:string;role:'diff';text:string;diff:TurnDiff}>;
 export type Attachment = {kind?:'text'; id:string;name:string;uri:string;text:string} | {kind:'image';id:string;name:string;mimeType:string;data:string};
 export interface Snapshot { commands?:acp.AvailableCommand[]; nativeForks?: Record<string,NativeBranchTarget>; harness?: HarnessId; sessionNumber?: number; revision?: string; id: string; cwd: string; title: string; updated: number; entries: Entry[]; stored?: boolean; conversationId?: string; contextWindow?: number; contextComplete?: boolean;  configs?: acp.SessionConfigOption[]; modes?: acp.SessionModeState }
 export interface ChatState {
@@ -34,6 +35,5 @@ export type UiMessage =
   | { type: 'config'; id: string; value: string }
   | { type: 'resume' | 'removeAttachment' | 'deleteHistory'; id: string }
   | { type: 'branchMessage'; id: string; sessionId: string }
-  | { type: 'deleteMessage'; id: string; sessionId: string }
   | { type: 'diff'; id: string; index: number }
   | { type: 'open'; url: string; line?: number };

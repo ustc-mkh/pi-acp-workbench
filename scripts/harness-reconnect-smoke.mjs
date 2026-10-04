@@ -25,7 +25,7 @@ try {
     finally {agent.dispose();}
     await delay(2000);commands=[];agent=create();
     try {
-      await agent.initialize();const restored=await agent.createSession(id,true);await delay(500);
+      await agent.initialize();const restored=await agent.createSession(id);await delay(500);
       assert(restored.sessionId.startsWith(`workbench:${harness}:`));assert(commands.length>0,`${harness}: no commands after reconnect`);
       console.log(JSON.stringify({harness,reconnected:true,recreatedEmpty:restored.sessionId!==id,commands:commands.length,promptsSent:0}));
     } finally {agent.dispose();}

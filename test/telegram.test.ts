@@ -31,13 +31,23 @@ async function fixture() {
   const api=new FakeApi(),events=new TelegramEvents(root);
   const sessions=[{id:'one',cwd:'/allowed',title:'One',sessionNumber:1},{id:'two',cwd:'/allowed',title:'Two',sessionNumber:2}];
   const host:TelegramSessionHost={list:vi.fn(async()=>sessions),create:vi.fn(async()=>sessions[1]),
-    run:vi.fn(async():Promise<TelegramTurnResult>=>({text:'done',status:'completed'})),cancel:vi.fn(async()=>true),permission:vi.fn(()=>true),dispose:vi.fn(async()=>{})};
+    history:vi.fn(async()=>[]),status:vi.fn(async()=>({busy:false,permissions:[],text:''})),
+    run:vi.fn(async():Promise<TelegramTurnResult>=>({status:'completed'})),cancel:vi.fn(async()=>true),permission:vi.fn(()=>true),dispose:vi.fn(async()=>{})};
   const saved:TelegramBridgeState[]=[];
   const data:TelegramBridgeState={version:1,botId:7,chatId:-100,offset:1,notifications:true,topics:[{sessionId:'one',threadId:101}],delivered:[]};
   const report=vi.fn();
   const save=vi.fn(async(s:TelegramBridgeState)=>{saved.push(structuredClone(s));});
-  const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],streamIntervalMs:1,
+  const bridge=new TelegramBridge(api,host,data,{chatId:-100,allowedUserIds:[42],streamIntervalMs:1,
     save,report});
+  // Model the independent service outbox and relay sweep, not a second bridge-owned delivery path.
+  let turn=0;
+  vi.mocked(host.run).mockImplementation(async id=>{
+    const session=sessions.find(s=>s.id===id)!;
+    const event={...session,id:`service:${++turn}`,sessionId:id,text:'done',status:'completed' as const,updated:Date.now()};
+    await events.write(event);
+    try{if(await bridge.consume(event))await events.remove(event.id);}catch(error){report(error);}
+    return {status:'completed'};
+  });
   cleanup.push(()=>bridge.dispose());
   return {api,host,events,bridge,data,saved,report,sessions,save};
 }
@@ -84,7 +94,7 @@ it('isolates topics, rejects unauthorized users/chats and preserves bindings for
 it('checkpoints update IDs before dispatch and never re-executes duplicate deliveries',async()=>{
   const {api,host,bridge,saved}=await fixture();
   vi.mocked(host.run).mockImplementation(async()=>{
-    expect(saved.at(-1)!.offset).toBe(11);return {text:'done',status:'completed'};
+    expect(saved.at(-1)!.offset).toBe(11);return {status:'completed'};
   });
   api.batches=[[message(10,'one'),message(10,'duplicate')]];
   const polling=bridge.poll();
@@ -94,7 +104,7 @@ it('checkpoints update IDs before dispatch and never re-executes duplicate deliv
 });
 it('refuses an existing webhook and never dispatches tasks when checkpoint storage fails',async()=>{
   const {api,host,events,data}=await fixture();
-  const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],
+  const bridge=new TelegramBridge(api,host,data,{chatId:-100,allowedUserIds:[42],
     save:async()=>{throw new Error('disk full');},report:()=>{}});
   cleanup.push(()=>bridge.dispose());
   const request=api.call.bind(api);
@@ -135,7 +145,7 @@ it('keeps permission responses tied to the allowed user, live session and exact 
   const callback=(user:number,thread:number):TelegramUpdate=>({update_id:2,callback_query:{id:'cb',from:{id:user},message:message(2,'',thread).message,data:keyboard.inline_keyboard[0][0].callback_data}});
   await bridge.handle(callback(99,101));await bridge.handle(callback(42,999));expect(host.permission).not.toHaveBeenCalled();
   await bridge.handle(callback(42,101));expect(host.permission).toHaveBeenCalledWith('one','permission','yes');
-  finish({text:'authorized',status:'completed'});await running;
+  finish({status:'completed'});await running;
   await bridge.handle(callback(42,101));expect(host.permission).toHaveBeenCalledOnce();
 });
 it('persists desktop completion without a running daemon and acknowledges delivery after restart',async()=>{
@@ -179,7 +189,7 @@ it('serializes phone messages and discards queued messages when stopped',async()
  await vi.waitFor(()=>expect(host.run).toHaveBeenCalledOnce());
  const second=bridge.handle(message(31,'queued'));
  await bridge.handle(message(32,'/stop'));
- finish({text:'stopped',status:'cancelled'});
+ finish({status:'cancelled'});
  await Promise.all([first,second]);expect(host.run).toHaveBeenCalledOnce();
  await bridge.handle(message(33,'next'));expect(host.run).toHaveBeenCalledTimes(2);
  expect((bridge as any).queued.size).toBe(0);expect((bridge as any).generations.size).toBe(0);
@@ -250,7 +260,7 @@ it('help and commands list every relay command with descriptions',async()=>{
  const {bridge,api,host}=await fixture();
  await bridge.handle(message(306,'/help'));await bridge.handle(message(307,'/commands'));
  const help=api.calls.filter(c=>c.method==='sendMessage');expect(help).toHaveLength(2);expect(help[0].params.text).toBe(help[1].params.text);
- for(const command of ['new','sessions','open','sync','history','status','stop','interrupt','notifications','silent','help','commands','start','takeover','desktop'])expect(String(help[0].params.text)).toContain('/'+command);
+ for(const command of ['new','sessions','open','sync','history','status','stop','interrupt','notifications','silent','help','commands','start'])expect(String(help[0].params.text)).toContain('/'+command);
  expect(host.run).not.toHaveBeenCalled();
 });
 

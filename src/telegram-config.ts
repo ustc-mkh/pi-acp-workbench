@@ -8,6 +8,7 @@ export function telegramConfig(value:unknown):TelegramConfig {
   if(!Array.isArray(v.allowedUserIds)||!v.allowedUserIds.length||v.allowedUserIds.some(id=>!Number.isSafeInteger(id)||id<=0))throw new Error('allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。');
   const workspaces=v.workspaces??{};
   if(!workspaces||typeof workspaces!=='object'||Array.isArray(workspaces)||Object.entries(workspaces).some(([name,path])=>!/^[-\w]+$/.test(name)||['__proto__','constructor','prototype'].includes(name)||typeof path!=='string'||!path.trim()))throw new Error('workspaces 必须是工作区名称到本机目录的映射。');
-  if(['command','args','env','maxConcurrent'].some(key=>key in v))throw new Error('请将 command/args/env 移到 sessions.json，并将 maxConcurrent 改为 maxWorkers；Telegram 仅保留接入配置。');
+  const unsupported=Object.keys(v).filter(key=>!['chatId','allowedUserIds','workspaces'].includes(key));
+  if(unsupported.length)throw new Error(`不支持的 Telegram 配置字段：${unsupported.join(', ')}`);
   return {chatId:Number(v.chatId),allowedUserIds:v.allowedUserIds as number[],workspaces:workspaces as Record<string,string>};
 }

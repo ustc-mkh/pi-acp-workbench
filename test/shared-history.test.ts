@@ -11,7 +11,7 @@ async function pair() {
   const a = new SharedHistoryStore(root), b = new SharedHistoryStore(root); stores.push(a,b); return {a,b};
 }
 async function seed(store:SharedHistoryStore,snapshot:Snapshot){await store.claim(snapshot.id);try{return await store.write(snapshot);}finally{await store.release(snapshot.id);}}
-const snapshot = (id:string):Snapshot => ({id,cwd:'/project',title:id,updated:Date.now(),contextComplete:true,entries:[{id:'user',role:'user',text:'hello'}]});
+const snapshot = (id:string):Snapshot => ({harness:'pi',id,cwd:'/project',title:id,updated:Date.now(),contextComplete:true,entries:[{id:'user',role:'user',text:'hello'}]});
 afterEach(async()=>{for(const store of stores.splice(0))await store.releaseAll();for(const dir of directories.splice(0))await rm(dir,{recursive:true,force:true});});
 it('shares all histories without losing concurrent additions or pruning to 20', async()=>{
   const {a,b} = await pair();

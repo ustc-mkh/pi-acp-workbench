@@ -7,15 +7,15 @@ import { renderDiagrams } from './diagrams';
 import { PricesPage } from './prices';
 import { installImagePaste, imagePreview } from './image-paste';
 import { StatisticsPage } from './statistics';
-import { messageActions } from './message-actions';
-import type { ChatState, Entry, UiMessage } from '../src/shared';
+import { createMessageRenderer } from './messages';
+import type { ChatState, UiMessage } from '../src/shared';
 import { applyStatePatch } from '../src/state-channel';
 import { sessionLabel } from '../src/session-numbers';
 import { HARNESSES, isHarnessId, type HarnessId } from '../src/harness';
 import { TranscriptView } from './transcript';
 import { installComposerResize } from './composer-resize';
 import { SlashCommands } from './slash-commands';
-interface UiState {draft?:string;drafts?:Partial<Record<HarnessId,string>>;composerHeight?:number;activityExpanded?:boolean}
+interface UiState {drafts?:Partial<Record<HarnessId,string>>;composerHeight?:number;activityExpanded?:boolean}
 declare function acquireVsCodeApi(): { postMessage(message: UiMessage): void; getState(): UiState | undefined; setState(state: UiState): void };
 const vscode = acquireVsCodeApi();
 const saveUi = (patch:UiState) => vscode.setState({...vscode.getState(),...patch});
@@ -35,8 +35,8 @@ const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElem
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
 let draftHarness: HarnessId = 'pi';
-input.value = vscode.getState()?.drafts?.pi ?? vscode.getState()?.draft ?? '';
-const saveDraft = () => saveUi({drafts:{...vscode.getState()?.drafts,[draftHarness]:input.value},...(draftHarness==='pi'?{draft:input.value}:{})});
+input.value = vscode.getState()?.drafts?.pi ?? '';
+const saveDraft = () => saveUi({drafts:{...vscode.getState()?.drafts,[draftHarness]:input.value}});
 installComposerResize(el('composer-resizer'),input,vscode.getState()?.composerHeight,height=>saveUi({composerHeight:height}));
 const send = (message: UiMessage) => vscode.postMessage(message);
 let state: ChatState | undefined;
@@ -47,7 +47,7 @@ let pasting=false;
 installImagePaste(input,()=>state?.sessionId,send,value=>{pasting=value;updateSend();},()=>state?.harness || 'pi');
 let paintPending = false;
 let activityExpanded = vscode.getState()?.activityExpanded || false;
-const transcriptView = new TranscriptView(el('messages'),contentNode,activityExpanded);
+const transcriptView = new TranscriptView(el('messages'),createMessageRenderer(renderMarkdown,()=>state?.sessionId,send),activityExpanded);
 const updateActivityButton = () => {el('toggle-activity').textContent = activityExpanded ? '折叠执行过程' : '展开执行过程';el('toggle-activity').setAttribute('aria-pressed',String(activityExpanded));};
 updateActivityButton();
 el('toggle-activity').onclick = () => {activityExpanded = !activityExpanded;transcriptView.setExpanded(activityExpanded);saveUi({activityExpanded});updateActivityButton();};
@@ -122,42 +122,6 @@ app.addEventListener('click', async event => {
   }
 });
 function updateSend() { el<HTMLButtonElement>('send').disabled = state?.status !== 'ready' || (!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || sending || pasting; }
-function contentNode(entry: Entry): HTMLElement {
-  const node = document.createElement(entry.role === 'tool' || entry.role === 'thought' ? 'details' : 'article');
-  node.className = `message ${entry.role}`;
-  if (entry.role === 'tool') {
-    const summary = document.createElement('summary');
-    const labels: Record<string, string> = { pending: '等待', in_progress: '执行中', completed: '完成', failed: '失败' };
-    summary.textContent = `${entry.tool.status === 'completed' ? '✓' : entry.tool.status === 'failed' ? '×' : '◇'} ${entry.tool.title}`;
-    const badge = document.createElement('span'); badge.className = `badge ${entry.tool.status}`; badge.textContent = labels[entry.tool.status || 'pending']; summary.append(badge); node.append(summary);
-    const body = document.createElement('div'); body.className = 'tool-body';
-    for (const location of entry.tool.locations || []) body.append(button(`${location.path}${location.line ? ':' + location.line : ''}`, () => send({ type: 'open', url: location.path, line: location.line ?? undefined }), 'file-link'));
-    (entry.tool.content || []).forEach((content, index) => {
-      if (content.type === 'diff') {
-        body.append(button(`查看修改 · ${content.path}`, () => send({ type: 'diff', id: entry.id, index }), 'diff-link'));
-        const before = document.createElement('pre'), after = document.createElement('pre');
-        before.className = 'diff-before'; after.className = 'diff-after';
-        before.textContent = (content.oldText || '').slice(0, 4000); after.textContent = content.newText.slice(0, 4000);
-        body.append(before, after);
-      } else if (content.type === 'content') {
-        const text = content.content.type === 'text' ? content.content.text : `[${content.content.type}]`;
-        const c = document.createElement('div'); c.className = 'markdown'; c.innerHTML = renderMarkdown(text); body.append(c);
-      } else { const p = document.createElement('p'); p.textContent = `终端 ${content.terminalId}`; body.append(p); }
-    });
-    if (entry.tool.rawInput != null || entry.tool.rawOutput != null) {
-      const raw = document.createElement('details'), label = document.createElement('summary'), pre = document.createElement('pre');
-      label.textContent = '原始输入 / 输出'; pre.textContent = JSON.stringify({ input: entry.tool.rawInput, output: entry.tool.rawOutput }, null, 2); raw.append(label, pre); body.append(raw);
-    }
-    node.append(body);
-  } else {
-    if (entry.role === 'thought') { const summary = document.createElement('summary'); summary.textContent = '思考过程'; node.append(summary); }
-    const body = document.createElement('div'); body.className = 'markdown';
-    body.innerHTML = renderMarkdown(entry.text); node.append(body);
-    if(entry.role==='user')for(const block of entry.contextBlocks||[])if(block.type==='image'){const img=imagePreview(block.mimeType,block.data,'消息图片');if(img)node.append(img);}
-  }
-  if (entry.role === 'assistant' || entry.role === 'user' || entry.role === 'tool') node.append(messageActions(entry, () => state?.sessionId, send));
-  return node;
-}
 function paint() {
   paintPending = false;
   if (!state) return;
@@ -254,7 +218,7 @@ window.addEventListener('message', event => {
   const nextHarness=state?.harness || 'pi';
   if(nextHarness!==draftHarness){
     saveDraft();draftHarness=nextHarness;
-    input.value=vscode.getState()?.drafts?.[draftHarness] ?? (draftHarness==='pi'?vscode.getState()?.draft || '':'');
+    input.value=vscode.getState()?.drafts?.[draftHarness] ?? '';
     followBottom=true;
   }
   if (state?.status !== 'busy') sending = false;

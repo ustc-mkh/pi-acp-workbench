@@ -8,7 +8,8 @@ import { TelegramApi } from './telegram-api';
 import { TelegramBridge, type TelegramBridgeState } from './telegram-bridge';
 import { TelegramSessions } from './telegram-sessions';
 import { telegramConfig } from './telegram-config';
-import { TelegramEvents, writeTelegramJson } from './telegram-events';
+import { TelegramEvents } from './telegram-events';
+import {writeAtomicJson} from './atomic-json';
 
 async function main() {
   const args=process.argv.slice(2);
@@ -60,7 +61,7 @@ async function main() {
     } catch(error) {if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     host=new TelegramSessions(config.workspaces,join(root,'service','sessions.sock'));
     const events=new TelegramEvents(join(directory,'events'));
-    relay=new TelegramBridge(api,host,events,state,{...config,save:s=>writeTelegramJson(file,s),report});
+    relay=new TelegramBridge(api,host,state,{...config,save:s=>writeAtomicJson(file,s,true),report});
     await relay.initialize(bot.username);
     console.log(`Telegram relay ready: @${bot.username}, ${Object.keys(config.workspaces).join(', ')}; send /help in the configured Topics group.`);
     const poll=relay.poll();

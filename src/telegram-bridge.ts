@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { TelegramApiError, telegramChunks, type TelegramTransport, type TelegramUpdate } from './telegram-api';
 import { TelegramStream } from './telegram-stream';
 import type { TelegramSessionHost, TelegramSession, TelegramPermission } from './telegram-sessions';
-import type { TelegramTurnEvent, TelegramEvents } from './telegram-events';
+import type { TelegramTurnEvent } from './telegram-events';
 
 export interface TelegramBridgeState {
   version:1;botId:number;chatId:number;offset?:number;
@@ -35,7 +35,7 @@ export class TelegramBridge {
   private generations=new Map<string,number>();
   private syncing=new Set<string>();
   private syncingAll=false;
-  constructor(private api:TelegramTransport, private host:TelegramSessionHost, private events:TelegramEvents,
+  constructor(private api:TelegramTransport, private host:TelegramSessionHost,
     private data:TelegramBridgeState, private options:TelegramBridgeOptions) {
     this.maintenance=setInterval(()=>this.prune(),30000);this.maintenance.unref();
   }
@@ -186,14 +186,12 @@ export class TelegramBridge {
           '', '帮助',
           '/help 或 /commands — 显示全部服务命令',
           '/start — 显示本帮助',
-          '/takeover、/desktop — 说明桌面与手机共享会话，无需接管',
           '', '在会话话题直接发文字即可对话。其他命令（如 /compact）原样转交 Pi；可用命令取决于 Pi 配置。',
         ].join('\n'),threadId,{disable_notification:true});return;
       }
       if(command==='silent'){await this.silentMenu(threadId);return;}
       if(command==='notifications'){await this.notificationMenu(threadId);return;}
       if(command==='sync'){
-        if(!this.host.history)throw new Error('当前会话服务不支持历史同步。');
         if(this.syncingAll){await this.send('历史同步正在进行，请稍候。',threadId,{disable_notification:true});return;}
         this.syncingAll=true;
         try {
@@ -211,10 +209,9 @@ export class TelegramBridge {
         return;
       }
       if(command==='history'){
-        if(!binding||!this.host.history)throw new Error('请先用 /open 编号进入会话话题。');
+        if(!binding)throw new Error('请先用 /open 编号进入会话话题。');
         await this.syncHistory(binding.sessionId,threadId!,argument==='all');return;
       }
-      if(command==='takeover'||command==='desktop'){await this.send('桌面和手机已共享同一会话，无需接管。直接发消息即可；忙碌时排队。',threadId,{disable_notification:true});return;}
       if(command==='interrupt'){
         if(!binding||!argument)throw new Error('用法：/interrupt 要发送的新消息');
         if(this.queues.has(binding.sessionId))this.generations.set(binding.sessionId,(this.generations.get(binding.sessionId)||0)+1);
@@ -226,12 +223,10 @@ export class TelegramBridge {
         await this.send(stopped?'正在停止本话题任务…':'本话题没有可停止的任务。',threadId);return;
       }
       if(command==='status'){
-        if(binding&&this.host.control){
-          const status=await this.host.control(binding.sessionId,'status');
-          for(const p of status?.permissions||[])await this.showPermission(binding.sessionId,threadId!,p);
-          await this.send(`会话 ${binding.sessionId}\n${status?.busy||this.active.has(binding.sessionId)?'正在执行':'空闲'}；排队消息：${this.queued.get(binding.sessionId)||0}\n${status?.text||''}`,threadId,{disable_notification:true});return;
-        }
-        await this.send(binding?`会话 ${binding.sessionId}\n${this.active.has(binding.sessionId)?'正在执行，可用 /stop 停止。':'空闲；发送文字即可继续。'}`:'请用 /new 或 /open 创建会话话题。',threadId);return;
+        if(!binding){await this.send('请用 /new 或 /open 创建会话话题。',threadId);return;}
+        const status=await this.host.status(binding.sessionId);
+        for(const p of status.permissions)await this.showPermission(binding.sessionId,threadId!,p);
+        await this.send(`会话 ${binding.sessionId}\n${status.busy||this.active.has(binding.sessionId)?'正在执行':'空闲'}；排队消息：${this.queued.get(binding.sessionId)||0}\n${status.text}`,threadId,{disable_notification:true});return;
       }
       if(command==='sessions'){
         const sessions=await this.host.list();
@@ -254,24 +249,14 @@ export class TelegramBridge {
       const generation=this.generations.get(binding.sessionId)||0;
       await previous;
       this.active.add(binding.sessionId);
-      const id=`telegram:${this.data.botId}:${update.update_id}`,stream=this.stream(id,threadId!);
-      let completionSaved=false;
       try {
         if(this.stopped||generation!==(this.generations.get(binding.sessionId)||0))return;
         const prompt=command==='interrupt'?argument!:match?.[2]?`/${match[1]}${argument?' '+argument:''}`:message.text;
-        const result=await this.host.run(binding.sessionId,prompt,{
-          update:text=>{if(!this.host.managedDelivery&&this.data.notifications!==false)this.stream(id,threadId!).update(text||'正在处理…');},
+        // Only the session service publishes progress and completion to the durable outbox.
+        await this.host.run(binding.sessionId,prompt,{
           permission:p=>{if(this.data.notifications!==false)void this.showPermission(binding.sessionId,threadId!,p).catch(error=>this.options.report(error));},
         });
-        if(this.host.managedDelivery)return; // The service's durable outbox owns completion delivery.
-        const session=(await this.host.list()).find(s=>s.id===binding.sessionId);
-        if(!session)throw new Error('任务结束，但会话已删除；请查看服务器日志。');
-        const event:TelegramTurnEvent={...session,id,sessionId:session.id,text:result.text,status:result.status,error:result.error,updated:Date.now()};
-        await this.events.write(event); // Durable completion outbox; network failure cannot lose the result.
-        completionSaved=true;
-        if(await this.consume(event))await this.events.remove(event.id);
       } finally {
-        if(!completionSaved)this.dropStream(id);
         this.active.delete(binding.sessionId);
         const remaining=(this.queued.get(binding.sessionId)||1)-1;
         if(remaining)this.queued.set(binding.sessionId,remaining);else{this.queued.delete(binding.sessionId);this.generations.delete(binding.sessionId);}
@@ -294,9 +279,9 @@ export class TelegramBridge {
       {disable_notification:true,reply_markup:{inline_keyboard:[[{text:this.data.silent===true?'关闭静音':'开启静音',callback_data:this.data.silent===true?'silent:off':'silent:on'}]]}});
   }
   private async pendingHistory(id:string,all:boolean){
-    const entries=(await this.host.history!(id)).filter(e=>e.role==='user'||e.role==='assistant');
+    const entries=(await this.host.history(id)).filter(e=>e.role==='user'||e.role==='assistant'||e.role==='diff');
     const sent=this.data.historySent&&Object.hasOwn(this.data.historySent,id)?this.data.historySent[id]:[];
-    return (all?entries:entries.slice(-20)).map(e=>({key:createHash('sha256').update(e.id+'\0'+('text' in e?e.text:'')).digest('hex'),text:`${e.role==='user'?'你':'Pi'}：\n${'text' in e?e.text:''}`})).filter(e=>!sent.includes(e.key)).slice(0,100);
+    return (all?entries:entries.slice(-20)).map(e=>({key:createHash('sha256').update(e.id+'\0'+('text' in e?e.text:'')).digest('hex'),text:`${e.role==='user'?'你':e.role==='diff'?'修改汇总':'Pi'}：\n${'text' in e?e.text:''}`})).filter(e=>!sent.includes(e.key)).slice(0,100);
   }
   private async syncHistory(id:string,threadId:number,all:boolean){
     if(this.syncing.has(id))throw new Error('此话题正在同步历史。');

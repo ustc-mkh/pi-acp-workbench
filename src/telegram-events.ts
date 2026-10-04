@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, writeFile, rename, rm, readFile, opendir, stat } from 'node:fs/promises';
+import { mkdir, rm, readFile, opendir, stat } from 'node:fs/promises';
+import {writeAtomicJson} from './atomic-json';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ChatState } from './shared';
@@ -9,17 +10,12 @@ export interface TelegramTurnEvent {
   id:string;sessionId:string;cwd:string;title:string;sessionNumber?:number;
   inputText?:string;text:string;status:'running'|'completed'|'cancelled'|'failed';error?:string;updated:number;
 }
-export async function writeTelegramJson(file:string,data:unknown) {
-  const temp=file+'.'+randomUUID()+'.tmp';
-  try {await writeFile(temp,JSON.stringify(data),{mode:0o600});await rename(temp,file);}
-  finally {await rm(temp,{force:true});}
-}
 export class TelegramEvents {
   constructor(readonly directory=join(telegramDirectory(),'events')) {}
   private file(id:string) {return join(this.directory,createHash('sha256').update(id).digest('hex')+'.json');}
   async write(event:TelegramTurnEvent) {
     await mkdir(this.directory,{recursive:true,mode:0o700});
-    await writeTelegramJson(this.file(event.id),event);
+    await writeAtomicJson(this.file(event.id),event,event.status!=='running');
   }
   async remove(id:string) {await rm(this.file(id),{force:true});}
   async *iterate():AsyncGenerator<TelegramTurnEvent> {
@@ -84,7 +80,7 @@ export class DesktopTelegramTurn {
     return this.writing;
   }
   private capture(){
-    this.event.text=this.state.entries.slice(this.start).filter(e=>e.role==='assistant').map(e=>'text' in e?e.text:'').join('\n\n');
+    this.event.text=this.state.entries.slice(this.start).filter(e=>e.role==='assistant'||e.role==='diff').map(e=>'text' in e?e.text:'').join('\n\n');
     if(this.state.permissions.length)this.event.text+='\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。';
     this.event.updated=Date.now();
   }
@@ -100,7 +96,7 @@ export class DesktopTelegramTurn {
   async finish(error?:string,stopReason?:string) {
     if(this.ended)return;
     this.capture();this.ended=true;if(this.timer)clearTimeout(this.timer);
-    this.event.status=this.cancelled||stopReason==='cancelled'?'cancelled':error||stopReason&&stopReason!=='end_turn'?'failed':'completed';
+    this.event.status=error?'failed':this.cancelled||stopReason==='cancelled'?'cancelled':stopReason&&stopReason!=='end_turn'?'failed':'completed';
     this.event.error=error;await this.publish();while(this.writing)await this.writing;
   }
 }
