@@ -30,3 +30,10 @@ it('does not call unavailable or partial results a clean workspace',()=>{
  const partial=render({...summary,diff:{status:'partial',files:[],warnings:['files omitted']}});
  expect(partial.textContent).toContain('已采集范围内');
 });
+it('keeps empty results and scope notes collapsed by default',()=>{
+ const node=createMessageRenderer(text=>text,()=>undefined,()=>{})({...summary,diff:{status:'complete',files:[],warnings:['净变化，不是回滚点']}});
+ const notes=node.querySelector<HTMLDetailsElement>('.turn-diff-notes')!;
+ expect(notes.open).toBe(false);
+ expect(notes.textContent).toContain('本轮未检测到文件净变化。');
+ expect(notes.textContent).toContain('净变化，不是回滚点');
+});

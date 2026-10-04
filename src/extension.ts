@@ -505,11 +505,19 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           if (!forgotten) return;
           this.telemetry.forget(forgotten.conversationId||forgotten.id);this.sessions.remove(message.id);
         } else {this.sessions.clear();this.telemetry.forget();}
-        // Forget storage without interrupting the active Agent turn.
+        const deletedState = this.state;
+        const deletesCurrent = message.type === 'clearHistory' || message.type === 'deleteHistory' && message.id === deletedState.sessionId;
         await this.historyStore.remove(message.type==='deleteHistory'?message.id:undefined,async()=>{
           await this.telemetry.persistTitles();
           for(const harness of HARNESS_IDS)if(message.type==='clearHistory'||message.type==='deleteHistory'&&this.transientSnapshots.get(harness)?.id===message.id)this.transientSnapshots.delete(harness);
         });
+        if (deletesCurrent && this.state === deletedState) {
+          this.disconnect(); this.releaseLease();
+          this.cwd = ''; this.contextWindow = undefined; this.conversationId = undefined;
+          this.state = {...initialState(),harness:this.harness};
+          this.telemetry.reset(this.harness);
+          this.autoConnectHandled = true;
+        }
         this.emit(); return;
       }
       if(message.type==='copyConversation'){await vscode.env.clipboard.writeText(this.conversationText());return;}
@@ -621,6 +629,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
             }
           }
           if(agent instanceof RemoteAgent)await agent.sync();
+        } catch (error) {
+          if (generation === this.generation) throw error;
         } finally {
           if (generation === this.generation) {
             if (this.cancelTimer) clearTimeout(this.cancelTimer);

@@ -14,8 +14,10 @@ function turnDiffNode(entry:Extract<Entry,{role:'diff'}>,send:(message:UiMessage
   const title=document.createElement('strong');title.textContent=turnDiffTitle(entry.diff);header.append(title);
   if(entry.diff.files.length)header.append(button('查看总 Diff',()=>send({type:'diff',id:entry.id,index:-1}),'diff-link'));
   node.append(header);
+  const notes=document.createElement('details');notes.className='turn-diff-notes';
+  const notesTitle=document.createElement('summary');notesTitle.textContent='改动说明';notes.append(notesTitle);
   if(!entry.diff.files.length&&entry.diff.status!=='unavailable') {
-    const empty=document.createElement('p');empty.textContent=entry.diff.status==='complete'?'本轮未检测到文件净变化。':'已采集范围内未检测到净变化；未采集文件见下方说明。';node.append(empty);
+    const empty=document.createElement('p');empty.textContent=entry.diff.status==='complete'?'本轮未检测到文件净变化。':'已采集范围内未检测到净变化；未采集文件见下方说明。';notes.append(empty);
   }
   entry.diff.files.forEach((file,index)=>{
     const details=document.createElement('details');details.className='turn-diff-file';
@@ -45,7 +47,8 @@ function turnDiffNode(entry:Extract<Entry,{role:'diff'}>,send:(message:UiMessage
     });
     node.append(details);
   });
-  for(const warning of entry.diff.warnings){const p=document.createElement('p');p.className='diff-warning';p.textContent=warning;node.append(p);}
+  for(const warning of entry.diff.warnings){const p=document.createElement('p');p.className='diff-warning';p.textContent=warning;notes.append(p);}
+  if(notes.childElementCount>1)node.append(notes);
   return node;
 }
 

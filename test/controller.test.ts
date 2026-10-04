@@ -10,7 +10,9 @@ vi.mock('node:os', async importOriginal => {
 vi.mock('vscode', () => ({
   Uri: {from: (parts: {scheme:string;path:string}) => ({toString: () => `${parts.scheme}:${parts.path}`})},
   env:{clipboard:{writeText:vi.fn(async()=>{})}},
+  languages:{setTextDocumentLanguage:vi.fn(async(document)=>document)},
   workspace: {
+    openTextDocument:vi.fn(async(uri)=>({uri})),
     isTrusted: true,
     get workspaceFolders() { return [{ uri: { scheme: 'file', fsPath: host.cwd || process.cwd() } }]; },
     getConfiguration: () => ({ get: (key: string, fallback: unknown) => host.config[key] ?? fallback }),
@@ -247,6 +249,9 @@ it.each(['codex','claude'] as const)('shows %s turn diffs after the answer and o
    await host.provider.perform({type:'diff',id:summary.id,index:-1});
    const previews=[...host.provider.documents.previews.values()] as {documents:Map<string,string>}[];
    expect([...previews.at(-1)!.documents.values()][0]).toContain('-dirty before');
+   expect([...previews.at(-1)!.documents.values()][0]).toMatch(/^diff --git /);
+   const vscode=await import('vscode');
+   expect(vscode.languages.setTextDocumentLanguage).toHaveBeenLastCalledWith(expect.anything(),'diff');
    expect(host.provider.snapshot().error).toBeUndefined();
    expect((host.stored.get('history') as any[])[0].entries.at(-1).role).toBe('diff');
  } finally {host.provider.dispose();await host.provider.persistence.pending;host.cwd=undefined;rmSync(root,{recursive:true,force:true});}
@@ -434,11 +439,13 @@ it('does not recreate a deleted current record when the turn completes or the pr
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
-  expect(host.provider.snapshot().status).toBe('busy');
-  await host.provider.perform({ type: 'cancel' }); await turn;
+  expect(host.provider.snapshot()).toMatchObject({status:'disconnected',entries:[],attachments:[]});
+  expect(host.provider.snapshot().sessionId).toBeUndefined();
+  await turn;
   await host.provider.save();
   expect(host.stored.get('history')).toBeUndefined();
-  expect(host.provider.snapshot().entries.some((e: any) => e.role === 'user')).toBe(true);
+  expect(host.provider.snapshot().entries).toEqual([]);
+  expect(host.provider.snapshot().error).toBeUndefined();
 });
 it('keeps cleared history empty after another automatic save', async () => {
   await host.provider.perform({ type: 'new' });

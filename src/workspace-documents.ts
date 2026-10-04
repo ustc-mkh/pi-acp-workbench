@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import {realpath} from 'node:fs/promises';
 import * as path from 'node:path';
 import type {Entry} from './shared';
-import {turnDiffText} from './turn-diff';
 
 /** All transcript file navigation stays behind the same workspace/realpath boundary. */
 export async function openWorkspaceLink(cwd:string,url:string,line?:number) {
@@ -37,9 +36,11 @@ export class DiffDocuments implements vscode.Disposable {
     const key=encodeURIComponent(`${sessionId||'preview'}-${entry.id}-${index}`);
     if(entry.role==='diff'&&index===-1) {
       const uri=vscode.Uri.from({scheme:'pi-acp-diff',path:`/${key}/turn.diff`});
-      const text=[turnDiffText(entry.diff),'',...entry.diff.files.map(file=>file.patch||`${file.path}: ${file.omitted||'仅文件属性变化'}`)].join('\n');
+      const text=entry.diff.files.map(file=>file.patch||`# ${file.path}: ${file.omitted||'仅文件属性变化'}\n`).join('\n');
       this.keep(key,[[uri,text]]);
-      await vscode.window.showTextDocument(uri,{preview:true});
+      const document=await vscode.workspace.openTextDocument(uri);
+      await vscode.languages.setTextDocumentLanguage(document,'diff');
+      await vscode.window.showTextDocument(document,{preview:true});
       return;
     }
     const content=entry.role==='tool'?entry.tool.content?.[index]:undefined;
