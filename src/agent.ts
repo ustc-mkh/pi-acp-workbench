@@ -60,7 +60,7 @@ export class AgentProcess {
   async initialize() {
     try {
       this.info = await this.withTimeout(this.request('initialize', {
-        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.9.1' },
+        protocolVersion: 1, clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.9.2' },
         // Adapters must handle their own files/terminals. Never advertise unimplemented delegation.
         clientCapabilities: {},
       }), this.options.requestTimeoutMs ?? 20000);

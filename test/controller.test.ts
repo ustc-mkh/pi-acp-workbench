@@ -20,6 +20,7 @@ vi.mock('vscode', () => ({
     onDidChangeConfiguration: (callback: (event: any) => void) => { host.configurationChanged = callback; return { dispose() {} }; },
   },
   window: {
+    showInformationMessage:vi.fn(async()=>undefined),
     showTextDocument:vi.fn(async()=>{}),
     createTerminal: (options:any) => {host.terminals.push(options);return {show(){}};},
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
@@ -27,7 +28,7 @@ vi.mock('vscode', () => ({
   },
   commands: {
     registerCommand: (name: string, fn: Function) => { host.commands.set(name, fn); return { dispose() {} }; },
-    executeCommand: async () => {},
+    executeCommand: vi.fn(async (..._args:unknown[]) => {}),
   },
 }));
 import { activate as activateExtension } from '../src/extension';
@@ -235,7 +236,7 @@ it.each([false, true])('disables local persistence during writes without deletin
     host.home = undefined; rmSync(root, {recursive:true, force:true});
   }
 });
-it.each(['codex','claude'] as const)('shows %s turn diffs after the answer and opens a consolidated read-only document',async harness=>{
+it.each(['codex','claude'] as const)('shows %s turn diffs after the answer and opens native changes',async harness=>{
  const {execFileSync}=await import('node:child_process');const {writeFileSync}=await import('node:fs');
  const root=mkdtempSync(resolve(tmpdir(),'pi-local-diff-'));host.cwd=root;
  try {
@@ -248,13 +249,36 @@ it.each(['codex','claude'] as const)('shows %s turn diffs after the answer and o
    expect(summary.diff.files[0]).toMatchObject({path:'change.txt',before:'dirty before\n',after:'agent final\n'});
    await host.provider.perform({type:'diff',id:summary.id,index:-1});
    const previews=[...host.provider.documents.previews.values()] as {documents:Map<string,string>}[];
-   expect([...previews.at(-1)!.documents.values()][0]).toContain('-dirty before');
-   expect([...previews.at(-1)!.documents.values()][0]).toMatch(/^diff --git /);
+   expect([...previews.at(-1)!.documents.values()]).toEqual(expect.arrayContaining(['dirty before\n','agent final\n']));
    const vscode=await import('vscode');
-   expect(vscode.languages.setTextDocumentLanguage).toHaveBeenLastCalledWith(expect.anything(),'diff');
+   expect(vscode.commands.executeCommand).toHaveBeenLastCalledWith('vscode.changes','本轮修改',expect.any(Array));
    expect(host.provider.snapshot().error).toBeUndefined();
    expect((host.stored.get('history') as any[])[0].entries.at(-1).role).toBe('diff');
  } finally {host.provider.dispose();await host.provider.persistence.pending;host.cwd=undefined;rmSync(root,{recursive:true,force:true});}
+});
+it('opens saved snapshots for added/deleted files with distinct paths and reports missing text',async()=>{
+  const vscode=await import('vscode');
+  const files=[
+    {path:'目录一/公式.md',status:'added',before:'',after:'新增公式'},
+    {path:'目录二/公式.md',status:'deleted',before:'删除公式',after:''},
+    {path:'目录三/公式.md',status:'modified',before:'旧公式',after:'新公式'},
+    {path:'binary.png',status:'modified',omitted:'二进制文件'},
+  ].map(file=>({...file,added:1,removed:1}));
+  await host.provider.documents.open('test',{id:'native',role:'diff',text:'',diff:{status:'partial',files,warnings:[]}},-1);
+  const [command,title,resources]=vi.mocked(vscode.commands.executeCommand).mock.calls.at(-1)! as any[];
+  expect(command).toBe('vscode.changes');expect(title).toBe('本轮修改');expect(resources).toHaveLength(3);
+  const docs=[...host.provider.documents.previews.values()].at(-1) as {documents:Map<string,string>};
+  expect(resources[0][1]).toBeUndefined();expect(docs.documents.get(resources[0][2].toString())).toBe('新增公式');
+  expect(resources[1][2]).toBeUndefined();expect(docs.documents.get(resources[1][1].toString())).toBe('删除公式');
+  expect(docs.documents.get(resources[2][1].toString())).toBe('旧公式');
+  expect(docs.documents.get(resources[2][2].toString())).toBe('新公式');
+  expect(resources.map(([label]:any[])=>label.toString())).toEqual([
+    expect.stringContaining('/目录一/公式.md'),expect.stringContaining('/目录二/公式.md'),expect.stringContaining('/目录三/公式.md'),
+  ]);
+  expect(vscode.window.showInformationMessage).toHaveBeenLastCalledWith(expect.stringContaining('binary.png'));
+  vi.mocked(vscode.commands.executeCommand).mockClear();
+  await host.provider.documents.open('test',{id:'missing',role:'diff',text:'',diff:{status:'partial',files:[files[3]],warnings:[]}},-1);
+  expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
 });
 it('bounds diff document storage and reuses repeated previews', async () => {
   await host.provider.perform({type:'new'});

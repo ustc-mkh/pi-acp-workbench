@@ -35,12 +35,21 @@ export class DiffDocuments implements vscode.Disposable {
     if(!entry||!Number.isInteger(index))return;
     const key=encodeURIComponent(`${sessionId||'preview'}-${entry.id}-${index}`);
     if(entry.role==='diff'&&index===-1) {
-      const uri=vscode.Uri.from({scheme:'pi-acp-diff',path:`/${key}/turn.diff`});
-      const text=entry.diff.files.map(file=>file.patch||`# ${file.path}: ${file.omitted||'仅文件属性变化'}\n`).join('\n');
-      this.keep(key,[[uri,text]]);
-      const document=await vscode.workspace.openTextDocument(uri);
-      await vscode.languages.setTextDocumentLanguage(document,'diff');
-      await vscode.window.showTextDocument(document,{preview:true});
+      const documents:[vscode.Uri,string][]=[];
+      const resources:[vscode.Uri,vscode.Uri|undefined,vscode.Uri|undefined][]=[];
+      const omitted:string[]=[];
+      entry.diff.files.forEach((file,fileIndex)=>{
+        if(file.before===undefined||file.after===undefined){omitted.push(file.path);return;}
+        const uri=(side:string)=>vscode.Uri.from({scheme:'pi-acp-diff',path:`/${key}/${fileIndex}/${side}/${file.path}`});
+        const left=uri('before'),right=uri('after');
+        documents.push([left,file.before],[right,file.after]);
+        resources.push([uri('file'),file.status==='added'?undefined:left,file.status==='deleted'?undefined:right]);
+      });
+      if(resources.length){
+        this.keep(key,documents);
+        await vscode.commands.executeCommand('vscode.changes','本轮修改',resources);
+      }
+      if(omitted.length)await vscode.window.showInformationMessage(`${omitted.length} 个文件未保存完整文本，无法原生对比：${omitted.join('、')}。请在改动卡片中查看原因。`);
       return;
     }
     const content=entry.role==='tool'?entry.tool.content?.[index]:undefined;
