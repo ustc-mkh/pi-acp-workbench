@@ -100,7 +100,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       localDirectory:context.storageUri?.fsPath?path.join(context.storageUri.fsPath,'conversations'):undefined,
       sharedDirectory:this.config.get('sharedHistory',true)?path.join(homedir(),'.pi','pi-acp-workbench','history'):undefined,
       enabled:()=>this.config.get('persistHistory',true),current:()=>this.state,changed:()=>this.emit(),
-      error:error=>{this.state.error=String(error);this.emit();},
+      error:error=>{this.log.appendLine(`[history] ${String(error)}`);this.state.error=String(error);this.emit();},
       leaseLost:()=>{this.disconnect();this.state.status='disconnected';this.state.readOnly=true;this.state.error='共享会话锁已失效，已停止本窗口的 Agent。请重新连接。';this.emit();},
       remote:agentFactory?undefined:{list:()=>this.serviceClient.call<Snapshot[]>('list'),remove:id=>this.serviceClient.call('remove',{sessionId:id},undefined,0)},
     });

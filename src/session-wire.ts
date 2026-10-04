@@ -62,7 +62,7 @@ export class SessionClient {
     if(this.pending.size>=WIRE_LIMITS.pending)throw new Error('会话客户端待处理请求已满');
     const body=encode({id,method,params});
     return new Promise((resolve,reject)=>{if(this.pending.has(id)){reject(new Error('请求仍在等待'));return;}
-      const timer=timeout?setTimeout(()=>{this.pending.delete(id);reject(new Error('会话服务请求超时；请查看状态，不会自动重发。'));},timeout):undefined;
+      const timer=timeout?setTimeout(()=>{this.pending.delete(id);reject(new Error(`会话服务请求超时（${method}，等待 ${timeout/1000} 秒）；请查看状态，不会自动重发。`));},timeout):undefined;
       this.pending.set(id,{resolve,reject,timer});sendBody(this.socket!,body);});
   }
   dispose(){this.closed=true;this.socket?.destroy();}

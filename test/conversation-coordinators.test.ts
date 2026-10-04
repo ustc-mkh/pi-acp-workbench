@@ -42,3 +42,33 @@ it('statistics discards late responses and errors from detached sessions',async(
   const pending=stats.refresh();state={...state,sessionId:'new'};stats.reset('pi');reject(new Error('old failure'));await pending;
   expect(stats.value.note).toBeUndefined();expect(stats.pending).toBeUndefined();expect(stats.value.records).toEqual([]);
 });
+it('coalesces slow history polls, preserves the index, and only reports a continuing outage once',async()=>{
+  vi.useFakeTimers();
+  const state=initialState(),error=vi.fn();
+  const item:Snapshot={id:'one',harness:'pi',title:'one',cwd:'/work',updated:1,entries:[],contextComplete:true};
+  const list=vi.fn().mockResolvedValue([item]);
+  const history=new ConversationHistory({storage:storage(),enabled:()=>true,current:()=>state,changed:()=>{},error,leaseLost:()=>{},remote:{list,remove:async()=>{}}});
+  try {
+    history.start();await history.ready;
+    let reject!:(error:Error)=>void;
+    list.mockImplementation(()=>new Promise((_,fail)=>{reject=fail;}));
+    await vi.advanceTimersByTimeAsync(35000);
+    expect(list).toHaveBeenCalledTimes(2); // Initial read plus just one slow refresh.
+    const failure=new Error('list timeout');reject(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(error).toHaveBeenCalledTimes(1);expect(history.items).toEqual([item]);
+    list.mockRejectedValue(failure);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(error).toHaveBeenCalledTimes(1); // Dismissing this banner will not bring it back each poll.
+    await expect(history.refresh()).rejects.toThrow('list timeout'); // Explicit refresh still fails visibly.
+    list.mockResolvedValue([item]);await vi.advanceTimersByTimeAsync(5000);
+    list.mockRejectedValue(failure);await vi.advanceTimersByTimeAsync(5000);
+    expect(error).toHaveBeenCalledTimes(2); // A new outage after recovery is reported.
+  } finally {history.dispose();vi.useRealTimers();}
+});
+it('discards a failed poll after disposal',async()=>{
+  const error=vi.fn();let reject!:(error:Error)=>void;
+  const history=new ConversationHistory({storage:storage(),enabled:()=>true,current:initialState,changed:()=>{},error,leaseLost:()=>{},remote:{list:()=>new Promise((_,fail)=>{reject=fail;}),remove:async()=>{}}});
+  history.start();await Promise.resolve();await Promise.resolve();history.dispose();
+  reject(new Error('late timeout'));await history.ready;expect(error).not.toHaveBeenCalled();
+});

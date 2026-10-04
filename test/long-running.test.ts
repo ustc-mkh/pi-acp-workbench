@@ -78,3 +78,14 @@ it('bounds socket connections and in-flight requests, releases them, and handles
  for(const s of sockets)s.destroy();await vi.waitFor(()=>expect((server as any).sockets.size).toBe(0));
  expect((server as any).pending).toBe(0);expect((server as any).pendingBytes).toBe(0);expect((server as any).bufferedBytes).toBe(0);
 },10000);
+it('identifies timed-out requests without replaying them or breaking other service calls',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'pi-wire-timeout-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ let release!:(value:string)=>void;
+ const handle=vi.fn(async(method:string)=>method==='slow'?new Promise<string>(resolve=>{release=resolve;}):'ok');
+ const server=new SessionServer(join(root,'service.sock'),handle);await server.listen();cleanup.push(()=>server.dispose());
+ const client=new SessionClient(join(root,'service.sock'));cleanup.push(()=>client.dispose());
+ await expect(client.call('slow',{},undefined,50)).rejects.toThrow('slow，等待 0.05 秒');
+ expect(await client.call('hello')).toBe('ok');release('late result');
+ expect(await client.call('hello')).toBe('ok');
+ expect(handle.mock.calls.filter(([method])=>method==='slow')).toHaveLength(1);
+});

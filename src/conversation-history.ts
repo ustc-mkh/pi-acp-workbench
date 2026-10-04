@@ -28,6 +28,8 @@ export class ConversationHistory {
   activeLease?:string;
   ready:Promise<void>=Promise.resolve();
   private poll?:NodeJS.Timeout;
+  private refreshing?:Promise<void>;
+  private backgroundError?:string;
   private disposed=false;
   constructor(private options:HistoryOptions) {
     this.items=options.enabled()?options.storage.get<Snapshot[]>('history',[]):[];
@@ -40,7 +42,7 @@ export class ConversationHistory {
   start() {
     if(!this.shared&&!this.options.remote)return;
     this.initialize();
-    this.poll=setInterval(()=>{void this.refresh().catch(this.options.error);},5000);
+    this.poll=setInterval(()=>{if(!this.refreshing)void this.refresh().catch(error=>this.reportBackgroundError(error));},5000);
     this.poll.unref();
   }
   initialize() {
@@ -49,16 +51,26 @@ export class ConversationHistory {
       const epoch=this.persistence.epoch,items=await this.list();
       if(this.disposed||epoch!==this.persistence.epoch||!this.options.enabled())return;
       this.items=items;this.options.changed();
-    }).catch(this.options.error);
+    }).catch(error=>this.reportBackgroundError(error));
     return this.ready;
   }
   private async list() {
     const local=this.shared?await this.shared.list():this.items;
-    if(!this.options.remote)return local;
-    try{return [...await this.options.remote.list(),...local.filter(s=>s.harness!=='pi')];}
-    catch(error){this.options.error(error);return local;}
+    const items=this.options.remote?[...await this.options.remote.list(),...local.filter(s=>s.harness!=='pi')]:local;
+    this.backgroundError=undefined;
+    return items;
   }
-  async refresh() {
+  private reportBackgroundError(error:unknown) {
+    if(this.disposed||!this.options.enabled())return;
+    const detail=String(error);
+    if(this.backgroundError===detail)return;
+    this.backgroundError=detail;this.options.error(error);
+  }
+  refresh():Promise<void> {
+    // Include time waiting for initialization/storage: polling must never accumulate queued reads.
+    return this.refreshing ||= this.refreshOnce().finally(()=>{this.refreshing=undefined;});
+  }
+  private async refreshOnce() {
     await this.ready;
     if(this.disposed||!this.options.enabled())return;
     await this.persistence.enqueue(async()=>{
