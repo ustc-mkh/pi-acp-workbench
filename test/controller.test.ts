@@ -803,3 +803,30 @@ it('publishes desktop completion only when Telegram and history persistence are 
   await host.provider.perform({type:'send',text:'do not persist or notify'});
   expect(publish).not.toHaveBeenCalled();
 });
+
+it('gives phone control priority, queues behind the desktop turn and preserves the desktop attachment draft',async()=>{
+ await contextAgent();
+ const provider=host.provider,id=provider.snapshot().sessionId;
+ await provider.desktopServer.dispose();provider.desktopServer={bind(){},dispose:async()=>{}};
+ // Exercise the desktop endpoint against an existing mock ACP process without a second process.
+ provider.activeLease=id;
+ const desktop=provider.perform({type:'send',text:'wait'});
+ await vi.waitFor(()=>expect(provider.snapshot().status).toBe('busy'));
+ await provider.remoteControl({sessionId:id,action:'takeover'},()=>{});
+ expect(provider.snapshot().mobileControlled).toBe(true);
+ await provider.perform({type:'send',text:'blocked desktop'});
+ expect(provider.snapshot().entries.some((e:any)=>e.text==='blocked desktop')).toBe(false);
+ provider.state.attachments=[{id:'draft',name:'draft',uri:'file:///draft',text:'do not send from phone'}];
+ const phone=provider.remoteControl({sessionId:id,action:'prompt',text:'phone message'},()=>{});
+ await provider.remoteControl({sessionId:id,action:'cancel'},()=>{});
+ await desktop;expect((await phone).status).toBe('cancelled');
+ const posted=vi.fn(async()=>true);provider.view={webview:{postMessage:posted}};
+ const reply=await provider.remoteControl({sessionId:id,action:'prompt',text:'phone message'},()=>{});
+ expect(posted.mock.calls.some((args:any)=>args[0]?.type==='sent')).toBe(false);provider.view=undefined;
+ expect(reply.status).toBe('completed');expect(reply.text).toContain('数学');
+ expect(provider.snapshot().attachments[0].id).toBe('draft');
+ const entry=provider.snapshot().entries.find((e:any)=>e.role==='user'&&e.text==='phone message');
+ expect(entry.contextBlocks).toEqual([{type:'text',text:'phone message'}]);
+ await provider.perform({type:'takeDesktopControl'});expect(provider.snapshot().mobileControlled).toBe(false);
+ provider.activeLease=undefined;
+});

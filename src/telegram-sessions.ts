@@ -3,7 +3,7 @@ import { AgentProcess, type AgentOptions } from './agent';
 import { SharedHistoryStore } from './shared-history';
 import { initialState, applyUpdate, nextId } from './state';
 import { snapshotHarness } from './harness';
-import type { ChatState, Snapshot } from './shared';
+import type { ChatState, Snapshot, Entry } from './shared';
 
 export type TelegramSession = Pick<Snapshot,'id'|'cwd'|'title'|'sessionNumber'>;
 export type TelegramPermission = ChatState['permissions'][number];
@@ -14,12 +14,14 @@ export interface TelegramSessionHost {
   create(workspace?:string):Promise<TelegramSession>;
   run(id:string,text:string,listener:TelegramTurnListener):Promise<TelegramTurnResult>;
   cancel(id:string):Promise<boolean>;
-  permission(id:string,permissionId:string,optionId?:string):boolean;
+  permission(id:string,permissionId:string,optionId?:string):boolean|Promise<boolean>;
+  history?(id:string):Promise<Entry[]>;
+  control?(id:string,action:'takeover'|'desktop'|'status'):Promise<any>;
   dispose():Promise<void>;
 }
 interface Task {
-  agent?:AgentProcess;cancelled:boolean;timer?:ReturnType<typeof setTimeout>;
-  permissions:Map<string,{options:string[];resolve:(option?:string)=>void}>;
+  text?:string;agent?:AgentProcess;cancelled:boolean;timer?:ReturnType<typeof setTimeout>;
+  permissions:Map<string,{permission:TelegramPermission;options:string[];resolve:(option?:string)=>void}>;
   done:Promise<void>;settled:()=>void;
 }
 export interface TelegramAgentConfig {
@@ -38,6 +40,15 @@ export class TelegramSessions implements TelegramSessionHost {
   async list() {
     const roots = Object.values(this.config.workspaces);
     return (await this.store.list()).filter(s => roots.includes(s.cwd) && snapshotHarness(s)==='pi');
+  }
+  async control(id:string,action:'takeover'|'desktop'|'status'){
+    if(!(await this.list()).some(s=>s.id===id))throw new Error('会话不在允许的工作区内。');
+    const task=this.tasks.get(id);return {desktop:false,busy:!!task,text:task?.text||'',permissions:task?[...task.permissions.values()].map(p=>p.permission):[]};
+  }
+  async history(id:string) {
+    const snapshot=(await this.list()).find(s=>s.id===id);
+    if(!snapshot)throw new Error('会话不在允许的工作区内。');
+    return (await this.store.read(snapshot)).entries;
   }
   private capacity() {
     if (this.closed) throw new Error('Telegram 服务正在停止。');
@@ -94,7 +105,7 @@ export class TelegramSessions implements TelegramSessionHost {
         update:n => {
           if(n.sessionId!==id)return;
           if(replay)applyUpdate(replayState,n.update,true);
-          else {applyUpdate(state,n.update);listener.update(answer());}
+          else {applyUpdate(state,n.update);task.text=answer();listener.update(task.text);}
         },
         permission:request => {
           if(replay||task.cancelled||request.sessionId!==id)return Promise.resolve({outcome:{outcome:'cancelled'}});
@@ -105,7 +116,7 @@ export class TelegramSessions implements TelegramSessionHost {
               clearTimeout(timer);task.permissions.delete(permissionId);
               resolve({outcome:option?{outcome:'selected',optionId:option}:{outcome:'cancelled'}});
             };
-            task.permissions.set(permissionId,{options:request.options.map(o=>o.optionId),resolve:settle});
+            task.permissions.set(permissionId,{permission:{id:permissionId,request},options:request.options.map(o=>o.optionId),resolve:settle});
             listener.permission({id:permissionId,request});
           });
         },

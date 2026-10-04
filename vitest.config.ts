@@ -7,7 +7,7 @@ export default defineConfig({
       '**/package.json', '**/package-lock.json', '**/tsconfig.json', '**/vitest.config.*',
       '**/scripts/**', '**/test/mock-*.mjs',
       '**/src/{pi-enhancements,pi-native-fork,native-branch}.ts',
-      '**/src/adapter-store.ts',
+      '**/src/{adapter-store,adapter-errors}.ts',
     ],
   },
 });

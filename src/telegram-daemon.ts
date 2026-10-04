@@ -6,6 +6,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { lock } from 'proper-lockfile';
 import { TelegramApi } from './telegram-api';
 import { TelegramBridge, type TelegramBridgeState } from './telegram-bridge';
+import { TelegramRouting } from './telegram-routing';
+import { DesktopClient } from './desktop-control';
 import { TelegramSessions } from './telegram-sessions';
 import { telegramConfig } from './telegram-config';
 import { TelegramEvents, writeTelegramJson } from './telegram-events';
@@ -57,14 +59,14 @@ async function main() {
     let state:TelegramBridgeState={version:1,botId:bot.id,chatId:config.chatId,topics:[],delivered:[]};
     try {
       state=JSON.parse(await readFile(file,'utf8'));
-      if(state.version!==1||state.botId!==bot.id||state.chatId!==config.chatId||!Array.isArray(state.topics)||!Array.isArray(state.delivered)||state.delivered.some(id=>typeof id!=='string')||state.topics.some(t=>typeof t.sessionId!=='string'||!Number.isSafeInteger(t.threadId)||t.threadId<=0)||state.offset!==undefined&&(!Number.isSafeInteger(state.offset)||state.offset<0))throw new Error('Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。');
+      if((state.notifications!==undefined&&typeof state.notifications!=='boolean')||(state.historySent!==undefined&&(!state.historySent||typeof state.historySent!=='object'||Array.isArray(state.historySent)||Object.values(state.historySent).some(v=>!Array.isArray(v)||v.some(k=>typeof k!=='string'))))||state.version!==1||state.botId!==bot.id||state.chatId!==config.chatId||!Array.isArray(state.topics)||!Array.isArray(state.delivered)||state.delivered.some(id=>typeof id!=='string')||state.topics.some(t=>typeof t.sessionId!=='string'||!Number.isSafeInteger(t.threadId)||t.threadId<=0)||state.offset!==undefined&&(!Number.isSafeInteger(state.offset)||state.offset<0))throw new Error('Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。');
     } catch(error) {if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     const store=new SharedHistoryStore(join(root,'history'),id=>host?.leaseLost(id));
     host=new TelegramSessions(store,{...config,command:config.command||process.execPath,
       args:config.command?config.args:[fileURLToPath(new URL('./pi-adapter.mjs',import.meta.url))],
       env:{...config.env,...(!config.command?{ELECTRON_RUN_AS_NODE:'1'}:{})}});
     const events=new TelegramEvents(join(directory,'events'));
-    relay=new TelegramBridge(api,host,events,state,{...config,save:s=>writeTelegramJson(file,s),report});
+    relay=new TelegramBridge(api,new TelegramRouting(host,new DesktopClient(join(directory,'control'))),events,state,{...config,save:s=>writeTelegramJson(file,s),report});
     await relay.initialize(bot.username);
     console.log(`Telegram relay ready: @${bot.username}, ${Object.keys(config.workspaces).join(', ')}; send /help in the configured Topics group.`);
     const poll=relay.poll();

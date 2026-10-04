@@ -23,5 +23,7 @@ it('negotiates real bundled ACP extensions, reads native billing/checkpoints, an
   const pending=agent.connection.agent.request('_pi_workbench/summarize',{sessionId,text:'WAIT_FOREVER',limit:1000});const rejected=expect(pending).rejects.toThrow();
   await new Promise(resolve=>setTimeout(resolve,100));await agent.connection.agent.request('_pi_workbench/cancel_summary',{sessionId});await rejected;
   expect((await inspect()).records).toHaveLength(3);
+  await expect(agent.prompt(sessionId,[{type:'text',text:'MODEL_ERROR'}])).rejects.toThrow('模型服务返回网页错误');
+  expect(await agent.prompt(sessionId,[{type:'text',text:'recovered'}])).toMatchObject({stopReason:'end_turn'});
  }finally{agent?.dispose();await rm(dir,{recursive:true,force:true});}
 },20000);

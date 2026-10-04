@@ -12,6 +12,7 @@ export interface ChatState {
   harness?: HarnessId;
   connectionAttempted?: boolean;
   readOnly?: boolean;
+  mobileControlled?: boolean;
   sessionId?: string; sessionNumber?: number; agent?: string; error?: string; entries: Entry[]; attachments: Attachment[];
   modes?: acp.SessionModeState;
   configs?: acp.SessionConfigOption[]; commands: acp.AvailableCommand[];
@@ -23,7 +24,7 @@ export interface ChatState {
   statistics?: Statistics; contextOperation?: {kind:'fork'} | {kind:'summary';done:number;total:number};
 }
 export type UiMessage =
-  | { type: 'ready' | 'connect' | 'new' | 'cancel' | 'attach' | 'clearHistory' | 'login' | 'logs' | 'preview' | 'export' | 'refreshStatistics' | 'cancelContext' | 'copyConversation' | 'releaseSession' | 'refreshHistory' }
+  | { type: 'ready' | 'connect' | 'new' | 'cancel' | 'attach' | 'clearHistory' | 'login' | 'logs' | 'preview' | 'export' | 'refreshStatistics' | 'cancelContext' | 'copyConversation' | 'releaseSession' | 'refreshHistory' | 'takeDesktopControl' }
   | {type:'attachImages';harness?:HarnessId;sessionId?:string;images:import('./images').PastedImage[]}
   | {type:'attachmentError';harness?:HarnessId;sessionId?:string;error:string}
   | { type: 'switchHarness'; harness: HarnessId }

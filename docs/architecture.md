@@ -118,7 +118,7 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench
 
 `telegram-daemon.ts` 是独立 Node 入口，长轮询接收指定群组中白名单用户的消息，不依赖 VS Code 生命周期或公开入站端口。`telegram-bridge.ts` 负责话题绑定、游标、命令与授权按钮；`telegram-sessions.ts` 复用 ACP 进程和共享历史租约，限定可访问的 Pi 工作区。每轮任务独占会话，结束后写入快照并释放进程和租约。内置适配器的会话索引写入使用 `adapter-store.ts` 的跨进程锁和原子替换，避免并发进程覆盖索引。
 
-`telegram-stream.ts` 合并预览，`telegram-api.ts` 串行节流群组写入并处理 Telegram 的限流响应。执行前持久化游标，防止重放任务；完成事件写入本地 outbox，失败后重试投递。桌面仅在显式启用通知且保存历史时通过 `telegram-events.ts` 发布事件，不持有 Bot token。关闭持久化或通知会停止当前桌面发布。崩溃交付边界和配置见 [Telegram 使用说明](telegram.md)。
+`telegram-stream.ts` 合并预览，`telegram-api.ts` 串行节流群组写入并处理 Telegram 的限流响应。执行前持久化游标，防止重放任务；完成事件写入本地 outbox，失败后重试投递。`desktop-control.ts` 提供账户私有 Unix socket；`telegram-routing.ts` 优先请求持有租约的桌面，只有请求发送前确认桌面端点不可用才回退到独立 Agent。桌面同一会话串行执行，手机接管后阻止桌面修改；连接在请求发送后断开不自动重放。历史导出游标与全局推送开关独立持久化，暂停时不投递自动回复。桌面仅在显式启用通知且保存历史时通过 `telegram-events.ts` 发布事件，不持有 Bot token。关闭持久化或通知会停止当前桌面发布。崩溃交付边界和配置见 [Telegram 使用说明](telegram.md)。
 
 ## 渲染与安全边界
 

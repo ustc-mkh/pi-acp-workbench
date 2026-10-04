@@ -22,6 +22,8 @@ import { prepareContext, contextBudget, checkpoint, byteSize, type Checkpoint } 
 import { mergeUsage, validPrice, priceFor, type Inspection, type Statistics, type Price, type UsageRecord } from './telemetry';
 import { presetPrices } from './prices';
 import { DesktopTelegramTurn, TelegramEvents } from './telegram-events';
+import { DesktopServer, type DesktopRequest, type DesktopEvent } from './desktop-control';
+import { setTimeout as delay } from 'node:timers/promises';
 import { demoMarkdown } from './demo';
 import type { Entry, Snapshot, UiMessage } from './shared';
 
@@ -85,6 +87,57 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private resources: vscode.Disposable[] = [];
   private desktopTelegramTurn?: DesktopTelegramTurn;
   private telegramEvents = new TelegramEvents();
+  private remoteQueue: Promise<unknown> = Promise.resolve();
+  private remoteWaiting = 0;
+  private remoteEpoch = 0;
+  private lastTurnStop?:string;
+  private desktopServer = new DesktopServer((request,event)=>this.remoteControl(request,event),error=>this.log.appendLine(String(error)));
+  private async remoteControl(request:DesktopRequest,event:(event:DesktopEvent)=>void):Promise<unknown> {
+    const owns=()=>!this.disposed && this.harness==='pi' && this.activeLease===request.sessionId && this.state.sessionId===request.sessionId && !!this.agent && this.config.get('persistHistory',true);
+    if(!owns())throw new Error('桌面会话已改变或未启用共享持久化，请刷新后重试。');
+    if(request.action==='status'){
+      const lastUser=this.state.entries.map(e=>e.role).lastIndexOf('user');
+      return {turnId:this.state.entries[lastUser]?.id,stopReason:this.lastTurnStop,busy:this.state.status==='busy',mobileControlled:!!this.state.mobileControlled,queued:this.remoteWaiting,permissions:this.state.permissions,
+        text:this.state.entries.slice(lastUser+1).filter(e=>e.role==='assistant').map(e=>'text' in e?e.text:'').join('\n\n'),error:this.state.error};
+    }
+    if(request.action==='desktop'){
+      if(this.remoteWaiting)throw new Error('请等待手机消息执行完毕后切回桌面。');
+      this.state.mobileControlled=false;this.emit();return true;
+    }
+    this.state.mobileControlled=true;this.emit();
+    if(request.action==='takeover'){this.stopTelegramPublication();return this.remoteControl({...request,action:'status'},event);}
+    if(request.action==='cancel'){this.remoteEpoch++;await this.perform({type:'cancel'},true);return true;}
+    if(request.action==='permission'){
+      const p=this.state.permissions.find(p=>p.id===request.permissionId);
+      if(!p || request.optionId!==undefined&&!p.request.options.some(o=>o.optionId===request.optionId))return false;
+      await this.perform({type:'permission',id:p.id,optionId:request.optionId},true);return true;
+    }
+    if(typeof request.text!=='string'||!request.text.trim()||request.text.length>16000)throw new Error('手机消息为空或过长。');
+    if(this.remoteWaiting>=20)throw new Error('手机排队消息已满，请稍后重试。');
+    this.remoteWaiting++;
+    const epoch=this.remoteEpoch;
+    const pending=this.remoteQueue.catch(()=>{}).then(async()=>{
+      event({kind:'update',value:'等待当前任务结束后发送…'});
+      while(epoch===this.remoteEpoch&&owns()&&(this.state.status==='busy'||this.state.status==='connecting'||this.transitioning))await delay(100);
+      if(epoch!==this.remoteEpoch)return {text:'',status:'cancelled'};
+      if(!owns()||this.state.status!=='ready')throw new Error('桌面连接不可用；消息未重发，请重新连接后手动发送。');
+      const start=this.state.entries.length;
+      const seen=new Set<string>();
+      const update=()=>{
+        event({kind:'update',value:this.state.entries.slice(start).filter(e=>e.role==='assistant').map(e=>'text' in e?e.text:'').join('\n\n')});
+        for(const p of this.state.permissions)if(!seen.has(p.id)){seen.add(p.id);event({kind:'permission',value:p});}
+      };
+      const timer=setInterval(update,250);
+      const attachments=this.state.attachments;this.state.attachments=[];
+      try {
+        const result=await this.perform({type:'send',text:request.text!},true);update();
+        return {text:this.state.entries.slice(start).filter(e=>e.role==='assistant').map(e=>'text' in e?e.text:'').join('\n\n'),
+          status:result?.stopReason==='cancelled'?'cancelled':result?.error||result?.stopReason&&result.stopReason!=='end_turn'?'failed':'completed',error:result?.error};
+      }finally{clearInterval(timer);this.state.attachments=attachments;this.emit();}
+    });
+    this.remoteQueue=pending;
+    try{return await pending;}finally{this.remoteWaiting--;}
+  }
   private log = vscode.window.createOutputChannel('Pi Agent');
   constructor(private context: vscode.ExtensionContext) {
     const selected = context.workspaceState.get('selectedHarness','pi');
@@ -193,6 +246,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.emit();
   }
   private emit() {
+    this.desktopServer.bind(!this.disposed && this.harness==='pi' && this.agent && this.config.get('persistHistory',true) ? this.activeLease : undefined);
     this.desktopTelegramTurn?.update();
     if (this.disposed || this.timer) return;
     this.timer = setTimeout(() => {
@@ -625,12 +679,17 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       await vscode.commands.executeCommand('piAcp.chat.focus'); this.emit();
     } catch (error) { this.state.error = String(error); this.emit(); }
   }
-  async perform(message: UiMessage) {
+  async perform(message: UiMessage, remote=false):Promise<{error?:string;stopReason?:string}|void> {
     let telegramTurn: DesktopTelegramTurn | undefined, telegramError: string | undefined, telegramStopReason: string | undefined;
     try {
       if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
       await this.historyReady;
       if (this.disposed) return;
+      if(message.type==='takeDesktopControl'){
+        if(this.remoteWaiting)throw new Error('请等待手机消息执行完毕后切回桌面。');
+        this.state.mobileControlled=false;this.emit();return;
+      }
+      if(!remote && this.state.mobileControlled && !['ready','takeDesktopControl','open','diff','export','copyConversation','logs','refreshHistory','refreshStatistics','dismissError'].includes(message.type))throw new Error('手机控制中，请先点击“切回桌面”。');
       if (message.type === 'deleteMessage') throw new Error('逐条消息删除功能已移除；可从原生历史节点创建分支。');
       if (message.type === 'switchHarness') {
         if (!isHarnessId(message.harness)) throw new Error('未知 harness。');
@@ -791,7 +850,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if(seed && byteSize(JSON.stringify(prompt.filter(b=>b.type!=='image')))>contextBudget(this.contextWindow)*2)throw new Error('本次输入连同重建上下文超过安全预算，请缩小当前消息或附件后重试。');
         this.state.entries.push({ id: nextId(), role: 'user', contextBlocks, text: message.text + (attached.length ? '\n\n' + attached.map(a => `📎 ${a.name}`).join(' · ') : '') });
         this.state.attachments = []; this.state.status = 'busy'; this.stopping = false;
-        if (this.harness === 'pi' && this.config.get('telegram.desktopNotifications', false)
+        if (!remote && this.harness === 'pi' && this.config.get('telegram.desktopNotifications', false)
           && this.config.get('persistHistory', true) && !this.forgottenSessions.has(this.state.sessionId)) {
           telegramTurn = new DesktopTelegramTurn(this.telegramEvents, this.state, this.cwd, this.state.entries.length,
             error => this.log.appendLine(`Telegram 通知保存失败：${String(error)}`));
@@ -800,7 +859,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.emit();
         try {
           await this.save();
-          await this.view?.webview.postMessage({ type: 'sent' });
+          if(!remote)await this.view?.webview.postMessage({ type: 'sent' });
           if (this.stopping || generation !== this.generation) {
             telegramStopReason = 'cancelled';
             if (generation === this.generation) this.state.entries.push({ id: nextId(), role: 'notice', text: '本轮已停止，消息尚未发送给 Agent。' });
@@ -866,6 +925,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if (this.desktopTelegramTurn === telegramTurn) this.desktopTelegramTurn = undefined;
         await telegramTurn.finish(telegramError, telegramStopReason);
       }
+      if(message.type==='send')this.lastTurnStop=telegramStopReason;
+      if(remote && message.type==='send')return {error:telegramError,stopReason:telegramStopReason};
     }
   }
   private async openLink(url: string, line?: number) {
@@ -906,6 +967,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if (this.disposed) return;
     void this.save().catch(() => {}); this.disconnect();this.releaseLease();this.sessions.clear();
     this.disposed = true;
+    void this.desktopServer.dispose();
     if (this.historyPoll) clearInterval(this.historyPoll);
     if (this.timer) clearTimeout(this.timer);
     this.resources.forEach(r => r.dispose()); this.diffDocs.clear();

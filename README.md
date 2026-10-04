@@ -19,10 +19,10 @@ pi
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.6.0.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.7.0.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.6.0.vsix
+code --install-extension pi-acp-workbench-0.7.0.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π**。首次使用点击 **新建会话**；已有历史时自动恢复上次活动会话。只有点击新建（或执行 `Pi: New Session`）才创建空白对话，重新连接只恢复原会话，失败不会偷偷创建新对话。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
@@ -261,7 +261,7 @@ flowchart TD
 
 支持独立 Node.js 服务常驻服务器，关闭 VS Code 后仍可从手机控制 Pi。私人群组的每个 Topic 对应一个会话，支持增量更新回复、完成通知、权限按钮和 `/stop`，通过用户、群组及工作区白名单限制访问。
 
-配置与 systemd 部署见 [Telegram 使用说明](docs/telegram.md)。运行 `npm run build` 后通过 `npm run telegram -- --config /absolute/path/telegram.json` 启动；Bot token 由环境变量提供。桌面会话的通知需另外开启 `piAcp.telegram.desktopNotifications`。同一会话由手机或桌面独占执行，交接时先释放会话。
+配置与 systemd 部署见 [Telegram 配置文档](docs/telegram-setup.md)，命令与手机控制见 [日常使用指南](docs/telegram-usage.md)。运行 `npm run build` 后通过 `npm run telegram -- --config /absolute/path/telegram.json` 启动；Bot token 由环境变量提供。桌面会话的通知需另外开启 `piAcp.telegram.desktopNotifications`。手机优先复用桌面已有连接，执行中消息排队；支持旧会话历史同步和全局推送开关。全局推送默认关闭，使用 `/notifications` 开启。
 
 ### 会话连接缓存
 

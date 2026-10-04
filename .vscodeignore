@@ -7,5 +7,7 @@
 !media/pi.svg
 !THIRD_PARTY_NOTICES.txt
 !docs/telegram.md
+!docs/telegram-setup.md
+!docs/telegram-usage.md
 !examples/telegram.json
 !examples/pi-telegram.service

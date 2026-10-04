@@ -24,7 +24,7 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><div class="brand"><span id="harness-logo" class="logo">π</span><select id="harness-switch" aria-label="切换 Harness" data-tooltip="切换 Harness；保存当前会话，不自动发送或创建新会话"><option value="pi">Pi Agent</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><span class="protocol">ACP</span></div><div class="toolbar"><button id="history-toggle" aria-controls="history" aria-expanded="false" data-tooltip="历史记录" aria-label="历史记录">◷</button><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">⧉</button><button id="statistics-toggle" data-tooltip="用量统计" aria-label="用量统计" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M5 13V9M10 13V4M15 13V7"/></svg></button><button id="new" data-tooltip="新对话" aria-label="新对话">＋</button></div></header><div id="chat-page" class="chat-page">
 <details id="harness-help" hidden><summary id="harness-help-title"></summary><p id="harness-note"></p><p id="harness-auth"></p><p>请在扩展宿主（SSH 时为服务器）安装 ACP 适配器：</p><code id="harness-install"></code><p>安装不会自动执行。配置 command / args / env 后新建会话；认证失败时先完成登录或配置该 harness 的 API key。</p><button id="harness-login">打开登录终端</button></details>
 <section id="history" hidden><div class="section-label">会话历史 <span><button id="refresh-history" data-tooltip="刷新共享会话">刷新</button><button id="clear-history" data-tooltip="清除历史记录（共享模式下影响所有客户端）">清空</button></span></div><div id="history-items"></div></section>
-<div id="connection" hidden><span class="status-dot"></span><span id="session-number" class="session-number" hidden></span><span id="status" role="status"></span><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
+<div id="connection" hidden><span class="status-dot"></span><span id="session-number" class="session-number" hidden></span><span id="status" role="status"></span><button id="desktop-control" hidden>切回桌面</button><button id="release-session" hidden data-tooltip="释放此会话，让其他客户端继续对话">释放会话</button><button id="connect" hidden>重新连接</button></div>
 <div class="transcript-tools"><button id="toggle-activity" aria-pressed="false" data-tooltip="整体展开或折叠工具调用、思考和中间过程">展开执行过程</button></div>
 <div id="context-operation" hidden role="status"><span id="context-progress"></span><button id="cancel-context">取消</button></div><div id="error" role="alert" hidden><span id="error-message"></span><button id="dismiss-error" aria-label="关闭错误提示" data-tooltip="关闭错误提示">×</button></div>
 <div class="transcript-area"><main id="transcript" aria-label="对话记录" tabindex="0"><section id="welcome"><div class="hero-icon">π</div><h1>从一个想法开始。</h1><p>代码、推导、探索。<br><span id="welcome-harness">让 Pi 在你的工作区里协助你。</span></p><button id="start-session">新建会话</button><button id="demo">预览 Markdown 与公式 <span>↗</span></button><small>通过 ACP 连接本地 Agent</small></section><div id="messages"></div><div id="working" hidden><span class="session-indicator running" aria-hidden="true"></span> <span id="working-label">Pi 正在处理…</span></div></main>
@@ -57,7 +57,7 @@ const button = (text: string, action: () => void, className?: string) => {
 };
 const slashCommands = new SlashCommands(input,el('commands'),()=>{saveDraft();updateSend();});
 function submit() {
-  if ((!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || state?.status !== 'ready' || sending || pasting) return;
+  if ((!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || state?.status !== 'ready' || !!state?.mobileControlled || sending || pasting) return;
   sending = true; send({ type: 'send', text: input.value });
 }
 input.addEventListener('keydown', event => {
@@ -73,6 +73,7 @@ el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
 el('start-session').onclick = () => send({ type: 'new' });
 el('connect').onclick = () => send({ type: 'connect' });
+el('desktop-control').onclick = () => send({type:'takeDesktopControl'});
 el('release-session').onclick = () => send({type:'releaseSession'});
 el('refresh-history').onclick = () => send({type:'refreshHistory'});
 el('dismiss-error').onclick = () => {
@@ -121,7 +122,7 @@ app.addEventListener('click', async event => {
     setTimeout(() => { target.textContent = '复制'; }, 1500);
   }
 });
-function updateSend() { el<HTMLButtonElement>('send').disabled = state?.status !== 'ready' || (!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || sending || pasting; }
+function updateSend() { el<HTMLButtonElement>('send').disabled = state?.status !== 'ready' || !!state?.mobileControlled || (!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || sending || pasting; }
 function contentNode(entry: Entry): HTMLElement {
   const node = document.createElement(entry.role === 'tool' || entry.role === 'thought' ? 'details' : 'article');
   node.className = `message ${entry.role}`;
@@ -177,20 +178,21 @@ function paint() {
   const reconnect = state.status === 'disconnected' && !!state.sessionId && !!state.connectionAttempted && !state.preview;
   el('connection').hidden = !connecting && !reconnect && !state.preview && !state.sessionId;
   el('release-session').hidden = !state.sessionId || !!state.readOnly || state.preview;
-  el<HTMLButtonElement>('release-session').disabled = busy || connecting;
-  el('status').textContent = state.preview ? '渲染预览 · 离线' : state.readOnly ? '只读查看' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
+  el<HTMLButtonElement>('release-session').disabled = busy || connecting || !!state.mobileControlled;
+  el('desktop-control').hidden = !state.mobileControlled;
+  el('status').textContent = state.mobileControlled ? '手机控制中' : state.preview ? '渲染预览 · 离线' : state.readOnly ? '只读查看' : connecting ? '正在连接…' : state.status === 'disconnected' ? '未连接' : '';
   el('connection').dataset.status = state.status;
   el('session-number').hidden = !state.sessionId || state.preview;
   el('session-number').textContent = sessionLabel(state.sessionNumber,state.sessionId);
   el('session-number').dataset.tooltip = `会话 ${sessionLabel(state.sessionNumber,state.sessionId)}\nSession ID: ${state.sessionId || ''}`;
   el('connect').hidden = !reconnect;
   el<HTMLButtonElement>('connect').disabled = connecting;
-  el<HTMLButtonElement>('new').disabled = busy || connecting;
+  el<HTMLButtonElement>('new').disabled = busy || connecting || !!state.mobileControlled;
   el('stop').hidden = !busy; el('send').hidden = busy; el('working').hidden = !busy;
   el('error').hidden = !state.error; el('error-message').textContent = state.error || '';
   el('welcome').hidden = !!state.entries.length;
   el('start-session').hidden = !!state.sessionId || !!state.preview;
-  el<HTMLButtonElement>('start-session').disabled = busy || connecting;
+  el<HTMLButtonElement>('start-session').disabled = busy || connecting || !!state.mobileControlled;
   input.disabled = connecting;
   updateSend();
   const messages = el('messages');
@@ -214,7 +216,7 @@ function paint() {
   const plan = el('plan'); plan.hidden = !state.plan.length; plan.replaceChildren();
   for (const item of state.plan) { const p = document.createElement('div'); p.textContent = `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'} ${item.content}`; plan.append(p); }
   // Do not replace focused permission buttons on every streaming update.
-  const permissions = el('permissions'); const permissionSignature = JSON.stringify(state.permissions);
+  const permissions = el('permissions'); const permissionSignature = JSON.stringify([state.permissions,state.mobileControlled]);
   if (permissions.dataset.signature !== permissionSignature) {
     permissions.dataset.signature = permissionSignature; permissions.replaceChildren();
     for (const item of state.permissions) {
@@ -223,14 +225,14 @@ function paint() {
       const details = document.createElement('pre'); details.textContent = JSON.stringify(item.request.toolCall, null, 2); card.append(details);
       const actions = document.createElement('div'); actions.className = 'permission-actions';
       for (const option of item.request.options) actions.append(button(option.name, () => send({ type: 'permission', id: item.id, optionId: option.optionId }), option.kind.startsWith('reject') ? '' : 'primary'));
-      actions.append(button('取消', () => send({ type: 'permission', id: item.id }))); card.append(actions); permissions.append(card);
+      actions.append(button('取消', () => send({ type: 'permission', id: item.id }))); for(const action of actions.querySelectorAll('button'))action.disabled=!!state.mobileControlled;card.append(actions); permissions.append(card);
     }
   }
-  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.harness, state.modes, state.configs, state.status, state.readOnly]);
+  const selectors = el('selectors'); const selectSignature = JSON.stringify([state.harness, state.modes, state.configs, state.status, state.readOnly, state.mobileControlled]);
   if (selectors.dataset.signature !== selectSignature) {
     selectors.dataset.signature = selectSignature; selectors.replaceChildren();
     for (const control of sessionSelectors(state)) {
-      selectors.append(createSessionSelector(control, state.status !== 'ready' || !!state.readOnly, value => send({ ...control.change, value })));
+      selectors.append(createSessionSelector(control, state.status !== 'ready' || !!state.readOnly || !!state.mobileControlled, value => send({ ...control.change, value })));
     }
   }
   const usage = contextUsage(state.usage);

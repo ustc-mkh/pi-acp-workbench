@@ -10,10 +10,10 @@ export class TelegramStream {
   private finished = false;
   private working = false;
   constructor(private api:TelegramTransport, private chatId:number, private threadId:number,
-    private intervalMs=3100, private report:(error:unknown)=>void=()=>{}) {}
+    private intervalMs=3100, private report:(error:unknown)=>void=()=>{}, private enabled:()=>boolean=()=>true) {}
 
   update(text:string) {
-    if (this.finished) return;
+    if (this.finished || !this.enabled()) return;
     this.text = text;
     if (this.timer || this.working || text === this.shown) return;
     this.timer = setTimeout(() => {
@@ -27,7 +27,7 @@ export class TelegramStream {
     this.timer.unref?.();
   }
   private async preview() {
-    if (this.finished) return;
+    if (this.finished || !this.enabled()) return;
     const text = this.text;
     const preview = text.length > 3800 ? '…（完整回复将在结束后补齐）\n' + text.slice(-3800) : text || '正在处理…';
     if (text === this.shown && this.messageId) return;
@@ -41,10 +41,11 @@ export class TelegramStream {
     this.shown = text;
   }
   async finish(text:string, notification:string) {
-    if (this.finished) return;
+    if (this.finished || !this.enabled()) return;
     this.finished = true;
     if (this.timer) clearTimeout(this.timer);
     await this.pending;
+    if(!this.enabled())return;
     const chunks = telegramChunks(text);
     if (this.messageId) {
       const first = chunks.shift() || '本轮没有文本回复。';
@@ -53,10 +54,11 @@ export class TelegramStream {
         await this.api.call('editMessageText', {chat_id:this.chatId,message_id:this.messageId,text:first});
       }
     }
-    for (const chunk of chunks) await this.api.call('sendMessage', {
+    for (const chunk of chunks) {if(!this.enabled())return;await this.api.call('sendMessage', {
       chat_id:this.chatId,message_thread_id:this.threadId,text:chunk,disable_notification:true,
     });
-    await this.api.call('sendMessage', {chat_id:this.chatId,message_thread_id:this.threadId,text:notification,disable_notification:false});
+    }
+    if(this.enabled())await this.api.call('sendMessage', {chat_id:this.chatId,message_thread_id:this.threadId,text:notification,disable_notification:false});
   }
   dispose() { this.finished = true; if (this.timer) clearTimeout(this.timer); }
 }

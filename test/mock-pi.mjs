@@ -24,6 +24,10 @@ createInterface({input:process.stdin}).on('line',line=>{
  case 'abort':reply({});send({type:'agent_end',messages});send({type:'agent_settled'});break;
  case 'prompt':{
   reply({});if(summary&&cmd.message.includes('WAIT_FOREVER'))break;
+  if(cmd.message==='MODEL_ERROR'){
+   const message={role:'assistant',content:[],stopReason:'error',errorMessage:'<html><body>Unable to load site</body></html>'};
+   send({type:'message_end',message});send({type:'auto_retry_end',success:false});send({type:'agent_end',messages:[message]});send({type:'agent_settled'});break;
+  }
   const message={role:'assistant',provider:model.provider,model:model.id,api:model.api,content:[{type:'text',text:summary?'保留目标、约束与待办。':'完成，公式 $x^2$。'}],usage:{input:100,output:20,cacheRead:800,cacheWrite:100,cost:{total:.001}},timestamp:Date.now(),stopReason:'stop'};
   messages.push({role:'user',content:cmd.message},message);append({type:'message',message});
   if(!summary){const compaction={type:'compaction',summary:'压缩后的历史摘要',firstKeptEntryId:'kept',usage:{input:50,output:10,cacheRead:0,cacheWrite:0,cost:{total:.0003}}};append(compaction);messages=[{role:'compactionSummary',summary:compaction.summary},message];}

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TelegramApiError, telegramChunks, type TelegramTransport, type TelegramUpdate } from './telegram-api';
 import { TelegramStream } from './telegram-stream';
@@ -8,6 +8,7 @@ import type { TelegramTurnEvent, TelegramEvents } from './telegram-events';
 export interface TelegramBridgeState {
   version:1;botId:number;chatId:number;offset?:number;
   topics:{sessionId:string;threadId:number}[];delivered:string[];
+  notifications?:boolean;historySent?:Record<string,string[]>;
 }
 export interface TelegramBridgeOptions {
   chatId:number;allowedUserIds:number[];streamIntervalMs?:number;
@@ -26,6 +27,11 @@ export class TelegramBridge {
   private consuming=new Set<string>();
   private handlers=new Set<Promise<void>>();
   private username='';
+  private queues=new Map<string,Promise<void>>();
+  private queued=new Map<string,number>();
+  private generations=new Map<string,number>();
+  private syncing=new Set<string>();
+  private watching=new Set<string>();
   constructor(private api:TelegramTransport, private host:TelegramSessionHost, private events:TelegramEvents,
     private data:TelegramBridgeState, private options:TelegramBridgeOptions) {}
 
@@ -93,7 +99,7 @@ export class TelegramBridge {
   }
   private stream(id:string,threadId:number) {
     let stream=this.streams.get(id);
-    if(!stream){stream=new TelegramStream(this.api,this.options.chatId,threadId,this.options.streamIntervalMs??3100,this.options.report);this.streams.set(id,stream);}
+    if(!stream){stream=new TelegramStream(this.api,this.options.chatId,threadId,this.options.streamIntervalMs??3100,this.options.report,()=>this.data.notifications===true);this.streams.set(id,stream);}
     return stream;
   }
   async consume(event:TelegramTurnEvent):Promise<boolean> {
@@ -102,7 +108,12 @@ export class TelegramBridge {
     this.consuming.add(event.id);
     try {
       const session=(await this.host.list()).find(s=>s.id===event.sessionId&&s.cwd===event.cwd);
-      if(!session)return false; // Never relay another workspace's output.
+      if(!session)return false;
+      if(this.data.notifications!==true){
+        this.streams.get(event.id)?.dispose();this.streams.delete(event.id);
+        if(event.status!=='running'){this.data.delivered=[...this.data.delivered,event.id].slice(-2000);await this.persist();}
+        return true;
+      }
       const threadId=await this.ensureTopic(session),stream=this.stream(event.id,threadId);
       if(event.status==='running'){stream.update(event.text||'正在处理…');return false;}
       const label=event.status==='completed'?'✅ 任务完成':event.status==='cancelled'?'⏹ 任务已停止':'❌ 任务失败';
@@ -122,7 +133,16 @@ export class TelegramBridge {
     const sender=callback?.from||message?.from;
     if(!message||message.chat.id!==this.options.chatId||!sender||sender.is_bot||message.sender_chat||!this.options.allowedUserIds.includes(sender.id))return;
     const threadId=message.message_thread_id;
-    if(callback){await this.answerPermission(callback.id,callback.data,threadId);return;}
+    if(callback){
+      if(callback.data==='notify:on'||callback.data==='notify:off'){
+        this.data.notifications=callback.data==='notify:on';
+        if(!this.data.notifications){for(const stream of this.streams.values())stream.dispose();this.streams.clear();}
+        await this.persist();
+        await this.api.call('answerCallbackQuery',{callback_query_id:callback.id,text:this.data.notifications?'已开启全部会话推送':'已暂停全部会话推送'});
+        await this.notificationMenu(threadId);return;
+      }
+      await this.answerPermission(callback.id,callback.data,threadId);return;
+    }
     if(!message.text)return;
     const match=message.text.match(/^\/(\w+)(?:@([\w]+))?(?:\s+([\s\S]*))?$/);
     if(match?.[2]&&match[2].toLowerCase()!==this.username.toLowerCase())return;
@@ -130,13 +150,44 @@ export class TelegramBridge {
     const binding=this.data.topics.find(t=>t.threadId===threadId);
     try {
       if(command==='start'||command==='help'){
-        await this.send('/new [工作区名] — 新建会话和独立话题\n/sessions — 列出允许的 Pi 会话\n/open 编号 — 为已有会话打开话题\n/status — 查看本话题任务状态\n/stop — 停止本话题任务\n\n进入会话话题直接发文字即可；/compact 等其他命令转交 Pi。电脑占用的会话请先在 VS Code 点击“释放会话”。',threadId);return;
+        await this.send('/new [工作区名] — 新建会话和独立话题\n/sessions — 列出允许的 Pi 会话\n/open 编号 — 为已有会话打开话题\n/status — 查看本话题任务状态\n/stop — 停止本话题任务\n\n进入会话话题直接发文字即可；/compact 等其他命令转交 Pi。旧会话：/sync、/history [all]\n手机优先：/takeover、/interrupt 新消息、/desktop\n全局推送开关：/notifications（默认关闭）',threadId);return;
+      }
+      if(command==='notifications'){await this.notificationMenu(threadId);return;}
+      if(command==='sync'){
+        const sessions=await this.host.list();let created=0;
+        for(const session of sessions){if(this.data.topics.some(t=>t.sessionId===session.id))continue;await this.ensureTopic(session);if(++created>=20)break;}
+        await this.send(`已为 ${created} 个旧会话建立话题。每次最多 20 个；可再次 /sync。进入话题用 /history 加载最近对话，/history all 分批加载完整文字历史。`,threadId,{disable_notification:true});return;
+      }
+      if(command==='history'){
+        if(!binding||!this.host.history)throw new Error('请先用 /open 编号进入会话话题。');
+        await this.syncHistory(binding.sessionId,threadId!,argument==='all');return;
+      }
+      if(command==='takeover'||command==='desktop'){
+        if(command==='desktop'&&binding&&(this.queued.get(binding.sessionId)||0)>0)throw new Error('请先停止或等待手机排队消息完成，再切回桌面。');
+        if(!binding)throw new Error('请先进入会话话题。');
+        const status=await this.host.control?.(binding.sessionId,command==='takeover'?'takeover':'desktop');
+        if(command==='takeover'&&status?.busy&&!this.watching.has(binding.sessionId)){
+          const watch=this.watchDesktop(binding.sessionId,status.turnId).catch(error=>this.options.report(error));
+          this.handlers.add(watch);void watch.finally(()=>this.handlers.delete(watch));
+        }
+        await this.send(command==='desktop'?'已切回桌面控制。':status?.desktop===false?'此会话当前没有可用的桌面控制连接。直接发消息将尝试以独占方式恢复；如提示占用，请更新并重载 VS Code 插件。':'手机已接管，电脑保留显示；新消息会在当前任务结束后执行。/status 查看进度与权限请求，/stop 停止当前任务。',threadId,{disable_notification:true});return;
+      }
+      if(command==='interrupt'){
+        if(!binding||!argument)throw new Error('用法：/interrupt 要发送的新消息');
+        this.generations.set(binding.sessionId,(this.generations.get(binding.sessionId)||0)+1);
+        await this.host.cancel(binding.sessionId);
       }
       if(command==='stop'){
+        if(binding)this.generations.set(binding.sessionId,(this.generations.get(binding.sessionId)||0)+1);
         const stopped=binding&&await this.host.cancel(binding.sessionId);
-        await this.send(stopped?'正在停止本话题任务…':'本话题没有由 Telegram 执行的任务。电脑任务请在 VS Code 停止。',threadId);return;
+        await this.send(stopped?'正在停止本话题任务…':'本话题没有可停止的任务。旧版桌面插件需要更新后才能远程控制。',threadId);return;
       }
       if(command==='status'){
+        if(binding&&this.host.control){
+          const status=await this.host.control(binding.sessionId,'status');
+          for(const p of status?.permissions||[])await this.showPermission(binding.sessionId,threadId!,p);
+          await this.send(`会话 ${binding.sessionId}\n${status?.busy||this.active.has(binding.sessionId)?'正在执行':'空闲'}；排队消息：${this.queued.get(binding.sessionId)||0}\n${status?.text||''}`,threadId,{disable_notification:true});return;
+        }
         await this.send(binding?`会话 ${binding.sessionId}\n${this.active.has(binding.sessionId)?'正在执行，可用 /stop 停止。':'空闲；发送文字即可继续。'}`:'请用 /new 或 /open 创建会话话题。',threadId);return;
       }
       if(command==='sessions'){
@@ -151,15 +202,23 @@ export class TelegramBridge {
         return;
       }
       if(!binding)throw new Error('此话题尚未绑定会话，请先发送 /new 或 /open 编号，再进入新话题。');
-      if(this.active.has(binding.sessionId))throw new Error('此会话正在执行任务，请等待或发送 /stop。');
+      if((this.queued.get(binding.sessionId)||0)>=20)throw new Error('排队消息已满，请稍后重试。');
+      const previous=this.queues.get(binding.sessionId)||Promise.resolve();
+      let release!:()=>void;
+      const tail=new Promise<void>(resolve=>{release=resolve;});
+      this.queues.set(binding.sessionId,tail);
+      this.queued.set(binding.sessionId,(this.queued.get(binding.sessionId)||0)+1);
+      const generation=this.generations.get(binding.sessionId)||0;
+      await previous;
       this.active.add(binding.sessionId);
       const id=`telegram:${this.data.botId}:${update.update_id}`,stream=this.stream(id,threadId!);
       let completionSaved=false;
       try {
-        const prompt=match?.[2]?`/${match[1]}${argument?' '+argument:''}`:message.text;
+        if(this.stopped||generation!==(this.generations.get(binding.sessionId)||0))return;
+        const prompt=command==='interrupt'?argument!:match?.[2]?`/${match[1]}${argument?' '+argument:''}`:message.text;
         const result=await this.host.run(binding.sessionId,prompt,{
-          update:text=>stream.update(text||'正在处理…'),
-          permission:p=>{void this.showPermission(binding.sessionId,threadId!,p).catch(error=>this.options.report(error));},
+          update:text=>{if(this.data.notifications===true)this.stream(id,threadId!).update(text||'正在处理…');},
+          permission:p=>{if(this.data.notifications===true)void this.showPermission(binding.sessionId,threadId!,p).catch(error=>this.options.report(error));},
         });
         const session=(await this.host.list()).find(s=>s.id===binding.sessionId);
         if(!session)throw new Error('任务结束，但会话已删除；请查看服务器日志。');
@@ -170,13 +229,51 @@ export class TelegramBridge {
       } finally {
         if(!completionSaved){stream.dispose();this.streams.delete(id);}
         this.active.delete(binding.sessionId);
+        this.queued.set(binding.sessionId,(this.queued.get(binding.sessionId)||1)-1);
+        if(this.queues.get(binding.sessionId)===tail)this.queues.delete(binding.sessionId);
+        release();
         for(const [key,ticket]of this.tickets)if(ticket.sessionId===binding.sessionId)this.tickets.delete(key);
       }
     } catch(error) {
       const detail=error instanceof Error?error.message:String(error);
       this.options.report(error);
-      await this.send(detail,threadId).catch(error=>this.options.report(error));
+      if(command||this.data.notifications===true)await this.send(detail,threadId).catch(error=>this.options.report(error));
     }
+  }
+  private async watchDesktop(sessionId:string,turnId:string){
+    this.watching.add(sessionId);const seen=new Set<string>();
+    try{
+      while(!this.stopped){
+        const status=await this.host.control!(sessionId,'status');
+        if(!status?.mobileControlled||status.turnId!==turnId)return;
+        const session=(await this.host.list()).find(s=>s.id===sessionId);if(!session)return;
+        const event:TelegramTurnEvent={...session,id:'desktop-watch:'+sessionId+':'+turnId,sessionId,text:status.text||'',updated:Date.now(),
+          status:status.busy?'running':status.stopReason==='cancelled'?'cancelled':status.error?'failed':'completed',error:status.error};
+        if(this.data.notifications===true)for(const p of status.permissions||[])if(!seen.has(p.id)){seen.add(p.id);await this.showPermission(sessionId,await this.ensureTopic(session),p);}
+        if(!status.busy)await this.events.write(event);
+        if(await this.consume(event))await this.events.remove(event.id);
+        if(!status.busy)return;
+        await delay(2000,undefined,{signal:this.abort.signal}).catch(()=>{});
+      }
+    }finally{this.watching.delete(sessionId);const id='desktop-watch:'+sessionId+':'+turnId;this.streams.get(id)?.dispose();this.streams.delete(id);}
+  }
+  private async notificationMenu(threadId?:number){
+    await this.send(`全部会话自动推送：${this.data.notifications===true?'开启':'关闭'}。关闭时不发送自动回复、完成通知或授权卡片；可用 /history、/status 主动查看。`,threadId,
+      {disable_notification:true,reply_markup:{inline_keyboard:[[{text:this.data.notifications===true?'暂停全部推送':'开启全部推送',callback_data:this.data.notifications===true?'notify:off':'notify:on'}]]}});
+  }
+  private async syncHistory(id:string,threadId:number,all:boolean){
+    if(this.syncing.has(id))throw new Error('此话题正在同步历史。');
+    this.syncing.add(id);
+    try{
+      const entries=(await this.host.history!(id)).filter(e=>e.role==='user'||e.role==='assistant');
+      const sent=this.data.historySent?.[id]||[];
+      const selected=(all?entries:entries.slice(-20)).map(e=>({key:createHash('sha256').update(e.id+'\0'+('text' in e?e.text:'')).digest('hex'),text:`${e.role==='user'?'你':'Pi'}：\n${'text' in e?e.text:''}`})).filter(e=>!sent.includes(e.key)).slice(0,100);
+      for(const entry of selected){
+        await this.send(entry.text,threadId,{disable_notification:true});
+        this.data.historySent||={};this.data.historySent[id]=[...(this.data.historySent[id]||[]),entry.key];await this.persist();
+      }
+      await this.send(`已同步 ${selected.length} 条历史消息。${selected.length===100?'可再次 /history all 继续。':''}`,threadId,{disable_notification:true});
+    }finally{this.syncing.delete(id);}
   }
   private async showPermission(sessionId:string,threadId:number,permission:TelegramPermission) {
     const key=randomBytes(10).toString('hex');
@@ -189,7 +286,7 @@ export class TelegramBridge {
   private async answerPermission(callbackId:string,data:string|undefined,threadId?:number) {
     const match=data?.match(/^p:([a-f0-9]{20}):(\d+)$/),ticket=match?this.tickets.get(match[1]):undefined;
     const index=Number(match?.[2]);
-    const accepted=!!ticket&&ticket.threadId===threadId&&ticket.expires>Date.now()&&Number.isInteger(index)&&index<ticket.options.length&&this.host.permission(ticket.sessionId,ticket.permissionId,ticket.options[index]);
+    const accepted=!!ticket&&ticket.threadId===threadId&&ticket.expires>Date.now()&&Number.isInteger(index)&&index<ticket.options.length&&await this.host.permission(ticket.sessionId,ticket.permissionId,ticket.options[index]);
     if(accepted)this.tickets.delete(match![1]);
     await this.api.call('answerCallbackQuery',{callback_query_id:callbackId,text:accepted?'已提交':'授权已失效或不属于此话题。'});
   }

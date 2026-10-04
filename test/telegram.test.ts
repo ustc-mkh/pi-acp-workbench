@@ -33,7 +33,7 @@ async function fixture() {
   const host:TelegramSessionHost={list:vi.fn(async()=>sessions),create:vi.fn(async()=>sessions[1]),
     run:vi.fn(async():Promise<TelegramTurnResult>=>({text:'done',status:'completed'})),cancel:vi.fn(async()=>true),permission:vi.fn(()=>true),dispose:vi.fn(async()=>{})};
   const saved:TelegramBridgeState[]=[];
-  const data:TelegramBridgeState={version:1,botId:7,chatId:-100,offset:1,topics:[{sessionId:'one',threadId:101}],delivered:[]};
+  const data:TelegramBridgeState={version:1,botId:7,chatId:-100,offset:1,notifications:true,topics:[{sessionId:'one',threadId:101}],delivered:[]};
   const report=vi.fn();
   const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],streamIntervalMs:1,
     save:async s=>{saved.push(structuredClone(s));},report});
@@ -148,4 +148,32 @@ it('persists desktop completion without a running daemon and acknowledges delive
   expect(await bridge.consume(event)).toBe(true);
   const sent=api.calls.length;expect(await bridge.consume(event)).toBe(true);expect(api.calls).toHaveLength(sent);
   expect(host.run).not.toHaveBeenCalled();
+});
+
+it('defaults to paused delivery, toggles globally and synchronizes history without duplicate exports',async()=>{
+ const {bridge,host,data,api,events}=await fixture();delete data.notifications;
+ host.history=vi.fn(async()=>[{id:'u',role:'user' as const,text:'old question'},{id:'a',role:'assistant' as const,text:'old answer'}]);
+ await bridge.handle(message(20,'new question'));
+ expect(host.run).toHaveBeenCalledOnce();expect(api.calls).toHaveLength(0);expect(await events.list()).toHaveLength(0);
+ await bridge.handle(message(21,'/history'));await bridge.handle(message(22,'/history'));
+ expect(api.calls.filter(c=>String(c.params.text).includes('old answer'))).toHaveLength(1);
+ await bridge.handle(message(23,'/notifications'));
+ expect(api.calls.at(-1)?.params.reply_markup).toBeDefined();
+ await bridge.handle({update_id:24,callback_query:{id:'toggle',from:{id:42},message:message(24,'').message,data:'notify:on'}});
+ expect(data.notifications).toBe(true);
+ await bridge.handle(message(25,'another question'));
+ expect(api.calls.some(c=>c.params.text==='✅ 任务完成 · #1')).toBe(true);
+ await bridge.handle({update_id:26,callback_query:{id:'bad',from:{id:99},message:message(26,'').message,data:'notify:off'}});
+ expect(data.notifications).toBe(true);
+});
+it('serializes phone messages and discards queued messages when stopped',async()=>{
+ const {bridge,host}=await fixture();let finish!:(value:TelegramTurnResult)=>void;
+ vi.mocked(host.run).mockImplementationOnce(async()=>new Promise(resolve=>{finish=resolve;}));
+ const first=bridge.handle(message(30,'first'));
+ await vi.waitFor(()=>expect(host.run).toHaveBeenCalledOnce());
+ const second=bridge.handle(message(31,'queued'));
+ await bridge.handle(message(32,'/stop'));
+ finish({text:'stopped',status:'cancelled'});
+ await Promise.all([first,second]);expect(host.run).toHaveBeenCalledOnce();
+ await bridge.handle(message(33,'next'));expect(host.run).toHaveBeenCalledTimes(2);
 });
