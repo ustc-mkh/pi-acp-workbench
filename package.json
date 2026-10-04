@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -174,6 +174,12 @@
           "maximum": 500000,
           "description": "Maximum characters in an attached editor selection or file."
         },
+        "piAcp.telegram.desktopNotifications": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Publish Pi task progress and completion to the local Telegram relay outbox. Requires the standalone Telegram daemon with this workspace allowed; conversation output is sent to its configured Telegram group."
+        },
         "piAcp.useBundledAdapter": {
           "type": "boolean",
           "default": true,
@@ -189,11 +195,12 @@
     "test": "npm run check && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && vitest run",
     "verify": "npm run test:all && npm run test:browser",
-    "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.5.0.vsix",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.6.0.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs",
     "test:harness": "node scripts/harness-reconnect-smoke.mjs",
-    "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs"
+    "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs",
+    "telegram": "node dist/telegram-daemon.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",

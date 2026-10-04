@@ -40,6 +40,7 @@ CHROME_PATH=/absolute/path/to/chromium npm run test:browser
 - 原生分支：节点与工具边界、历史设置、继承用量排除、取消和断连恢复。
 - 协议与渲染：ACP 流式/权限/取消、图片限制、Markdown / 数学 / SVG 净化。
 - 状态同步：消息对象替换、旧图片与统计不重复序列化、增量更新和丢包重同步。
+- Telegram：群组 / 用户 / 话题隔离、游标防重放、增量消息与完成通知、远程授权、共享租约及并发停止；使用模拟 API 和 ACP，不需要 Bot token，也不向真实群组发消息。内置适配器索引覆盖多个真实子进程同时写入。
 
 这些行为已由自动测试覆盖，不要求每次修改再手动遍历一份重复清单。新测试优先补现有文件中缺失的行为；不为同一行为重复增加单元、宿主与浏览器断言。浏览器只验证真实布局、交互及 DOM 环境无法代替的链路。
 
@@ -82,4 +83,4 @@ cat "$PI_TEST_ROOT/result.json"
 5. 提交源码，创建与 package 一致的 vX.Y.Z 标签，推送仓库；创建同名 GitHub Release，附上 VSIX、变更说明及 SHA-256。源码由标签关联。
 6. 从 Release 下载 VSIX 并核对摘要，确认发布附件可用。不要用 Marketplace 发布命令代替 GitHub Release 附件上传。
 
-示例摘要命令：`sha256sum ../pi-acp-workbench-0.5.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。
+示例摘要命令：`sha256sum ../pi-acp-workbench-0.6.0.vsix`。发布需要相应 GitHub 权限；普通贡献者提交 PR 即可，无须发布权限。

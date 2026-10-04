@@ -1,0 +1,50 @@
+import {afterEach,expect,it,vi} from 'vitest';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {tmpdir} from 'node:os';
+import {SharedHistoryStore} from '../src/shared-history';
+import {TelegramSessions,type TelegramPermission} from '../src/telegram-sessions';
+const cleanup:(()=>Promise<unknown>)[]=[];
+afterEach(async()=>{for(const fn of cleanup.splice(0).reverse())await fn();});
+async function fixture(){
+  const root=await mkdtemp(join(tmpdir(),'pi-telegram-sessions-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+  const store=new SharedHistoryStore(join(root,'history')),desktop=new SharedHistoryStore(store.root);
+  cleanup.push(()=>desktop.releaseAll());cleanup.push(()=>store.releaseAll());
+  const audit=join(root,'wire.jsonl');
+  const host=new TelegramSessions(store,{workspaces:{test:root},command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],env:{PI_TEST_AUDIT:audit},maxConcurrent:3});
+  cleanup.push(()=>host.dispose());return {host,store,desktop,root,audit};
+}
+it('shares durable Pi sessions with desktop, enforces leases and workspace boundaries',async()=>{
+  const {host,desktop,root}=await fixture();const session=await host.create('test');
+  await desktop.claim(session.id);
+  await expect(host.run(session.id,'must not run',{update:()=>{},permission:()=>{}})).rejects.toThrow('另一个窗口');
+  await desktop.release(session.id);
+  const result=await host.run(session.id,'hello',{update:()=>{},permission:()=>{}});
+  expect(result.status).toBe('completed');expect(result.text).toContain('数学');
+  const saved=await desktop.read((await desktop.list()).find(s=>s.id===session.id)!);
+  expect(saved.cwd).toBe(root);expect(saved.entries.some(e=>e.role==='user'&&e.text==='hello')).toBe(true);
+  await desktop.import({id:'outside',cwd:'/forbidden',title:'secret',updated:1,entries:[]});
+  expect((await host.list()).some(s=>s.id==='outside')).toBe(false);
+  await expect(host.run('outside','no',{update:()=>{},permission:()=>{}})).rejects.toThrow('不在允许');
+});
+it('runs independent sessions concurrently, supports exact permission responses, cancellation and shutdown',async()=>{
+  const {host,audit,desktop}=await fixture();const a=await host.create(),b=await host.create();
+  const listeners={update:()=>{},permission:()=>{}};
+  const waiting=host.run(a.id,'wait',listeners);
+  await vi.waitFor(async()=>expect((await readFile(audit,'utf8')).includes('"text":"wait"')).toBe(true));
+  await expect(host.run(a.id,'duplicate',listeners)).rejects.toThrow('正在执行');
+  expect((await host.run(b.id,'parallel',listeners)).status).toBe('completed');
+  await desktop.claim(b.id);await desktop.release(b.id);
+  await expect(desktop.claim(a.id)).rejects.toThrow('另一个窗口');
+  await host.cancel(a.id);expect((await waiting).status).toBe('cancelled');
+  let permission:TelegramPermission|undefined;
+  const authorized=host.run(a.id,'permission',{update:()=>{},permission:p=>{permission=p;}});
+  await vi.waitFor(()=>expect(permission).toBeDefined());
+  expect(host.permission(a.id,permission!.id,'invented')).toBe(false);
+  expect(host.permission(a.id,permission!.id,'yes')).toBe(true);
+  expect((await authorized).status).toBe('completed');
+  const ending=host.run(a.id,'wait',listeners);
+  await vi.waitFor(async()=>expect((await readFile(audit,'utf8')).split('"text":"wait"').length).toBe(3));
+  await host.dispose();expect((await ending).status).toBe('cancelled');
+  await desktop.claim(a.id);await desktop.release(a.id);
+});

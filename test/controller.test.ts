@@ -790,3 +790,16 @@ it('warns about unavailable inherited values without retrying or silently creati
   expect(host.provider.snapshot().error).toContain('上次的设置当前不可用');
   expect(wire().slice(before).filter(r=>r.method==='session/new')).toHaveLength(1);
 });
+
+it('publishes desktop completion only when Telegram and history persistence are enabled', async () => {
+  const publish=vi.spyOn(host.provider.telegramEvents,'write').mockResolvedValue(undefined);
+  await host.provider.perform({type:'new'});
+  await host.provider.perform({type:'send',text:'local only'});
+  expect(publish).not.toHaveBeenCalled();
+  host.config['telegram.desktopNotifications']=true;
+  await host.provider.perform({type:'send',text:'notify phone'});
+  expect(publish.mock.calls.at(-1)?.[0]).toMatchObject({sessionId:'test-session',status:'completed',text:'数学 $x^2$'});
+  publish.mockClear();host.config.persistHistory=false;
+  await host.provider.perform({type:'send',text:'do not persist or notify'});
+  expect(publish).not.toHaveBeenCalled();
+});

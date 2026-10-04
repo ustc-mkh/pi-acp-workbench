@@ -114,6 +114,12 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench
 
 这些是本项目扩展，不是标准 ACP 方法。外部 Agent 可只实现标准协议，此时普通聊天仍可用，详细消费统计和长历史自动摘要会受限。用量通过稳定请求 ID 去重，历史分支不能重复计费；上下文圆环与累计 token 消费是不同数据。
 
+## Telegram 常驻服务
+
+`telegram-daemon.ts` 是独立 Node 入口，长轮询接收指定群组中白名单用户的消息，不依赖 VS Code 生命周期或公开入站端口。`telegram-bridge.ts` 负责话题绑定、游标、命令与授权按钮；`telegram-sessions.ts` 复用 ACP 进程和共享历史租约，限定可访问的 Pi 工作区。每轮任务独占会话，结束后写入快照并释放进程和租约。内置适配器的会话索引写入使用 `adapter-store.ts` 的跨进程锁和原子替换，避免并发进程覆盖索引。
+
+`telegram-stream.ts` 合并预览，`telegram-api.ts` 串行节流群组写入并处理 Telegram 的限流响应。执行前持久化游标，防止重放任务；完成事件写入本地 outbox，失败后重试投递。桌面仅在显式启用通知且保存历史时通过 `telegram-events.ts` 发布事件，不持有 Bot token。关闭持久化或通知会停止当前桌面发布。崩溃交付边界和配置见 [Telegram 使用说明](telegram.md)。
+
 ## 渲染与安全边界
 
 `webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。显式重置 html/body/后代的 scrollbar-color 和 scrollbar-width 为 auto，避免 VS Code 注入的标准属性压过 Chromium 的 WebKit 伪元素规则。

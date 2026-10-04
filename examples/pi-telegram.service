@@ -1,0 +1,18 @@
+[Unit]
+Description=Pi ACP Workbench Telegram relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/pi-acp-workbench
+EnvironmentFile=%h/.config/pi-acp-workbench/telegram.env
+ExecStart=/absolute/path/to/node /absolute/path/to/pi-acp-workbench/dist/telegram-daemon.mjs --config %h/.config/pi-acp-workbench/telegram.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=default.target

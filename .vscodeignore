@@ -6,3 +6,6 @@
 !dist/**
 !media/pi.svg
 !THIRD_PARTY_NOTICES.txt
+!docs/telegram.md
+!examples/telegram.json
+!examples/pi-telegram.service

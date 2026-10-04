@@ -21,6 +21,7 @@ import { SharedHistoryStore, SessionInUseError } from './shared-history';
 import { prepareContext, contextBudget, checkpoint, byteSize, type Checkpoint } from './checkpoints';
 import { mergeUsage, validPrice, priceFor, type Inspection, type Statistics, type Price, type UsageRecord } from './telemetry';
 import { presetPrices } from './prices';
+import { DesktopTelegramTurn, TelegramEvents } from './telegram-events';
 import { demoMarkdown } from './demo';
 import type { Entry, Snapshot, UiMessage } from './shared';
 
@@ -82,6 +83,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private permissionResolvers = new Map<string, (response: acp.RequestPermissionResponse) => void>();
   private diffDocs = new Map<string, string>();
   private resources: vscode.Disposable[] = [];
+  private desktopTelegramTurn?: DesktopTelegramTurn;
+  private telegramEvents = new TelegramEvents();
   private log = vscode.window.createOutputChannel('Pi Agent');
   constructor(private context: vscode.ExtensionContext) {
     const selected = context.workspaceState.get('selectedHarness','pi');
@@ -111,6 +114,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       provideTextDocumentContent: uri => this.diffDocs.get(uri.toString()) || '',
     }), vscode.workspace.onDidChangeConfiguration(e => {
       if (!e.affectsConfiguration('piAcp')) return;
+      if (!this.config.get('telegram.desktopNotifications', false)) this.stopTelegramPublication();
       if(['command','args','env','useBundledAdapter','codex','claude'].some(key=>e.affectsConfiguration('piAcp.'+key))){this.sessions.clear();this.activeCacheable=false;}
       if (!this.config.get('persistHistory', true)) this.disableHistory();
       else if (this.sharedHistory && e.affectsConfiguration('piAcp.persistHistory')) {
@@ -120,7 +124,12 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     }));
   }
   private get config() { return vscode.workspace.getConfiguration('piAcp'); }
+  private stopTelegramPublication() {
+    const turn=this.desktopTelegramTurn;this.desktopTelegramTurn=undefined;
+    if(turn)void turn.discard().catch(error=>this.log.appendLine(`Telegram 通知清理失败：${String(error)}`));
+  }
   private disableHistory() {
+    this.stopTelegramPublication();
     this.persistence.invalidate();
     this.history = [];
     this.statistics = {...this.statistics, titles:{}};
@@ -184,6 +193,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.emit();
   }
   private emit() {
+    this.desktopTelegramTurn?.update();
     if (this.disposed || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
@@ -616,6 +626,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     } catch (error) { this.state.error = String(error); this.emit(); }
   }
   async perform(message: UiMessage) {
+    let telegramTurn: DesktopTelegramTurn | undefined, telegramError: string | undefined, telegramStopReason: string | undefined;
     try {
       if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
       await this.historyReady;
@@ -701,6 +712,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         vscode.window.createTerminal({ name:`${HARNESSES[this.harness].name} Login`,cwd,shellPath,shellArgs,env }).show();return;
       }
       if (message.type === 'cancel') {
+        this.desktopTelegramTurn?.cancel();
         if (!this.agent || this.state.status !== 'busy' || !this.state.sessionId) return;
         this.stopping = true; this.cancelPermissions(); this.emit();
         if (!this.prompting) return;
@@ -778,16 +790,25 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         checkPromptSize(prompt);
         if(seed && byteSize(JSON.stringify(prompt.filter(b=>b.type!=='image')))>contextBudget(this.contextWindow)*2)throw new Error('本次输入连同重建上下文超过安全预算，请缩小当前消息或附件后重试。');
         this.state.entries.push({ id: nextId(), role: 'user', contextBlocks, text: message.text + (attached.length ? '\n\n' + attached.map(a => `📎 ${a.name}`).join(' · ') : '') });
-        this.state.attachments = []; this.state.status = 'busy'; this.stopping = false; this.emit();
+        this.state.attachments = []; this.state.status = 'busy'; this.stopping = false;
+        if (this.harness === 'pi' && this.config.get('telegram.desktopNotifications', false)
+          && this.config.get('persistHistory', true) && !this.forgottenSessions.has(this.state.sessionId)) {
+          telegramTurn = new DesktopTelegramTurn(this.telegramEvents, this.state, this.cwd, this.state.entries.length,
+            error => this.log.appendLine(`Telegram 通知保存失败：${String(error)}`));
+          this.desktopTelegramTurn = telegramTurn;
+        }
+        this.emit();
         try {
           await this.save();
           await this.view?.webview.postMessage({ type: 'sent' });
           if (this.stopping || generation !== this.generation) {
+            telegramStopReason = 'cancelled';
             if (generation === this.generation) this.state.entries.push({ id: nextId(), role: 'notice', text: '本轮已停止，消息尚未发送给 Agent。' });
             return;
           }
           this.prompting = true;
           const response = await agent.prompt(this.state.sessionId, prompt);
+          telegramStopReason = response.stopReason;
           if (generation === this.generation) this.state.contextPending = !!seed && response.stopReason === 'cancelled';
           if (generation === this.generation && response.stopReason !== 'end_turn') this.state.entries.push({ id: nextId(), role: 'notice', text: `本轮结束：${response.stopReason}` });
           if (seed && response.stopReason === 'cancelled' && generation === this.generation) {
@@ -838,7 +859,14 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       }
       this.emit();
     } catch (error) { const detail = error instanceof Error ? error.message : String(error);
+      telegramError = detail;
       this.state.error = detail === 'ACP connection closed' && this.state.error ? this.state.error : detail; this.log.appendLine(this.state.error); this.emit(); }
+    finally {
+      if (telegramTurn) {
+        if (this.desktopTelegramTurn === telegramTurn) this.desktopTelegramTurn = undefined;
+        await telegramTurn.finish(telegramError, telegramStopReason);
+      }
+    }
   }
   private async openLink(url: string, line?: number) {
     if (typeof url !== 'string' || url.length > 10000) return;

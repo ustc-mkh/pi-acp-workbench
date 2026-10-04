@@ -1,0 +1,151 @@
+import {afterEach,expect,it,vi} from 'vitest';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {TelegramApi,telegramChunks,type TelegramTransport,type TelegramUpdate} from '../src/telegram-api';
+import {TelegramBridge,type TelegramBridgeState} from '../src/telegram-bridge';
+import {TelegramStream} from '../src/telegram-stream';
+import {DesktopTelegramTurn,TelegramEvents} from '../src/telegram-events';
+import {telegramConfig} from '../src/telegram-config';
+import {initialState,applyUpdate} from '../src/state';
+import type {TelegramSessionHost,TelegramTurnListener,TelegramTurnResult} from '../src/telegram-sessions';
+
+const cleanup:(()=>Promise<unknown>|void)[]=[];
+afterEach(async()=>{vi.useRealTimers();for(const fn of cleanup.splice(0).reverse())await fn();});
+class FakeApi implements TelegramTransport {
+  calls:{method:string;params:Record<string,unknown>}[]=[];
+  batches:TelegramUpdate[][]=[];
+  wake?:()=>void;
+  async call<T>(method:string,params:Record<string,unknown>={}):Promise<T> {
+    this.calls.push({method,params});
+    if(method==='getWebhookInfo')return {url:''} as T;
+    if(method==='getChat')return {type:'supergroup',is_forum:true} as T;
+    if(method==='createForumTopic')return {message_thread_id:200+this.calls.filter(c=>c.method===method).length} as T;
+    if(method==='getUpdates')return (this.batches.shift()||await new Promise<TelegramUpdate[]>(r=>{this.wake=()=>r([]);})) as T;
+    return {message_id:500+this.calls.length} as T;
+  }
+  dispose(){this.wake?.();}
+}
+async function fixture() {
+  const root=await mkdtemp(join(tmpdir(),'pi-telegram-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+  const api=new FakeApi(),events=new TelegramEvents(root);
+  const sessions=[{id:'one',cwd:'/allowed',title:'One',sessionNumber:1},{id:'two',cwd:'/allowed',title:'Two',sessionNumber:2}];
+  const host:TelegramSessionHost={list:vi.fn(async()=>sessions),create:vi.fn(async()=>sessions[1]),
+    run:vi.fn(async():Promise<TelegramTurnResult>=>({text:'done',status:'completed'})),cancel:vi.fn(async()=>true),permission:vi.fn(()=>true),dispose:vi.fn(async()=>{})};
+  const saved:TelegramBridgeState[]=[];
+  const data:TelegramBridgeState={version:1,botId:7,chatId:-100,offset:1,topics:[{sessionId:'one',threadId:101}],delivered:[]};
+  const report=vi.fn();
+  const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],streamIntervalMs:1,
+    save:async s=>{saved.push(structuredClone(s));},report});
+  cleanup.push(()=>bridge.dispose());
+  return {api,host,events,bridge,data,saved,report,sessions};
+}
+const message=(id:number,text:string,threadId=101,userId=42,chatId=-100):TelegramUpdate=>({update_id:id,message:{message_id:id,chat:{id:chatId,type:'supergroup'},from:{id:userId},message_thread_id:threadId,text}});
+
+it('requires explicit identity/workspace configuration and redacts transport failures',async()=>{
+  expect(()=>telegramConfig({chatId:-1,allowedUserIds:[],workspaces:{a:'/a'}})).toThrow('allowedUserIds');
+  expect(()=>telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'},maxConcurrent:99})).toThrow('maxConcurrent');
+  expect(telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'}}).maxConcurrent).toBe(3);
+  const token='123:private_token_never_log';
+  const api=new TelegramApi(token,0,vi.fn(async()=>{throw new Error(`https://api.telegram.org/bot${token}`);}) as typeof fetch);
+  await expect(api.call('getMe')).rejects.toThrow('网络请求');
+  await api.call('getMe').catch(error=>expect(error.message).not.toContain(token));api.dispose();
+  const fetcher=vi.fn().mockResolvedValueOnce({json:async()=>({ok:false,error_code:429,parameters:{retry_after:0.001}})})
+    .mockResolvedValueOnce({json:async()=>({ok:true,result:{message_id:1}})});
+  const retry=new TelegramApi(token,0,fetcher as typeof fetch);
+  expect(await retry.call('sendMessage',{text:'hello'})).toEqual({message_id:1});expect(fetcher).toHaveBeenCalledTimes(2);retry.dispose();
+});
+it('coalesces streamed text, preserves long Unicode output and sends an audible completion',async()=>{
+  const api=new FakeApi(),stream=new TelegramStream(api,-100,101,1);
+  cleanup.push(()=>stream.dispose());
+  for(let i=0;i<100;i++)stream.update('partial '+i);
+  await vi.waitFor(()=>expect(api.calls.filter(c=>c.method==='sendMessage')).toHaveLength(1));
+  const text='😀'.repeat(5000)+'last';
+  expect(telegramChunks(text).join('')).toBe(text);
+  expect(telegramChunks(text).every(c=>c.length<=3900&&!/[\uD800-\uDBFF]$/.test(c))).toBe(true);
+  await stream.finish(text,'✅ 任务完成');
+  const final=api.calls.filter(c=>c.method==='editMessageText'||c.method==='sendMessage').slice(1,-1);
+  expect(final.map(c=>c.params.text).join('')).toBe(text);
+  expect(api.calls.at(-1)?.params).toMatchObject({message_thread_id:101,text:'✅ 任务完成',disable_notification:false});
+});
+it('isolates topics, rejects unauthorized users/chats and preserves bindings for existing sessions',async()=>{
+  const {api,host,bridge,data}=await fixture();
+  await bridge.handle(message(1,'attack',101,99));await bridge.handle(message(2,'attack',101,42,-999));
+  expect(host.run).not.toHaveBeenCalled();expect(api.calls).toHaveLength(0);
+  await bridge.handle(message(3,'unbound',999));expect(host.run).not.toHaveBeenCalled();
+  await bridge.handle(message(4,'hello'));expect(host.run).toHaveBeenCalledWith('one','hello',expect.anything());
+  await bridge.handle(message(5,'/open 2'));await bridge.handle(message(6,'/open 2'));
+  expect(api.calls.filter(c=>c.method==='createForumTopic')).toHaveLength(1);
+  expect(data.topics.find(t=>t.sessionId==='two')).toBeDefined();
+  await bridge.handle(message(7,'/stop'));expect(host.cancel).toHaveBeenCalledWith('one');
+});
+it('checkpoints update IDs before dispatch and never re-executes duplicate deliveries',async()=>{
+  const {api,host,bridge,saved}=await fixture();
+  vi.mocked(host.run).mockImplementation(async()=>{
+    expect(saved.at(-1)!.offset).toBe(11);return {text:'done',status:'completed'};
+  });
+  api.batches=[[message(10,'one'),message(10,'duplicate')]];
+  const polling=bridge.poll();
+  await vi.waitFor(()=>expect(host.run).toHaveBeenCalledOnce());
+  await bridge.dispose();await polling;
+  expect(host.run).toHaveBeenCalledOnce();
+});
+it('refuses an existing webhook and never dispatches tasks when checkpoint storage fails',async()=>{
+  const {api,host,events,data}=await fixture();
+  const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],
+    save:async()=>{throw new Error('disk full');},report:()=>{}});
+  cleanup.push(()=>bridge.dispose());
+  const request=api.call.bind(api);
+  api.call=async<T>(method:string,params?:Record<string,unknown>):Promise<T>=>
+    method==='getWebhookInfo'?{url:'https://existing.example/webhook'} as T:request<T>(method,params);
+  await expect(bridge.initialize('pi_bot')).rejects.toThrow('webhook');
+  api.batches=[[message(10,'must not run')]];
+  await expect(bridge.poll()).rejects.toThrow('游标');
+  expect(host.run).not.toHaveBeenCalled();
+});
+it('retains a failed completion for delivery retry without re-running the agent',async()=>{
+  const {api,host,events,bridge,data}=await fixture();
+  const request=api.call.bind(api);let fail=true;
+  api.call=async<T>(method:string,params?:Record<string,unknown>):Promise<T>=>{
+    if(fail&&method==='sendMessage'&&params?.disable_notification===false)throw new Error('offline');
+    return request<T>(method,params);
+  };
+  await bridge.handle(message(15,'task'));
+  expect(host.run).toHaveBeenCalledOnce();
+  expect(data.delivered).toHaveLength(0);
+  const queued=await events.list();expect(queued).toHaveLength(1);
+  fail=false;
+  expect(await bridge.consume(queued[0])).toBe(true);
+  await events.remove(queued[0].id);
+  expect(await events.list()).toHaveLength(0);
+  expect(host.run).toHaveBeenCalledOnce();
+  expect(data.delivered).toContain(queued[0].id);
+});
+it('keeps permission responses tied to the allowed user, live session and exact topic',async()=>{
+  const {api,host,bridge}=await fixture();let finish!:(result:TelegramTurnResult)=>void;
+  vi.mocked(host.run).mockImplementation(async(_id,_text,listener:TelegramTurnListener)=>{
+    listener.permission({id:'permission',request:{sessionId:'one',toolCall:{toolCallId:'t',title:'Write'},options:[{optionId:'yes',name:'Allow once',kind:'allow_once'}]}});
+    return new Promise(resolve=>{finish=resolve;});
+  });
+  const running=bridge.handle(message(1,'permission'));
+  await vi.waitFor(()=>expect(api.calls.some(c=>c.params.reply_markup)).toBe(true));
+  const keyboard=api.calls.find(c=>c.params.reply_markup)!.params.reply_markup as {inline_keyboard:{callback_data:string}[][]};
+  const callback=(user:number,thread:number):TelegramUpdate=>({update_id:2,callback_query:{id:'cb',from:{id:user},message:message(2,'',thread).message,data:keyboard.inline_keyboard[0][0].callback_data}});
+  await bridge.handle(callback(99,101));await bridge.handle(callback(42,999));expect(host.permission).not.toHaveBeenCalled();
+  await bridge.handle(callback(42,101));expect(host.permission).toHaveBeenCalledWith('one','permission','yes');
+  finish({text:'authorized',status:'completed'});await running;
+  await bridge.handle(callback(42,101));expect(host.permission).toHaveBeenCalledOnce();
+});
+it('persists desktop completion without a running daemon and acknowledges delivery after restart',async()=>{
+  const {events,bridge,api,host}=await fixture();
+  const state={...initialState(),sessionId:'one',sessionNumber:1};
+  state.entries.push({id:'u',role:'user',text:'desktop job'});
+  const turn=new DesktopTelegramTurn(events,state,'/allowed',1,()=>{});
+  applyUpdate(state,{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'desktop answer'}});
+  await turn.finish(undefined,'end_turn');
+  const event=(await events.list())[0];expect(event).toMatchObject({sessionId:'one',text:'desktop answer',status:'completed'});
+  expect(await bridge.consume({...event,cwd:'/forbidden'})).toBe(false);expect(api.calls).toHaveLength(0);
+  expect(await bridge.consume(event)).toBe(true);
+  const sent=api.calls.length;expect(await bridge.consume(event)).toBe(true);expect(api.calls).toHaveLength(sent);
+  expect(host.run).not.toHaveBeenCalled();
+});
