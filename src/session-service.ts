@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
-import {realpath} from 'node:fs/promises';
-import {join} from 'node:path';
+import {realpath,stat} from 'node:fs/promises';
+import {join,isAbsolute} from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import {AgentProcess,type AgentOptions} from './agent';
 import {SharedHistoryStore} from './shared-history';
@@ -11,7 +11,7 @@ import {TelegramEvents,DesktopTelegramTurn} from './telegram-events';
 import type {Snapshot,ChatState} from './shared';
 import type {Inspection} from './telemetry';
 import {RequestJournal,type Receipt} from './request-journal';
-export interface ServiceConfig {workspaces:Record<string,string>;command:string;args:string[];env?:Record<string,string>;maxWorkers:number;idleMs:number}
+export interface ServiceConfig {command:string;args:string[];env?:Record<string,string>;maxWorkers:number;idleMs:number}
 export interface ServiceState {snapshot:Snapshot;busy:boolean;permissions:ChatState['permissions'];commands:ChatState['commands'];error?:string}
 interface Runtime {snapshot:Snapshot;state:ChatState;agent?:AgentProcess;busy:boolean;cancelled?:boolean;prompting?:boolean;used:number;replay:boolean;permissions:Map<string,(option?:string)=>void>;publication?:DesktopTelegramTurn;cancelTimer?:NodeJS.Timeout;error?:string}
 /** Single writer and process owner. Client lifetime never owns a task's lifetime. */
@@ -45,8 +45,8 @@ export class SessionService {
       finally{const next=this.waiters.shift();if(next)next();else this.active--;}
     });this.tails.set(id,p);try{return await p;}finally{this.queued--;if(this.tails.get(id)===p){this.tails.delete(id);this.epochs.delete(id);}}
   }
-  async list(){return (await this.store.list()).filter(s=>s.harness==='pi'&&Object.values(this.config.workspaces).includes(s.cwd));}
-  private async index(id:string){const s=(await this.list()).find(s=>s.id===id);if(!s)throw new Error('会话不存在或工作区不在服务允许范围');return s;}
+  async list(){return (await this.store.list()).filter(s=>s.harness==='pi');}
+  private async index(id:string){const s=(await this.list()).find(s=>s.id===id);if(!s)throw new Error('会话不存在');return s;}
   private view(r:Runtime):ServiceState{return {snapshot:{...r.snapshot,entries:r.state.entries,configs:r.state.configs,modes:r.state.modes,nativeForks:r.state.nativeForks},busy:r.busy,permissions:r.state.permissions,commands:r.state.commands,error:r.error};}
   private emit(r:Runtime){this.broadcast({type:'state',...this.view(r)});}
   private async save(r:Runtime){const first=r.state.entries.find(e=>e.role==='user');const snapshot={...r.snapshot,entries:structuredClone(r.state.entries),configs:r.state.configs,modes:r.state.modes,commands:r.state.commands,nativeForks:r.state.nativeForks,updated:Date.now(),title:first&&'text'in first?first.text.slice(0,70)||'新对话':r.snapshot.title};
@@ -78,7 +78,8 @@ export class SessionService {
     if(method==='list')return this.list();
     if(method==='state')return this.state(p.sessionId);
     if(method==='create')return this.schedule('create:'+requestId,async()=>{
-      const cwd=await realpath(p.cwd);if(!Object.values(this.config.workspaces).includes(cwd))throw new Error('工作区不在服务允许范围');
+      if(typeof p.cwd!=='string'||!isAbsolute(p.cwd))throw new Error('工作区需要绝对目录路径');
+      const cwd=await realpath(p.cwd);if(!(await stat(cwd)).isDirectory())throw new Error('工作区不是目录');
       return this.exclusive(async()=>{
         if(this.runtimes.size>=this.config.maxWorkers){const idle=[...this.runtimes].find(([,r])=>!r.busy);if(!idle)throw new Error('工作进程均忙碌');await this.evict(...idle);}
         const initial=initialState();

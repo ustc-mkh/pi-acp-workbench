@@ -15,7 +15,7 @@ cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
 cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 ```
 
-编辑 `sessions.json` 的工作区绝对路径、Pi 可执行文件路径；编辑 unit 中 Node、仓库绝对路径。凭据继续由 Pi 管理。代理变量、`PI_ACP_PI_COMMAND`、模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。
+Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。编辑 `sessions.json` 的 Pi 可执行文件路径；编辑 unit 中 Node、仓库绝对路径。凭据继续由 Pi 管理。代理变量、`PI_ACP_PI_COMMAND`、模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。
 
 默认使用内置 `pi-adapter.mjs`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；它必须支持原生会话加载和 Workbench 原生分支扩展。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
 

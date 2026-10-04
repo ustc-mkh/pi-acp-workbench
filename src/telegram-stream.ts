@@ -10,7 +10,7 @@ export class TelegramStream {
   private finished = false;
   private working = false;
   constructor(private api:TelegramTransport, private chatId:number, private threadId:number,
-    private intervalMs=3100, private report:(error:unknown)=>void=()=>{}, private enabled:()=>boolean=()=>true) {}
+    private intervalMs=3100, private report:(error:unknown)=>void=()=>{}, private enabled:()=>boolean=()=>true, private silent:()=>boolean=()=>false) {}
 
   update(text:string) {
     if (this.finished || !this.enabled()) return;
@@ -66,7 +66,7 @@ export class TelegramStream {
       chat_id:this.chatId,message_thread_id:this.threadId,text:chunk,disable_notification:true,
     });
     }
-    if(this.enabled())await this.api.call('sendMessage', {chat_id:this.chatId,message_thread_id:this.threadId,text:notification,disable_notification:false});
+    if(this.enabled())await this.api.call('sendMessage', {chat_id:this.chatId,message_thread_id:this.threadId,text:notification,disable_notification:this.silent()});
   }
   dispose() { this.finished = true;this.text='';this.shown=''; if (this.timer) clearTimeout(this.timer); }
 }

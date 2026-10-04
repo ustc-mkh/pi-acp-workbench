@@ -1,5 +1,5 @@
 import {afterEach,expect,it,vi} from 'vitest';
-import {mkdtemp,rm,readFile} from 'node:fs/promises';
+import {mkdtemp,rm,readFile,mkdir,symlink,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {AgentProcess} from '../src/agent';
@@ -15,7 +15,7 @@ async function fixture(maxWorkers=2,idleMs=900000,mode='context'){
  const root=await mkdtemp(join(tmpdir(),'pi-service-'));cleanup.push(()=>rm(root,{recursive:true,force:true}));
  const socket=join(root,'service','sessions.sock'),audit=join(root,'audit.jsonl');
  let server:SessionServer;const agents:AgentProcess[]=[];
- const service=new SessionService(root,{workspaces:{test:root},command:process.execPath,args:[resolve('test/mock-agent.mjs'),mode],env:{PI_TEST_AUDIT:audit},maxWorkers,idleMs},event=>server.broadcast(event),()=>{},options=>{const agent=new AgentProcess(options);agents.push(agent);return agent;});
+ const service=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),mode],env:{PI_TEST_AUDIT:audit},maxWorkers,idleMs},event=>server.broadcast(event),()=>{},options=>{const agent=new AgentProcess(options);agents.push(agent);return agent;});
  await service.initialize();server=new SessionServer(socket,(m,p,id)=>service.handle(m,p,id));await server.listen();cleanup.push(()=>service.dispose());cleanup.push(()=>server.dispose());
  const host=new TelegramSessions({test:root},socket);cleanup.push(()=>host.dispose());const client=new SessionClient(socket);cleanup.push(()=>client.dispose());
  return {root,service,server,host,client,socket,audit,agents};
@@ -59,7 +59,7 @@ it('shares permission tickets and accepts only the first valid response',async()
 it('marks unfinished durable requests interrupted on restart without re-running tools',async()=>{
  const {root,host,audit}=await fixture();const session=await host.create();
  const id='interrupted-request';await writeTelegramJson(join(root,'service','requests',createHash('sha256').update(id).digest('hex')+'.json'),{id,sessionId:session.id,status:'running'});
- const recovered=new SessionService(root,{workspaces:{test:root},command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000},()=>{},()=>{});cleanup.push(()=>recovered.dispose());
+ const recovered=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000},()=>{},()=>{});cleanup.push(()=>recovered.dispose());
  const before=await readFile(audit,'utf8');await recovered.initialize();
  await expect(recovered.handle('prompt',{sessionId:session.id,prompt:[{type:'text',text:'never repeat'}]},id)).rejects.toThrow('不会自动重放');
  expect(await readFile(audit,'utf8')).toBe(before);
@@ -84,3 +84,17 @@ it('never dispatches a prompt if saving its user message fails, and never retrie
  await expect(service.handle('prompt',params,'disk-failure')).rejects.toThrow('不会自动重放');
  expect((await readFile(audit,'utf8')).includes('"method":"session/prompt"')).toBe(false);
 },10000);
+
+it('uses arbitrary directories from desktop and Telegram without workspace registration',async()=>{
+ const {root,client,host}=await fixture();
+ const directory=join(root,'unlisted project'),alias=join(root,'project-link'),file=join(root,'file');
+ await mkdir(directory);await symlink(directory,alias);await writeFile(file,'not a directory');
+ const desktop:any=await client.call('create',{cwd:alias});expect(desktop.cwd).toBe(directory);
+ expect((await host.list()).some(s=>s.id===desktop.id)).toBe(true);
+ expect((await host.run(desktop.id,'hello',{update:()=>{},permission:()=>{}})).status).toBe('completed');
+ expect((await host.history(desktop.id)).some(e=>'text'in e&&e.text==='hello')).toBe(true);
+ const phone=await host.create(directory);expect(phone.cwd).toBe(directory);
+ await expect(host.create(file)).rejects.toThrow('工作区不是目录');
+ await expect(client.call('create',{cwd:'relative'})).rejects.toThrow('绝对目录路径');
+ await expect(client.call('create',{cwd:join(root,'missing')})).rejects.toThrow();
+},15000);

@@ -8,7 +8,7 @@ import type { TelegramTurnEvent, TelegramEvents } from './telegram-events';
 export interface TelegramBridgeState {
   version:1;botId:number;chatId:number;offset?:number;
   topics:{sessionId:string;threadId:number}[];delivered:string[];
-  notifications?:boolean;historySent?:Record<string,string[]>;
+  notifications?:boolean;silent?:boolean;historySent?:Record<string,string[]>;
 }
 export interface TelegramBridgeOptions {
   chatId:number;allowedUserIds:number[];streamIntervalMs?:number;
@@ -34,6 +34,7 @@ export class TelegramBridge {
   private queued=new Map<string,number>();
   private generations=new Map<string,number>();
   private syncing=new Set<string>();
+  private syncingAll=false;
   constructor(private api:TelegramTransport, private host:TelegramSessionHost, private events:TelegramEvents,
     private data:TelegramBridgeState, private options:TelegramBridgeOptions) {
     this.maintenance=setInterval(()=>this.prune(),30000);this.maintenance.unref();
@@ -54,7 +55,7 @@ export class TelegramBridge {
   }
   private async send(text:string,threadId?:number,extra:Record<string,unknown>={}) {
     for(const chunk of telegramChunks(text)) await this.api.call('sendMessage', {
-      chat_id:this.options.chatId,...(threadId?{message_thread_id:threadId}:{}),text:chunk,...extra,
+      chat_id:this.options.chatId,...(threadId?{message_thread_id:threadId}:{}),text:chunk,disable_notification:this.data.silent===true,...extra,
     });
   }
   async initialize(username:string) {
@@ -109,7 +110,7 @@ export class TelegramBridge {
   private stream(id:string,threadId:number) {
     this.prune();this.touched.set(id,Date.now());
     let stream=this.streams.get(id);
-    if(!stream){if(this.streams.size>=32)this.dropStream(this.streams.keys().next().value!);stream=new TelegramStream(this.api,this.options.chatId,threadId,this.options.streamIntervalMs??3100,this.options.report,()=>this.data.notifications===true);this.streams.set(id,stream);}
+    if(!stream){if(this.streams.size>=32)this.dropStream(this.streams.keys().next().value!);stream=new TelegramStream(this.api,this.options.chatId,threadId,this.options.streamIntervalMs??3100,this.options.report,()=>this.data.notifications!==false,()=>this.data.silent===true);this.streams.set(id,stream);}
     return stream;
   }
   async consume(event:TelegramTurnEvent):Promise<boolean> {
@@ -119,7 +120,7 @@ export class TelegramBridge {
     try {
       const session=(await this.host.list()).find(s=>s.id===event.sessionId&&s.cwd===event.cwd);
       if(!session){this.dropStream(event.id);return false;}
-      if(this.data.notifications!==true){
+      if(this.data.notifications===false){
         this.dropStream(event.id);
         if(event.status!=='running'){await this.persist(state=>{state.delivered=[...state.delivered,event.id].slice(-2000);});}
         return true;
@@ -153,6 +154,11 @@ export class TelegramBridge {
         await this.api.call('answerCallbackQuery',{callback_query_id:callback.id,text:this.data.notifications?'已开启全部会话推送':'已暂停全部会话推送'});
         await this.notificationMenu(threadId);return;
       }
+      if(callback.data==='silent:on'||callback.data==='silent:off'){
+        await this.persist(state=>{state.silent=callback.data==='silent:on';});
+        await this.api.call('answerCallbackQuery',{callback_query_id:callback.id,text:this.data.silent?'已开启静音发送':'已关闭静音发送'});
+        await this.silentMenu(threadId);return;
+      }
       await this.answerPermission(callback.id,callback.data,threadId);return;
     }
     if(!message.text)return;
@@ -161,14 +167,47 @@ export class TelegramBridge {
     const command=match?.[1].toLowerCase(),argument=match?.[3]?.trim();
     const binding=this.data.topics.find(t=>t.threadId===threadId);
     try {
-      if(command==='start'||command==='help'){
-        await this.send('/new [工作区名] — 新建会话和独立话题\n/sessions — 列出允许的 Pi 会话\n/open 编号 — 为已有会话打开话题\n/status — 查看本话题任务状态\n/stop — 停止本话题任务\n\n进入会话话题直接发文字即可；/compact 等其他命令转交 Pi。旧会话：/sync、/history [all]\n停止后发送：/interrupt 新消息\n全局推送开关：/notifications（默认关闭）',threadId);return;
+      if(command==='start'||command==='help'||command==='commands'){
+        await this.send([
+          '会话与历史',
+          '/new 绝对路径或工作区名 — 新建会话及话题；仅一个别名时可省略参数',
+          '/sessions — 列出最近 50 个 Pi 会话',
+          '/open 编号或 Session ID — 打开已有会话话题',
+          '/sync — 自动建立话题并同步未导出的文字历史；大批量时重复执行继续',
+          '/history — 补充本话题最近 20 条文字历史',
+          '/history all — 补充本话题完整文字历史，每次最多 100 条',
+          '', '任务控制',
+          '/status — 查看本话题状态、当前回复和待授权操作',
+          '/stop — 停止本话题任务并取消排队消息',
+          '/interrupt 新消息 — 停止当前任务后发送新指令',
+          '/notifications — 自动投递总开关（默认开启）；关闭后暂停自动回复和授权卡片',
+          '/silent — 静音发送开关（默认关闭）；保留消息，仅关闭通知声音',
+          '', '帮助',
+          '/help 或 /commands — 显示全部服务命令',
+          '/start — 显示本帮助',
+          '/takeover、/desktop — 说明桌面与手机共享会话，无需接管',
+          '', '在会话话题直接发文字即可对话。其他命令（如 /compact）原样转交 Pi；可用命令取决于 Pi 配置。',
+        ].join('\n'),threadId,{disable_notification:true});return;
       }
+      if(command==='silent'){await this.silentMenu(threadId);return;}
       if(command==='notifications'){await this.notificationMenu(threadId);return;}
       if(command==='sync'){
-        const sessions=await this.host.list();let created=0;
-        for(const session of sessions){if(this.data.topics.some(t=>t.sessionId===session.id))continue;await this.ensureTopic(session);if(++created>=20)break;}
-        await this.send(`已为 ${created} 个旧会话建立话题。每次最多 20 个；可再次 /sync。进入话题用 /history 加载最近对话，/history all 分批加载完整文字历史。`,threadId,{disable_notification:true});return;
+        if(!this.host.history)throw new Error('当前会话服务不支持历史同步。');
+        if(this.syncingAll){await this.send('历史同步正在进行，请稍候。',threadId,{disable_notification:true});return;}
+        this.syncingAll=true;
+        try {
+          const sessions=await this.host.list();let processed=0,created=0;
+          for(const session of sessions){
+            if(this.stopped)break;
+            const bound=this.data.topics.some(t=>t.sessionId===session.id);
+            if(bound&&!(await this.pendingHistory(session.id,true)).length)continue;
+            const topic=await this.ensureTopic(session);if(!bound)created++;
+            await this.syncHistory(session.id,topic,true);
+            if(++processed>=20)break;
+          }
+          await this.send(`已同步 ${processed} 个会话，其中新建 ${created} 个话题。每次最多 20 个会话、每个会话 100 条文字消息；再次 /sync 会跳过已同步内容并继续，无需另发 /history。`,threadId,{disable_notification:true});
+        }finally{this.syncingAll=false;}
+        return;
       }
       if(command==='history'){
         if(!binding||!this.host.history)throw new Error('请先用 /open 编号进入会话话题。');
@@ -220,8 +259,8 @@ export class TelegramBridge {
         if(this.stopped||generation!==(this.generations.get(binding.sessionId)||0))return;
         const prompt=command==='interrupt'?argument!:match?.[2]?`/${match[1]}${argument?' '+argument:''}`:message.text;
         const result=await this.host.run(binding.sessionId,prompt,{
-          update:text=>{if(!this.host.managedDelivery&&this.data.notifications===true)this.stream(id,threadId!).update(text||'正在处理…');},
-          permission:p=>{if(this.data.notifications===true)void this.showPermission(binding.sessionId,threadId!,p).catch(error=>this.options.report(error));},
+          update:text=>{if(!this.host.managedDelivery&&this.data.notifications!==false)this.stream(id,threadId!).update(text||'正在处理…');},
+          permission:p=>{if(this.data.notifications!==false)void this.showPermission(binding.sessionId,threadId!,p).catch(error=>this.options.report(error));},
         });
         if(this.host.managedDelivery)return; // The service's durable outbox owns completion delivery.
         const session=(await this.host.list()).find(s=>s.id===binding.sessionId);
@@ -242,20 +281,27 @@ export class TelegramBridge {
     } catch(error) {
       const detail=error instanceof Error?error.message:String(error);
       this.options.report(error);
-      if(command||this.data.notifications===true)await this.send(detail,threadId).catch(error=>this.options.report(error));
+      if(command||this.data.notifications!==false)await this.send(detail,threadId).catch(error=>this.options.report(error));
     }
   }
   private async notificationMenu(threadId?:number){
-    await this.send(`全部会话自动推送：${this.data.notifications===true?'开启':'关闭'}。关闭时不发送自动回复、完成通知或授权卡片；可用 /history、/status 主动查看。`,threadId,
-      {disable_notification:true,reply_markup:{inline_keyboard:[[{text:this.data.notifications===true?'暂停全部推送':'开启全部推送',callback_data:this.data.notifications===true?'notify:off':'notify:on'}]]}});
+    await this.send(`全部会话自动推送（默认开启）：${this.data.notifications!==false?'开启':'关闭'}。关闭时不发送自动回复、完成通知或授权卡片；可用 /history、/status 主动查看。`,threadId,
+      {disable_notification:true,reply_markup:{inline_keyboard:[[{text:this.data.notifications!==false?'暂停全部推送':'开启全部推送',callback_data:this.data.notifications!==false?'notify:off':'notify:on'}]]}});
+  }
+  private async silentMenu(threadId?:number){
+    await this.send(`静音发送：${this.data.silent===true?'开启':'关闭'}（默认关闭）。静音不阻止消息投递，仅关闭通知声音；手机仍可能显示无声通知。自动投递总开关由 /notifications 控制。`,threadId,
+      {disable_notification:true,reply_markup:{inline_keyboard:[[{text:this.data.silent===true?'关闭静音':'开启静音',callback_data:this.data.silent===true?'silent:off':'silent:on'}]]}});
+  }
+  private async pendingHistory(id:string,all:boolean){
+    const entries=(await this.host.history!(id)).filter(e=>e.role==='user'||e.role==='assistant');
+    const sent=this.data.historySent&&Object.hasOwn(this.data.historySent,id)?this.data.historySent[id]:[];
+    return (all?entries:entries.slice(-20)).map(e=>({key:createHash('sha256').update(e.id+'\0'+('text' in e?e.text:'')).digest('hex'),text:`${e.role==='user'?'你':'Pi'}：\n${'text' in e?e.text:''}`})).filter(e=>!sent.includes(e.key)).slice(0,100);
   }
   private async syncHistory(id:string,threadId:number,all:boolean){
     if(this.syncing.has(id))throw new Error('此话题正在同步历史。');
     this.syncing.add(id);
     try{
-      const entries=(await this.host.history!(id)).filter(e=>e.role==='user'||e.role==='assistant');
-      const sent=this.data.historySent&&Object.hasOwn(this.data.historySent,id)?this.data.historySent[id]:[];
-      const selected=(all?entries:entries.slice(-20)).map(e=>({key:createHash('sha256').update(e.id+'\0'+('text' in e?e.text:'')).digest('hex'),text:`${e.role==='user'?'你':'Pi'}：\n${'text' in e?e.text:''}`})).filter(e=>!sent.includes(e.key)).slice(0,100);
+      const selected=await this.pendingHistory(id,all);
       for(const entry of selected){
         await this.send(entry.text,threadId,{disable_notification:true});
         await this.persist(state=>{state.historySent||={};Object.defineProperty(state.historySent,id,{value:[...(Object.hasOwn(state.historySent,id)?state.historySent[id]:[]),entry.key],enumerable:true,writable:true,configurable:true});});

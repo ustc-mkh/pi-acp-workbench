@@ -760,7 +760,7 @@ it('uses the production remote Pi client and receives phone turns without owning
   const root=mkdtempSync(resolve(tmpdir(),'pi-remote-controller-')),socket=resolve(root,'service','sessions.sock');
   host.config={sharedHistory:false,serviceSocket:socket};host.stored.clear();
   let server:InstanceType<typeof SessionServer>;
-  const service=new SessionService(root,{workspaces:{test:process.cwd()},command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context-native'],env:{PI_TEST_AUDIT:resolve(root,'audit.jsonl')},maxWorkers:1,idleMs:900000},event=>server.broadcast(event),()=>{});
+  const service=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context-native'],env:{PI_TEST_AUDIT:resolve(root,'audit.jsonl')},maxWorkers:1,idleMs:900000},event=>server.broadcast(event),()=>{});
   const phone=new SessionClient(socket);
   try{
     await service.initialize();server=new SessionServer(socket,(m,p,id)=>service.handle(m,p,id));await server.listen();

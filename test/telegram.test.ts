@@ -47,6 +47,7 @@ it('requires explicit identity/workspace configuration and redacts transport fai
   expect(()=>telegramConfig({chatId:-1,allowedUserIds:[],workspaces:{a:'/a'}})).toThrow('allowedUserIds');
   expect(()=>telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'},maxConcurrent:99})).toThrow('maxConcurrent');
   expect(telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'}}).workspaces).toEqual({a:'/a'});
+  expect(telegramConfig({chatId:-1,allowedUserIds:[42]}).workspaces).toEqual({});
   const token='123:private_token_never_log';
   const api=new TelegramApi(token,0,vi.fn(async()=>{throw new Error(`https://api.telegram.org/bot${token}`);}) as typeof fetch);
   await expect(api.call('getMe')).rejects.toThrow('网络请求');
@@ -155,8 +156,8 @@ it('persists desktop completion without a running daemon and acknowledges delive
   expect(host.run).not.toHaveBeenCalled();
 });
 
-it('defaults to paused delivery, toggles globally and synchronizes history without duplicate exports',async()=>{
- const {bridge,host,data,api,events}=await fixture();delete data.notifications;
+it('honors explicitly paused delivery, toggles globally and synchronizes history without duplicate exports',async()=>{
+ const {bridge,host,data,api,events}=await fixture();data.notifications=false;
  host.history=vi.fn(async()=>[{id:'u',role:'user' as const,text:'old question'},{id:'a',role:'assistant' as const,text:'old answer'}]);
  await bridge.handle(message(20,'new question'));
  expect(host.run).toHaveBeenCalledOnce();expect(api.calls).toHaveLength(0);expect(await events.list()).toHaveLength(0);
@@ -214,4 +215,64 @@ it('bounds and expires abandoned live notification previews',async()=>{
  expect((bridge as any).streams.size).toBe(32);expect((bridge as any).touched.size).toBe(32);
  vi.setSystemTime(Date.now()+6*60*1000);await vi.advanceTimersByTimeAsync(30000);
  expect((bridge as any).streams.size).toBe(0);expect((bridge as any).touched.size).toBe(0);
+});
+
+it('sync creates topics and imports history, then continues batches without duplicate messages',async()=>{
+ const {bridge,host,api,data}=await fixture();data.notifications=false;
+ host.history=vi.fn(async(id)=>Array.from({length:id==='one'?101:2},(_,i)=>({id:`${id}-${i}`,role:'assistant' as const,text:`history-${id}-${i}`})));
+ await bridge.handle(message(301,'/sync'));
+ expect(data.topics).toHaveLength(2);
+ expect(api.calls.filter(c=>c.method==='createForumTopic')).toHaveLength(1);
+ const histories=()=>api.calls.filter(c=>String(c.params.text).startsWith('Pi：\nhistory-'));
+ expect(histories()).toHaveLength(102);
+ expect(histories().every(c=>c.params.disable_notification===true)).toBe(true);
+ expect(histories().filter(c=>c.params.message_thread_id===101)).toHaveLength(100);
+ await bridge.handle(message(302,'/sync'));
+ expect(histories()).toHaveLength(103);
+ await bridge.handle(message(303,'/sync'));
+ expect(histories()).toHaveLength(103);
+ expect(host.run).not.toHaveBeenCalled();
+});
+it('sync retries history after a topic was created but sending failed',async()=>{
+ const {bridge,host,api,data}=await fixture();
+ host.history=vi.fn(async(id)=>id==='two'?[{id:'a',role:'assistant' as const,text:'retry-history'}]:[]);
+ const call=api.call.bind(api);let fail=true;
+ api.call=async<T>(method:string,params:Record<string,unknown>={}):Promise<T>=>{
+  if(fail&&String(params.text).includes('retry-history')){fail=false;throw new Error('network failed');}
+  return call<T>(method,params);
+ };
+ await bridge.handle(message(304,'/sync'));expect(data.topics).toHaveLength(2);
+ await bridge.handle(message(305,'/sync'));
+ expect(api.calls.filter(c=>String(c.params.text).includes('retry-history'))).toHaveLength(1);
+ expect(api.calls.filter(c=>c.method==='createForumTopic')).toHaveLength(1);
+});
+it('help and commands list every relay command with descriptions',async()=>{
+ const {bridge,api,host}=await fixture();
+ await bridge.handle(message(306,'/help'));await bridge.handle(message(307,'/commands'));
+ const help=api.calls.filter(c=>c.method==='sendMessage');expect(help).toHaveLength(2);expect(help[0].params.text).toBe(help[1].params.text);
+ for(const command of ['new','sessions','open','sync','history','status','stop','interrupt','notifications','silent','help','commands','start','takeover','desktop'])expect(String(help[0].params.text)).toContain('/'+command);
+ expect(host.run).not.toHaveBeenCalled();
+});
+
+it('delivers by default and independently persists silence without muting delivery',async()=>{
+ const {bridge,data,api,host,saved,save}=await fixture();delete data.notifications;
+ await bridge.handle(message(401,'default delivery'));
+ expect(api.calls.some(c=>c.params.text==='✅ 任务完成 · #1'&&c.params.disable_notification===false)).toBe(true);
+ const toggle=(id:number,value:string,userId=42):TelegramUpdate=>({update_id:id,callback_query:{id:String(id),from:{id:userId},message:message(id,'').message,data:value}});
+ await bridge.handle(toggle(402,'silent:on'));expect(data.silent).toBe(true);expect(saved.at(-1)?.silent).toBe(true);
+ api.calls=[];await bridge.handle(message(403,'quiet delivery'));
+ expect(api.calls.some(c=>c.params.text==='✅ 任务完成 · #1')).toBe(true);
+ expect(api.calls.filter(c=>c.method==='sendMessage').every(c=>c.params.disable_notification===true)).toBe(true);
+ await bridge.handle(toggle(404,'silent:off',99));expect(data.silent).toBe(true);
+ save.mockRejectedValueOnce(new Error('disk full'));
+ await expect(bridge.handle(toggle(405,'silent:off'))).rejects.toThrow('disk full');expect(data.silent).toBe(true);
+ await bridge.handle(toggle(406,'notify:off'));api.calls=[];await bridge.handle(message(407,'paused'));
+ expect(api.calls).toHaveLength(0);expect(host.run).toHaveBeenCalledTimes(3);
+ await bridge.handle(toggle(408,'silent:off'));expect(data.notifications).toBe(false);expect(data.silent).toBe(false);
+});
+it('applies the live silence setting to completion of an existing stream',async()=>{
+ const api=new FakeApi();let silent=false;
+ const stream=new TelegramStream(api,-100,101,1,()=>{},()=>true,()=>silent);
+ stream.update('preview');await new Promise(r=>setTimeout(r,10));silent=true;
+ await stream.finish('final','complete');expect(api.calls.at(-1)?.params.disable_notification).toBe(true);
 });

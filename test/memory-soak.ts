@@ -20,7 +20,7 @@ try{
  // 64 MiB of durable receipts: none should remain resident after startup or lookup.
  for(let i=0;i<1024;i++)await journal.write({id:'receipt-'+i,sessionId:'one',status:'completed',result:{stopReason:'end_turn',padding:String(i).padEnd(65536,'x')}});
  const baseline=await heap();
- service=new SessionService(root,{workspaces:{test:root},command:'must-never-spawn',args:[],maxWorkers:1,idleMs:1000},()=>{},()=>{});
+ service=new SessionService(root,{command:'must-never-spawn',args:[],maxWorkers:1,idleMs:1000},()=>{},()=>{});
  await service.initialize();const startup=await heap();
  const socket=join(root,'service','memory.sock');server=new SessionServer(socket,(m,p,id)=>service!.handle(m,p,id));await server.listen();
  const batches:number[]=[];

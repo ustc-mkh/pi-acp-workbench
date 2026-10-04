@@ -61,7 +61,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与工作区白名单。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。`workspaces` 只是 `/new` 的快捷入口，不限制目录访问；可直接使用 `/new /absolute/path`。Token 不进入 Pi 服务或 Pi 子进程。
 
 ## 3. 作为用户服务常驻
 
