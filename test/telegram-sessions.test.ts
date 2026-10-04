@@ -93,6 +93,9 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
  expect((await host.list()).some(s=>s.id===desktop.id)).toBe(true);
  expect((await host.run(desktop.id,'hello',{update:()=>{},permission:()=>{}})).status).toBe('completed');
  expect((await host.history(desktop.id)).some(e=>'text'in e&&e.text==='hello')).toBe(true);
+ expect((await new TelegramEvents(join(root,'telegram','events')).list())[0].inputText).toBeUndefined();
+ await client.call('prompt',{sessionId:desktop.id,prompt:[{type:'text',text:'desktop input'}]});
+ expect((await new TelegramEvents(join(root,'telegram','events')).list()).some(e=>e.inputText==='desktop input')).toBe(true);
  const phone=await host.create(directory);expect(phone.cwd).toBe(directory);
  await expect(host.create(file)).rejects.toThrow('工作区不是目录');
  await expect(client.call('create',{cwd:'relative'})).rejects.toThrow('绝对目录路径');

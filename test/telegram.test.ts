@@ -276,3 +276,15 @@ it('applies the live silence setting to completion of an existing stream',async(
  stream.update('preview');await new Promise(r=>setTimeout(r,10));silent=true;
  await stream.finish('final','complete');expect(api.calls.at(-1)?.params.disable_notification).toBe(true);
 });
+
+it('includes desktop input before the reply and does not duplicate it on event redelivery',async()=>{
+ const {bridge,api}=await fixture();
+ const event={id:'with-input',sessionId:'one',cwd:'/allowed',title:'One',inputText:'desktop question',text:'agent answer',status:'completed' as const,updated:Date.now()};
+ expect(await bridge.consume(event)).toBe(true);
+ const replies=api.calls.filter(c=>String(c.params.text).includes('desktop question'));
+ expect(replies).toHaveLength(1);expect(replies[0].params.text).toBe('你（VS Code）：\ndesktop question\n\nPi：\nagent answer');
+ const count=api.calls.length;expect(await bridge.consume(event)).toBe(true);expect(api.calls).toHaveLength(count);
+ await bridge.consume({...event,id:'phone',inputText:undefined,text:'phone answer'});
+ expect(api.calls.filter(c=>String(c.params.text).includes('desktop question'))).toHaveLength(1);
+ expect(api.calls.some(c=>c.params.text==='phone answer')).toBe(true);
+});

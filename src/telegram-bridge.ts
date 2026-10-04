@@ -126,9 +126,10 @@ export class TelegramBridge {
         return true;
       }
       const threadId=await this.ensureTopic(session),stream=this.stream(event.id,threadId);
-      if(event.status==='running'){stream.update(event.text||'正在处理…');return false;}
+      const text=event.inputText!==undefined?`你（VS Code）：\n${event.inputText}\n\nPi：\n${event.text||(event.status==='running'?'正在处理…':'本轮没有文本回复。')}`:event.text;
+      if(event.status==='running'){stream.update(text||'正在处理…');return false;}
       const label=event.status==='completed'?'✅ 任务完成':event.status==='cancelled'?'⏹ 任务已停止':'❌ 任务失败';
-      await stream.finish(event.text,`${label}${session.sessionNumber?' · #'+session.sessionNumber:''}${event.error?'\n'+event.error.slice(0,700):''}`);
+      await stream.finish(text,`${label}${session.sessionNumber?' · #'+session.sessionNumber:''}${event.error?'\n'+event.error.slice(0,700):''}`);
       await this.persist(state=>{state.delivered=[...state.delivered,event.id].slice(-2000);});
       this.dropStream(event.id);
       return true;

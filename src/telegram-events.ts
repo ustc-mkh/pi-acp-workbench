@@ -7,7 +7,7 @@ import type { ChatState } from './shared';
 export const telegramDirectory = () => join(homedir(),'.pi','pi-acp-workbench','telegram');
 export interface TelegramTurnEvent {
   id:string;sessionId:string;cwd:string;title:string;sessionNumber?:number;
-  text:string;status:'running'|'completed'|'cancelled'|'failed';error?:string;updated:number;
+  inputText?:string;text:string;status:'running'|'completed'|'cancelled'|'failed';error?:string;updated:number;
 }
 export async function writeTelegramJson(file:string,data:unknown) {
   const temp=file+'.'+randomUUID()+'.tmp';
@@ -34,6 +34,7 @@ export class TelegramEvents {
         if(info.size>16*1024*1024)continue;
         const event=JSON.parse(await readFile(file,'utf8')) as TelegramTurnEvent;
         if(!event||typeof event!=='object'||Array.isArray(event))continue;
+        if(event.inputText!==undefined&&typeof event.inputText!=='string')continue;
         if(event.error!==undefined&&typeof event.error!=='string')continue;
         if(typeof event.id!=='string'||typeof event.sessionId!=='string'||typeof event.cwd!=='string'||typeof event.text!=='string'||typeof event.title!=='string'||!['running','completed','cancelled','failed'].includes(event.status)||!Number.isFinite(event.updated)||this.file(event.id)!==file)continue;
         yield event;
@@ -56,10 +57,15 @@ export class DesktopTelegramTurn {
   private ended=false;
   private cancelled=false;
   constructor(private events:TelegramEvents, private state:ChatState, cwd:string, private start:number,
-    private report:(error:unknown)=>void, id:string=randomUUID()) {
+    private report:(error:unknown)=>void, id:string=randomUUID(), source:'desktop'|'telegram'='desktop') {
     const first=state.entries.find(e=>e.role==='user');
     this.event={id,sessionId:state.sessionId!,cwd,title:first&&'text' in first?first.text.slice(0,70)||'Pi 任务':'Pi 任务',
       sessionNumber:state.sessionNumber,text:'',status:'running',updated:Date.now()};
+    const input=state.entries[start-1];
+    if(source==='desktop'&&input?.role==='user'){
+      const attachments=input.contextBlocks?.filter(b=>b.type!=='text').length||0;
+      this.event.inputText=input.text+(attachments?`\n[附带 ${attachments} 个非文本内容，请在 VS Code 查看]`:'');
+    }
     this.publish();
   }
   private publish() {

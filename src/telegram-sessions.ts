@@ -24,7 +24,7 @@ export class TelegramSessions implements TelegramSessionHost {
  async history(id:string){return (await this.client.call<ServiceState>('state',{sessionId:id})).snapshot.entries;}
  async run(id:string,text:string,listener:TelegramTurnListener):Promise<TelegramTurnResult>{
   this.listeners.set(id,listener);try {
-  const result=await this.client.call<{stopReason:string}>('prompt',{sessionId:id,prompt:[{type:'text',text}]},undefined,0);
+  const result=await this.client.call<{stopReason:string}>('prompt',{sessionId:id,prompt:[{type:'text',text}],source:'telegram'},undefined,0);
   const state=await this.client.call<ServiceState>('state',{sessionId:id});
   const last=state.snapshot.entries.map(e=>e.role).lastIndexOf('user');
   return {text:state.snapshot.entries.slice(last+1).filter(e=>e.role==='assistant').map(e=>'text'in e?e.text:'').join('\n\n'),status:result.stopReason==='end_turn'?'completed':result.stopReason==='cancelled'?'cancelled':'failed'};

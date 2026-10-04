@@ -130,7 +130,7 @@ export class SessionService {
         r.state.entries.push({id:nextId(),role:'user',text:p.prompt.filter((b:acp.ContentBlock)=>b.type==='text').map((b:any)=>b.text).join('\n'),contextBlocks:p.prompt});
         await this.save(r);const start=r.state.entries.length;this.emit(r);
         // The service owns notification delivery even if every client disconnects.
-        r.publication=new DesktopTelegramTurn(this.events,r.state,r.snapshot.cwd,start,this.report,'service:'+requestId);
+        r.publication=new DesktopTelegramTurn(this.events,r.state,r.snapshot.cwd,start,this.report,'service:'+requestId,p.source==='telegram'?'telegram':'desktop');
         checkpoint=setInterval(()=>{if(savingBusy)return;savingBusy=true;saving=this.save(r).catch(error=>{r.error=String(error);r.agent?.dispose();this.report(error);}).finally(()=>{savingBusy=false;});},2000);
         let result:acp.PromptResponse;
         try{r.prompting=true;result=r.cancelled?{stopReason:'cancelled'}:await agent.prompt(p.sessionId,p.prompt);if(result.stopReason!=='end_turn')r.state.entries.push({id:nextId(),role:'notice',text:`本轮结束：${result.stopReason}`});}
