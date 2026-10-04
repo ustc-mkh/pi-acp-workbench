@@ -26,11 +26,14 @@ export class TelegramApi implements TelegramTransport {
   private abort = new AbortController();
   private outgoing: Promise<unknown> = Promise.resolve();
   private nextSend = 0;
+  private queued=0;
   constructor(private token:string, private intervalMs=3100, private fetcher:typeof fetch=fetch) {}
 
   call<T>(method:string, params:Record<string,unknown>={}):Promise<T> {
     const paced = ['sendMessage','editMessageText','createForumTopic'].includes(method);
     if (!paced) return this.request<T>(method, params);
+    if(this.queued>=64)return Promise.reject(new Error('Telegram 发送队列已满，请稍后重试。'));
+    this.queued++;
     const result = this.outgoing.catch(() => {}).then(async () => {
       const wait = this.nextSend - Date.now();
       if (wait > 0) await delay(wait, undefined, {signal:this.abort.signal});
@@ -38,8 +41,9 @@ export class TelegramApi implements TelegramTransport {
       try { return await this.request<T>(method, params); }
       finally { this.nextSend = Date.now() + this.intervalMs; }
     });
-    this.outgoing = result;
-    return result;
+    const finished=result.finally(()=>{this.queued--;});
+    this.outgoing = finished.then(()=>{},()=>{});
+    return finished;
   }
 
   private async request<T>(method:string, params:Record<string,unknown>):Promise<T> {

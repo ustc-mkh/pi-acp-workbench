@@ -10,20 +10,22 @@ async function pair() {
   const root = await mkdtemp(join(tmpdir(),'pi-shared-history-')); directories.push(root);
   const a = new SharedHistoryStore(root), b = new SharedHistoryStore(root); stores.push(a,b); return {a,b};
 }
+async function seed(store:SharedHistoryStore,snapshot:Snapshot){await store.claim(snapshot.id);try{return await store.write(snapshot);}finally{await store.release(snapshot.id);}}
 const snapshot = (id:string):Snapshot => ({id,cwd:'/project',title:id,updated:Date.now(),contextComplete:true,entries:[{id:'user',role:'user',text:'hello'}]});
 afterEach(async()=>{for(const store of stores.splice(0))await store.releaseAll();for(const dir of directories.splice(0))await rm(dir,{recursive:true,force:true});});
 it('shares all histories without losing concurrent additions or pruning to 20', async()=>{
   const {a,b} = await pair();
-  await Promise.all(Array.from({length:24},(_,i)=>(i%2?a:b).import(snapshot(String(i)))));
+  await Promise.all(Array.from({length:24},(_,i)=>seed(i%2?a:b,snapshot(String(i)))));
   expect(await a.list()).toHaveLength(24);
   expect(new Set((await a.list()).map(s=>s.sessionNumber)).size).toBe(24);
   expect(await b.list()).toHaveLength(24);
   const index = (await b.list())[0];
   expect((await b.read(index)).entries[0]).toMatchObject({text:'hello'});
+  expect((a as any).seen.size).toBe(0);expect((b as any).seen.size).toBe(0);
 });
 it('stores identical native IDs from different harnesses independently',async()=>{
   const {a,b}=await pair();
-  for(const harness of ['pi','codex','claude'] as const)await a.import({...snapshot(localSessionId(harness,'same')),harness});
+  for(const harness of ['pi','codex','claude'] as const)await seed(a,{...snapshot(localSessionId(harness,'same')),harness});
   const history=await b.list();expect(history).toHaveLength(3);
   expect(new Set(history.map(s=>s.sessionNumber)).size).toBe(3);
   for(const item of history){await b.claim(item.id);expect((await b.read(item)).harness).toBe(item.harness);}
@@ -38,13 +40,12 @@ it('requires exclusive session ownership, permits viewing, and transfers ownersh
   await b.write({...await b.read(index),title:'changed'});
   expect((await a.list())[0].title).toBe('changed');
 });
-it('prevents deletion/clear from being undone by an old writer or a second migration', async()=>{
-  const {a,b} = await pair(); await a.claim('one'); await a.write(snapshot('one'));
-  await b.remove('one');
-  await expect(a.write(snapshot('one'))).rejects.toThrow('已从共享历史删除');
-  await b.import(snapshot('one')); expect(await b.list()).toEqual([]);
-  await b.import(snapshot('two')); await a.clear(); await b.import(snapshot('two'));
-  expect(await a.list()).toEqual([]);
+it('prevents deletion and clear from being undone by a stale writer', async()=>{
+ const {a,b}=await pair();await a.claim('one');await a.write(snapshot('one'));await b.remove('one');
+ await expect(a.write(snapshot('one'))).rejects.toThrow('已从共享历史删除');
+ await a.claim('two');await a.write(snapshot('two'));await b.clear();
+ await expect(a.write(snapshot('two'))).rejects.toThrow('已从共享历史删除');
+ expect(await b.list()).toEqual([]);
 });
 it('keeps the previous full snapshot readable if committing its replacement fails', async()=>{
   const {a,b} = await pair(); await a.claim('one'); const original = await a.write(snapshot('one'));
@@ -52,19 +53,10 @@ it('keeps the previous full snapshot readable if committing its replacement fail
   await expect(a.write({...snapshot('one'),entries:[{id:'new',role:'user',text:'replacement'}]})).rejects.toThrow('disk full');
   expect((await b.read(original)).entries[0]).toMatchObject({text:'hello'});
 });
-it('migrates v0.3.0 indices without rewriting snapshots and retains numbers across clients', async()=>{
-  const {a,b} = await pair(); await a.import(snapshot('older')); await a.import(snapshot('newer'));
-  const file=join(a.root,'index.json');const legacy=JSON.parse(await readFile(file,'utf8'));
-  delete legacy.nextSessionNumber; delete legacy.sessionNumbers;
-  for(const item of legacy.sessions)delete item.sessionNumber;
-  await writeFile(file,JSON.stringify(legacy));
-  const migrated=await a.list();
-  expect(migrated.every(s=>Number.isSafeInteger(s.sessionNumber))).toBe(true);
-  expect((await b.list()).map(s=>[s.id,s.sessionNumber])).toEqual(migrated.map(s=>[s.id,s.sessionNumber]));
-  for(const item of migrated)expect((await b.read(item)).sessionNumber).toBe(item.sessionNumber);
-  const previousMax=Math.max(...migrated.map(s=>s.sessionNumber!));
-  await a.clear();await b.import(snapshot('after-clear'));
-  expect((await a.list())[0].sessionNumber).toBe(previousMax+1);
+it('preserves the allocation counter across clear without repairing old indices on read',async()=>{
+ const {a,b}=await pair();await seed(a,snapshot('first'));await a.clear();await seed(b,snapshot('next'));
+ expect((await b.list())[0].sessionNumber).toBe(2);
+ const file=join(a.root,'index.json');const before=await readFile(file,'utf8');await a.list();expect(await readFile(file,'utf8')).toBe(before);
 });
 it('detects stale revisions even after another client releases its lock', async()=>{
   const {a,b} = await pair(); await a.claim('one'); const old = await a.write(snapshot('one'));

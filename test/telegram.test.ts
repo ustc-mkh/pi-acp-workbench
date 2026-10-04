@@ -1,5 +1,5 @@
 import {afterEach,expect,it,vi} from 'vitest';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {TelegramApi,telegramChunks,type TelegramTransport,type TelegramUpdate} from '../src/telegram-api';
@@ -35,17 +35,18 @@ async function fixture() {
   const saved:TelegramBridgeState[]=[];
   const data:TelegramBridgeState={version:1,botId:7,chatId:-100,offset:1,notifications:true,topics:[{sessionId:'one',threadId:101}],delivered:[]};
   const report=vi.fn();
+  const save=vi.fn(async(s:TelegramBridgeState)=>{saved.push(structuredClone(s));});
   const bridge=new TelegramBridge(api,host,events,data,{chatId:-100,allowedUserIds:[42],streamIntervalMs:1,
-    save:async s=>{saved.push(structuredClone(s));},report});
+    save,report});
   cleanup.push(()=>bridge.dispose());
-  return {api,host,events,bridge,data,saved,report,sessions};
+  return {api,host,events,bridge,data,saved,report,sessions,save};
 }
 const message=(id:number,text:string,threadId=101,userId=42,chatId=-100):TelegramUpdate=>({update_id:id,message:{message_id:id,chat:{id:chatId,type:'supergroup'},from:{id:userId},message_thread_id:threadId,text}});
 
 it('requires explicit identity/workspace configuration and redacts transport failures',async()=>{
   expect(()=>telegramConfig({chatId:-1,allowedUserIds:[],workspaces:{a:'/a'}})).toThrow('allowedUserIds');
   expect(()=>telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'},maxConcurrent:99})).toThrow('maxConcurrent');
-  expect(telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'}}).maxConcurrent).toBe(3);
+  expect(telegramConfig({chatId:-1,allowedUserIds:[42],workspaces:{a:'/a'}}).workspaces).toEqual({a:'/a'});
   const token='123:private_token_never_log';
   const api=new TelegramApi(token,0,vi.fn(async()=>{throw new Error(`https://api.telegram.org/bot${token}`);}) as typeof fetch);
   await expect(api.call('getMe')).rejects.toThrow('网络请求');
@@ -143,6 +144,10 @@ it('persists desktop completion without a running daemon and acknowledges delive
   const turn=new DesktopTelegramTurn(events,state,'/allowed',1,()=>{});
   applyUpdate(state,{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'desktop answer'}});
   await turn.finish(undefined,'end_turn');
+  await writeFile(join(events.directory,'0'.repeat(64)+'.json'),'null');
+  await writeFile(join(events.directory,'1'.repeat(64)+'.json'),'{broken');
+  await events.write({id:'invalid-error',sessionId:'one',cwd:'/allowed',title:'bad',text:'bad',status:'failed',updated:Date.now(),error:{} as string});
+  expect(await events.list()).toHaveLength(1);
   const event=(await events.list())[0];expect(event).toMatchObject({sessionId:'one',text:'desktop answer',status:'completed'});
   expect(await bridge.consume({...event,cwd:'/forbidden'})).toBe(false);expect(api.calls).toHaveLength(0);
   expect(await bridge.consume(event)).toBe(true);
@@ -176,4 +181,37 @@ it('serializes phone messages and discards queued messages when stopped',async()
  finish({text:'stopped',status:'cancelled'});
  await Promise.all([first,second]);expect(host.run).toHaveBeenCalledOnce();
  await bridge.handle(message(33,'next'));expect(host.run).toHaveBeenCalledTimes(2);
+ expect((bridge as any).queued.size).toBe(0);expect((bridge as any).generations.size).toBe(0);
+});
+
+it('keeps notification receipts, topic bindings and switches uncommitted when disk writes fail',async()=>{
+ const {bridge,data,save,events,host,sessions}=await fixture();
+ const event={id:'durable',sessionId:'one',cwd:'/allowed',title:'One',text:'answer',status:'completed' as const,updated:Date.now()};
+ await events.write(event);
+ save.mockRejectedValueOnce(new Error('disk full'));
+ await expect(bridge.consume(event)).rejects.toThrow('disk full');
+ expect(data.delivered).not.toContain(event.id);expect(await events.list()).toHaveLength(1);
+ expect(await bridge.consume(event)).toBe(true);expect(data.delivered).toContain(event.id);expect(host.run).not.toHaveBeenCalled();
+ save.mockRejectedValueOnce(new Error('disk full'));
+ await expect(bridge.ensureTopic(sessions[1])).rejects.toThrow('disk full');
+ expect(data.topics.some(t=>t.sessionId==='two')).toBe(false);
+ save.mockRejectedValueOnce(new Error('disk full'));
+ await expect(bridge.handle({update_id:90,callback_query:{id:'toggle',from:{id:42},message:message(90,'').message,data:'notify:off'}})).rejects.toThrow('disk full');
+ expect(data.notifications).toBe(true);
+});
+
+it('reports a failed final outbox write to the session owner',async()=>{
+ const {events}=await fixture();const state={...initialState(),sessionId:'one'};
+ const turn=new DesktopTelegramTurn(events,state,'/allowed',0,()=>{});
+ await vi.waitFor(async()=>expect(await events.list()).toHaveLength(1));
+ vi.spyOn(events,'write').mockRejectedValueOnce(new Error('disk full'));
+ await expect(turn.finish(undefined,'end_turn')).rejects.toThrow('disk full');
+});
+
+it('bounds and expires abandoned live notification previews',async()=>{
+ vi.useFakeTimers();const {bridge}=await fixture();
+ for(let i=0;i<100;i++)await bridge.consume({id:'orphan-'+i,sessionId:'one',cwd:'/allowed',title:'One',text:'x'.repeat(10000),status:'running',updated:Date.now()});
+ expect((bridge as any).streams.size).toBe(32);expect((bridge as any).touched.size).toBe(32);
+ vi.setSystemTime(Date.now()+6*60*1000);await vi.advanceTimersByTimeAsync(30000);
+ expect((bridge as any).streams.size).toBe(0);expect((bridge as any).touched.size).toBe(0);
 });

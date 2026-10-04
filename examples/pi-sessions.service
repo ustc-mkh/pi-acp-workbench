@@ -1,0 +1,19 @@
+[Unit]
+Description=Pi ACP Workbench session service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/pi-acp-workbench
+ExecStart=/absolute/path/to/node /absolute/path/to/pi-acp-workbench/dist/session-daemon.mjs --config %h/.config/pi-acp-workbench/sessions.json
+Restart=on-failure
+RestartSec=35
+TimeoutStopSec=30
+KillMode=control-group
+MemoryAccounting=yes
+TasksAccounting=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

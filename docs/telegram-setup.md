@@ -16,6 +16,8 @@ Telegram relay 是独立的 Node.js 常驻进程，关闭 VS Code 后仍可对�
 
 协议依据：[Topics](https://core.telegram.org/bots/api#createforumtopic)、[长轮询](https://core.telegram.org/bots/api#getupdates)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)、[速率限制](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)。
 
+先完成 [Pi 会话服务部署](session-service.md)，Telegram 只负责消息接入。两者使用同一个服务器账户和数据目录。
+
 ## 2. 配置服务器
 
 要求 Node.js 22+、已配置凭据的 Pi、当前仓库的构建产物。以实际执行 Pi 的服务器账户操作：
@@ -37,8 +39,7 @@ cp examples/telegram.json ~/.config/pi-acp-workbench/telegram.json
   "workspaces": {
     "workbench": "/absolute/path/to/pi-acp-workbench",
     "another": "/absolute/path/to/another-project"
-  },
-  "maxConcurrent": 3
+  }
 }
 ```
 
@@ -60,9 +61,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-默认使用 `dist/pi-adapter.mjs`。Pi 不在服务的 PATH 时，可在配置的 `env` 中设置 `PI_ACP_PI_COMMAND` 为绝对路径。可选 `command` / `args` 指定其他 Pi ACP 适配器，但其并发索引安全由该适配器负责；建议保留内置适配器。`maxConcurrent` 范围为 1–8。Token 不会作为环境变量内容传给 Pi 子进程。
-
-systemd 服务不会自动继承终端中的代理变量。如果 Pi 在终端正常、手机任务却反复重试，请在配置的 `env` 中补齐本机实际使用的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 等变量。支持环境代理的 Node 版本可同时设置 `NODE_USE_ENV_PROXY: "1"`，随后重启服务。这些 `env` 设置仅传给 Pi 子进程；代理地址和凭据应留在本机配置中。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与工作区白名单。Token 不进入 Pi 服务或 Pi 子进程。
 
 ## 3. 作为用户服务常驻
 
@@ -81,15 +80,13 @@ journalctl --user -u pi-telegram -f
 
 如果需要退出 SSH 后用户服务仍常驻，服务器还需为此账户启用 linger：`loginctl enable-linger "$USER"`（是否需要管理员权限取决于服务器配置）。关闭 VS Code 不影响这个独立服务；关闭服务器会停止任务。
 
-升级代码后重新构建并执行 `systemctl --user restart pi-telegram`。重启会停止正在运行的手机任务，先用 `/status` 检查。停止服务用 `systemctl --user stop pi-telegram`。
+升级代码后重新构建并执行 `systemctl --user restart pi-telegram`。只重启 Telegram 不会停止已提交到 Pi 服务的任务；尚未提交的内存排队消息不会重放。升级 Pi 服务前先等待任务完成。停止服务用 `systemctl --user stop pi-telegram`。
 
-## 4. 桌面手机交互配置
+## 4. 桌面手机共享会话
 
-要让手机控制 VS Code 已持有的 Pi 连接，需要安装包含手机控制通道的新版 VSIX，并重载 VS Code 窗口。桌面和服务必须运行在同一服务器账户下，开启 `piAcp.sharedHistory` 与 `piAcp.persistHistory`。扩展在本机账户私有目录中提供 Unix socket 控制通道，不开放网络监听端口。手机访问仍由服务的群组、用户和工作区白名单限制。
+安装新插件并重载窗口。VS Code 和 Telegram 均连接 `pi-sessions.service`，不再通过桌面控制端点或抢占会话锁。关闭 VS Code 后任务继续，手机在对应话题直接发送消息即可。通知由执行服务保存到 outbox，Telegram `/notifications` 控制是否推送，无需桌面单独启用通知设置。
 
-可选的 `piAcp.telegram.desktopNotifications: true` 会让桌面主动发布任务进度与完成结果；Telegram 端还必须通过 `/notifications` 开启全局推送。未打开全局推送时，自动输出不会发送。主动 `/takeover` 可以观察当前桌面任务，不要求开启桌面自动通知设置。
-
-桌面只在持有会话锁且开启历史保存时接受远程请求。旧版插件没有控制通道，仍会显示占用提示，不能直接接管。此版本的本地控制通道在 Linux 上验证；Windows 未验证。
+旧版本升级时先等待任务结束，退出旧插件连接并停止旧 Telegram，再按新配置启动会话服务与 Telegram。不要混用仍直接启动 Pi 的旧客户端。
 
 ## 存储与恢复边界
 
@@ -101,3 +98,7 @@ journalctl --user -u pi-telegram -f
 - 强制杀进程不会自动继续中断的模型请求；原生历史和本地记录保留。需要继续时在原话题发新消息。
 
 `--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。
+
+## 维护与升级范围
+
+共享历史要求快照含明确 harness 和原生会话 ID。旧版待重建快照、跨存储自动迁移和缺失元数据推断已移除；已有文件不会被自动删除。升级前可备份 `~/.pi/pi-acp-workbench/` 和 Pi 原生会话目录。维护源码后，应先验证、打包，再在任务空闲时更新插件与常驻服务。配置文件中的 token 和代理凭据始终留在用户配置目录，不进入仓库。

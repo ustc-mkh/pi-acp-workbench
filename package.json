@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -99,56 +99,58 @@
     "configuration": {
       "title": "Pi ACP",
       "properties": {
-        "piAcp.command": {
+        "piAcp.codex.command": {
           "type": "string",
-          "default": "pi-acp",
+          "default": "codex-acp",
           "scope": "machine",
-          "description": "ACP executable override. The default pi-acp with empty args uses the bundled enhanced adapter unless useBundledAdapter is false."
+          "description": "Codex ACP adapter executable (not the interactive codex CLI). Install @agentclientprotocol/codex-acp on the extension host."
         },
-        "piAcp.args": {
+        "piAcp.codex.args": {
           "type": "array",
           "items": {
             "type": "string"
           },
           "default": [],
           "scope": "machine",
-          "description": "Arguments passed directly without a shell."
+          "description": "Arguments for the Codex ACP adapter, passed without a shell."
         },
-        "piAcp.env": {
+        "piAcp.codex.env": {
           "type": "object",
           "additionalProperties": {
             "type": "string"
           },
           "default": {},
           "scope": "machine",
-          "description": "Agent environment overrides. Prefer provider credentials stored by Pi; avoid saving secrets here."
-        },
-        "piAcp.codex.command": {
-          "type": "string", "default": "codex-acp", "scope": "machine",
-          "description": "Codex ACP adapter executable (not the interactive codex CLI). Install @agentclientprotocol/codex-acp on the extension host."
-        },
-        "piAcp.codex.args": {
-          "type": "array", "items": {"type": "string"}, "default": [], "scope": "machine",
-          "description": "Arguments for the Codex ACP adapter, passed without a shell."
-        },
-        "piAcp.codex.env": {
-          "type": "object", "additionalProperties": {"type": "string"}, "default": {}, "scope": "machine",
           "description": "Codex-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
         },
         "piAcp.codex.loginCommand": {
-          "type": "string", "default": "codex", "scope": "machine",
+          "type": "string",
+          "default": "codex",
+          "scope": "machine",
           "description": "Interactive Codex CLI used by Open Login Terminal (runs codex login). This is separate from codex-acp."
         },
         "piAcp.claude.command": {
-          "type": "string", "default": "claude-agent-acp", "scope": "machine",
+          "type": "string",
+          "default": "claude-agent-acp",
+          "scope": "machine",
           "description": "Claude Code ACP adapter executable (not the interactive claude CLI). Install @agentclientprotocol/claude-agent-acp on the extension host."
         },
         "piAcp.claude.args": {
-          "type": "array", "items": {"type": "string"}, "default": [], "scope": "machine",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
           "description": "Arguments for the Claude ACP adapter, passed without a shell."
         },
         "piAcp.claude.env": {
-          "type": "object", "additionalProperties": {"type": "string"}, "default": {}, "scope": "machine",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "scope": "machine",
           "description": "Claude-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
         },
         "piAcp.showThoughts": {
@@ -160,12 +162,12 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Share conversation history between clients of the same server account under ~/.pi/pi-acp-workbench/history. Changes require reloading the window."
+          "description": "Share Codex/Claude history on this server. Pi always uses session-service history. Changes require reloading the window."
         },
         "piAcp.persistHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Save conversation history. In shared mode, disabling only hides/stops saving history on this client; use Clear History to delete server-wide records. In local mode, disabling clears local snapshots. Usage totals remain."
+          "description": "Show and save client history. For Pi this only hides history in this client: the independent session service always persists tasks. Use Delete History to remove server records."
         },
         "piAcp.maxContextChars": {
           "type": "number",
@@ -174,17 +176,11 @@
           "maximum": 500000,
           "description": "Maximum characters in an attached editor selection or file."
         },
-        "piAcp.telegram.desktopNotifications": {
-          "type": "boolean",
-          "default": false,
+        "piAcp.serviceSocket": {
+          "type": "string",
+          "default": "",
           "scope": "machine",
-          "description": "Publish Pi task progress and completion to the local Telegram relay outbox. Requires the standalone Telegram daemon with this workspace allowed; conversation output is sent to its configured Telegram group."
-        },
-        "piAcp.useBundledAdapter": {
-          "type": "boolean",
-          "default": true,
-          "scope": "machine",
-          "description": "Use the bundled enhanced Pi ACP adapter when command is pi-acp and args is empty. Enables bounded context summaries and detailed usage statistics."
+          "description": "Pi session service Unix socket. Empty uses ~/.pi/pi-acp-workbench/service/sessions.sock. Pi processes and model environment are configured in sessions.json; reload the window after changing this path."
         }
       }
     }
@@ -195,12 +191,14 @@
     "test": "npm run check && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && vitest run",
     "verify": "npm run test:all && npm run test:browser",
-    "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.7.0.vsix",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-0.8.0.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs",
     "test:harness": "node scripts/harness-reconnect-smoke.mjs",
     "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs",
-    "telegram": "node dist/telegram-daemon.mjs"
+    "telegram": "node dist/telegram-daemon.mjs",
+    "sessions": "node dist/session-daemon.mjs",
+    "test:memory": "node scripts/memory-smoke.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",

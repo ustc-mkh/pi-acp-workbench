@@ -1,7 +1,7 @@
 [Unit]
 Description=Pi ACP Workbench Telegram relay
-After=network-online.target
-Wants=network-online.target
+After=network-online.target pi-sessions.service
+Wants=network-online.target pi-sessions.service
 
 [Service]
 Type=simple

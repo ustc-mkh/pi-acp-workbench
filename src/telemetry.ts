@@ -4,7 +4,7 @@ export interface UsageRecord extends TokenUsage {
 }
 export interface Price { input: number; output: number; cacheRead: number; cacheWrite: number; source?: string; updated?: string }
 export interface Statistics { models?:{id:string;name:string}[]; records: UsageRecord[]; prices: Record<string, Price>; titles: Record<string, string>; available: boolean; note?: string }
-export interface Inspection { forkPoints?: import('./native-branch').NativeForkPoint[]; records: UsageRecord[]; cursor?: number; context?: string; checkpointId?: string; contextWindow?: number; model?: string; prices?: Record<string, Price> }
+export interface Inspection { forkPoints?: import('./native-branch').NativeForkPoint[]; records: UsageRecord[]; cursor?: number; context?: string; contextWindow?: number; model?: string; prices?: Record<string, Price> }
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
 export function validPrice(value: unknown): value is Price {
   const p = value as Price; return !!p && ['input', 'output', 'cacheRead', 'cacheWrite'].every(k => finite(p[k as keyof TokenUsage]) && p[k as keyof TokenUsage] <= 1000000);

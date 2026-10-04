@@ -8,12 +8,11 @@ export const HARNESSES: Record<HarnessId,{name:string;command:string;install:str
 };
 export function snapshotHarness(snapshot:{harness?:unknown;id?:string}):HarnessId {
   const namespace = snapshot.id?.match(/^workbench:(codex|claude):/)?.[1] as HarnessId | undefined;
-  if (snapshot.harness === undefined) return namespace || 'pi'; // Old clients may drop the new metadata field.
   if (!isHarnessId(snapshot.harness) || namespace && namespace !== snapshot.harness) throw new Error('历史记录中的 harness 不受支持或不匹配，未启动 Agent。');
   return snapshot.harness;
 }
 export function harnessKey(key:string,harness:HarnessId) { return harness==='pi'?key:`harness.${harness}.${key}`; }
-/** Preserve legacy Pi IDs; other adapters live in a reserved local namespace. */
+/** Pi uses native IDs; other adapters use a reserved local namespace. */
 export function localSessionId(harness:HarnessId,id:string) {
   if (harness==='pi') {
     if (/^workbench:(codex|claude):/.test(id)) throw new Error('Pi 会话 ID 使用了保留的 harness 命名空间，拒绝覆盖历史。');

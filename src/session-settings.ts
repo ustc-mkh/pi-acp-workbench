@@ -27,7 +27,7 @@ export function sessionSelectors({ modes, configs, harness }: Pick<ChatState, 'm
       change: { type: 'config' as const, id: config.id },
     }];
   });
-  // Model switches can change supported levels while legacy modes remain stale.
+  // Model switches can change supported levels while parallel modes remain stale.
   // Recognize the purpose of the control instead of requiring identical option sets.
   const thinkingControl = controls.find(c => c.category === 'thought_level') || controls.find(c => c.kind === 'thinking');
   const unique = controls.filter(c => c.kind !== 'thinking' || c === thinkingControl);
@@ -36,12 +36,12 @@ export function sessionSelectors({ modes, configs, harness }: Pick<ChatState, 'm
   const sameLevels = !!modes && !!thinkingControl && modes.availableModes.length === thinkingControl.options.length &&
     modes.availableModes.every(mode => thinkingControl.options.some(option => option.id === mode.id));
   const modesCovered = unique.some(c => c.kind === 'mode') || (!!thinkingControl && (thinkingModes || sameLevels));
-  const legacy: SessionSelector[] = modes && !modesCovered ? [{
+  const modeControls: SessionSelector[] = modes && !modesCovered ? [{
     label: thinkingModes ? 'Thinking' : '会话模式', kind: thinkingModes ? 'thinking' : 'mode', current: modes.currentModeId,
     options: modes.availableModes.map(mode => ({ id: mode.id, name: compactThinking(mode.name) })),
     change: { type: 'mode' },
   }] : [];
-  return [...legacy, ...unique];
+  return [...modeControls, ...unique];
 }
 
 export interface SessionPreference { kind: SessionSelector['kind']; value: string }

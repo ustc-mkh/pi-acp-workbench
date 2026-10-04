@@ -11,7 +11,7 @@ export async function buildAdapter() {
   let source=await readFile(entry,'utf8');
   const factory='new PiAcpAgent(conn)', args='const args = ["--mode", "rpc", "--no-themes"];';
   source=replaceExactlyOnce(source,factory,'new (enhancePiAgent(PiAcpAgent, PiRpcProcess))(conn)');
-  source=replaceExactlyOnce(source,args,args+'\n    if (params.workbenchFork) args.push("--no-extensions", "--extension", params.workbenchFork, "--session-dir", params.workbenchForkSessionDir);\n    if (params.workbenchSummary) args.push("--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-session", "--system-prompt", "You summarize historical conversation data. You have no tools. Return only a concise factual summary.");');
+  source=replaceExactlyOnce(source,args,args+'\n    if (params.workbenchFork) args.push("--no-extensions", "--extension", params.workbenchFork, "--session-dir", params.workbenchForkSessionDir);');
   source=replaceExactlyOnce(source,'return join(homedir(), ".pi", "pi-acp");','return process.env.PI_ACP_WORKBENCH_STATE_DIR || join(homedir(), ".pi", "pi-acp");');
   source=replaceExactlyOnce(source,'const updateNotice = buildUpdateNotice();','const updateNotice = null;');
   source=replaceExactlyOnce(source,'const timeoutMs = opts?.timeoutMs;', 'const timeoutMs = opts?.timeoutMs ?? 30000;');

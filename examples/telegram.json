@@ -1,8 +1,9 @@
 {
   "chatId": -1001234567890,
-  "allowedUserIds": [123456789],
+  "allowedUserIds": [
+    123456789
+  ],
   "workspaces": {
     "project": "/absolute/path/to/project"
-  },
-  "maxConcurrent": 3
+  }
 }

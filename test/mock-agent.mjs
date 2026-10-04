@@ -58,7 +58,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
     sessionId = r.params.sessionId;
     if(native){const data=nativeDb()[sessionId];if(!data){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,error:{code:-32603,message:'missing native mock'}})+'\n');return;}points=data.points;configOptions=data.configOptions;reply(r.id,{configOptions});return;}
     update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'previous' } }); reply(r.id, mode==='context-codex-options'?{configOptions}:{});
-  } else if(native&&['_pi_workbench/cancel_summary','_pi_workbench/cancel_fork'].includes(r.method)){reply(r.id,{});
+  } else if(native&&r.method==='_pi_workbench/cancel_fork'){reply(r.id,{});
   } else if(r.method==='_pi_workbench/inspect'&&native){reply(r.id,{records:[],contextWindow:272000,forkPoints:points.map(({configs,...point})=>point)});
   } else if(r.method==='_pi_workbench/fork'&&native){
     const index=points.findIndex(p=>p.entryId===r.params.entryId&&p.hash===r.params.hash);

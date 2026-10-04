@@ -166,14 +166,7 @@ try {
   assert.equal(await page.evaluate(() => window.messages.filter(m => m.type === 'ready').length), readyBefore + 1);
   encoder.reset(); await emit(state);
   assert.equal(await page.locator('.message.tool').count(), 1);
-  state.status='ready';state.mobileControlled=true;state.sessionId='mobile-session';await emit(state);
-  await page.locator('#input').fill('desktop draft');
-  assert(await page.locator('#send').isDisabled());
-  assert.equal(await page.locator('#status').textContent(),'手机控制中');
-  await page.locator('#desktop-control').click();
-  assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='takeDesktopControl'));
-  state.mobileControlled=false;await emit(state);
-  assert.equal(await page.locator('#input').inputValue(),'desktop draft');
+  state.status='ready';await emit(state);
   assert.deepEqual(errors, []);
   console.log('Browser smoke passed: dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, diff, no runtime errors.');
 } finally { await browser?.close(); server.close(); }

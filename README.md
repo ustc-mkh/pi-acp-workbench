@@ -15,14 +15,14 @@ npm install -g @earendil-works/pi-coding-agent
 pi
 ```
 
-在 Pi 的交互界面完成登录或 API key 配置。插件复用 Pi 的凭据，不单独收集模型密钥。如果所用 Pi 版本仍使用旧 npm 包名，请遵循对应 Pi 版本的安装文档；适配器必须与本机 Pi 版本兼容。
+在 Pi 的交互界面完成登录或 API key 配置。插件复用 Pi 的凭据，不单独收集模型密钥。请使用支持原生会话树和 `fork(position: at)` 的 Pi。
 
 ### 2. 安装 VSIX
 
-在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.7.0.vsix`，或执行：
+在 VS Code 的扩展面板菜单选择 **Install from VSIX…**，选择 `pi-acp-workbench-0.8.0.vsix`，或执行：
 
 ```bash
-code --install-extension pi-acp-workbench-0.7.0.vsix
+code --install-extension pi-acp-workbench-0.8.0.vsix
 ```
 
 打开并信任项目文件夹 → 点击活动栏的 **π**。首次使用点击 **新建会话**；已有历史时自动恢复上次活动会话。只有点击新建（或执行 `Pi: New Session`）才创建空白对话，重新连接只恢复原会话，失败不会偷偷创建新对话。连接成功后输入任务，Enter 发送，Shift+Enter 换行。生成过程中可点击 **停止**。
@@ -31,34 +31,13 @@ code --install-extension pi-acp-workbench-0.7.0.vsix
 
 **不配置模型也可以体验渲染**：命令面板执行 `Pi: Preview Markdown & Math`。
 
-### 3. 配置 ACP 启动命令
+### 3. 启动 Pi 会话服务
 
-默认使用随插件打包的增强 Pi ACP 适配器（固定上游 `pi-acp@0.0.34`），无需全局安装 `pi-acp`。Pi 本体仍需安装。若 VS Code 找不到 `pi`，设置 `piAcp.env.PI_ACP_PI_COMMAND` 为 Pi 可执行文件的绝对路径；保留默认 command / args 即可启用完整统计及分块摘要能力。
+Pi 运行于独立的常驻服务，插件与 Telegram 共享它。先按 [会话服务部署文档](docs/session-service.md) 配置 `sessions.json` 并启动 `pi-sessions.service`，再连接插件。当前使用 Linux Unix socket；本地 Windows 不支持此运行方式，可使用 WSL 或 Remote SSH。
 
-需要自定义外部 ACP 进程时，参数直接传给进程，不经过 shell，例如：
+默认最多 3 个工作进程，空闲 15 分钟回收。关闭 VS Code 不会停止已经提交的任务；服务未启动时明确报错，不回退到插件启动 Pi。Pi 路径、代理、进程上限等在服务配置中设置，Bot token 仅属于 Telegram 接入。
 
-```json
-{
-  "piAcp.command": "/absolute/path/to/pi-acp",
-  "piAcp.args": [],
-  "piAcp.env": {},
-  "piAcp.showThoughts": true,
-  "piAcp.persistHistory": true,
-  "piAcp.sharedHistory": true,
-  "piAcp.maxContextChars": 60000
-}
-```
-
-Windows 也优先使用默认内置适配器。仅在自定义外部适配器时，可使用 Node 和适配器的 JS 入口；可用 `npm root -g` 找到全局模块目录：
-
-```json
-{
-  "piAcp.command": "C:\\Program Files\\nodejs\\node.exe",
-  "piAcp.args": ["C:\\Users\\YOUR_NAME\\AppData\\Roaming\\npm\\node_modules\\pi-acp\\dist\\index.js"]
-}
-```
-
-同样支持其他 **ACP v1 stdio agent**：修改 command / args 即可。`piAcp.useBundledAdapter: false` 可显式恢复全局 `pi-acp`。命令面板中的 `Pi: Open Login Terminal` 在内置模式打开 `pi`，外部模式调用配置命令的 `--terminal-login`；其他 Agent 应在自己的终端工具中认证。ACP v2 草案不在本版支持范围内。
+插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，可用 `piAcp.serviceSocket` 指定路径。Codex / Claude 的启动配置维持各自的设置键。凭据在执行服务的服务器账户下配置。
 
 ## 使用体验
 
@@ -72,16 +51,16 @@ Windows 也优先使用默认内置适配器。仅在自定义外部适配器时
 - **工具调用**：增量更新状态、位置、输出；结构化 `diff` 支持在 VS Code 中左右对比。这是已执行/报告修改的预览，不是延迟应用或回滚机制。
 - **授权卡片**：完整展示 `session/request_permission` 工具信息和 Agent 的选项，原样返回所选 optionId；取消会返回 cancelled。
 - **共享会话**：默认将全部插件历史保存到扩展宿主用户目录，不再只保留 20 条。同一服务器、同一 SSH 用户从不同电脑连接时共享列表和快照；打开其他工作区的会话可只读查看。
-- **会话恢复**：点击历史记录后调用 `session/load`。不支持 load 的 Agent 会明确报错；不会把本地快照伪装成已恢复远端上下文。新会话使用新进程，旧会话是否可恢复取决于适配器持久化能力。
+- **会话恢复**：点击历史记录后调用 `session/load`。不支持 load 的 Agent 会明确报错；不会把本地快照伪装成已恢复远端上下文。Pi 由服务按需加载原生会话，其他 harness 的恢复取决于适配器持久化能力。
 - **导出**：导出对话正文的原始 Markdown 和工具摘要。
 - **多根工作区**：创建会话时选择一个工作目录，历史会话绑定其原始目录。
 - **远程开发**：扩展运行于 workspace 宿主。在 Remote SSH / WSL / Dev Container 中，需要在远端安装 Pi 和 Node，并在那里配置凭据。
 
 ## Harness 切换
 
-左上角的 Harness 下拉框提供 **Pi Agent / Codex / Claude Code**。Pi 为默认，原有 `piAcp.command / args / env / useBundledAdapter` 仅作用于 Pi 配置。切换会保存并断开当前会话，释放共享会话锁；不会自动创建会话或把对话转发给另一家 Agent。目标 harness 已有记录时先只读展示，点击“重新连接”后才启动；没有记录时点击“新建会话”。生成、连接或上下文重建期间禁止切换。
+左上角的 Harness 下拉框提供 **Pi Agent / Codex / Claude Code**。Pi 为默认，执行环境改由 `sessions.json` 管理。切换会保存并断开当前会话，释放共享会话锁；不会自动创建会话或把对话转发给另一家 Agent。目标 harness 已有记录时先只读展示，点击“重新连接”后才启动；没有记录时点击“新建会话”。生成、连接或上下文重建期间禁止切换。
 
-草稿、待发送附件、最近模型偏好和活动会话指针按 harness 隔离。历史列表保留全部记录并标注 Codex / Claude Code，点击历史会切到其所属 harness。旧记录默认仍属于 Pi 配置；Codex / Claude 的原生 Session ID 使用独立的本地命名空间，不会覆盖同名 Pi 会话。请让共享历史的各客户端都升级到支持 harness 的版本，不要用旧版客户端操作非 Pi 记录。
+草稿、待发送附件、最近模型偏好和活动会话指针按 harness 隔离。历史列表保留全部记录并标注 Codex / Claude Code，点击历史会切到其所属 harness。历史记录必须显式包含 harness 元数据；Codex / Claude 的原生 Session ID 使用独立的本地命名空间，不会覆盖同名 Pi 会话。共享同一历史目录的客户端应使用同一版本。
 
 **空会话恢复**：Codex / Claude 在第一条消息之前可能只分配 Session ID，而不保存原生会话。释放后恢复时，如果适配器明确返回该 ID 不存在，且本地记录完整、没有任何消息，插件会重新建立空连接，保留会话编号与设置并显示提示；不会发送消息。已有内容、记录不完整、认证失败或其他错误不会触发此回退。无法恢复的原记录保留为只读，释放占用锁。
 
@@ -96,7 +75,7 @@ npm install -g @agentclientprotocol/codex-acp
 npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-上游旧包 `@zed-industries/codex-acp` / `@zed-industries/claude-agent-acp` 已弃用并更名，优先使用上述新包。可自定义路径及参数：
+可自定义适配器路径及参数：
 
 ```json
 {
@@ -122,7 +101,7 @@ npm install -g @agentclientprotocol/claude-agent-acp
 | 图片、嵌入上下文、模型/思考选择器、slash 命令 | 按声明支持 | 按实际能力/通知显示 |
 | 保存与恢复历史 | 支持 | 保存本地记录；恢复须声明 `session/load`，否则只读，不自动重放 |
 | 原生上下文分支 | 支持（需内置增强适配器及可验证节点） | 第一阶段不提供 |
-| Pi 详细计费、原生压缩检查点、有界摘要 | 支持 | 不提供，不调用 Pi 私有扩展 |
+| Pi 详细计费、原生上下文检查 | 支持 | 不提供，不调用 Pi 私有扩展 |
 | 客户端文件/终端委托、网关认证、原生子 Agent/后台任务扩展 | 不声明 | 不声明，依赖适配器自己的工具能力或标准回退 |
 
 Codex 的 **Fast mode（On/Off）** 和 **Collaboration mode（Default/Plan）** 不再显示。新建/恢复时固定为 `off` 和 `default`；模型、思考强度、权限选择仍保留。On/Off 是快速服务档位，不是缓存或思考开关：当前 Codex 适配器说明 On 约为 1.5 倍速度、用量更高，Off 为正常速度和用量。
@@ -159,7 +138,7 @@ KaTeX 不是完整 TeX 引擎：**TikZ、任意 LaTeX 宏包和原始 HTML 不�
 
 最近模型/thinking 偏好、活动会话指针、用量统计及价格仍按 VS Code 工作区保存，不在客户端之间同步。完整快照（可能包含代码、图片与对话）默认保存在 **扩展宿主** 的 `~/.pi/pi-acp-workbench/history/`；Remote SSH 下即服务器目录，不是本地电脑目录。目录/文件新建权限为 0700/0600（POSIX）。
 
-共享模式下，`piAcp.persistHistory: false` 只隐藏并停止当前客户端的历史保存，不会清空其他客户端的共享记录；需要删除时使用历史列表的删除/清空按钮，并确认其影响所有客户端。`piAcp.sharedHistory: false` 后重载窗口可恢复原来的工作区本地存储模式；该模式下关闭持久化会清除本地快照。删除不擦除 Pi 原生文件、旧版迁移备份或计费记录。stderr 保留在 `Pi Agent` 输出面板以便诊断，插件不记录环境变量或 stdout 协议原文、不包含遥测。
+共享模式下，`piAcp.persistHistory: false` 只隐藏并停止当前客户端的历史保存，不会清空其他客户端的共享记录；需要删除时使用历史列表的删除/清空按钮，并确认其影响所有客户端。`piAcp.sharedHistory: false` 后重载窗口可恢复原来的工作区本地存储模式；该模式下关闭持久化会清除本地快照。删除不擦除 Pi 原生文件、已有备份或计费记录。stderr 保留在 `Pi Agent` 输出面板以便诊断，插件不记录环境变量或 stdout 协议原文、不包含遥测。
 
 ## 开发
 
@@ -193,7 +172,7 @@ test/              协议模拟服务、渲染/状态测试、扩展宿主测试
 
 ## 常见问题
 
-- **ENOENT / 启动失败**：检查 `piAcp.command`、Node 版本和 VS Code 的 PATH，优先使用绝对路径。
+- **ENOENT / 启动失败**：Pi 检查 `pi-sessions.service` 日志及 `sessions.json` 的可执行文件路径；其他 harness 检查各自启动设置。
 - **认证失败**：运行 `Pi: Open Login Terminal` 或在终端执行 `pi`，完成认证后重新连接。
 - **停止超时**：先发送 ACP cancel；5 秒仍未返回则终止连接和进程树，之后尝试从历史恢复。
 - **会话无法恢复**：确认打开的是原工作目录，Pi 的持久化文件仍存在，且 Agent 支持 `session/load`。
@@ -209,11 +188,11 @@ test/              协议模拟服务、渲染/状态测试、扩展宿主测试
 
 ### 历史会话
 
-点击顶部历史按钮查看此服务器账户的全部插件会话。每个持久化对话在历史列表和当前会话栏显示稳定编号（如 `#001`、`#002`），同名分支会获得不同编号；排序变化、重启不改变编号，空会话恢复导致后台 ID 替换时保留逻辑对话编号。旧历史自动补号，删除/清空后不复用旧号。共享模式下由服务器事务统一分配，各客户端一致；本地模式按工作区分配。悬停编号可查看完整 Session ID。列表最多显示 4 行，其余滚动查看；每 5 秒自动刷新，也可以点击“刷新”。其他工作区的会话可查看，但继续对话前必须打开对应工作区。远端看到的是已保存的快照，不是另一端正在生成的实时 token 流。
+点击顶部历史按钮查看此服务器账户的全部插件会话。每个持久化对话在历史列表和当前会话栏显示稳定编号（如 `#001`、`#002`），同名分支会获得不同编号；排序变化、重启不改变编号，空会话恢复导致后台 ID 替换时保留逻辑对话编号。编号在创建时分配，删除/清空后不复用旧号。共享模式下由服务器事务统一分配，各客户端一致；本地模式按工作区分配。悬停编号可查看完整 Session ID。列表最多显示 4 行，其余滚动查看；每 5 秒自动刷新，也可以点击“刷新”。其他工作区的会话可查看，但继续对话前必须打开对应工作区。Pi 的活动会话通过服务实时同步；断线重连会取得完整当前状态。
 
-同一会话只允许一个窗口连接 Agent；其他客户端打开时进入只读查看。原窗口点击 **释放会话**、切换会话或关闭窗口后，另一端点击 **重新连接** 即可接管。异常退出遗留的锁约 30 秒后可回收。共享模式下不缓存空闲 Agent 连接，以免长时间占用其他客户端需要的会话。
+Pi 的同一会话可由桌面与手机同时连接，消息串行执行，授权只接受首次有效响应。**释放会话**只断开本窗口，任务继续；Pi 服务统一持有会话锁并回收空闲进程。Codex / Claude 仍采用窗口独占连接，释放后由另一窗口恢复。
 
-首次升级会迁移当前 VS Code 工作区能读取到的旧历史，不覆盖已存在的共享记录；旧快照文件保留作迁移备份。请在各个曾保存旧历史的客户端/工作区都升级并打开一次，完成其记录迁移。不自动扫描或导入 Pi CLI 的全部原生历史，不跨服务器或不同 SSH 账户同步。
+Pi 始终由服务保存共享历史；关闭 `persistHistory` 只隐藏客户端列表，不停止服务保存任务。Codex / Claude 的本地模式与共享模式分别读取各自存储，不再自动迁移记录或给旧索引补号。只有明确保存的活动会话指针会自动恢复；没有指针时显示欢迎页，仍可主动从历史列表选择。缺少 harness 的旧记录或带 `contextPending=true` 的旧重建快照不再支持恢复，原文件保留，不会自动重建或重放。当前原生会话不受影响。不自动扫描 Pi CLI 的原生历史，也不跨服务器或 SSH 账户同步。
 
 垃圾桶/清空按钮在共享模式下影响所有客户端，并弹出确认；删除不会中断当前任务，也不会被旧窗口自动保存复活。这里管理的是插件历史，Pi 自身保存的会话文件仍由 Pi 管理。
 
@@ -227,7 +206,7 @@ test/              协议模拟服务、渲染/状态测试、扩展宿主测试
 - **安全定位**：仅空闲、已连接且可唯一定位到安全原生节点时可分支；无法定位的旧记录、待完成工具调用和只读历史会禁用按钮，不降级为文本摘要。操作期间显示进度与取消按钮；失败或取消保留原会话，源连接已断开时提供重新连接。首次接入旧历史可能需刷新原生映射。
 - **适配器**：需要支持原生 fork 的 Pi 和内置增强适配器。Codex、Claude 及不支持该扩展的外部 Pi 适配器暂不提供分支。
 - **复制**：仍复制本地原始 Markdown；压缩不会把界面全文或复制内容替换成摘要。旧版已缺失的内容不能凭空恢复。
-- **旧快照兼容**：升级前已经生成的“待同步上下文”仍走原有恢复流程，可能调用摘要模型；需先发普通消息完成同步，再使用 slash 命令。新原生分支不产生该状态。
+- **恢复边界**：仅恢复原生会话，不再提供旧版文本种子重放、分块摘要或待同步快照迁移。Pi 自身的正常自动压缩继续由 Pi 管理。
 
 ### 流程图
 
@@ -261,7 +240,7 @@ flowchart TD
 
 支持独立 Node.js 服务常驻服务器，关闭 VS Code 后仍可从手机控制 Pi。私人群组的每个 Topic 对应一个会话，支持增量更新回复、完成通知、权限按钮和 `/stop`，通过用户、群组及工作区白名单限制访问。
 
-配置与 systemd 部署见 [Telegram 配置文档](docs/telegram-setup.md)，命令与手机控制见 [日常使用指南](docs/telegram-usage.md)。运行 `npm run build` 后通过 `npm run telegram -- --config /absolute/path/telegram.json` 启动；Bot token 由环境变量提供。桌面会话的通知需另外开启 `piAcp.telegram.desktopNotifications`。手机优先复用桌面已有连接，执行中消息排队；支持旧会话历史同步和全局推送开关。全局推送默认关闭，使用 `/notifications` 开启。
+配置与 systemd 部署见 [Telegram 配置文档](docs/telegram-setup.md)，命令与手机控制见 [日常使用指南](docs/telegram-usage.md)。运行 `npm run build` 后通过 `npm run telegram -- --config /absolute/path/telegram.json` 启动；Bot token 由环境变量提供。先部署 [Pi 会话服务](docs/session-service.md)。桌面与手机连接同一个执行服务，执行中消息排队；支持旧会话历史同步和全局推送开关。全局推送默认关闭，使用 `/notifications` 开启。
 
 ### 会话连接缓存
 
@@ -275,4 +254,4 @@ flowchart TD
 
 图片使用 ACP `image` 内容块发送；需要 Agent 声明图片能力，并选择支持视觉输入的模型。图片原文随消息保存在本地快照中，历史恢复后可以查看；关闭历史保存可禁用插件持久化。异步粘贴过程中切换会话会拒绝把图片加入其他会话。Webview 仅为本地图片预览开放 `data:` 图片，不开放远程 Markdown 图片加载。
 
-原生分支保留 Pi 原生图片内容，不重新编码或改写为文字。只有升级前遗留的待同步文本上下文恢复流程仍不支持图片；遇到此类旧快照会明确拒绝，不会静默丢弃图片。
+原生分支保留 Pi 原生图片内容，不重新编码或改写为文字。旧版文本上下文重建已移除。

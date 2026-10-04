@@ -1,0 +1,6 @@
+{
+  "workspaces": {"workbench": "/absolute/path/to/pi-acp-workbench"},
+  "maxWorkers": 3,
+  "idleMs": 900000,
+  "env": {"PI_ACP_PI_COMMAND": "/absolute/path/to/pi"}
+}

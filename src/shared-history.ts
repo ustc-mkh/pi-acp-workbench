@@ -2,8 +2,8 @@ import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { lock } from 'proper-lockfile';
-import { SnapshotStore } from './snapshots';
-import { allocateSessionNumber, migrateSessionNumbers, type SessionNumberIndex } from './session-numbers';
+import { SnapshotStore, validateSnapshot } from './snapshots';
+import { allocateSessionNumber, type SessionNumberIndex } from './session-numbers';
 import type { Snapshot } from './shared';
 
 interface Index extends SessionNumberIndex { deleted: string[] }
@@ -29,12 +29,12 @@ export class SharedHistoryStore extends SnapshotStore {
     try {
       const data = JSON.parse(await readFile(join(this.root, 'index.json'), 'utf8')) as Index;
       if (!Array.isArray(data.sessions) || !Array.isArray(data.deleted)) throw new Error('共享历史索引无效，请从备份恢复。');
-      return data;
+      return {sessions:data.sessions,deleted:data.deleted,nextSessionNumber:data.nextSessionNumber};
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {sessions:[],deleted:[]}; throw error; }
   }
   private transaction<T>(operation: (index: Index) => Promise<T>): Promise<T> {
     const result = this.transactions.catch(() => {}).then(() => this.runTransaction(operation));
-    this.transactions = result;
+    this.transactions = result.then(()=>{},()=>{});
     return result;
   }
   private async runTransaction<T>(operation: (index: Index) => Promise<T>): Promise<T> {
@@ -44,7 +44,6 @@ export class SharedHistoryStore extends SnapshotStore {
     const release = await lock(this.root, {realpath:false, stale:30000, update:10000, retries:{retries:20,minTimeout:50,maxTimeout:500,randomize:true}, onCompromised:error => { compromised = error; this.transactionError = error; }});
     try {
       const index = await this.index();
-      if (migrateSessionNumbers(index)) await this.commit(index);
       const result = await operation(index);
       if (compromised) throw compromised;
       return result;
@@ -75,7 +74,7 @@ export class SharedHistoryStore extends SnapshotStore {
   }
   async release(id: string) {
     const release = this.leases.get(id);
-    this.leases.delete(id);
+    this.leases.delete(id);this.seen.delete(id);
     const lost = this.lost.delete(id);
     if (release && !lost) await release();
   }
@@ -84,11 +83,11 @@ export class SharedHistoryStore extends SnapshotStore {
     return this.transaction(async index => {
       const current = index.sessions.find(s => s.id === snapshot.id);
       if (!current) {
-        if (!snapshot.stored && !index.deleted.includes(snapshot.id)) return structuredClone(snapshot);
+        if (!snapshot.stored && !index.deleted.includes(snapshot.id)) return validateSnapshot(structuredClone(snapshot));
         throw new Error('共享会话已被删除，请刷新历史列表。');
       }
       const data = await this.raw.read(current, this.key(current));
-      this.seen.set(data.id, data.revision);
+      if(this.leases.has(data.id))this.seen.set(data.id, data.revision);
       return {...data, sessionNumber:current.sessionNumber};
     });
   }
@@ -105,15 +104,6 @@ export class SharedHistoryStore extends SnapshotStore {
       this.seen.set(saved.id, saved.revision);
       if(current) await this.raw.remove(this.key(current));
       return saved;
-    });
-  }
-  /** Migration never overwrites newer shared history or revives deleted conversations. */
-  async import(snapshot: Snapshot) {
-    await this.transaction(async index => {
-      if (index.sessions.some(s => s.id === snapshot.id) || index.deleted.includes(snapshot.id)) return;
-      const version = {...snapshot, sessionNumber:allocateSessionNumber(index,snapshot), revision:randomUUID()};
-      const saved = await this.raw.write(version, this.key(version));
-      index.sessions.push(saved); await this.commit(index);
     });
   }
   async remove(id: string) {

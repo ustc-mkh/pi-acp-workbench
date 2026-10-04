@@ -27,7 +27,10 @@ vi.mock('vscode', () => ({
     executeCommand: async () => {},
   },
 }));
-import { activate } from '../src/extension';
+import { activate as activateExtension } from '../src/extension';
+import {AgentProcess} from '../src/agent';
+// Exercise the shared UI controller with an injected ACP transport. Service lifetime is tested separately.
+const activate=(context:any)=>activateExtension(context,options=>new AgentProcess(options));
 let context: any;
 beforeEach(() => {
   host.config = { sharedHistory: false, command: process.execPath, args: [resolve('test/mock-agent.mjs')] }; host.stored.clear(); host.terminals = [];
@@ -268,7 +271,7 @@ it('queues history deletion after in-flight snapshot writes', async () => {
   expect(host.stored.get('history')).toBeUndefined();
   expect(host.provider.history).toEqual([]);
 });
-it('migrates and shares history across hosts, views occupied sessions, and hands off after release', async () => {
+it('shares history without importing local records across hosts, views occupied sessions, and hands off after release', async () => {
   const root = mkdtempSync(resolve(tmpdir(),'pi-controller-shared-'));
   host.provider.dispose(); await host.provider.persistence.pending;
   host.home=root; host.config.sharedHistory=true;
@@ -278,13 +281,13 @@ it('migrates and shares history across hosts, views occupied sessions, and hands
   const other = new Map<string,unknown>();
   try {
     activate(context); first=host.provider; await first.historyReady;
-    expect(first.history.map((s:any)=>s.id)).toContain('legacy');
-    expect(host.stored.get('sharedHistoryMigrated')).toBe(true);
+    expect(first.history).toEqual([]);
+    expect(host.stored.get('history')).toEqual([legacy]);
     await first.perform({type:'new'}); await first.perform({type:'send',text:'shared message'});
     expect(first.snapshot().status).toBe('ready');
     activate({subscriptions:[],workspaceState:{get:(k:string,d:unknown)=>other.has(k)?other.get(k):d,update:async(k:string,v:unknown)=>other.set(k,structuredClone(v))}} as any);
     second=host.provider; await second.historyReady;
-    expect(second.history.map((s:any)=>s.id)).toEqual(expect.arrayContaining(['legacy','test-session']));
+    expect(second.history.map((s:any)=>s.id)).toEqual(['test-session']);
     await second.perform({type:'resume',id:'test-session'});
     expect(second.snapshot()).toMatchObject({readOnly:true,status:'disconnected'});
     expect(second.snapshot().entries.some((e:any)=>e.text==='shared message')).toBe(true);
@@ -316,7 +319,8 @@ it('does not create a session on ready, reconnect, or send; only explicit new do
   expect(host.provider.snapshot().sessionId).toBe(id);
 });
 it('restores on opening and retries the same failed history without falling back to new', async () => {
-  host.provider.history = [{id:'existing',cwd:process.cwd(),entries:[],contextComplete:true,title:'existing',updated:1}];
+  host.stored.set('activeSession','existing');
+  host.provider.history = [{harness:'pi',id:'existing',cwd:process.cwd(),entries:[],contextComplete:true,title:'existing',updated:1}];
   host.config.args = [resolve('test/mock-agent.mjs'), 'v2'];
   const start = vi.spyOn(host.provider, 'start');
   await host.provider.perform({type:'ready'});
@@ -459,7 +463,7 @@ it('branches at the native node, keeps historical settings, and never sends a te
   await edit('branchMessage', selected.id);
   const branch = host.provider.snapshot();
   expect(branch.error).toBeUndefined(); expect(branch.sessionId).not.toBe(old.sessionId);
-  expect(branch.entries).toEqual(old.entries.slice(0, 2)); expect(branch.contextPending).toBe(false); expect(branch.usage).toBeUndefined();
+  expect(branch.entries).toEqual(old.entries.slice(0, 2)); expect(branch.usage).toBeUndefined();
   expect(branch.configs.map((c: any) => c.currentValue)).toEqual(['default', 'low']);
   expect((host.stored.get('history') as any[]).find(s => s.id === old.sessionId).entries.some((e: any) => e.text === 'excluded-later')).toBe(true);
   expect(wire().filter(r => r.method === 'session/prompt')).toHaveLength(2);
@@ -470,7 +474,6 @@ it('branches at the native node, keeps historical settings, and never sends a te
   const prompt = wire().filter(r => r.method === 'session/prompt').at(-1).params;
   expect(prompt.sessionId).toBe(branch.sessionId);
   expect(prompt.prompt).toEqual([{type:'text',text:'continue-here'}]);
-  expect(host.provider.snapshot().contextPending).toBe(false);
   await host.provider.perform({ type: 'send', text: 'one-more' });
   expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt).toEqual([{ type: 'text', text: 'one-more' }]);
 });
@@ -509,20 +512,6 @@ it('preserves the visible transcript across native load and never re-injects it 
   const seed = wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text;
   expect(seed).toBe('continue');
 });
-it('supports legacy unsent reconstructed snapshots across restart and blocks slash commands until synchronized', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'retain-after-restart' });
-  host.provider.state.contextPending=true;await host.provider.save(); // Legacy pre-native-fork snapshot.
-  const branch = host.provider.snapshot();
-  context.subscriptions.forEach((d: any) => d.dispose()); context.subscriptions = []; activate(context);
-  await host.provider.perform({ type: 'resume', id: branch.sessionId });
-  const resumed = host.provider.snapshot();
-  expect(resumed.sessionId).not.toBe(branch.sessionId); expect(resumed.entries).toEqual(branch.entries);
-  await host.provider.perform({ type: 'send', text: '/compact' });
-  expect(host.provider.snapshot().error).toContain('先发送普通消息');
-  expect(wire().filter(r => r.method === 'session/prompt')).toHaveLength(1);
-  await host.provider.perform({ type: 'send', text: 'continue' });
-  expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text).toContain('retain-after-restart');
-});
 it('retains the original session and its usable agent when native forking fails', async () => {
   await contextAgent('context-native-fail'); await host.provider.perform({ type: 'send', text: 'original' });
   await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
@@ -532,20 +521,6 @@ it('retains the original session and its usable agent when native forking fails'
   expect(host.provider.snapshot().error).toBeTruthy();
   await host.provider.perform({ type: 'send', text: 'still-usable' });
   expect(host.provider.snapshot().error).toBeUndefined(); expect(host.provider.snapshot().status).toBe('ready');
-});
-it('recovers a legacy seeded-prompt failure in another fresh session', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'retained' });
-  host.provider.state.contextPending=true;await host.provider.save(); // Legacy unsynchronized context.
-  const branch = host.provider.snapshot();
-  await host.provider.perform({ type: 'send', text: 'crash' });
-  expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', contextPending: true });
-  await host.provider.perform({ type: 'connect' });
-  const resumed = host.provider.snapshot();
-  expect(resumed.sessionId).not.toBe(branch.sessionId); expect(resumed.contextPending).toBe(true);
-  await host.provider.perform({ type: 'send', text: 'try-again' });
-  const sent = wire().filter(r => r.method === 'session/prompt').at(-1).params;
-  expect(sent.sessionId).toBe(resumed.sessionId); expect(sent.prompt[0].text).toContain('retained');
-  expect(host.provider.snapshot().contextPending).toBe(false);
 });
 it('blocks stale branch actions, branching during generation, and unlocatable display messages', async () => {
   await contextAgent('context-native'); await host.provider.perform({ type: 'send', text: 'original' });
@@ -560,17 +535,6 @@ it('blocks stale branch actions, branching during generation, and unlocatable di
   host.provider.state.entries.push({id:'unmapped',role:'user',text:'not in native history'});
   await edit('branchMessage', 'unmapped');
   expect(host.provider.snapshot().sessionId).toBe(original.sessionId); expect(host.provider.snapshot().error).toContain('无法唯一');
-});
-it('keeps cancelled legacy synchronization pending instead of assuming the peer retained it', async () => {
-  await contextAgent(); await host.provider.perform({ type: 'send', text: 'retained-before-cancel' });
-  host.provider.state.contextPending=true;await host.provider.save(); // Legacy unsynchronized context.
-  const turn = host.provider.perform({ type: 'send', text: 'wait' });
-  await vi.waitFor(() => expect(wire().filter(r => r.method === 'session/prompt')).toHaveLength(2));
-  await host.provider.perform({ type: 'cancel' }); await turn;
-  expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', contextPending: true });
-  await host.provider.perform({ type: 'connect' });
-  await host.provider.perform({ type: 'send', text: 'continue' });
-  expect(wire().filter(r => r.method === 'session/prompt').at(-1).params.prompt[0].text).toContain('retained-before-cancel');
 });
 it('never falls back to large textual reconstruction when an adapter lacks native fork support', async () => {
   await contextAgent();
@@ -662,7 +626,6 @@ it('persists custom prices, rejects invalid numbers and restores defaults',async
 });
 it('copies original full Markdown even when a compacted checkpoint exists',async()=>{
  const vscode=await import('vscode');await contextAgent();await host.provider.perform({type:'send',text:'Original equation $x^2$'});
- host.provider.checkpoints=[{count:2,hash:'irrelevant',text:'short summary',source:'pi',id:'cp'}];
  await host.provider.perform({type:'copyConversation'});
  expect(vscode.env.clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining('Original equation $x^2$'));
  expect(vscode.env.clipboard.writeText).not.toHaveBeenLastCalledWith(expect.stringContaining('short summary'));
@@ -734,7 +697,7 @@ it('persists successful selections immediately and inherits them after restart e
   await host.provider.perform({type:'new'});
   expect(host.provider.snapshot().configs.map((c:any)=>c.currentValue)).toEqual(['other','high']);
 });
-it('inherits legacy reasoning modes when configOptions does not provide thinking', async () => {
+it('inherits ACP reasoning modes when configOptions does not provide thinking', async () => {
   await contextAgent('context-legacy');
   await host.provider.perform({type:'mode',value:'high'});
   await host.provider.perform({type:'new'});
@@ -791,42 +754,24 @@ it('warns about unavailable inherited values without retrying or silently creati
   expect(wire().slice(before).filter(r=>r.method==='session/new')).toHaveLength(1);
 });
 
-it('publishes desktop completion only when Telegram and history persistence are enabled', async () => {
-  const publish=vi.spyOn(host.provider.telegramEvents,'write').mockResolvedValue(undefined);
-  await host.provider.perform({type:'new'});
-  await host.provider.perform({type:'send',text:'local only'});
-  expect(publish).not.toHaveBeenCalled();
-  host.config['telegram.desktopNotifications']=true;
-  await host.provider.perform({type:'send',text:'notify phone'});
-  expect(publish.mock.calls.at(-1)?.[0]).toMatchObject({sessionId:'test-session',status:'completed',text:'数学 $x^2$'});
-  publish.mockClear();host.config.persistHistory=false;
-  await host.provider.perform({type:'send',text:'do not persist or notify'});
-  expect(publish).not.toHaveBeenCalled();
-});
-
-it('gives phone control priority, queues behind the desktop turn and preserves the desktop attachment draft',async()=>{
- await contextAgent();
- const provider=host.provider,id=provider.snapshot().sessionId;
- await provider.desktopServer.dispose();provider.desktopServer={bind(){},dispose:async()=>{}};
- // Exercise the desktop endpoint against an existing mock ACP process without a second process.
- provider.activeLease=id;
- const desktop=provider.perform({type:'send',text:'wait'});
- await vi.waitFor(()=>expect(provider.snapshot().status).toBe('busy'));
- await provider.remoteControl({sessionId:id,action:'takeover'},()=>{});
- expect(provider.snapshot().mobileControlled).toBe(true);
- await provider.perform({type:'send',text:'blocked desktop'});
- expect(provider.snapshot().entries.some((e:any)=>e.text==='blocked desktop')).toBe(false);
- provider.state.attachments=[{id:'draft',name:'draft',uri:'file:///draft',text:'do not send from phone'}];
- const phone=provider.remoteControl({sessionId:id,action:'prompt',text:'phone message'},()=>{});
- await provider.remoteControl({sessionId:id,action:'cancel'},()=>{});
- await desktop;expect((await phone).status).toBe('cancelled');
- const posted=vi.fn(async()=>true);provider.view={webview:{postMessage:posted}};
- const reply=await provider.remoteControl({sessionId:id,action:'prompt',text:'phone message'},()=>{});
- expect(posted.mock.calls.some((args:any)=>args[0]?.type==='sent')).toBe(false);provider.view=undefined;
- expect(reply.status).toBe('completed');expect(reply.text).toContain('数学');
- expect(provider.snapshot().attachments[0].id).toBe('draft');
- const entry=provider.snapshot().entries.find((e:any)=>e.role==='user'&&e.text==='phone message');
- expect(entry.contextBlocks).toEqual([{type:'text',text:'phone message'}]);
- await provider.perform({type:'takeDesktopControl'});expect(provider.snapshot().mobileControlled).toBe(false);
- provider.activeLease=undefined;
-});
+it('uses the production remote Pi client and receives phone turns without owning a process',async()=>{
+  const {SessionService}=await import('../src/session-service');const {SessionServer,SessionClient}=await import('../src/session-wire');
+  host.provider.dispose();await host.provider.persistence.pending;
+  const root=mkdtempSync(resolve(tmpdir(),'pi-remote-controller-')),socket=resolve(root,'service','sessions.sock');
+  host.config={sharedHistory:false,serviceSocket:socket};host.stored.clear();
+  let server:InstanceType<typeof SessionServer>;
+  const service=new SessionService(root,{workspaces:{test:process.cwd()},command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context-native'],env:{PI_TEST_AUDIT:resolve(root,'audit.jsonl')},maxWorkers:1,idleMs:900000},event=>server.broadcast(event),()=>{});
+  const phone=new SessionClient(socket);
+  try{
+    await service.initialize();server=new SessionServer(socket,(m,p,id)=>service.handle(m,p,id));await server.listen();
+    activateExtension(context);await host.provider.historyReady;await host.provider.perform({type:'new'});
+    expect(host.provider.snapshot().status).toBe('ready');const id=host.provider.snapshot().sessionId;
+    await phone.call('prompt',{sessionId:id,prompt:[{type:'text',text:'from phone'}]},undefined,0);
+    await vi.waitFor(()=>expect(host.provider.snapshot().entries.some((e:any)=>e.text==='from phone')).toBe(true));
+    expect(host.provider.snapshot().status).toBe('ready');
+    const turn=phone.call('prompt',{sessionId:id,prompt:[{type:'text',text:'wait'}]},undefined,0);
+    await vi.waitFor(()=>expect(host.provider.snapshot().status).toBe('busy'));
+    await host.provider.perform({type:'cancel'});expect((await turn).stopReason).toBe('cancelled');
+    expect(host.provider.agent.child).toBeUndefined();
+  }finally{host.provider.dispose();phone.dispose();await server!.dispose();await service.dispose();rmSync(root,{recursive:true,force:true});}
+},15000);

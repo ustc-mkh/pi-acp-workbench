@@ -10,7 +10,7 @@ it('paginates cached usage and invalidates it on append and truncation', async (
   const line = (id: number) => JSON.stringify({id:String(id),type:'message',timestamp:Date.now(),message:{usage:{input:1,output:2}}})+'\n';
   try {
     await writeFile(sessionFile, Array.from({length:501},(_,i)=>line(i)).join(''));
-    const session = {sessionId:'one', proc:{getState:async()=>({sessionFile,model:{provider:'test',id:'model'}}),getMessages:async()=>({messages:[]}),getAvailableModels:async()=>({models:[]})}};
+    const session = {sessionId:'one', proc:{request:async()=>({success:true,data:{entries:[],leafId:null}}),getState:async()=>({sessionFile,model:{provider:'test',id:'model'}}),getMessages:async()=>({messages:[]}),getAvailableModels:async()=>({models:[]})}};
     class Base { sessions = new Map([['one',session]]); }
     const Agent = enhancePiAgent(Base, undefined), agent = new Agent();
     const inspect = (cursor?:number) => agent.extMethod('_pi_workbench/inspect',{sessionId:'one',cursor});

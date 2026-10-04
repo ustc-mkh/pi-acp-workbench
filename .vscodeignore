@@ -11,3 +11,7 @@
 !docs/telegram-usage.md
 !examples/telegram.json
 !examples/pi-telegram.service
+
+!docs/session-service.md
+!examples/sessions.json
+!examples/pi-sessions.service

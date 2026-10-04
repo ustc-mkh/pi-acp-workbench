@@ -1,5 +1,5 @@
 import type * as acp from '@agentclientprotocol/sdk';
-import type { AgentProcess } from './agent';
+import type { Agent as AgentProcess } from './remote-agent';
 import type { Snapshot } from './shared';
 import { sessionSelectors, type SessionPreference, type SessionSelector } from './session-settings';
 
