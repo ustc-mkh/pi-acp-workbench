@@ -58,6 +58,9 @@ const button = (text: string, action: () => void, className?: string) => {
 const slashCommands = new SlashCommands(input,el('commands'),()=>{saveDraft();updateSend();});
 function submit() {
   if ((!input.value.trim()&&!state?.attachments.some(a=>a.kind==='image')) || state?.status !== 'ready' || sending || pasting) return;
+  followBottom = true;
+  el('transcript').scrollTop = el('transcript').scrollHeight;
+  el('bottom').hidden = true;
   sending = true; send({ type: 'send', text: input.value });
 }
 input.addEventListener('keydown', event => {

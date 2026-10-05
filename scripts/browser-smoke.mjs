@@ -81,8 +81,13 @@ try {
   await page.screenshot({ path: resolve(artifacts, 'preview-light.png') });
   state.preview = false; state.status = 'ready';
   await emit(state);
+  await page.locator('#transcript').evaluate(node=>{node.scrollTop=0;});
+  await page.waitForTimeout(100);
+  assert(await page.locator('#bottom').isVisible());
   await page.locator('#input').fill('推导这个公式'); await page.locator('#input').press('Enter');
   assert((await page.evaluate(() => window.messages)).some(m => m.type === 'send' && m.text === '推导这个公式'));
+  assert(await page.locator('#transcript').evaluate(node=>node.scrollHeight-node.clientHeight-node.scrollTop<2));
+  assert(await page.locator('#bottom').isHidden());
   await page.evaluate(() => window.postMessage({ type: 'sent' }, '*')); await page.waitForTimeout(40); assert.equal(await page.locator('#input').inputValue(), '');
   state.status = 'busy'; state.entries = [{ id: 'stream', role: 'assistant', text: '$$\\frac{1}' }]; await emit(state);
   state.entries[0] = {...state.entries[0], text:state.entries[0].text + '{2}$$'}; await emit(state); assert.equal(await page.locator('.katex').count(), 1);
@@ -103,6 +108,9 @@ try {
   assert.equal(await page.locator('.activity-body .turn-diff').count(),0);
   await page.getByText('查看总 Diff',{exact:true}).click();
   assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='diff'&&m.id==='turn-diff'&&m.index===-1));
+  assert.equal(await page.locator('.turn-diff-files').evaluate(node=>node.open),false);
+  assert(await page.locator('.turn-diff-notes').isVisible());
+  await page.locator('.turn-diff-files > summary').click();
   await page.locator('.turn-diff-file > summary').click();
   await page.getByText('在编辑器中对比',{exact:true}).click();
   assert((await page.evaluate(()=>window.messages)).some(m=>m.type==='diff'&&m.id==='turn-diff'&&m.index===0));

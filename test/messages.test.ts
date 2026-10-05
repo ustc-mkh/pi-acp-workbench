@@ -18,7 +18,10 @@ it('keeps the final turn diff visible after the answer and outside collapsed act
 it('renders patches lazily as text and opens the saved before/after comparison',()=>{
  const send=vi.fn(),node=createMessageRenderer(text=>text,()=> 'session',send)(summary);
  expect(node.querySelector('pre')).toBeNull();expect(node.querySelector('img')).toBeNull();
- const file=node.querySelector('details')!;file.open=true;file.dispatchEvent(new Event('toggle'));
+ const group=node.querySelector<HTMLDetailsElement>('.turn-diff-files')!;
+ expect(group.open).toBe(false);group.open=true;
+ const file=group.querySelector<HTMLDetailsElement>('.turn-diff-file')!;file.open=true;file.dispatchEvent(new Event('toggle'));
+ group.open=false;expect(group.open).toBe(false);
  expect(file.querySelector('script')).toBeNull();expect(file.querySelector('pre')?.textContent).toContain('<script>unsafe</script>');
  expect(file.querySelector('.diff-add')).not.toBeNull();expect(file.querySelector('.diff-remove')).not.toBeNull();
  file.querySelector('button')!.click();expect(send).toHaveBeenCalledWith({type:'diff',id:'changes',index:0});
@@ -30,10 +33,11 @@ it('does not call unavailable or partial results a clean workspace',()=>{
  const partial=render({...summary,diff:{status:'partial',files:[],warnings:['files omitted']}});
  expect(partial.textContent).toContain('已采集范围内');
 });
-it('keeps empty results and scope notes collapsed by default',()=>{
+it('shows empty results and scope notes without a disclosure',()=>{
  const node=createMessageRenderer(text=>text,()=>undefined,()=>{})({...summary,diff:{status:'complete',files:[],warnings:['净变化，不是回滚点']}});
- const notes=node.querySelector<HTMLDetailsElement>('.turn-diff-notes')!;
- expect(notes.open).toBe(false);
+ const notes=node.querySelector('.turn-diff-notes')!;
+ expect(notes.tagName).toBe('DIV');
+ expect(node.querySelector('details')).toBeNull();
  expect(notes.textContent).toContain('本轮未检测到文件净变化。');
  expect(notes.textContent).toContain('净变化，不是回滚点');
 });

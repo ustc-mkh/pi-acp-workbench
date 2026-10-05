@@ -158,6 +158,10 @@ export class SessionService {
     try {
       await agent.initialize();
       const session=await agent.createSession(r.snapshot.id);
+      // A freshly spawned adapter can report defaults, especially for empty sessions.
+      // Restore the persisted pair before publishing state or accepting a prompt.
+      const warning=await applyPreferences(agent,session,modelPreferences(r.state));
+      if(warning)r.state.entries.push({id:nextId(),role:'notice',text:warning});
       r.state.configs=session.configOptions||r.state.configs;r.state.modes=session.modes||r.state.modes;r.replay=false;
       return agent;
     } catch(error) { agent.dispose();throw error; }

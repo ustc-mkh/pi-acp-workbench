@@ -61,7 +61,9 @@ export class SharedHistoryStore extends SnapshotStore {
     } finally { await rm(temp, {force:true}); }
   }
   async list(): Promise<Snapshot[]> {
-    return this.transaction(async index => index.sessions.sort((a,b) => b.updated-a.updated));
+    // index.json is committed by atomic rename. Readers see a complete committed
+    // version without waiting behind transcript I/O or cross-process writer locks.
+    return (await this.index()).sessions.sort((a,b) => b.updated-a.updated);
   }
   async claim(id: string) {
     if (this.leases.has(id)) { if(this.lost.has(id)) throw new Error('共享会话锁已失效，请重新连接。'); return; }

@@ -49,6 +49,20 @@ it('Pi service shares selections across directories and restart without changing
   await service.handle('prompt',{sessionId:first.id,prompt:[{type:'text',text:'hello'}],source:'telegram'},'phone-turn');
   expect(await preferences.read('pi')).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
 },15000);
+it('restores the saved pair when a new worker returns adapter defaults',async()=>{
+  const root=await directory(),preferences=new SessionPreferences(join(root,'preferences'));
+  await preferences.save('pi',settings());
+  // Non-native mock deliberately returns default/low whenever loaded in a new process.
+  const config={command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000};
+  let service=new SessionService(root,config,()=>{},()=>{});cleanups.push(()=>service.dispose());await service.initialize();
+  const first=await service.handle('create',{cwd:root},'create-first') as Snapshot;
+  expect(first.configs?.map(c=>c.currentValue)).toEqual(['other','high']);
+  await service.dispose();service=new SessionService(root,config,()=>{},()=>{});await service.initialize();
+  await service.handle('prompt',{sessionId:first.id,prompt:[{type:'text',text:'hello'}],source:'desktop'},'use-first');
+  expect(await preferences.read('pi')).toEqual([{kind:'model',value:'other'},{kind:'thinking',value:'high'}]);
+  const second=await service.handle('create',{cwd:root},'create-second') as Snapshot;
+  expect(second.configs?.map(c=>c.currentValue)).toEqual(['other','high']);
+},15000);
 it('Pi service warns about unavailable saved values without destroying the saved pair',async()=>{
   const root=await directory(),preferences=new SessionPreferences(join(root,'preferences'));await preferences.save('pi',settings('removed','missing'));
   const service=new SessionService(root,{command:process.execPath,args:[resolve('test/mock-agent.mjs'),'context'],maxWorkers:1,idleMs:900000},()=>{},()=>{});

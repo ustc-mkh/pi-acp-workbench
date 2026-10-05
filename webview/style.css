@@ -27,7 +27,7 @@ html::-webkit-scrollbar-button,body::-webkit-scrollbar-button,body *::-webkit-sc
 @supports not selector(::-webkit-scrollbar){html,body,body *{scrollbar-width:thin!important;scrollbar-color:color-mix(in srgb,var(--fg) 22%,transparent) transparent!important}}
 .turn-diff{border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--vscode-textCodeBlock-background,var(--input));font-size:12px}
 .turn-diff-header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}.turn-diff-header strong{font-weight:500}
-.turn-diff-notes{margin-top:8px;color:var(--muted);font-size:11px}.turn-diff-notes>summary{cursor:pointer}
+.turn-diff-notes{margin-top:8px;color:var(--muted);font-size:11px}.turn-diff-files>summary{cursor:pointer;padding-top:8px}
 .turn-diff-file{border-top:1px solid var(--border);margin-top:8px;padding-top:4px}.turn-diff-file>summary{padding:7px 0;cursor:pointer;overflow-wrap:anywhere;font-family:var(--vscode-editor-font-family,monospace);font-size:11px}
 .turn-diff-patch{overflow:auto;max-height:400px;max-width:100%;padding:8px;line-height:1.6;font-size:11px;tab-size:4}.turn-diff-patch span{display:block;min-width:max-content;white-space:pre}
 .diff-add{background:var(--vscode-diffEditor-insertedTextBackground,#2b832b33)}.diff-remove{background:var(--vscode-diffEditor-removedTextBackground,#bb444433)}.diff-hunk{color:var(--vscode-textLink-foreground,#84b8eb)}.diff-warning{color:var(--muted);font-size:11px;line-height:1.6;margin:8px 0 0}

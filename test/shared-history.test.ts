@@ -23,6 +23,18 @@ it('shares all histories without losing concurrent additions or pruning to 20', 
   expect((await b.read(index)).entries[0]).toMatchObject({text:'hello'});
   expect((a as any).seen.size).toBe(0);expect((b as any).seen.size).toBe(0);
 });
+it('lists the committed index while a writer holds the transaction queue and lock',async()=>{
+  const {a,b}=await pair();await seed(a,snapshot('one'));
+  let release!:()=>void,started!:()=>void;
+  const blocked=new Promise<void>(resolve=>{release=resolve;});
+  const entered=new Promise<void>(resolve=>{started=resolve;});
+  const writing=(a as any).transaction(async()=>{started();await blocked;});
+  await entered;
+  try {
+    expect(await a.list()).toHaveLength(1);
+    expect(await b.list()).toHaveLength(1);
+  } finally {release();await writing;}
+});
 it('stores identical native IDs from different harnesses independently',async()=>{
   const {a,b}=await pair();
   for(const harness of ['pi','codex','claude'] as const)await seed(a,{...snapshot(localSessionId(harness,'same')),harness});
