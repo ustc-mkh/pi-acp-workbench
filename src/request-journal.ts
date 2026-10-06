@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {mkdir,opendir,readFile,stat} from 'node:fs/promises';
+import {mkdir,opendir,readFile,rm,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {writeAtomicJson} from './atomic-json';
 import type {TaskQueue} from './task-queue';
@@ -96,6 +96,21 @@ export class RequestJournal {
       await recover(interrupted);
       await writeAtomicJson(file,interrupted,true);
       if(r.sessionId&&(!last||last.id===r.id))await writeAtomicJson(this.lastFile(r.sessionId),interrupted,true);
+    }
+    await this.sweep().catch(()=>{});
+  }
+  /** Finished receipts and session markers are diagnostic only; expire them after the retention window. */
+  private async sweep(maxAgeMs=30*86400000) {
+    const cutoff=Date.now()-maxAgeMs;
+    for await(const entry of await opendir(this.directory)) {
+      if(!/^(?:session-)?[a-f0-9]{64}\.json$/.test(entry.name))continue;
+      const file=join(this.directory,entry.name);
+      try {
+        if((await stat(file)).mtimeMs>cutoff)continue;
+        const r=await this.read(file).catch(()=>undefined);
+        if(r?.status==='running')continue;
+        await rm(file,{force:true});
+      } catch {/* keep unreadable files for manual inspection */}
     }
   }
 }

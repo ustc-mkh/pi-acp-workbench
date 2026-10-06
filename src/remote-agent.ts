@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 import type * as acp from '@agentclientprotocol/sdk';
 import type {AgentOptions,AgentProcess} from './agent';
 import {SessionClient} from './session-wire';
@@ -7,6 +8,7 @@ export type Agent=Pick<AgentProcess,'harness'|'info'|'isClosed'|'initialize'|'cr
 export class RemoteAgent implements Agent {
  readonly harness='pi' as const;info?:acp.InitializeResponse;isClosed=false;latest?:ServiceState;
  private client:SessionClient;private id?:string;
+ private pendingIds=new WeakMap<Promise<unknown>,string>();
  constructor(private options:AgentOptions,private state:(value:ServiceState)=>void, socket?:string){
   this.client=new SessionClient(socket,event=>{
    if(event.type==='state'&&event.snapshot.id===this.id){this.latest=event;this.state(event);}
@@ -23,8 +25,14 @@ export class RemoteAgent implements Agent {
  }
  request<Method extends acp.AgentRequestMethod>(method:Method,params:acp.AgentRequestParamsByMethod[Method]):Promise<acp.AgentRequestResponsesByMethod[Method]>;
  request<Response=unknown, Params=unknown>(method:string,params?:Params):Promise<Response>;
- request(method:string,params:any={}):Promise<any>{return this.client.call('request',{sessionId:params.sessionId,method,params},undefined,0);}
- async withTimeout<T>(request:Promise<T>,ms=30000):Promise<T>{let timer:NodeJS.Timeout|undefined;try{return await Promise.race([request,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error('服务操作仍未完成，请查看会话状态。')),ms);})]);}finally{clearTimeout(timer);}}
+ request(method:string,params:any={}):Promise<any>{
+  const id=randomUUID(),result=this.client.call('request',{sessionId:params.sessionId,method,params},id,0);
+  this.pendingIds.set(result,id);return result;
+ }
+ async withTimeout<T>(request:Promise<T>,ms=30000):Promise<T>{let timer:NodeJS.Timeout|undefined;try{return await Promise.race([request,new Promise<T>((_,reject)=>{timer=setTimeout(()=>{
+  const id=this.pendingIds.get(request);if(id)this.client.cancelPending(id);
+  reject(new Error('服务操作仍未完成，请查看会话状态。'));
+ },ms);})]);}finally{clearTimeout(timer);}}
  prompt(sessionId:string,prompt:acp.ContentBlock[]){return this.client.call<acp.PromptResponse>('prompt',{sessionId,prompt},undefined,0);}
  async cancel(sessionId:string){await this.client.call('cancel',{sessionId});}
  permission(permissionId:string,optionId?:string){return this.client.call<boolean>('permission',{sessionId:this.id,permissionId,optionId});}

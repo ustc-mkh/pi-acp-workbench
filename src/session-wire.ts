@@ -15,12 +15,16 @@ function reader(socket:Socket,receive:(value:any,bytes:number)=>void,adjust:(del
     if(!adjust(added)||bytes>LIMIT){socket.destroy(new Error('会话消息缓冲已满'));release();return;}
     buffer+=data;
     let end;while((end=buffer.indexOf('\n'))>=0){
-      const line=buffer.slice(0,end),size=Buffer.byteLength(line)+1;buffer=Buffer.from(buffer.slice(end+1)).toString('utf8');bytes-=size;adjust(-size);
+      const line=buffer.slice(0,end),size=Buffer.byteLength(line)+1;buffer=buffer.slice(end+1);bytes-=size;adjust(-size);
       try{receive(JSON.parse(line),size);}catch{socket.destroy(new Error('会话协议无效'));release();return;}
       if(socket.destroyed){release();return;}
     }
     if(!buffer){clearTimeout(timer);timer=undefined;}
-    else if(!timer){timer=setTimeout(()=>socket.destroy(new Error('会话消息未完整发送')),WIRE_LIMITS.partialMs);timer.unref();}
+    else {
+      // Detach the remainder once per chunk so V8 slices cannot retain the whole source.
+      buffer=Buffer.from(buffer).toString('utf8');
+      if(!timer){timer=setTimeout(()=>socket.destroy(new Error('会话消息未完整发送')),WIRE_LIMITS.partialMs);timer.unref();}
+    }
   });
 }
 /** Responses are fragmented, requests remain single bounded frames. One transfer per socket. */
@@ -65,6 +69,8 @@ export class SessionClient {
       const timer=timeout?setTimeout(()=>{this.pending.delete(id);reject(new Error(`会话服务请求超时（${method}，等待 ${timeout/1000} 秒）；请查看状态，不会自动重发。`));},timeout):undefined;
       this.pending.set(id,{resolve,reject,timer});sendBody(this.socket!,body);});
   }
+  /** Free a pending slot after the caller has given up on its result. The service reply is ignored. */
+  cancelPending(id:string){const p=this.pending.get(id);if(!p)return;this.pending.delete(id);clearTimeout(p.timer);p.reject(new Error('会话请求已被客户端放弃，服务端结果将被忽略。'));}
   dispose(){this.closed=true;this.socket?.destroy();}
 }
 interface Outgoing {queue:{body:string;bytes:number}[];bytes:number;writing:boolean;subscriptions:Set<string>}

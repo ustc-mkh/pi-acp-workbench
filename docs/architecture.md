@@ -10,7 +10,7 @@ Telegram Bot → TelegramBridge → TelegramSessions ┘                 ├─ 
 Codex / Claude：ChatProvider → AgentProcess（保留本地运行方式）
 ```
 
-`session-daemon.ts` 是唯一 Pi 进程所有者；`session-service.ts` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。`session-wire.ts` 使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间仅向会话订阅者广播 ACP 增量与生命周期状态。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
+`session-daemon.ts` 是唯一 Pi 进程所有者；`session-service.ts` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。`session-wire.ts` 使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间仅向会话订阅者广播 ACP 增量与生命周期状态。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
 
 默认 3 个工作进程，空闲 15 分钟回收。容量满时排队，空闲进程优先淘汰；回收先终止进程组再释放槽位。新建短暂启动 Pi 取得原生 ID，查看已有历史不启动 Pi。进程组终止与 systemd 控制组兜底互补，详见 [运行与恢复边界](session-service.md)。
 

@@ -97,6 +97,10 @@ cat "$PI_TEST_ROOT/result.json"
 
 发布前执行 `npm run verify`，并执行 `npm run test:native-fork` 验证安装的 Pi 原生树接口；均不发送真实模型任务。
 
+## 会话服务 Contract 测试
+
+`npm run test:contract` 运行 `scripts/service-contract.mjs`：只通过 Unix socket 驱动 daemon 的黑盒协议验证（自带最小 wire 客户端，不 import 服务实现），覆盖方法/参数校验、违规连接隔离、大帧上限、会话编号、事件订阅隔离、授权流转、取消、同 ID 幂等、>512 KiB 分块响应、重启中断防重放、数据目录单例锁与删除语义。规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)；用 `PI_CONTRACT_DAEMON=/path/to/other-daemon` 可对替代实现（如未来的 Rust daemon）跑同一套件。
+
 ## 可选的内存增长检查
 
 `npm run test:memory` 在临时目录使用 `--expose-gc` 运行独立检查，不需要真实 Pi、Bot token 或模型请求，不加入日常默认测试。

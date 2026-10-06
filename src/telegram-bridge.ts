@@ -68,6 +68,11 @@ export class TelegramBridge {
       const updates=await this.api.call<TelegramUpdate[]>('getUpdates',{offset:-1,limit:1,timeout:0,allowed_updates:['message','callback_query']});
       await this.persist(state=>{state.offset=updates.length?updates[updates.length-1].update_id+1:0;}); // First setup never executes pre-configuration commands.
     }
+    try {
+      const known=new Set((await this.host.list()).map(s=>s.id));
+      if(this.data.topics.some(t=>!known.has(t.sessionId)))
+        await this.persist(state=>{state.topics=state.topics.filter(t=>known.has(t.sessionId));});
+    } catch {/* The session service may still be starting; stale bindings stay until the next restart. */}
   }
   async poll() {
     let failures=0;

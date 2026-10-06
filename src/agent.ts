@@ -100,14 +100,17 @@ export class AgentProcess {
     if (process.platform === 'win32') {
       if (!this.exited) spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on('error', () => this.child.kill());
     } else {
-      try { process.kill(-pid, 'SIGTERM'); } catch { /* already gone */ }
+      // Resolve as soon as the group exits; the timer only escalates to SIGKILL.
       this.termination=new Promise<void>(resolve=>{
+        const finish=()=>{clearTimeout(timer);resolve();};
         const timer=setTimeout(()=>{
           try {process.kill(-pid,'SIGKILL');}catch { /* already gone */ }
-          if(this.exited)resolve();else this.child.once('exit',()=>resolve());
+          if(this.exited)finish();else this.child.once('exit',finish);
         },1500);
         timer.unref();
+        if(this.exited)finish();else this.child.once('exit',finish);
       });
+      try { process.kill(-pid, 'SIGTERM'); } catch { /* already gone */ }
     }
   }
 }
