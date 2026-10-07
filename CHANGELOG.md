@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Rust 收敛第二阶段：删除 TS 会话服务、队列、收据、socket 服务端和服务端命令校验；TS 只保留协议客户端/DTO。会话、原生分支、偏好、Diff 和存储失败回归直接启动 Rust 服务，不再依赖 TS 内嵌实现。
+- 补 Rust 收据落盘后取消、写失败不执行、队列溢出、响应隔离及连接/请求资源回收测试；故障注入仅 cfg(test)。内存检查改为真实 Rust RSS/FD/worker 浸泡，CI 执行；Rust 预览缓冲测试覆盖大源文本、Unicode 和过量容量小字符串。
+
 - 开始 Rust 契约单实现迁移：删除 TS daemon 入口及生产构建，npm/systemd 默认只运行 Rust；新增独立 `build:services` 产物与 SHA-256 清单，旧 TS 内部故障测试暂留待覆盖迁移，不宣称已完成源码淘汰。
 - 桌面真实 RemoteAgent 测试改接 Rust；新增两个真实 Rust daemon 的授权/取消/离线 outbox 集成及 queue/journal 故障回归。
 - 修复 Rust Telegram 重启时错误要求可选 `historySent` 存在，保留非法类型拒绝和游标防重放校验。

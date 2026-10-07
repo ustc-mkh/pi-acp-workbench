@@ -93,7 +93,7 @@ cat "$PI_TEST_ROOT/result.json"
 
 ## 独立会话服务回归
 
-迁移期间，`test/telegram-sessions.test.ts` 暂用旧 TS 内部实现与临时 socket、共享存储和真实 ACP mock 子进程，覆盖桌面断开后手机继续、请求去重、队列与进程上限、空闲回收、首次授权生效、重启中断防重放和原生分支设置。原桌面接管、消息删除兼容入口及对应测试已删除；`task-queue.test.ts` 独立验证调度/取消，`request-journal.test.ts` 验证幂等、当前格式校验及写盘后取消边界。控制器测试通过注入 ACP 传输保留 UI/其他 harness 的回归；真实远程 Pi 用例改为启动 Rust daemon，验证 RemoteAgent 的订阅、手机任务与桌面取消。旧 TS 故障测试不等价于 Rust 生产覆盖，迁移清单见 [rust-migration.md](rust-migration.md)。
+`test/rust-sessions.test.ts` 直接启动真实 Rust 会话服务与 ACP mock，覆盖桌面断开后手机继续、并发去重、进程上限/回收、授权、真实文件系统存储失败不执行/不重放、重启收据恢复、原生分支和三种终态的 Diff/outbox。`session-preferences.test.ts` 的服务用例也连接真实 Rust，验证跨目录/重启/恢复偏好。已移除 TS 会话服务与其队列/收据单测，对应边界由 Rust queue/journal 测试验证，包括落盘成功后、执行前取消的确定性注入（仅 cfg(test)，不存在于服务二进制）。控制器真实 RemoteAgent 用例继续验证桌面订阅与手机任务。剩余 Telegram 覆盖迁移见 [rust-migration.md](rust-migration.md)。
 
 发布前执行 `npm run verify`，并执行 `npm run test:native-fork` 验证安装的 Pi 原生树接口；均不发送真实模型任务。
 
@@ -109,12 +109,12 @@ Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键�
 
 `npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。生产发布前还需完整覆盖迁移与长时间浸泡检查。
 
-## 可选的内存增长检查（旧 TS 参考）
+## Rust 内存与资源增长检查
 
-`npm run test:memory` 在临时目录使用 `--expose-gc` 运行独立检查，不需要真实 Pi、Bot token 或模型请求，不加入日常默认测试。
+`npm run test:memory` 预置 1024 份约 64 MiB 的任务收据，启动真实 Rust 服务，执行 1200 次重复请求查询和 150 次 socket 连接/关闭，从 Linux `/proc` 采集服务 RSS、文件描述符与 worker 数量。断开后 FD 回到基线；收据复用和只读状态不启动 worker，后续批次 RSS 不持续增长。不需要真实 Pi、Bot token 或模型请求，CI 会执行。
 
-目前此检查仍针对旧 TS 参考实现，不是 Rust 生产内存验收，待迁移为外部 RSS/FD 检查。它预置 1024 份约 64 MiB 的任务收据，执行 1200 次重复请求查询、150 次 socket 连接/关闭，并向 32 个预览输入共 128 MiB 长文本。每批采集多次显式 GC 后的 JS 堆，检查收据不常驻、预览不保留大字符串、队列/连接/版本缓存回到空状态。此检查验证特定路径的稳定性，不等价于数周生产浸泡测试，也不测量第三方 Pi/模型 SDK 的全部内存行为。
+Rust stream 单测独立验证 32 个预览处理共 128 MiB 源文本后只保留小容量自有缓冲，并验证 Unicode 和预先过量分配的小字符串。检查不等价于数周生产浸泡或第三方 Pi/模型 SDK 的全部内存行为。
 
 `workspace-diff.test.ts` 使用临时 Git 仓库验证只读采集，不修改真实项目的 index/工作树；`messages.test.ts` 与浏览器冒烟覆盖末尾汇总渲染。
 
-`long-running.test.ts` 另外覆盖慢磁盘下的进度合并、IPC/Telegram 队列上限、超过 16 MiB 的 Unicode 历史分块传输、会话订阅隔离、超大响应错误不影响其他连接，以及连接回收。`atomic-json.test.ts` 验证 fsync/rename 顺序和同步失败时不发布文件；服务集成测试验证收据失败不启动 worker、创建/分支去重以及 ID 异内容冲突。这些测试不等价于真实掉电实验。功能回归继续使用 `npm run verify`。
+`long-running.test.ts` 通过真实 Rust 服务覆盖超过 16 MiB 的 Unicode 历史分块传输与订阅隔离；其两个 relay/outbox 参考用例仍待迁移。Rust server 单测验证超大响应隔离、32 连接/128 请求上限及字节/队列回收。`session-client.test.ts` 的 transport-only mock 只验证 TS 客户端超时不重放、晚到结果忽略、序列化/待处理上限与断线分块清理，不实现另一套会话服务。`atomic-json.test.ts` 验证 fsync/rename 顺序和同步失败时不发布文件；服务集成测试验证收据失败不启动 worker、创建/分支去重以及 ID 异内容冲突。这些测试不等价于真实掉电实验。功能回归继续使用 `npm run verify`。

@@ -1,16 +1,15 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, readFile, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, mkdir, symlink, writeFile, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { AgentProcess } from '../src/agent';
-import { SessionService } from '../src/session-service';
-import { SessionServer, SessionClient } from '../src/session-wire';
+import { SessionClient } from '../src/session-wire';
+import { SharedHistoryStore } from '../src/shared-history';
+import { startRustService } from './rust-service';
+import { requestFingerprint, workerPids, readOutbox } from './rust-utils';
 import { TelegramSessions } from '../src/telegram-sessions';
 import { RemoteAgent } from '../src/remote-agent';
 import { createHash } from 'node:crypto';
-import { TelegramEvents } from '../src/telegram-events';
 import { writeAtomicJson } from '../src/atomic-json';
-import { requestFingerprint } from '../src/request-journal';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const cleanup: (() => Promise<unknown> | void)[] = [];
@@ -22,35 +21,26 @@ async function fixture(maxWorkers = 2, idleMs = 900000, mode = 'context') {
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const socket = join(root, 'service', 'sessions.sock'),
     audit = join(root, 'audit.jsonl');
-  let server: SessionServer;
-  const agents: AgentProcess[] = [];
-  const service = new SessionService(
-    root,
-    {
-      command: process.execPath,
-      args: [resolve('test/mock-agent.mjs'), mode],
-      env: { PI_TEST_AUDIT: audit },
-      maxWorkers,
-      idleMs,
-    },
-    (event) => server.broadcast(event),
-    () => {},
-    (options) => {
-      const agent = new AgentProcess(options);
-      agents.push(agent);
-      return agent;
-    },
-  );
-  await service.initialize();
-  server = new SessionServer(socket, (m, p, id) => service.handle(m, p, id));
-  await server.listen();
-  cleanup.push(() => service.dispose());
-  cleanup.push(() => server.dispose());
+  const config = {
+    command: process.execPath,
+    args: [resolve('test/mock-agent.mjs'), mode],
+    env: { PI_TEST_AUDIT: audit },
+    maxWorkers,
+    idleMs,
+  };
+  const service = await startRustService(root, config);
+  cleanup.push(() => service.stop());
+  const restart = async () => {
+    await service.stop();
+    const next = await startRustService(root, config);
+    cleanup.push(() => next.stop());
+    return next;
+  };
   const host = new TelegramSessions({ test: root }, socket);
   cleanup.push(() => host.dispose());
   const client = new SessionClient(socket);
   cleanup.push(() => client.dispose());
-  return { root, service, server, host, client, socket, audit, agents };
+  return { root, service, host, client, socket, audit, restart };
 }
 it('restricts new sessions to canonical workspace roots, rejecting symlink escapes', async () => {
   const { root, socket, client } = await fixture();
@@ -104,7 +94,7 @@ it('shares a running task between desktop and phone; detaching desktop does not 
   await expect(client.call('create', { cwd: '/forbidden' })).rejects.toThrow();
 }, 15000);
 it('deduplicates requests, serializes a session, bounds workers, and reclaims idle Pi', async () => {
-  const { host, client, service, audit, agents } = await fixture(1, 1000);
+  const { host, client, service, audit } = await fixture(1, 1000);
   const a = await host.create(),
     b = await host.create();
   const first = client.call(
@@ -122,16 +112,18 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
     'second',
     0,
   );
-  const duplicate = service.handle(
+  const seenWorkers = await workerPids(service.child.pid!);
+  expect(seenWorkers).toHaveLength(1);
+  const duplicate = service.call(
     'prompt',
     { sessionId: a.id, prompt: [{ type: 'text', text: 'wait' }] },
     'once',
   );
   await expect(
-    service.handle('prompt', { sessionId: b.id, prompt: [{ type: 'text', text: 'wait' }] }, 'once'),
+    service.call('prompt', { sessionId: b.id, prompt: [{ type: 'text', text: 'wait' }] }, 'once'),
   ).rejects.toThrow('请求 ID');
   await expect(
-    service.handle(
+    service.call(
       'prompt',
       { sessionId: a.id, prompt: [{ type: 'text', text: 'different' }] },
       'once',
@@ -145,12 +137,13 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
   expect(
     wire.split('\n').filter((l) => l.includes('session/prompt') && l.includes('"text":"wait"')),
   ).toHaveLength(1);
-  expect((service as any).runtimes.size).toBeLessThanOrEqual(1);
-  await vi.waitFor(() => expect((service as any).runtimes.size).toBe(0), { timeout: 6000 });
-  for (const agent of agents) {
-    const pid = (agent as any).child.pid;
-    if (pid) expect(() => process.kill(pid, 0)).toThrow();
-  }
+  const remaining = await workerPids(service.child.pid!);
+  expect(remaining.length).toBeLessThanOrEqual(1);
+  await vi.waitFor(async () => expect(await workerPids(service.child.pid!)).toEqual([]), {
+    timeout: 6000,
+  });
+  for (const pid of new Set([...seenWorkers, ...remaining]))
+    expect(() => process.kill(pid, 0)).toThrow();
   const before = await readFile(audit, 'utf8');
   await client.call('state', { sessionId: a.id });
   expect(await readFile(audit, 'utf8')).toBe(before);
@@ -179,7 +172,7 @@ it('shares permission tickets and accepts only the first valid response', async 
 }, 15000);
 
 it('marks unfinished durable requests interrupted on restart without re-running tools', async () => {
-  const { root, host, audit } = await fixture();
+  const { root, host, audit, restart } = await fixture();
   const session = await host.create();
   const id = 'interrupted-request';
   await writeAtomicJson(
@@ -194,29 +187,17 @@ it('marks unfinished durable requests interrupted on restart without re-running 
       status: 'running',
     },
   );
-  const recovered = new SessionService(
-    root,
-    {
-      command: process.execPath,
-      args: [resolve('test/mock-agent.mjs'), 'context'],
-      maxWorkers: 1,
-      idleMs: 900000,
-    },
-    () => {},
-    () => {},
-  );
-  cleanup.push(() => recovered.dispose());
   const before = await readFile(audit, 'utf8');
-  await recovered.initialize();
+  const recovered = await restart();
   await expect(
-    recovered.handle(
+    recovered.call(
       'prompt',
       { sessionId: session.id, prompt: [{ type: 'text', text: 'never repeat' }] },
       id,
     ),
   ).rejects.toThrow('不会自动重放');
   expect(await readFile(audit, 'utf8')).toBe(before);
-  expect((await new TelegramEvents(join(root, 'telegram', 'events')).list())[0]).toMatchObject({
+  expect((await readOutbox(root))[0]).toMatchObject({
     status: 'failed',
     sessionId: session.id,
   });
@@ -246,7 +227,7 @@ it('loads native fork settings, preserves source history and leaves separate dur
   const fork: any = await client.call('request', params, 'fork-once', 0);
   const before = await readFile(audit, 'utf8');
   expect(
-    await service.handle(
+    await service.call(
       'request',
       { params: point, method: params.method, sessionId: session.id },
       'fork-once',
@@ -254,7 +235,7 @@ it('loads native fork settings, preserves source history and leaves separate dur
   ).toEqual(fork);
   expect(await readFile(audit, 'utf8')).toBe(before);
   await expect(
-    service.handle(
+    service.call(
       'request',
       { ...params, method: 'session/set_mode', params: { modeId: 'other' } },
       'fork-once',
@@ -268,52 +249,44 @@ it('loads native fork settings, preserves source history and leaves separate dur
   );
 }, 15000);
 
-it('does not start a worker when the initial durable receipt cannot be written', async () => {
-  const { root, service, agents } = await fixture();
-  const write = vi
-    .spyOn((service as any).journal, 'write')
-    .mockRejectedValueOnce(new Error('sync failed'));
-  await expect(service.handle('create', { cwd: root }, 'sync-failure')).rejects.toThrow(
-    'sync failed',
-  );
-  expect(agents).toHaveLength(0);
-  write.mockRestore();
+it('does not start a worker when initial receipt storage is unavailable', async () => {
+  const { root, service, audit } = await fixture();
+  // A real filesystem failure, not a spy on the retired TS journal.
+  const requests = join(root, 'service', 'requests');
+  await rename(requests, requests + '.backup');
+  await writeFile(requests, 'not a directory');
+  await expect(service.call('create', { cwd: root }, 'sync-failure')).rejects.toThrow();
+  expect(await workerPids(service.child.pid!)).toEqual([]);
+  await expect(readFile(audit)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 it('persists create receipts across service restarts and rejects ID reuse for different payloads', async () => {
-  const { root, service, audit } = await fixture();
-  const session = await service.handle('create', { cwd: root }, 'create-once');
+  const { root, service, audit, restart } = await fixture();
+  const session = await service.call('create', { cwd: root }, 'create-once');
   const before = await readFile(audit, 'utf8');
-  const restarted = new SessionService(
-    root,
-    {
-      command: process.execPath,
-      args: [resolve('test/mock-agent.mjs'), 'context'],
-      maxWorkers: 1,
-      idleMs: 900000,
-    },
-    () => {},
-    () => {},
-  );
-  cleanup.push(() => restarted.dispose());
-  await restarted.initialize();
-  expect(await restarted.handle('create', { cwd: root }, 'create-once')).toEqual(session);
+  const restarted = await restart();
+  expect(await restarted.call('create', { cwd: root }, 'create-once')).toEqual(session);
   await expect(
-    restarted.handle('create', { cwd: join(root, 'other') }, 'create-once'),
+    restarted.call('create', { cwd: join(root, 'other') }, 'create-once'),
   ).rejects.toThrow('请求 ID');
   expect(await readFile(audit, 'utf8')).toBe(before);
-  expect(await restarted.list()).toHaveLength(1);
+  expect(await restarted.call('list')).toHaveLength(1);
 }, 10000);
 
 it('never dispatches a prompt if saving its user message fails, and never retries that request ID', async () => {
-  const { host, service, audit } = await fixture();
+  const { root, host, service, audit } = await fixture();
   const session = await host.create();
-  const store = (service as any).store;
-  const save = vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('disk full'));
+  const conversations = join(root, 'history', 'conversations');
+  await rename(conversations, conversations + '.backup');
+  await writeFile(conversations, 'not a directory');
   const params = { sessionId: session.id, prompt: [{ type: 'text', text: 'must not execute' }] };
-  await expect(service.handle('prompt', params, 'disk-failure')).rejects.toThrow('disk full');
-  save.mockRestore();
-  await expect(service.handle('prompt', params, 'disk-failure')).rejects.toThrow('不会自动重放');
+  try {
+    await expect(service.call('prompt', params, 'disk-failure')).rejects.toThrow();
+  } finally {
+    await rm(conversations);
+    await rename(conversations + '.backup', conversations);
+  }
+  await expect(service.call('prompt', params, 'disk-failure')).rejects.toThrow('不会自动重放');
   expect((await readFile(audit, 'utf8')).includes('"method":"session/prompt"')).toBe(false);
 }, 10000);
 
@@ -345,19 +318,24 @@ it.each(['normal', 'wait', 'crash'])(
     const result = await task;
     if (outcome === 'crash') expect(result.error).toBeTruthy();
     else expect(result.error).toBeUndefined();
-    const state = await service.state(session.id),
+    const state = await service.call('state', { sessionId: session.id }),
       entry = state.snapshot.entries.at(-1)!;
     expect(entry.role).toBe('diff');
     if (entry.role !== 'diff') throw new Error('missing diff');
-    expect(entry.diff.files.map((file) => file.path)).toEqual(['change.txt', 'created.txt']);
+    expect(entry.diff.files.map((file: { path: string }) => file.path)).toEqual([
+      'change.txt',
+      'created.txt',
+    ]);
     expect(entry.diff.files[0]).toMatchObject({
       before: 'preexisting dirty contents\n',
       after: 'agent final\n',
       added: 1,
       removed: 1,
     });
-    expect((await (service as any).store.read(state.snapshot)).entries.at(-1)).toEqual(entry);
-    const event = (await new TelegramEvents(join(root, 'telegram', 'events')).list()).at(-1)!;
+    expect(
+      (await new SharedHistoryStore(join(root, 'history')).read(state.snapshot)).entries.at(-1),
+    ).toEqual(entry);
+    const event = (await readOutbox(root)).at(-1)!;
     expect(event.text).toContain('本轮修改');
     expect(event.text).toContain('change.txt');
     expect(await readFile(join(root, '.git/index'))).toEqual(index);
@@ -380,18 +358,12 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
   expect((await host.history(desktop.id)).some((e) => 'text' in e && e.text === 'hello')).toBe(
     true,
   );
-  expect(
-    (await new TelegramEvents(join(root, 'telegram', 'events')).list())[0].inputText,
-  ).toBeUndefined();
+  expect((await readOutbox(root))[0].inputText).toBeUndefined();
   await client.call('prompt', {
     sessionId: desktop.id,
     prompt: [{ type: 'text', text: 'desktop input' }],
   });
-  expect(
-    (await new TelegramEvents(join(root, 'telegram', 'events')).list()).some(
-      (e) => e.inputText === 'desktop input',
-    ),
-  ).toBe(true);
+  expect((await readOutbox(root)).some((e) => e.inputText === 'desktop input')).toBe(true);
   const phone = await host.create(directory);
   expect(phone.cwd).toBe(directory);
   await expect(host.create(file)).rejects.toThrow('工作区不是目录');

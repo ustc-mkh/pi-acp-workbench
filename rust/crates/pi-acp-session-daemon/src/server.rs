@@ -1,5 +1,6 @@
-//! SessionServer port (src/session-wire.ts server half) — docs/service-protocol.md.
-//! Unix listener + per-connection reader/writer with all WIRE_LIMITS enforced.
+//! Session service transport — docs/service-protocol.md.
+//! Unix listener + bounded per-connection reader/writer.
+//! TS parity notes below describe the retired implementation, not a dependency.
 //!
 //! Limits (MUST match): connections 32; inbound line 16 MiB; incomplete inbound
 //! frame 10s destroys socket; global pending 128 ops / 32 MiB buffered request
@@ -113,9 +114,19 @@ struct Shared {
     /// server lifetime — stops the accept loop (TS server.close()).
     shutdown: CancellationToken,
     accept_task: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    response_limit_override: Option<usize>,
 }
 
 impl Shared {
+    fn response_limit(&self) -> usize {
+        #[cfg(test)]
+        if let Some(limit) = self.response_limit_override {
+            return limit;
+        }
+        MAX_RESPONSE_BYTES
+    }
+
     /// TS reader's `adjust(delta)` — global inbound buffered-byte accounting.
     /// Returns false when the added bytes push the total past 32 MiB.
     fn adjust_buffered(&self, delta: isize) -> bool {
@@ -148,7 +159,7 @@ impl Shared {
         let bytes = body.len();
         let per = conn.queued_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
         let global = self.outgoing_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
-        if per > MAX_RESPONSE_BYTES || global > MAX_OUTGOING_BYTES {
+        if per > self.response_limit() || global > MAX_OUTGOING_BYTES {
             conn.queued_bytes.fetch_sub(bytes, Ordering::SeqCst);
             self.outgoing_bytes.fetch_sub(bytes, Ordering::SeqCst);
             self.close_conn(conn);
@@ -163,7 +174,7 @@ impl Shared {
     /// TS send(): encode under 64 MiB; oversize falls back to a fixed error —
     /// but only for {id,…} frames ({event} frames have no id and are dropped).
     fn send(&self, conn: &Arc<Conn>, frame: Value) {
-        match encode(&frame, MAX_RESPONSE_BYTES) {
+        match encode(&frame, self.response_limit()) {
             Some(body) => self.enqueue(conn, body),
             None => {
                 if let Some(id) = frame.get("id").and_then(Value::as_str) {
@@ -638,6 +649,186 @@ mod permission_tests {
     }
 }
 
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixStream;
+    use tokio::sync::Semaphore;
+    use tokio::time::timeout;
+
+    struct Root(PathBuf);
+    impl Root {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("pi-server-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    struct Client {
+        reader: BufReader<OwnedReadHalf>,
+        writer: OwnedWriteHalf,
+    }
+    impl Client {
+        async fn open(path: &std::path::Path) -> Self {
+            let (reader, writer) = UnixStream::connect(path).await.unwrap().into_split();
+            Self {
+                reader: BufReader::new(reader),
+                writer,
+            }
+        }
+        async fn send(&mut self, id: &str, method: &str, params: Value) {
+            self.writer
+                .write_all(
+                    format!("{}\n", json!({"id":id,"method":method,"params":params})).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        async fn reply(&mut self) -> Value {
+            let mut line = String::new();
+            timeout(Duration::from_secs(5), self.reader.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+    }
+    async fn until(check: impl Fn() -> bool) {
+        timeout(Duration::from_secs(5), async {
+            while !check() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversize_errors_are_isolated_and_broadcasts_only_reach_subscribers() {
+        let root = Root::new();
+        let path = root.0.join("s");
+        let mut server = SessionServer::new(
+            path.clone(),
+            Arc::new(|method, _, _, _| {
+                Box::pin(async move {
+                    Ok(if method == "large" {
+                        json!("x".repeat(2048))
+                    } else {
+                        json!("ok")
+                    })
+                })
+            }),
+        );
+        Arc::get_mut(&mut server.shared)
+            .unwrap()
+            .response_limit_override = Some(1024);
+        server.listen().await.unwrap();
+        let mut client = Client::open(&path).await;
+        let mut other = Client::open(&path).await;
+        client
+            .send(
+                "watch",
+                "_watch",
+                json!({"sessionId":"large","enabled":true}),
+            )
+            .await;
+        assert_eq!(client.reply().await["value"], true);
+        other
+            .send(
+                "watch",
+                "_watch",
+                json!({"sessionId":"other","enabled":true}),
+            )
+            .await;
+        other.reply().await;
+        client.send("large", "large", json!({})).await;
+        assert!(client.reply().await["error"]
+            .as_str()
+            .unwrap()
+            .contains("响应超过"));
+        server.broadcast(json!({"type":"state","snapshot":{"id":"large","text":"x".repeat(2048)}}));
+        assert_eq!(client.reply().await["event"]["type"], "serviceError");
+        // If the other subscriber got the broadcast, this would read an event instead.
+        other.send("hello", "hello", json!({})).await;
+        assert_eq!(other.reply().await["value"], "ok");
+        client.send("hello", "hello", json!({})).await;
+        assert_eq!(client.reply().await["value"], "ok");
+        drop((client, other));
+        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        until(|| server.shared.outgoing_bytes.load(Ordering::SeqCst) == 0).await;
+        server.dispose().await;
+    }
+
+    #[tokio::test]
+    async fn bounds_requests_and_connections_and_releases_all_accounting() {
+        let root = Root::new();
+        let path = root.0.join("s");
+        let gate = Arc::new(Semaphore::new(0));
+        let wait = gate.clone();
+        let server = SessionServer::new(
+            path.clone(),
+            Arc::new(move |_, _, _, _| {
+                let gate = wait.clone();
+                Box::pin(async move {
+                    gate.acquire().await.unwrap().forget();
+                    Ok(json!("ok"))
+                })
+            }),
+        );
+        server.listen().await.unwrap();
+        let mut client = Client::open(&path).await;
+        for id in 0..=MAX_PENDING {
+            client.send(&id.to_string(), "hold", json!({})).await;
+        }
+        assert!(client.reply().await["error"]
+            .as_str()
+            .unwrap()
+            .contains("请求队列已满"));
+        assert_eq!(server.shared.pending.load(Ordering::SeqCst), MAX_PENDING);
+        gate.add_permits(MAX_PENDING);
+        for _ in 0..MAX_PENDING {
+            assert_eq!(client.reply().await["value"], "ok");
+        }
+        drop(client);
+        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        until(|| {
+            server.shared.pending.load(Ordering::SeqCst) == 0
+                && server.shared.outgoing_bytes.load(Ordering::SeqCst) == 0
+        })
+        .await;
+        assert_eq!(server.shared.pending_bytes.load(Ordering::SeqCst), 0);
+        assert_eq!(server.shared.buffered_bytes.load(Ordering::SeqCst), 0);
+        let mut clients = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            clients.push(Client::open(&path).await);
+        }
+        until(|| server.shared.conns.lock().unwrap().len() == MAX_CONNECTIONS).await;
+        let mut extra = UnixStream::connect(&path).await.unwrap();
+        assert!(timeout(Duration::from_secs(5), extra.read_u8())
+            .await
+            .unwrap()
+            .is_err());
+        drop(clients);
+        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        let mut partial = UnixStream::connect(&path).await.unwrap();
+        partial.write_all(b"{\"id\":").await.unwrap();
+        until(|| server.shared.buffered_bytes.load(Ordering::SeqCst) == 6).await;
+        drop(partial);
+        until(|| {
+            server.shared.buffered_bytes.load(Ordering::SeqCst) == 0
+                && server.shared.conns.lock().unwrap().is_empty()
+        })
+        .await;
+        server.dispose().await;
+    }
+}
+
 pub struct SessionServer {
     path: PathBuf,
     shared: Arc<Shared>,
@@ -659,6 +850,8 @@ impl SessionServer {
                 outgoing_bytes: AtomicUsize::new(0),
                 shutdown: CancellationToken::new(),
                 accept_task: Mutex::new(None),
+                #[cfg(test)]
+                response_limit_override: None,
             }),
         }
     }
@@ -719,7 +912,7 @@ impl SessionServer {
         if targets.is_empty() {
             return;
         }
-        let body = match encode(&json!({ "event": event }), MAX_RESPONSE_BYTES) {
+        let body = match encode(&json!({ "event": event }), self.shared.response_limit()) {
             Some(body) => body,
             None => match encode(
                 &json!({

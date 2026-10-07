@@ -58,7 +58,7 @@ npm run build        # 启动调试前构建
 
 ## Rust 单实现迁移
 
-生产 TS daemon 入口已删除，不要重新增加 TS 服务构建或隐式回退。服务修改应首先补 Rust 单测或黑盒契约；`npm run test:integration:rust` 使用两个真实 Rust daemon 与模拟 Bot API/ACP worker。旧 TS 内部故障测试暂留，在覆盖迁移后逐项删除，清单见 [迁移进度](docs/rust-migration.md)。
+生产 TS daemon 入口已删除，不要重新增加 TS 服务构建或隐式回退。服务修改应首先补 Rust 单测或黑盒契约；`npm run test:integration:rust` 使用两个真实 Rust daemon 与模拟 Bot API/ACP worker。TS 会话服务及其队列/收据/socket 服务端已删除；旧 Telegram 内部故障测试暂留，在覆盖迁移后逐项删除，清单见 [迁移进度](docs/rust-migration.md)。
 
 ## 提交与评审
 

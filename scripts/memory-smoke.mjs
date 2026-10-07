@@ -18,7 +18,7 @@ try {
     },
   });
   const code = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--expose-gc', file], { stdio: 'inherit' });
+    const child = spawn(process.execPath, [file], { stdio: 'inherit' });
     child.once('error', reject);
     child.once('exit', (code) => resolve(code ?? 1));
   });

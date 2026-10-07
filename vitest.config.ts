@@ -9,6 +9,8 @@ export default defineConfig({
       '**/tsconfig.json',
       '**/vitest.config.*',
       '**/scripts/**',
+      '**/rust/crates/**',
+      '**/rust/Cargo.*',
       '**/test/mock-*.mjs',
       '**/src/{pi-enhancements,pi-native-fork,native-branch}.ts',
       '**/src/{adapter-store,adapter-errors}.ts',

@@ -1,4 +1,4 @@
-//! TaskQueue port (src/task-queue.ts): per-session FIFO ordering + global
+//! TaskQueue: per-session FIFO ordering + global
 //! concurrency budget + epoch invalidation via cancel().
 //!
 //! Semantics to preserve (docs/service-protocol.md §6):
@@ -249,6 +249,33 @@ mod tests {
         assert!(inner.lanes.is_empty());
         assert!(inner.epochs.is_empty());
         drop(inner);
+        queue.close().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_queue_overflow_without_leaking_a_lane_or_slot() {
+        let queue = Arc::new(TaskQueue::new(1, 1));
+        let hold = Arc::new(Semaphore::new(0));
+        let q = queue.clone();
+        let gate = hold.clone();
+        let first = tokio::spawn(async move {
+            q.run("a", |_| async move {
+                gate.acquire().await.unwrap().forget();
+                Ok(())
+            })
+            .await
+        });
+        pending(&queue, 1).await;
+        assert_eq!(
+            queue.run("b", |_| async { Ok(()) }).await.unwrap_err(),
+            "服务排队已满"
+        );
+        assert_eq!(queue.pending_count(), 1);
+        hold.add_permits(1);
+        first.await.unwrap().unwrap();
+        queue.run("b", |_| async { Ok(()) }).await.unwrap();
+        assert_eq!(queue.pending_count(), 0);
+        assert!(queue.inner.lock().unwrap().lanes.is_empty());
         queue.close().await;
     }
 

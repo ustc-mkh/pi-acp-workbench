@@ -1,4 +1,4 @@
-//! RequestJournal port (src/request-journal.ts) — durable request receipts,
+//! RequestJournal — durable request receipts,
 //! idempotent replay, 30-day sweep. Layout per docs/data-formats.md §6:
 //!   requests/<sha256(requestId)>.json           — receipt by request id
 //!   requests/session-<sha256(sessionId)>.json   — last receipt per session
@@ -65,6 +65,11 @@ struct Pending {
 pub struct RequestJournal {
     directory: PathBuf,
     in_flight: Mutex<HashMap<String, Pending>>,
+    // Deterministic durability/cancellation race injection, absent in binaries.
+    #[cfg(test)]
+    after_running_write: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
+    fail_running_write: bool,
 }
 
 /// TS `/^[a-f0-9]{64}$/` — lowercase hex only.
@@ -183,10 +188,9 @@ mod tests {
     #[tokio::test]
     async fn initial_receipt_failure_never_invokes_the_side_effect() {
         let root = Root::new();
-        fs::create_dir_all(&root.0).await.unwrap();
-        let blocked = root.0.join("blocked");
-        fs::write(&blocked, "not a directory").await.unwrap();
-        let journal = RequestJournal::new(blocked);
+        let mut journal = RequestJournal::new(root.0.clone());
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        journal.fail_running_write = true;
         let queue = TaskQueue::new(1, 100);
         let calls = AtomicUsize::new(0);
         assert!(journal
@@ -206,6 +210,92 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(journal.pending_count().await, 0);
         assert_eq!(queue.pending_count(), 0);
+        assert!(journal.get("id").await.unwrap().is_none());
+        journal.fail_running_write = false;
+        journal
+            .run(
+                "id",
+                "create",
+                &json!({"cwd":"/work"}),
+                "",
+                &queue,
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Value::Null)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_durable_write_prevents_execution_but_allows_later_work() {
+        let root = Root::new();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut journal = RequestJournal::new(root.0.clone());
+        journal.after_running_write = Some(gate.clone());
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        let journal = Arc::new(journal);
+        let queue = Arc::new(TaskQueue::new(1, 100));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let j = journal.clone();
+        let q = queue.clone();
+        let count = calls.clone();
+        let task = tokio::spawn(async move {
+            j.run(
+                "one",
+                "prompt",
+                &json!({"sessionId":"s"}),
+                "s",
+                &q,
+                || async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"ok":true}))
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if journal
+                    .get("one")
+                    .await
+                    .unwrap()
+                    .is_some_and(|receipt| receipt.status == "running")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        queue.cancel("s").await;
+        gate.add_permits(1);
+        assert_eq!(task.await.unwrap().unwrap_err(), "排队请求已取消");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            journal.get("one").await.unwrap().unwrap().status,
+            "interrupted"
+        );
+        gate.add_permits(1);
+        assert_eq!(
+            journal
+                .run(
+                    "two",
+                    "prompt",
+                    &json!({"sessionId":"s"}),
+                    "s",
+                    &queue,
+                    || async { Ok(json!({"ok":true})) }
+                )
+                .await
+                .unwrap(),
+            json!({"ok":true})
+        );
+        assert_eq!(journal.pending_count().await, 0);
+        queue.close().await;
     }
 
     #[tokio::test]
@@ -244,6 +334,10 @@ impl RequestJournal {
         RequestJournal {
             directory,
             in_flight: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            after_running_write: None,
+            #[cfg(test)]
+            fail_running_write: false,
         }
     }
 
@@ -340,6 +434,10 @@ impl RequestJournal {
     }
 
     pub async fn write(&self, receipt: &Receipt) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_running_write && receipt.status == "running" {
+            return Err("simulated durable write failure".into());
+        }
         // TS: Buffer.byteLength(JSON.stringify(r)) > MAX → '任务收据过大'.
         // serde_json emits the same compact UTF-8 shape (camelCase keys, absent
         // option fields), so byte length matches byteLength(JSON.stringify).
@@ -458,6 +556,13 @@ impl RequestJournal {
                     error: None,
                 };
                 self.write(&receipt).await?;
+                #[cfg(test)]
+                if let Some(gate) = &self.after_running_write {
+                    gate.acquire()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .forget();
+                }
                 match async {
                     check()?;
                     execute().await

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { SessionPreferences } from '../src/session-preferences';
-import { SessionService } from '../src/session-service';
+import { startRustService } from './rust-service';
 import type { ChatState, Snapshot } from '../src/shared';
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -86,17 +86,11 @@ it('Pi service shares selections across directories and restart without changing
     maxWorkers: 2,
     idleMs: 900000,
   };
-  let service = new SessionService(
-    root,
-    config,
-    () => {},
-    () => {},
-  );
-  cleanups.push(() => service.dispose());
-  await service.initialize();
-  const first = (await service.handle('create', { cwd: root }, 'new-1')) as Snapshot;
+  let service = await startRustService(root, config);
+  cleanups.push(() => service.stop());
+  const first = await service.call<Snapshot>('create', { cwd: root }, 'new-1');
   const set = (configId: string, value: string) =>
-    service.handle(
+    service.call(
       'request',
       { sessionId: first.id, method: 'session/set_config_option', params: { configId, value } },
       `set-${configId}`,
@@ -107,17 +101,11 @@ it('Pi service shares selections across directories and restart without changing
     { kind: 'model', value: 'other' },
     { kind: 'thinking', value: 'high' },
   ]);
-  await service.dispose();
-  service = new SessionService(
-    root,
-    config,
-    () => {},
-    () => {},
-  );
-  await service.initialize();
-  const second = (await service.handle('create', { cwd: other }, 'new-2')) as Snapshot;
+  await service.stop();
+  service = await startRustService(root, config);
+  const second = await service.call<Snapshot>('create', { cwd: other }, 'new-2');
   expect(second.configs?.map((c) => c.currentValue)).toEqual(['other', 'high']);
-  await service.handle(
+  await service.call(
     'request',
     {
       sessionId: second.id,
@@ -126,13 +114,13 @@ it('Pi service shares selections across directories and restart without changing
     },
     'second-model',
   );
-  const restored = (await service.handle('state', { sessionId: first.id }, 'read-1')) as {
+  const restored = (await service.call('state', { sessionId: first.id }, 'read-1')) as {
     snapshot: Snapshot;
   };
   expect(restored.snapshot.configs?.map((c) => c.currentValue)).toEqual(['other', 'high']);
   expect((await preferences.read('pi'))[0].value).toBe('default');
   // Actually using the older conversation makes its pair the latest used one.
-  await service.handle(
+  await service.call(
     'prompt',
     { sessionId: first.id, prompt: [{ type: 'text', text: 'hello' }], source: 'telegram' },
     'phone-turn',
@@ -153,25 +141,13 @@ it('restores the saved pair when a new worker returns adapter defaults', async (
     maxWorkers: 1,
     idleMs: 900000,
   };
-  let service = new SessionService(
-    root,
-    config,
-    () => {},
-    () => {},
-  );
-  cleanups.push(() => service.dispose());
-  await service.initialize();
-  const first = (await service.handle('create', { cwd: root }, 'create-first')) as Snapshot;
+  let service = await startRustService(root, config);
+  cleanups.push(() => service.stop());
+  const first = await service.call<Snapshot>('create', { cwd: root }, 'create-first');
   expect(first.configs?.map((c) => c.currentValue)).toEqual(['other', 'high']);
-  await service.dispose();
-  service = new SessionService(
-    root,
-    config,
-    () => {},
-    () => {},
-  );
-  await service.initialize();
-  await service.handle(
+  await service.stop();
+  service = await startRustService(root, config);
+  await service.call(
     'prompt',
     { sessionId: first.id, prompt: [{ type: 'text', text: 'hello' }], source: 'desktop' },
     'use-first',
@@ -180,28 +156,22 @@ it('restores the saved pair when a new worker returns adapter defaults', async (
     { kind: 'model', value: 'other' },
     { kind: 'thinking', value: 'high' },
   ]);
-  const second = (await service.handle('create', { cwd: root }, 'create-second')) as Snapshot;
+  const second = await service.call<Snapshot>('create', { cwd: root }, 'create-second');
   expect(second.configs?.map((c) => c.currentValue)).toEqual(['other', 'high']);
 }, 15000);
 it('Pi service warns about unavailable saved values without destroying the saved pair', async () => {
   const root = await directory(),
     preferences = new SessionPreferences(join(root, 'preferences'));
   await preferences.save('pi', settings('removed', 'missing'));
-  const service = new SessionService(
-    root,
-    {
-      command: process.execPath,
-      args: [resolve('test/mock-agent.mjs'), 'context'],
-      maxWorkers: 1,
-      idleMs: 900000,
-    },
-    () => {},
-    () => {},
-  );
-  cleanups.push(() => service.dispose());
-  await service.initialize();
-  const index = (await service.handle('create', { cwd: root }, 'new')) as Snapshot;
-  const { snapshot: result } = (await service.handle('state', { sessionId: index.id }, 'read')) as {
+  const service = await startRustService(root, {
+    command: process.execPath,
+    args: [resolve('test/mock-agent.mjs'), 'context'],
+    maxWorkers: 1,
+    idleMs: 900000,
+  });
+  cleanups.push(() => service.stop());
+  const index = await service.call<Snapshot>('create', { cwd: root }, 'new');
+  const { snapshot: result } = (await service.call('state', { sessionId: index.id }, 'read')) as {
     snapshot: Snapshot;
   };
   expect(result.entries[0]).toMatchObject({

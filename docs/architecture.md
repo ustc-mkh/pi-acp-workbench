@@ -3,10 +3,10 @@
 ## 进程和数据流
 
 ```text
-VS Code Webview → ChatProvider → RemoteAgent ─┐
-                                            ├─ session-wire → SessionService → AgentProcess → Pi
-Telegram Bot → TelegramBridge → TelegramSessions ┘                 ├─ SharedHistoryStore
-                                                                  └─ Telegram outbox
+VS Code Webview → ChatProvider → RemoteAgent / TS SessionClient ─┐
+                                                               ├─ Unix socket → Rust SessionService → Node pi-adapter → Pi
+Telegram Bot → Rust Telegram relay / WireClient ─────────────────┘                    ├─ Rust shared history
+                                                                                     └─ Durable Telegram outbox
 Codex / Claude：ChatProvider → AgentProcess（保留本地运行方式）
 ```
 
@@ -18,19 +18,19 @@ Webview 只处理渲染和用户意图，不直接访问模型或文件系统。
 
 ## 职责拆分与合并
 
-| 模块                                 | 单一职责                                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------------------ |
-| `session-protocol.ts`                | 当前服务命令、共享响应类型及入口参数校验；客户端不再依赖服务实现的类型               |
-| `task-queue.ts`                      | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                             |
-| `request-journal.ts`                 | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                       |
-| `session-service.ts`                 | 工作进程/租约、会话状态、prompt 与原生分支；路由处决定调度，不在操作中重复入队       |
-| `workspace-diff.ts` / `turn-diff.ts` | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统          |
-| `workspace-documents.ts`             | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验              |
-| `webview/messages.ts`                | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用 |
-| `atomic-json.ts`                     | 快照、收据、outbox 共用原子写入；关键文件额外同步磁盘                                |
-| `conversation-history.ts`            | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                      |
-| `conversation-statistics.ts`         | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                   |
-| `session-preferences.ts`             | 账户级模型/thinking 组合的校验与持久原子保存                                         |
+| 模块                                          | 单一职责                                                                             |
+| --------------------------------------------- | ------------------------------------------------------------------------------------ |
+| TS `session-protocol.ts` / Rust `protocol.rs` | TS 只定义客户端 DTO；服务命令与入口参数校验只由 Rust 实现                            |
+| Rust `queue.rs`                               | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                             |
+| Rust `journal.rs`                             | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                       |
+| Rust `service.rs`                             | 工作进程/租约、会话状态、prompt 与原生分支；路由处决定调度，不在操作中重复入队       |
+| `workspace-diff.ts` / `turn-diff.ts`          | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统          |
+| `workspace-documents.ts`                      | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验              |
+| `webview/messages.ts`                         | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用 |
+| `atomic-json.ts`                              | 扩展共享历史/偏好的原子写入；Rust 收据/outbox 使用 core 的 atomic.rs                 |
+| `conversation-history.ts`                     | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                      |
+| `conversation-statistics.ts`                  | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                   |
+| `session-preferences.ts`                      | 账户级模型/thinking 组合的校验与持久原子保存                                         |
 
 继续保持独立的边界：`session-settings` 是纯选择器解析，`session-configuration` 是 ACP 设置应用；本地 `AgentProcess` 与服务客户端 `RemoteAgent` 生命周期不同，不应合并。共享索引事务锁与会话租约保护的对象不同，也不能为了减少模块而合并。
 
@@ -171,7 +171,7 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 
 ## Rust 常驻进程
 
-生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。部分旧 TS 内部模块暂留供故障测试迁移，不再有 daemon 入口或生产构建，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
+生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；仅旧 Telegram 内部模块暂留供故障测试迁移，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
 
 | crate                    | 对应 TS                                                                 | 职责                                                                                                                                           |
 | ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |

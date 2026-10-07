@@ -24,6 +24,7 @@ jobs:
       - run: npm run test:contract
       - run: npm run test:contract:telegram
       - run: npm run test:integration:rust
+      - run: npm run test:memory
       - run: npm run build:services
       - run: npm run sessions -- --help
       - run: npm audit --omit=dev

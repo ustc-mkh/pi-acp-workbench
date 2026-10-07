@@ -23,6 +23,37 @@ pub struct TelegramStream {
     tx: Mutex<Option<mpsc::Sender<Command>>>,
 }
 
+fn bounded_preview(mut text: String) -> String {
+    if text.encode_utf16().count() > 3800 {
+        format!("…（完整回复将在结束后补齐）\n{}", utf16_tail(&text, 3800))
+    } else {
+        text.shrink_to_fit();
+        text
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    #[test]
+    fn previews_own_small_buffers_instead_of_retaining_large_sources() {
+        let previews: Vec<_> = (0..32)
+            .map(|_| bounded_preview("x".repeat(4 * 1024 * 1024)))
+            .collect();
+        assert!(previews
+            .iter()
+            .all(|text| text.encode_utf16().count() < 3900));
+        assert!(previews.iter().map(String::capacity).sum::<usize>() < 512 * 1024);
+        let unicode = bounded_preview("😀".repeat(2 * 1024 * 1024));
+        assert!(unicode.encode_utf16().count() < 3900);
+        assert!(!unicode.contains('�'));
+        assert!(unicode.capacity() < 32 * 1024);
+        let mut overallocated = String::with_capacity(8 * 1024 * 1024);
+        overallocated.push_str("short");
+        assert!(bounded_preview(overallocated).capacity() < 128);
+    }
+}
+
 impl TelegramStream {
     pub fn new(
         api: Arc<TelegramApi>,
@@ -45,11 +76,7 @@ impl TelegramStream {
     /// Update the coalesced preview; oversized text keeps the last 3800 UTF-16
     /// units prefixed with an ellipsis, matching the reference implementation.
     pub async fn update(&self, text: String) {
-        let preview = if text.encode_utf16().count() > 3800 {
-            format!("…（完整回复将在结束后补齐）\n{}", utf16_tail(&text, 3800))
-        } else {
-            text
-        };
+        let preview = bounded_preview(text);
         let tx = self.tx.lock().await;
         if let Some(tx) = &*tx {
             let _ = tx.send(Command::Preview(preview)).await;

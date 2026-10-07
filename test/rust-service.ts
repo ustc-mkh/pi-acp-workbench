@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { SessionClient } from '../src/session-wire';
 import type { ServiceConfig } from '../src/session-protocol';
 
 /** Real production daemon with an explicitly configured mock ACP worker. */
@@ -18,7 +19,21 @@ export async function startRustService(root: string, config: ServiceConfig) {
     errors = (errors + data).slice(-8000);
   });
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  const socket = join(root, 'service', 'sessions.sock');
+  const clients = new Set<SessionClient>();
+  const call = async <T = any>(method: string, params: unknown = {}, id?: string): Promise<T> => {
+    // Separate connections allow testing concurrent requests with the same id.
+    const client = new SessionClient(socket);
+    clients.add(client);
+    try {
+      return await client.call<T>(method, params, id, 0);
+    } finally {
+      client.dispose();
+      clients.delete(client);
+    }
+  };
   const stop = async () => {
+    for (const client of clients) client.dispose();
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill('SIGTERM');
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
@@ -57,5 +72,5 @@ export async function startRustService(root: string, config: ServiceConfig) {
     if (child.pid) await stop();
     throw error;
   }
-  return { socket: join(root, 'service', 'sessions.sock'), child, stop };
+  return { socket, child, stop, call };
 }

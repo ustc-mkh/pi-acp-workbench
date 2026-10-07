@@ -1,6 +1,6 @@
 # 会话服务 Wire 协议规范
 
-本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端校验暂留为迁移参考，不再是生产服务入口。
+本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端及命令校验已删除，`src/session-protocol.ts` 仅保留客户端/config DTO。
 
 黑盒验证入口：`npm run test:contract`（`scripts/service-contract.mjs`，只依赖 socket，不 import 服务实现）。
 
