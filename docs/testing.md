@@ -109,9 +109,15 @@ Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键�
 
 `npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。生产发布前还需完整覆盖迁移与长时间浸泡检查。
 
-Telegram 黑盒契约目前 23 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。旧 `telegram.test.ts` 仍保留为未完成逐项映射的参考，不能据此宣称全部行为等价。
+Telegram 黑盒契约目前 24 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。另补 100 次增量合并、话题缓存/确认/开关写失败调用路径及过期票据实际响应，完整覆盖映射见迁移文档；旧 `telegram.test.ts` 及 TS relay 内部模块已删除。真实 Rust socket 用例验证最后 outbox 写失败传播和 interrupted 收据，不自动重放。
 
 Rust relay outbox 扫描为逐条消费，每次读取有硬大小限制；惰性读取、损坏/身份不匹配、过期删除和超大文件跳过均有单测。
+
+## 有界并行完整验收
+
+`npm run test:full` 先构建一次 debug/contract 产物，再并行执行 TS、Rust 单测、两种契约、双服务集成、内存与 runner 测试。默认最多 3 个套件，可设 `TEST_JOBS=1` 顺序复现，或 2–8 调整；Vitest 最多 4 个 worker，避免套件并行叠加无限制内部并行。所有套件独立进程/数据目录/端口，Telegram 契约中依赖前序状态的用例不并行。
+
+每次日志写 `.test-results/run-*/`，失败不跳过其余套件，最终退出码非零。本机不要并发运行 `test:browser` 和 `build:services` 两个 npm 包装命令：它们都重建 `dist/`。可先 `npm run build`，再并行运行 `node scripts/browser-smoke.mjs` 与 `node scripts/build-services.mjs`；CI 分 job 则工作目录天然隔离。CI 的浏览器/生产构建分别并行 job，服务 job 用 TEST_JOBS=2，失败上传日志。默认 `test:all` 仍为完整 TS 回归，不等于所有语言/契约验收。
 
 ## Rust 内存与资源增长检查
 

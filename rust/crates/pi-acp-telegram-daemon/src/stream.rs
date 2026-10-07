@@ -1,4 +1,4 @@
-//! TelegramStream port (src/telegram-stream.ts): one coalesced preview message
+//! Telegram stream: one coalesced preview message
 //! per turn, throttled edits, chunked finish + completion notification.
 use crate::api::{chunks, ApiError, TelegramApi};
 use pi_acp_core::utf16::utf16_tail;
@@ -35,6 +35,55 @@ fn bounded_preview(mut text: String) -> String {
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+    #[tokio::test]
+    async fn coalesces_one_hundred_updates_then_preserves_unicode_and_audible_completion() {
+        let bot = crate::test_support::Bot::success().await;
+        let enabled = Arc::new(AtomicBool::new(true));
+        let silent = Arc::new(AtomicBool::new(false));
+        let stream = TelegramStream::new(
+            bot.api.clone(),
+            -100,
+            101,
+            Duration::from_millis(500),
+            enabled,
+            silent,
+            Arc::new(|error| panic!("unexpected error: {error}")),
+        );
+        for i in 0..100 {
+            stream.update(format!("partial {i}")).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while bot.calls.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        {
+            let calls = bot.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].1["text"], "partial 99");
+        }
+        let text = format!("{}last", "😀".repeat(5000));
+        stream
+            .finish(text.clone(), "✅ 任务完成".into())
+            .await
+            .unwrap();
+        let calls = bot.calls.lock().unwrap();
+        let output = calls[1..calls.len() - 1]
+            .iter()
+            .map(|(_, p)| p["text"].as_str().unwrap())
+            .collect::<String>();
+        assert_eq!(output, text);
+        assert_eq!(calls.last().unwrap().1["disable_notification"], false);
+        assert_eq!(calls.last().unwrap().1["message_thread_id"], 101);
+        assert!(calls[1..calls.len() - 1].iter().all(|(_, p)| p["text"]
+            .as_str()
+            .unwrap()
+            .encode_utf16()
+            .count()
+            <= 3900));
+    }
     #[test]
     fn previews_own_small_buffers_instead_of_retaining_large_sources() {
         let previews: Vec<_> = (0..32)

@@ -3,7 +3,7 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  test:
+  services:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,15 +16,38 @@ jobs:
           components: rustfmt
       - run: npm ci
       - run: npm run format:check
-      - run: npm run test:all
+      # One preparation per target; independent suites overlap, not stateful cases.
+      - run: npm run test:full
+        env:
+          TEST_JOBS: 2
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: service-test-logs
+          path: .test-results/
+          include-hidden-files: true
+      - run: npm audit --omit=dev
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
-      - run: cargo test --manifest-path rust/Cargo.toml
-      - run: cargo build --manifest-path rust/Cargo.toml
-      - run: npm run test:contract
-      - run: npm run test:contract:telegram
-      - run: npm run test:integration:rust
-      - run: npm run test:memory
+  production:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
       - run: npm run build:services
       - run: npm run sessions -- --help
-      - run: npm audit --omit=dev
+      - run: npm run telegram -- --help

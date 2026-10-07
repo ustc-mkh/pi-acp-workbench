@@ -1,4 +1,4 @@
-//! TelegramBridge port (src/telegram-bridge.ts): polling, per-session lanes,
+//! Telegram relay: polling, per-session lanes,
 //! permission tickets, topic bindings, history sync and outbox consumption.
 use crate::api::{chunks, ApiError, TelegramApi};
 use crate::events::TurnEvent;

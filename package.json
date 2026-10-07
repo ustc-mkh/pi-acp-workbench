@@ -194,6 +194,8 @@
     "format:check": "prettier --check . && cargo fmt --manifest-path rust/Cargo.toml --all -- --check",
     "test": "npm run check && npm run build:service:test && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && npm run build:service:test && vitest run",
+    "test:full": "node scripts/test-full.mjs",
+    "test:runner": "node --test scripts/test-pool.test.mjs",
     "verify": "npm run test:all && npm run test:browser",
     "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-$npm_package_version.vsix",
     "vscode:prepublish": "npm run check && npm run build",

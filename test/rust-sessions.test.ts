@@ -6,7 +6,7 @@ import { SessionClient } from '../src/session-wire';
 import { SharedHistoryStore } from '../src/shared-history';
 import { startRustService } from './rust-service';
 import { requestFingerprint, workerPids, readOutbox } from './rust-utils';
-import { TelegramSessions } from '../src/telegram-sessions';
+import { PhoneClient } from './phone-client';
 import { RemoteAgent } from '../src/remote-agent';
 import { createHash } from 'node:crypto';
 import { writeAtomicJson } from '../src/atomic-json';
@@ -36,25 +36,15 @@ async function fixture(maxWorkers = 2, idleMs = 900000, mode = 'context') {
     cleanup.push(() => next.stop());
     return next;
   };
-  const host = new TelegramSessions({ test: root }, socket);
+  const host = new PhoneClient(root, socket);
   cleanup.push(() => host.dispose());
   const client = new SessionClient(socket);
   cleanup.push(() => client.dispose());
   return { root, service, host, client, socket, audit, restart };
 }
-it('restricts new sessions to canonical workspace roots, rejecting symlink escapes', async () => {
-  const { root, socket, client } = await fixture();
-  const allowed = join(root, 'allowed'),
-    outside = join(root, 'outside');
-  await mkdir(allowed);
-  await mkdir(outside);
-  await symlink(outside, join(allowed, 'escape'));
-  await symlink(allowed, join(root, 'alias'));
-  const host = new TelegramSessions({ main: allowed }, socket, true);
-  cleanup.push(() => host.dispose());
-  await expect(host.create(outside)).rejects.toThrow('workspaces');
-  await expect(host.create(join(allowed, 'escape'))).rejects.toThrow('workspaces');
-  await expect(host.create(join(root, 'alias'))).resolves.toMatchObject({ cwd: allowed });
+// Workspace policy/alias/symlink coverage belongs to the real Rust relay contract.
+it('rejects unknown service methods through the real Rust socket', async () => {
+  const { client } = await fixture();
   await expect(client.call('nope', { sessionId: 'x' })).rejects.toMatchObject({
     code: 'unknown_method',
   });
@@ -288,6 +278,39 @@ it('never dispatches a prompt if saving its user message fails, and never retrie
   }
   await expect(service.call('prompt', params, 'disk-failure')).rejects.toThrow('不会自动重放');
   expect((await readFile(audit, 'utf8')).includes('"method":"session/prompt"')).toBe(false);
+}, 10000);
+
+it('propagates terminal outbox failure and tombstones the executed request instead of replaying it', async () => {
+  const { root, service, host } = await fixture();
+  const session = await host.create();
+  const params = { sessionId: session.id, prompt: [{ type: 'text', text: 'wait' }] };
+  const task = service.call('prompt', params, 'terminal-outbox-failure').then(
+    (value) => ({ value, error: undefined }),
+    (error) => ({ value: undefined, error }),
+  );
+  await vi.waitFor(async () => expect((await readOutbox(root))[0]?.status).toBe('running'));
+  const directory = join(root, 'telegram', 'events');
+  await rename(directory, directory + '.backup');
+  await writeFile(directory, 'blocked');
+  try {
+    await host.cancel(session.id);
+    const result = await task;
+    expect(result.error).toBeTruthy();
+    expect((await service.call('state', { sessionId: session.id })).error).toBeTruthy();
+    const file = join(
+      root,
+      'service',
+      'requests',
+      createHash('sha256').update('terminal-outbox-failure').digest('hex') + '.json',
+    );
+    expect(JSON.parse(await readFile(file, 'utf8')).status).toBe('interrupted');
+  } finally {
+    await rm(directory);
+    await rename(directory + '.backup', directory);
+  }
+  await expect(service.call('prompt', params, 'terminal-outbox-failure')).rejects.toThrow(
+    '不会自动重放',
+  );
 }, 10000);
 
 it.each(['normal', 'wait', 'crash'])(

@@ -687,7 +687,7 @@ impl SessionService {
                 r.publication.take()
             };
             if let Some(publication) = publication {
-                publication.finish(Some(error.clone()), None).await;
+                let _ = publication.finish(Some(error.clone()), None).await;
             }
         }
         {
@@ -1077,7 +1077,7 @@ impl SessionService {
                         .map(String::from),
                 )
             };
-            publication.finish(error, stop_reason.as_deref()).await;
+            publication.finish(error, stop_reason.as_deref()).await?;
         }
         result
     }

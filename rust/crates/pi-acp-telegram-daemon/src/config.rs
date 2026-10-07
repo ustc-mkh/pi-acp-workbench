@@ -1,4 +1,4 @@
-//! telegramConfig() port (src/telegram-config.ts).
+//! Telegram relay configuration validation.
 use serde_json::Value;
 use std::collections::BTreeMap;
 

@@ -6,7 +6,8 @@ struct Fixture {
     root: PathBuf,
     bridge: Bridge,
     _listener: UnixListener,
-    _peer: UnixStream,
+    _peer: Option<UnixStream>,
+    service_task: Option<tokio::task::JoinHandle<()>>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -52,15 +53,183 @@ impl Fixture {
             root,
             bridge,
             _listener: listener,
-            _peer: peer,
+            _peer: Some(peer),
+            service_task: None,
         }
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Some(task) = &self.service_task {
+            task.abort();
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+impl Fixture {
+    fn mock_service(&mut self) -> Arc<std::sync::atomic::AtomicUsize> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (reader, mut writer) = self._peer.take().unwrap().into_split();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        self.service_task = Some(tokio::spawn(async move {
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let item: Value = serde_json::from_str(&line).unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                let value = match item["method"].as_str().unwrap() {
+                    "list" => json!([{"id":"one","cwd":"/work","title":"One","sessionNumber":1}]),
+                    "permission" => json!(true),
+                    _ => {
+                        json!({"snapshot":{"id":"one","entries":[]},"busy":false,"permissions":[]})
+                    }
+                };
+                if writer
+                    .write_all(format!("{}\n", json!({"id":item["id"],"value":value})).as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        calls
+    }
+    fn use_bot(&mut self, bot: &crate::test_support::Bot) {
+        Arc::get_mut(&mut self.bridge.shared).unwrap().api = bot.api.clone();
+    }
+}
+
+#[tokio::test]
+async fn topic_write_failure_does_not_publish_or_poison_the_topic_cache() {
+    let mut f = Fixture::new().await;
+    f.mock_service();
+    let file = f.bridge.shared.opts.state_file.clone();
+    let first = Arc::new(AtomicBool::new(true));
+    let fault = first.clone();
+    let bot = crate::test_support::Bot::new(move |method, _| {
+        if method == "createForumTopic" && fault.swap(false, Ordering::SeqCst) {
+            std::fs::create_dir(&file).unwrap();
+        }
+        json!({"ok":true,"result":{"message_id":100,"message_thread_id":201}})
+    })
+    .await;
+    f.use_bot(&bot);
+    let session = SessionStub {
+        id: "one".into(),
+        cwd: "/work".into(),
+        title: "One".into(),
+        session_number: Some(1),
+    };
+    assert!(f.bridge.ensure_topic(&session).await.is_err());
+    assert!(f.bridge.shared.data.read().await.topics.is_empty());
+    tokio::fs::remove_dir(&f.bridge.shared.opts.state_file)
+        .await
+        .unwrap();
+    assert_eq!(f.bridge.ensure_topic(&session).await.unwrap(), 201);
+    assert_eq!(f.bridge.ensure_topic(&session).await.unwrap(), 201);
+    assert_eq!(
+        bot.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == "createForumTopic")
+            .count(),
+        2
+    );
+    assert_eq!(f.bridge.shared.data.read().await.topics.len(), 1);
+    f.bridge.dispose().await;
+}
+
+#[tokio::test]
+async fn failed_delivery_ack_retains_the_event_without_rerunning_or_resending_in_process() {
+    let mut f = Fixture::new().await;
+    let service_calls = f.mock_service();
+    f.bridge.shared.data.write().await.topics.push(Topic {
+        session_id: "one".into(),
+        thread_id: 101,
+    });
+    let file = f.bridge.shared.opts.state_file.clone();
+    let bot = crate::test_support::Bot::new(move |_, p| {
+        if p["text"].as_str().is_some_and(|s| s.contains("任务完成")) {
+            let _ = std::fs::create_dir(&file);
+        }
+        json!({"ok":true,"result":{"message_id":100}})
+    })
+    .await;
+    f.use_bot(&bot);
+    let event = TurnEvent {
+        id: "event".into(),
+        session_id: "one".into(),
+        cwd: "/work".into(),
+        title: "One".into(),
+        session_number: Some(1),
+        input_text: None,
+        text: "answer".into(),
+        status: "completed".into(),
+        error: None,
+        updated: 1.0,
+    };
+    let mut wrong = event.clone();
+    wrong.cwd = "/forbidden".into();
+    assert!(!f.bridge.consume(&wrong).await);
+    assert!(bot.calls.lock().unwrap().is_empty());
+    assert!(!f.bridge.consume(&event).await);
+    assert!(f.bridge.shared.data.read().await.delivered.is_empty());
+    let sent = bot.calls.lock().unwrap().len();
+    tokio::fs::remove_dir(&f.bridge.shared.opts.state_file)
+        .await
+        .unwrap();
+    assert!(f.bridge.consume(&event).await);
+    assert!(f.bridge.consume(&event).await);
+    assert_eq!(bot.calls.lock().unwrap().len(), sent);
+    assert!(f
+        .bridge
+        .shared
+        .data
+        .read()
+        .await
+        .delivered
+        .contains(&event.id));
+    assert_eq!(service_calls.load(Ordering::SeqCst), 3); // list only, never prompt
+    f.bridge.dispose().await;
+}
+
+#[tokio::test]
+async fn failed_switch_dispatch_has_no_menu_or_live_side_effects_and_expired_ticket_never_reaches_service(
+) {
+    let mut f = Fixture::new().await;
+    let calls = f.mock_service();
+    let bot = crate::test_support::Bot::success().await;
+    f.use_bot(&bot);
+    tokio::fs::create_dir(&f.bridge.shared.opts.state_file)
+        .await
+        .unwrap();
+    let update = json!({"callback_query":{"id":"toggle","from":{"id":42},"data":"notify:off","message":{"chat":{"id":-100},"message_thread_id":101}}});
+    assert!(f.bridge.dispatch(&update).await.is_err());
+    assert!(f.bridge.shared.notifications_on.load(Ordering::SeqCst));
+    assert!(bot.calls.lock().unwrap().is_empty());
+    f.bridge.shared.tickets.lock().await.insert(
+        "a".repeat(20),
+        Ticket {
+            session_id: "one".into(),
+            permission_id: "permission".into(),
+            thread_id: 101,
+            options: vec![Some("yes".into())],
+            expires: 0,
+        },
+    );
+    f.bridge
+        .answer_permission("callback", &format!("p:{}:0", "a".repeat(20)), Some(101))
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        bot.calls.lock().unwrap()[0].1["text"],
+        "授权已失效或不属于此话题。"
+    );
+    f.bridge.dispose().await;
+}
+
 fn changes(s: &mut BridgeState) {
     s.offset = Some(99);
     s.notifications = Some(false);

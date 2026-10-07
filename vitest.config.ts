@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Node's test runner owns scripts/test-pool.test.mjs, not Vitest.
+    include: ['test/**/*.test.{ts,tsx}'],
     // These inputs are loaded by subprocesses or the build, outside Vite's import graph.
     forceRerunTriggers: [
       '**/package.json',

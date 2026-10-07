@@ -1,4 +1,4 @@
-//! TelegramApi port (src/telegram-api.ts): paced sends, 429 honor, redacted errors.
+//! Telegram transport: paced sends, 429 honor, redacted errors.
 //! Production builds always use Telegram's official endpoint and caller pace.
 //! The opt-in contract-test feature enables mock transport environment hooks.
 use pi_acp_core::utf16::telegram_chunks;
@@ -124,6 +124,14 @@ mod queue_tests {
 }
 
 impl TelegramApi {
+    #[cfg(test)]
+    pub(crate) fn for_test(base: &str, stop: CancellationToken) -> Self {
+        let mut api = Self::new("synthetic", Duration::ZERO, stop);
+        api.base = base.into();
+        api.interval = Duration::ZERO;
+        api.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        api
+    }
     pub fn new(token: &str, interval: Duration, stop: CancellationToken) -> Self {
         #[cfg(not(feature = "contract-test"))]
         let base = format!("https://api.telegram.org/bot{token}");

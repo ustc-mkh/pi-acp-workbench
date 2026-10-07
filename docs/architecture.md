@@ -171,7 +171,7 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 
 ## Rust 常驻进程
 
-生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；仅旧 Telegram 内部模块暂留供故障测试迁移，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
+生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；旧 Telegram 内部模块也已按覆盖映射淘汰，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
 
 | crate                    | 对应 TS                                                                 | 职责                                                                                                                                           |
 | ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |

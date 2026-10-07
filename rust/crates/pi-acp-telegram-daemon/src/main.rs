@@ -8,6 +8,8 @@ mod config;
 mod events;
 mod sessions;
 mod stream;
+#[cfg(test)]
+mod test_support;
 
 use api::TelegramApi;
 use bridge::{Bridge, BridgeState};

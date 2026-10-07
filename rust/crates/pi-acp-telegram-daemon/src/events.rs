@@ -1,5 +1,4 @@
-//! TelegramEvents reader port (src/telegram-events.ts, iterate() only — the
-//! Rust daemon consumes the outbox; writing stays with the session service).
+//! Lazy durable outbox reader; only the session service writes events.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io;

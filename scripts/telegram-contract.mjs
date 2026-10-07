@@ -359,6 +359,7 @@ const workspace = join(root, 'workspace');
 const dataDir = join(root, 'data');
 await mkdir(workspace, { recursive: true });
 await symlink(root, join(workspace, 'escape'));
+await symlink(workspace, join(root, 'allowed-alias'));
 await mkdir(join(dataDir, 'service'), { recursive: true });
 const configFile = join(root, 'telegram.json');
 await writeFile(
@@ -791,6 +792,28 @@ test('permission cards reject unauthorized, wrong-topic and invalid-option callb
   callback(data, { thread: state.threadId });
   await delay(400);
   assert.equal(sessions.calls.filter((c) => c.method === 'permission').length, before + 1);
+});
+
+test('canonical allowed directory aliases create sessions and repeated /open reuses the binding', async () => {
+  const before = sessions.list.size;
+  message(`/new ${join(root, 'allowed-alias')}`);
+  await waitUntil(
+    () => sessions.list.size === before + 1,
+    'canonical alias did not create a session',
+  );
+  const created = [...sessions.list.values()].at(-1);
+  assert.equal(created.cwd, workspace);
+  const reply = `会话 #${created.number} 已连接到此话题。直接发文字开始；/stop 停止任务。`;
+  await waitSent('sendMessage', { text: reply });
+  const count = telegram.topics.length;
+  for (let i = 2; i <= 3; i++) {
+    message(`/open ${created.number}`);
+    await waitUntil(
+      () => sent('sendMessage', { text: reply }).length === i,
+      'open did not reuse the topic',
+    );
+  }
+  assert.equal(telegram.topics.length, count);
 });
 
 test('a second daemon refuses the same data directory', async () => {

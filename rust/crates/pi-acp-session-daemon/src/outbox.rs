@@ -1,4 +1,4 @@
-//! TelegramEvents writer + DesktopTelegramTurn port (src/telegram-events.ts).
+//! Durable turn event writer and latest-state-coalescing publisher.
 //! The daemon is the ONLY writer; the telegram daemon consumes/deletes.
 //!
 //! File naming: telegram/events/<sha256(event.id)>.json — same as the reader.
@@ -11,7 +11,7 @@
 //!   text + optional '\n[附带 N 个非文本内容，请在 VS Code 查看]' (contextBlocks
 //!   non-text count). publish() immediately.
 //! - publish(): latest-pending coalesced writes — never queue more than one
-//!   pending event; errors reported, not thrown.
+//!   pending event; errors reported, terminal failures also propagated by finish().
 //! - update(): 2.5 s debounce → capture() + publish() (skipped after end).
 //! - capture(): text = entries[start..] filtered assistant|diff, texts joined
 //!   '\n\n'; permissions pending → append '\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。';
@@ -136,6 +136,7 @@ struct Inner {
     ended: bool,
     cancelled: bool,
     debounce_scheduled: bool,
+    last_write_error: Option<String>,
     /// ctor-time fields (title/inputText/sessionId/sessionNumber) still pending
     /// their first accessor() read — see DesktopTelegramTurn::new.
     needs_init: bool,
@@ -206,6 +207,7 @@ impl DesktopTelegramTurn {
                 ended: false,
                 cancelled: false,
                 debounce_scheduled: false,
+                last_write_error: None,
                 needs_init: true,
             }),
         });
@@ -293,8 +295,10 @@ impl DesktopTelegramTurn {
                         }
                     }
                 };
-                if let Err(error) = shared.events.write(&event).await {
-                    (shared.report)(&error); // errors reported, not thrown
+                let result = shared.events.write(&event).await;
+                shared.state.lock().unwrap().last_write_error = result.as_ref().err().cloned();
+                if let Err(error) = result {
+                    (shared.report)(&error);
                 }
                 shared.drained.send_modify(|v| *v += 1);
             }
@@ -381,9 +385,13 @@ impl DesktopTelegramTurn {
         self.inner.events.remove(&id).await;
     }
 
-    pub async fn finish(&self, error: Option<String>, stop_reason: Option<&str>) {
+    pub async fn finish(
+        &self,
+        error: Option<String>,
+        stop_reason: Option<&str>,
+    ) -> Result<(), String> {
         if self.inner.state.lock().unwrap().ended {
-            return;
+            return Ok(());
         }
         Self::capture_shared(&self.inner);
         {
@@ -404,6 +412,13 @@ impl DesktopTelegramTurn {
         }
         self.publish();
         self.wait_writes().await;
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .last_write_error
+            .clone()
+            .map_or(Ok(()), Err)
     }
 }
 
@@ -454,7 +469,7 @@ mod tests {
         assert_eq!(events.write_attempts.load(Ordering::SeqCst), 1);
         let shared = turn.inner.clone();
         let end = tokio::spawn(async move {
-            turn.finish(None, Some("end_turn")).await;
+            turn.finish(None, Some("end_turn")).await.unwrap();
             turn
         });
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -500,7 +515,7 @@ mod tests {
         turn.wait_writes().await;
         tokio::fs::rename(&dir, &backup).await.unwrap();
         tokio::fs::write(&dir, "not a directory").await.unwrap();
-        turn.finish(None, Some("end_turn")).await;
+        assert!(turn.finish(None, Some("end_turn")).await.is_err());
         assert_eq!(errors.lock().unwrap().len(), 1);
         assert!(!turn.inner.state.lock().unwrap().writer_active);
         assert!(turn.inner.state.lock().unwrap().pending.is_none());
@@ -559,7 +574,7 @@ mod tests {
             report,
             Arc::new(AtomicBool::new(false)),
         );
-        turn.finish(None, Some("end_turn")).await;
+        turn.finish(None, Some("end_turn")).await.unwrap();
         let name = format!("{}.json", hex::encode(Sha256::digest(b"service:req-1")));
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap();
@@ -588,7 +603,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         turn.cancel();
-        turn.finish(None, Some("end_turn")).await;
+        turn.finish(None, Some("end_turn")).await.unwrap();
         let file_a = dir.join(format!(
             "{}.json",
             hex::encode(Sha256::digest(b"service:a"))
@@ -606,7 +621,7 @@ mod tests {
             report.clone(),
             Arc::new(AtomicBool::new(false)),
         );
-        turn2.finish(None, Some("length")).await;
+        turn2.finish(None, Some("length")).await.unwrap();
         let file_b = dir.join(format!(
             "{}.json",
             hex::encode(Sha256::digest(b"service:b"))
@@ -624,7 +639,7 @@ mod tests {
             report,
             Arc::new(AtomicBool::new(false)),
         );
-        turn3.finish(Some("boom".into()), None).await;
+        turn3.finish(Some("boom".into()), None).await.unwrap();
         let file_c = dir.join(format!(
             "{}.json",
             hex::encode(Sha256::digest(b"service:c"))
@@ -704,6 +719,7 @@ mod tests {
                 ended: false,
                 cancelled: false,
                 debounce_scheduled: false,
+                last_write_error: None,
                 needs_init: false,
             }),
             source_desktop: true,

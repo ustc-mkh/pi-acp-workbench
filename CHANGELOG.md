@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 完成 Telegram 源码收敛：补 Rust 100 次增量合并、话题/确认/开关写失败调用路径、过期票据响应及目录 alias/open 复用覆盖，删除全部 TS relay 内部实现与旧参考测试；保留独立的纯 socket 测试客户端。
+- 修复 Rust 终态 outbox 写失败仅记录日志却仍返回成功的问题：向调用方传播错误，真实 socket 回归验证 interrupted 收据和同 ID 不重放。
+- 新增 `test:full`：测试产物构建一次，套件有界并行、独立日志、汇总失败；TEST_JOBS=1 可顺序排障。CI 服务、浏览器、生产打包拆分并行 job，附 runner 调度单测。
+
 - Rust relay 覆盖迁移：Telegram 黑盒契约扩展至 23 项，覆盖磁盘游标失败、投递/history 重试、真实排队取消、静音切换、权限隔离、Unicode/429 和 webhook 边界；新增事务/清理/队列与慢盘 outbox Rust 单测，删除已迁移的两个 TS 长运行参考用例。
 - Rust relay outbox 改为惰性逐条读取，避免一次性加载整个积压；在实际读取阶段强制文件大小上限，而不只检查 metadata。
 

@@ -5,4 +5,5 @@ service-dist.*.tmp/
 *.vsix
 playwright-report/
 test-results/
+.test-results/
 rust/target/

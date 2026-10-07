@@ -1,4 +1,4 @@
-//! TelegramSessions port (src/telegram-sessions.ts): the bridge's view of the
+//! Relay client: the bridge's view of the
 //! session service — list/create/run/cancel/permission/history/status over the
 //! shared wire client. Telegram turns are the ONLY callers that subscribe to
 //! `state` events for permission prompts.
