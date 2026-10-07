@@ -12,7 +12,9 @@ export type ServiceCommand=
   | {kind:'state'|'cancel'|'remove';sessionId:string}
   | {kind:'permission';sessionId:string;permissionId:string;optionId?:string}
   | {kind:'prompt';sessionId:string;prompt:acp.ContentBlock[];source:'desktop'|'telegram'}
-  | {kind:'request';sessionId:string;method:AgentMethod;params:Record<string,unknown>};
+  | {kind:'request';sessionId:string;method:AgentMethod;params:Record<string,unknown>}
+  | {kind:'historyWrite';snapshot:Snapshot}
+  | {kind:'historyRemove';sessionId?:string};
 const object=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
 function text(value:unknown,name:string):string {
   if(typeof value!=='string'||!value||value.length>10000)throw new Error(`无效参数：${name}`);
@@ -23,6 +25,13 @@ export function serviceCommand(method:string,params:unknown):ServiceCommand {
   if(!object(params))throw new Error('服务参数必须是对象');
   if(method==='hello'||method==='list')return {kind:method};
   if(method==='create')return {kind:method,cwd:text(params.cwd,'cwd')};
+  if(method==='historyWrite') {
+    const snapshot=params.snapshot as Snapshot|undefined;
+    if(!object(params.snapshot)||typeof snapshot!.id!=='string'||!snapshot!.id)throw new Error('无效参数：snapshot');
+    return {kind:method,snapshot:snapshot!};
+  }
+  // historyRemove accepts a missing sessionId (clear all); explicit null fails text().
+  if(method==='historyRemove')return {kind:method,sessionId:params.sessionId===undefined?undefined:text(params.sessionId,'sessionId')};
   const sessionId=text(params.sessionId,'sessionId');
   if(method==='state'||method==='cancel'||method==='remove')return {kind:method,sessionId};
   if(method==='permission')return {kind:method,sessionId,permissionId:text(params.permissionId,'permissionId'),optionId:params.optionId===undefined?undefined:text(params.optionId,'optionId')};

@@ -3,7 +3,7 @@ import {realpath,stat} from 'node:fs/promises';
 import {join,isAbsolute} from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import {AgentProcess,type AgentOptions} from './agent';
-import {SharedHistoryStore} from './shared-history';
+import {SharedHistoryStore,SessionInUseError} from './shared-history';
 import {initialState,applyUpdate,nextId} from './state';
 import {bindNativeForks} from './native-branch';
 import {TelegramEvents,DesktopTelegramTurn} from './telegram-events';
@@ -176,18 +176,22 @@ export class SessionService {
   async handle(method:string,params:unknown,requestId:string):Promise<unknown> {
     if(this.closed)throw new Error('会话服务正在停止');
     const command=serviceCommand(method,params);
-    if(durableCommand(command))return this.journal.run(requestId,method,params,'sessionId' in command?command.sessionId:'',this.queue,
+    if(durableCommand(command))return this.journal.run(requestId,method,params,'sessionId' in command?command.sessionId??'':'',this.queue,
       ()=>this.execute(command,requestId),this.report);
     if(command.kind==='remove'||command.kind==='request'&&command.method==='_pi_workbench/inspect')
       return this.queue.run(command.sessionId,()=>this.execute(command,requestId));
+    if(command.kind==='historyWrite')return this.queue.run(command.snapshot.id,()=>this.execute(command,requestId));
+    if(command.kind==='historyRemove')return this.queue.run(command.sessionId||'',()=>this.execute(command,requestId));
     return this.execute(command,requestId);
   }
   /** Queue ownership is decided once in handle(), never recursively in operation implementations. */
   private async execute(command:ServiceCommand,requestId:string):Promise<unknown> {
     if(command.kind==='hello')return {protocolVersion:1,agentInfo:{name:'pi-session-service',title:'Pi 会话服务',version:'1'},
-      agentCapabilities:{loadSession:true,promptCapabilities:{image:true,embeddedContext:true},_meta:{'pi-workbench':{version:1,inspect:true,nativeFork:true}}}};
+      agentCapabilities:{loadSession:true,promptCapabilities:{image:true,embeddedContext:true},_meta:{'pi-workbench':{version:2,inspect:true,nativeFork:true,history:true}}}};
     if(command.kind==='list')return this.list();
     if(command.kind==='create')return this.create(command.cwd);
+    if(command.kind==='historyWrite')return this.historyWrite(command.snapshot);
+    if(command.kind==='historyRemove')return this.historyRemove(command.sessionId);
     if(!('sessionId' in command))throw new Error('无效服务操作');
     const id=command.sessionId;
     await this.index(id);
@@ -229,6 +233,23 @@ export class SessionService {
         finally {await this.store.release(session.sessionId);}
       } finally {await agent.stop();}
     });
+  }
+  /** Protocol-v2 historyWrite: extension-side shared-history writes arrive as
+   * socket commands. A session with a live runtime here is daemon-owned —
+   * refuse like claim() does; otherwise the store claims briefly or accepts
+   * the caller's own fresh lease (writeDelegated). */
+  private async historyWrite(snapshot:Snapshot) {
+    if(this.runtimes.has(snapshot.id))throw new SessionInUseError();
+    return this.store.writeDelegated(snapshot);
+  }
+  private async historyRemove(id?:string) {
+    if(id===undefined) {
+      await this.exclusive(async()=>{for(const [sid,r]of[...this.runtimes])await this.evict(sid,r);});
+      return this.store.clear();
+    }
+    if(!(await this.store.list()).some(s=>s.id===id))throw new Error('会话不存在');
+    await this.exclusive(async()=>{const r=this.runtimes.get(id);if(r)await this.evict(id,r);});
+    return this.store.remove(id);
   }
   private async cancel(id:string) {
     this.queue.cancel(id);

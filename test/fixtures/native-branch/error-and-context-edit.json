@@ -1,0 +1,89 @@
+{
+  "name": "error-and-context-edit",
+  "kind": "points",
+  "description": "error responses and omitted attempts are excluded",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "bad"
+          }
+        ],
+        "stopReason": "error"
+      }
+    },
+    {
+      "type": "context_edit",
+      "id": "1",
+      "parentId": "0",
+      "targetId": "0",
+      "replacement": null
+    },
+    {
+      "type": "message",
+      "id": "2",
+      "parentId": "1",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "retry"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "3",
+      "parentId": "2",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "0",
+        "hash": "",
+        "role": "assistant",
+        "key": "assistant:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "safe": false
+      },
+      {
+        "entryId": "2",
+        "hash": "135cb70621c924f2ecf8d8a3879acc5f205caac34f89d299af3d2d45acafd8fe",
+        "role": "user",
+        "key": "user:06b29bb318814108e94270528fe7994c096308b3692923723bf1ae6f98d50b4f",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "3",
+        "hash": "ee3197da5732c99fc3347487adcdcba46929f38b5b443ddd493a768814fc1884",
+        "role": "assistant",
+        "key": "assistant:2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df",
+        "timestamp": 1,
+        "safe": true
+      }
+    ],
+    "prefixHash": "ee3197da5732c99fc3347487adcdcba46929f38b5b443ddd493a768814fc1884"
+  }
+}

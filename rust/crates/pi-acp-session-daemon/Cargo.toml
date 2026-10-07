@@ -1,0 +1,21 @@
+[package]
+name = "pi-acp-session-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Pi session service daemon (Rust port of session-daemon)"
+license = "Apache-2.0"
+
+[dependencies]
+pi-acp-core = { path = "../pi-acp-core" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: Value::Object must keep document key order for native-branch
+# prefix hashing (JSON.stringify preserves JS insertion order — native.rs).
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
+indexmap = "2"
+regex = "1"
+libc = "0.2"

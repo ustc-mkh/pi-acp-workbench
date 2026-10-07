@@ -104,6 +104,25 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       leaseLost:()=>{this.disconnect();this.state.status='disconnected';this.state.readOnly=true;this.state.error='共享会话锁已失效，已停止本窗口的 Agent。请重新连接。';this.emit();},
       remote:agentFactory?undefined:{list:()=>this.serviceClient.call<Snapshot[]>('list'),remove:id=>this.serviceClient.call('remove',{sessionId:id},undefined,0)},
     });
+    // Protocol v2: delegate shared-history writes to the daemon so file locks
+    // converge on a single implementation. Older daemons (no `history`
+    // capability) fall back to the in-process file path transparently.
+    void this.serviceClient.call<{agentCapabilities?:{_meta?:{'pi-workbench'?:{history?:boolean}}}}>('hello').then(result=>{
+      if(!result?.agentCapabilities?._meta?.['pi-workbench']?.history||!this.sharedHistory)return;
+      const guard=async<T>(call:Promise<T>,fallback:()=>Promise<T>)=>{
+        try{return await call;}
+        catch(error){
+          // Daemon downgraded to protocol v1 mid-session: drop the delegate
+          // once and fall back to the file path for this and future writes.
+          if(/未知服务操作/.test(String(error))){this.sharedHistory!.remote=undefined;return fallback();}
+          throw error;
+        }
+      };
+      this.sharedHistory.remote={
+        write:snapshot=>guard(this.serviceClient.call('historyWrite',{snapshot},undefined,0),()=>this.sharedHistory!.write(snapshot)),
+        remove:id=>guard(this.serviceClient.call('historyRemove',id===undefined?{}:{sessionId:id},undefined,0),()=>id===undefined?this.sharedHistory!.clear():this.sharedHistory!.remove(id)),
+      };
+    }).catch(()=>{});
     this.telemetry=new ConversationStatistics(context.workspaceState,this.persistence,()=>({agent:this.agent,state:this.state,harness:this.harness,conversationId:this.conversationId,
       retained:this.config.get('persistHistory',true)&&!this.forgottenSessions.has(this.state.sessionId||'')}),value=>{this.contextWindow=value;},()=>this.emit());
     this.historyStore.start();

@@ -1,0 +1,65 @@
+{
+  "name": "duplicate-text-timestamp",
+  "kind": "bind",
+  "description": "ambiguous rows fail closed; messageId timestamps disambiguate",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "same"
+          }
+        ],
+        "timestamp": 10,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "same"
+          }
+        ],
+        "timestamp": 20,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "uiEntries": [
+    {
+      "id": "a",
+      "role": "assistant",
+      "text": "same",
+      "messageId": "10"
+    },
+    {
+      "id": "b",
+      "role": "assistant",
+      "text": "same",
+      "messageId": "20"
+    }
+  ],
+  "expected": {
+    "bound": {
+      "a": {
+        "entryId": "0",
+        "hash": "53c0893efa700398952f99a2b082160c25b6a207e5c3a2bf547cc792a0c8a6db"
+      },
+      "b": {
+        "entryId": "1",
+        "hash": "faf2dcba18832c30a9d2097d818e15a9194b4d394b73e4f8bc6cbdc0c301d841"
+      }
+    }
+  }
+}

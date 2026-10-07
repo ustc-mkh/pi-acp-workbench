@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/pi-acp-core", "crates/pi-acp-telegram-daemon", "crates/pi-acp-session-daemon"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

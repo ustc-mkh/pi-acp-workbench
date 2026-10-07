@@ -1,0 +1,116 @@
+{
+  "name": "compaction-boundary",
+  "kind": "points",
+  "description": "prefix hash preserves prior but not later compactions",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "before"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "answer"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "compaction",
+      "id": "2",
+      "parentId": "1",
+      "summary": "native summary",
+      "firstKeptEntryId": "1",
+      "tokensBefore": 100
+    },
+    {
+      "type": "message",
+      "id": "3",
+      "parentId": "2",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "after"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "4",
+      "parentId": "3",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "latest"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "0",
+        "hash": "c55f94dd28b2716f716a4bfafa2d1d4bf58070abac8991e78d55456999e8669e",
+        "role": "user",
+        "key": "user:6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "1",
+        "hash": "944199a15255939c1240b84cf724ca8a57ee58d03127a9bd1230d5dc556a6365",
+        "role": "assistant",
+        "key": "assistant:0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "3",
+        "hash": "d3566842a6a94d2a40dd589d2fa80d5d320ba4aa93e99c3babde6febef884f00",
+        "role": "user",
+        "key": "user:f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "4",
+        "hash": "f8ab69fd789cb417e1f4ed5c9e13d593b9aa588d12435ea7c2a550e251fa1b33",
+        "role": "assistant",
+        "key": "assistant:5e1e2bcac305958b27077ca136f35f0abae7cf38c9af678f7d220ed0cb51d4f8",
+        "timestamp": 1,
+        "safe": true
+      }
+    ],
+    "prefixHash": "f8ab69fd789cb417e1f4ed5c9e13d593b9aa588d12435ea7c2a550e251fa1b33"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "name": "numeric-keys",
+  "kind": "points",
+  "description": "integer-index object keys sort first in JSON.stringify",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "numeric"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "x"
+          }
+        ],
+        "extra": {
+          "0": "d",
+          "2": "b",
+          "10": "a",
+          "z": "c"
+        }
+      },
+      "timestamp": 2,
+      "stopReason": "stop"
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "0",
+        "hash": "bb674eb1fbf1f6f0ccd18ea4ef023906045c16763da16303135e16e1319a914b",
+        "role": "user",
+        "key": "user:15f450a59134f37ab2bf2282e48351984b39a1a2c8da32f74883c57f8de06ed7",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "1",
+        "hash": "c65394448c4195dd29218cbb0739944039bffe32d4a7719c9f39a5775f2ebfeb",
+        "role": "assistant",
+        "key": "assistant:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        "safe": true
+      }
+    ],
+    "prefixHash": "c65394448c4195dd29218cbb0739944039bffe32d4a7719c9f39a5775f2ebfeb"
+  }
+}

@@ -104,7 +104,7 @@ systemctl --user enable --now pi-telegram
 loginctl enable-linger "$USER"
 ```
 
-`linger` 让用户服务在退出 SSH 后继续运行。Token 不要提交到仓库；Pi 和 Telegram 服务使用同一账户。获取数字 ID、代理与部署排错见 [Telegram 配置指南](docs/telegram-setup.md)。
+`linger` 让用户服务在退出 SSH 后继续运行。Token 不要提交到仓库；Pi 和 Telegram 服务使用同一账户。获取数字 ID、代理与部署排错见 [Telegram 指南](docs/telegram.md)。
 
 ### 3. 在手机上使用
 
@@ -123,7 +123,7 @@ loginctl enable-linger "$USER"
 
 若希望收到回复但不响铃，保持 `/notifications` 开启，再开启 `/silent`。静音仍可能显示手机通知，实际效果受 Telegram 和系统设置影响。两个开关跨服务重启保留。
 
-桌面与手机可使用同一会话，消息按顺序执行；关闭 VS Code 不会中断已提交任务。Telegram 目前支持文字输入，桌面的非文本附件只同步提示。更多操作见 [Telegram 使用指南](docs/telegram-usage.md)。
+桌面与手机可使用同一会话，消息按顺序执行；关闭 VS Code 不会中断已提交任务。Telegram 目前支持文字输入，桌面的非文本附件只同步提示。更多操作见 [Telegram 指南](docs/telegram.md#日常使用)。
 
 ## 可选：Codex / Claude Code
 

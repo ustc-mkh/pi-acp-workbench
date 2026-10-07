@@ -1,10 +1,11 @@
 # 参与开发
 
-欢迎修复 bug、改进交互、补充模型兼容性测试和文档。项目以 TypeScript 编写，使用标准 ACP v1 stdio；渲染组件与 VS Code 扩展宿主分开构建。
+欢迎修复 bug、改进交互、补充模型兼容性测试和文档。扩展与 Webview 以 TypeScript 编写，使用标准 ACP v1 stdio；两个常驻服务（会话服务、Telegram 接入）另有 `rust/` 下的等价 Rust 实现。渲染组件与 VS Code 扩展宿主分开构建。
 
 ## 准备开发环境
 
 - Node.js 22+、npm、Git；VS Code 1.96+。
+- 修改 `rust/` 下的常驻服务需要 Rust 工具链（cargo）。
 - 浏览器冒烟测试需要本地 Chrome / Chromium。
 - 单元与协议测试不需要 Pi、模型账户或 API key。真实模型调试才需要安装、配置 Pi。
 
@@ -22,23 +23,18 @@ npm run build        # 启动调试前构建
 
 ## 不连接真实模型的调试方式
 
-在 Development Host 的用户设置中配置 Node 与模拟 Agent 的绝对路径：
+仓库提供模拟 ACP 进程 `test/mock-agent.mjs`。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出；`context-images` 模式声明图片能力，`context-legacy` 使用旧版 modes 思考选项。两种接入方式：
 
-```json
-{
-  "piAcp.command": "/absolute/path/to/node",
-  "piAcp.args": ["/absolute/path/to/pi-acp-workbench/test/mock-agent.mjs", "context-dependent"],
-  "piAcp.persistHistory": false
-}
-```
+- Codex / Claude：在 Development Host 的用户设置中把 `piAcp.codex.command`（或 `claude`）指向 Node 可执行文件，对应 `.args` 设为 `["/absolute/path/to/test/mock-agent.mjs", "<mode>"]`。
+- Pi：临时修改会话服务 `sessions.json` 的 `command` / `args` 为同样的 Node + 脚本路径，重启 `pi-sessions`。
 
-点击新建后可验证模型/thinking 切换和流式输出。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出。`context-images` 模式声明图片能力；`context-legacy` 使用旧版 modes 思考选项。模拟 Agent 不保存真实原生上下文，不能代替 Pi 持久化或供应商兼容性测试。恢复默认真实 Pi 时移除 command / args 覆盖。
+点击新建后可验证模型/thinking 切换和流式输出。模拟 Agent 不保存真实原生上下文，不能代替 Pi 持久化或供应商兼容性测试。
 
 只验证渲染可执行 `Pi: Preview Markdown & Math`。日志通过 `Pi: Show Agent Logs` 查看；不要把包含私人代码或凭据的日志提交到 issue。
 
 ## 从哪里开始
 
-- [架构与会话生命周期](docs/architecture.md)：数据流、状态、缓存、上下文重建、协议边界。
+- [架构与会话生命周期](docs/architecture.md)：数据流、状态、缓存、存储、协议边界与 Rust 双实现。
 - [测试与发布](docs/testing.md)：测试分层、复现用例、VSIX 构建和发布检查。
 - [README](README.md)：用户可见行为、安装、配置及当前限制。
 - [CHANGELOG](CHANGELOG.md)：已发布变更。
@@ -51,7 +47,7 @@ npm run build        # 启动调试前构建
 | 模型与思考选项 | `src/session-settings.ts`、`webview/selectors.ts` | selectors / controller 测试 |
 | ACP 传输与进程管理 | `src/agent.ts` | agent 测试、NDJSON mock |
 | Markdown / 数学 / Mermaid | `webview/markdown.ts`、`webview/diagrams.ts` | markdown / diagrams 测试、浏览器冒烟 |
-| 长上下文编辑 | context / checkpoints / pi-enhancements 模块 | checkpoints / controller / bundled-adapter 测试 |
+| 原生会话分支 | `src/native-branch.ts`、`src/pi-native-fork.ts`、`src/pi-enhancements.ts` | native-branch / bundled-adapter 测试 |
 | 消费统计与价格 | telemetry / prices、Webview statistics 模块 | telemetry / statistics / prices 测试 |
 
 ## 提交与评审

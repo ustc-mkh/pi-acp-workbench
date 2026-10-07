@@ -9,7 +9,11 @@
 - 会话服务启动时清理超过 30 天的已完成/中断任务收据与会话标记，避免收据目录无限增长拖慢恢复扫描。
 - Telegram 绑定文件在守护进程启动时移除已删除会话的话题绑定，避免 topics 列表只增不减；会话服务暂不可用时跳过清理保留绑定。
 - 打包脚本版本号改由 `npm_package_version` 注入，不再随版本升级过时。
-- 会话服务 wire 协议与磁盘格式固化为规范文档（docs/service-protocol.md、docs/data-formats.md）；新增 `npm run test:contract` 黑盒契约测试（15 项），只通过 socket 验证实现，可用于未来的替代实现。
+- 会话服务 wire 协议与磁盘格式固化为规范文档（docs/service-protocol.md、docs/data-formats.md）；新增 `npm run test:contract` 黑盒契约测试（19 项），只通过 socket 验证实现，可用于未来的替代实现。
+- `scripts/export-fixtures.mjs` 导出 native-branch 哈希/绑定 fixtures 与磁盘格式 golden 样例（test/fixtures/），为替代实现提供逐比特断言目标；Rust 双实现见 docs/architecture.md。
+- 新增 Rust 版 Telegram relay（`rust/` workspace，Phase 1）：`pi-acp-core` 共享库（socket wire client、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16 切分）+ `pi-acp-telegram-daemon` 单二进制，与 Node 实现参数/格式完全兼容，systemd 改 `ExecStart` 即切换；空闲 RSS ~5 MB。`npm run test:contract:telegram` 用模拟 Bot API 与模拟会话服务验证 9 项 contract，同一套件对 Rust 与 TS 实现均通过（`PI_TG_DAEMON` 切换）。为此 `telegram-api` 新增 `PI_TELEGRAM_API_BASE`/`PI_TELEGRAM_PACE_MS` 测试钩子（仅限测试环境）。
+- 会话服务协议升至 v2（Phase 3）：新增 `historyWrite`/`historyRemove` 命令，扩展端共享历史写路径可委托给 daemon（`hello` 宣告 `history` 能力时启用，旧版 daemon 透明回退文件写）；租约语义见 docs/service-protocol.md §4。契约测试增至 22 项，对 TS 与 Rust 双实现全过。
+- 新增 Rust 版会话服务 daemon（Phase 2）：`pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB vs Node ~79 MB），实现 wire 服务端（分块/背压/订阅路由/全部限制）、serviceCommand 校验、TaskQueue、RequestJournal（幂等/中断恢复/30 天清理）、SharedHistoryStore（乐观锁/租约/编号分配）、SessionPreferences、Telegram outbox 发布、workspace-diff/turn-diff、native-branch 哈希、ACP v1 客户端子集与进程组管理（setsid+killpg）。`PI_CONTRACT_DAEMON` 对同一 19 项 contract 全过；`sessions.json` 缺省 `command` 时按 `PI_ADAPTER` 环境变量或可执行文件旁边的 `pi-adapter.mjs` 解析 worker（Node 版默认 `process.execPath`）。部署与已知差异见 docs/session-service.md「Rust daemon」小节。
 
 ## 0.9.4 — 2026-10-05
 

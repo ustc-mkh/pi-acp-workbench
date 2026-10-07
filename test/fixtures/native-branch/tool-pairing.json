@@ -1,0 +1,133 @@
+{
+  "name": "tool-pairing",
+  "kind": "points",
+  "description": "cuts are safe only where tool calls and results are paired",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "task"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "working"
+          },
+          {
+            "type": "toolCall",
+            "id": "t1"
+          },
+          {
+            "type": "toolCall",
+            "id": "t2"
+          }
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "2",
+      "parentId": "1",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "t1",
+        "content": []
+      }
+    },
+    {
+      "type": "message",
+      "id": "3",
+      "parentId": "2",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "partial"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "4",
+      "parentId": "3",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "t2",
+        "content": []
+      }
+    },
+    {
+      "type": "message",
+      "id": "5",
+      "parentId": "4",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "0",
+        "hash": "725b6bece9609781959a19bd488ff92fde373304cdcc2d48f595082a84f94ff4",
+        "role": "user",
+        "key": "user:0ebb429fa86d481c2630fac53db1c91cffed5d4d41d1021c179444eb67e7ee0b",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "1",
+        "hash": "",
+        "role": "assistant",
+        "key": "assistant:dd5ace9e018dbd62336cbe039916ad7c817d0e9bc9934f70d67f3ff75544da88",
+        "safe": false
+      },
+      {
+        "entryId": "3",
+        "hash": "",
+        "role": "assistant",
+        "key": "assistant:9834a14ab9bcaa0f6a8da71073617eac8f004e596a3fa11d807b84631b825d9d",
+        "timestamp": 1,
+        "safe": false
+      },
+      {
+        "entryId": "5",
+        "hash": "6511b02e5fc74f6fefdf3a97fd3d12c1135a05fa8d7f8caac4349235f177b8c5",
+        "role": "assistant",
+        "key": "assistant:a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211",
+        "timestamp": 1,
+        "safe": true
+      }
+    ],
+    "prefixHash": "6511b02e5fc74f6fefdf3a97fd3d12c1135a05fa8d7f8caac4349235f177b8c5"
+  }
+}

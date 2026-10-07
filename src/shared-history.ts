@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { lock } from 'proper-lockfile';
@@ -27,6 +27,10 @@ export class SharedHistoryStore extends SnapshotStore {
     if(!snapshot.revision)throw new Error('共享历史缺少版本标识，拒绝读取或覆盖。');
     return `${snapshot.id}:${snapshot.revision}`;
   }
+  /** Protocol-v2 delegate: when set, write/remove/clear go over the service
+   * socket instead of touching the history directory (claim/release stay
+   * local — the file lease still marks this client as the live holder). */
+  remote?: { write(snapshot: Snapshot): Promise<Snapshot>; remove(id?: string): Promise<void> };
   private async initialize() { await mkdir(this.root, {recursive:true, mode:0o700}); }
   private async index(): Promise<Index> {
     try {
@@ -96,12 +100,48 @@ export class SharedHistoryStore extends SnapshotStore {
       return {...data, sessionNumber:current.sessionNumber};
     });
   }
+  /** Freshness probe for a lease this store does not hold: the session lock
+   * directory exists and its heartbeat mtime is younger than the stale
+   * threshold (30 s, matching the claim lock options). */
+  private async externalLease(id: string) {
+    if (this.leases.has(id)) return false;
+    try {
+      const s = await stat(join(this.root, 'session-' + createHash('sha256').update(id).digest('hex') + '.lock'));
+      return Date.now() - s.mtimeMs < 30000;
+    } catch { return false; }
+  }
+  /** Socket-delegated write (service protocol `historyWrite`): the caller may
+   * hold its own fresh lease; an unheld session is claimed just for the write.
+   * A lease already held by this store itself means a live local runtime — the
+   * service refuses those before calling here. */
+  async writeDelegated(snapshot: Snapshot): Promise<Snapshot> {
+    if (!snapshot || typeof snapshot.id !== 'string' || !snapshot.id) throw new Error('无效参数：snapshot');
+    if (this.leases.has(snapshot.id)) return this.persist(snapshot, false);
+    let claimed = false;
+    if (!(await this.externalLease(snapshot.id))) {
+      try { await this.claim(snapshot.id); claimed = true; }
+      catch (error) {
+        if (!(error instanceof SessionInUseError) || !(await this.externalLease(snapshot.id))) throw error;
+      }
+    }
+    // Delegated writes always check the caller-supplied base revision, even
+    // when we hold a brief claim (the local `seen` map only tracks this
+    // store's own reads under its own leases).
+    try { return await this.persist(snapshot, true); }
+    finally { if (claimed) await this.release(snapshot.id); }
+  }
   async write(snapshot: Snapshot): Promise<Snapshot> {
+    if (this.remote) return this.remote.write(snapshot);
+    return this.persist(snapshot, false);
+  }
+  private persist(snapshot: Snapshot, external: boolean): Promise<Snapshot> {
     return this.transaction(async index => {
-      if (this.lost.has(snapshot.id) || !this.leases.has(snapshot.id)) throw new Error('未持有共享会话锁，请重新连接后再保存。');
+      if (this.lost.has(snapshot.id) || (!external && !this.leases.has(snapshot.id))) throw new Error('未持有共享会话锁，请重新连接后再保存。');
       const current = index.sessions.find(s => s.id === snapshot.id);
       if (index.deleted.includes(snapshot.id)) throw new Error('此会话已从共享历史删除，不会重新保存。');
-      if (current && current.revision !== this.seen.get(snapshot.id)) throw new Error('会话已被另一个窗口更新，请重新连接。');
+      // External (delegated) writes carry the caller's base revision in the
+      // snapshot itself; local writes use the revision this store last saw.
+      if (current && current.revision !== (external ? snapshot.revision : this.seen.get(snapshot.id))) throw new Error('会话已被另一个窗口更新，请重新连接。');
       const version = {...snapshot, sessionNumber:allocateSessionNumber(index,snapshot), revision:randomUUID()};
       const saved = await this.raw.write(version, this.key(version));
       index.sessions = [saved, ...index.sessions.filter(s => s.id !== snapshot.id)];
@@ -112,6 +152,7 @@ export class SharedHistoryStore extends SnapshotStore {
     });
   }
   async remove(id: string) {
+    if (this.remote) return this.remote.remove(id);
     await this.transaction(async index => {
       const current = index.sessions.find(s => s.id === id);
       index.sessions = index.sessions.filter(s => s.id !== id);
@@ -121,6 +162,7 @@ export class SharedHistoryStore extends SnapshotStore {
     });
   }
   async clear() {
+    if (this.remote) return this.remote.remove(undefined);
     await this.transaction(async index => {
       const sessions = index.sessions;
       index.deleted = [...new Set([...index.deleted, ...sessions.map(s => s.id)])]; index.sessions = [];

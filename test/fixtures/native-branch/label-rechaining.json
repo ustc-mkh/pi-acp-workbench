@@ -1,0 +1,98 @@
+{
+  "name": "label-rechaining",
+  "kind": "points",
+  "description": "labels are UI metadata and never change the context fingerprint",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "label",
+      "id": "1",
+      "parentId": "0",
+      "targetId": "0",
+      "label": "bookmark"
+    },
+    {
+      "type": "message",
+      "id": "2",
+      "parentId": "1",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "b"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "compaction",
+      "id": "3",
+      "parentId": "2",
+      "firstKeptEntryId": "1",
+      "summary": "summary"
+    },
+    {
+      "type": "message",
+      "id": "4",
+      "parentId": "3",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "c"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "0",
+        "hash": "896ab670071d88a0edbefeda2be7046326a34b9dedd0ada67c65801898fef226",
+        "role": "user",
+        "key": "user:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "2",
+        "hash": "a0850b9fca00c8a66c31c424f8df49d26e1ea1d1cc0903a22cc8503e872c88d5",
+        "role": "assistant",
+        "key": "assistant:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
+        "timestamp": 1,
+        "safe": true
+      },
+      {
+        "entryId": "4",
+        "hash": "4f8b0fc549b6cb4c94b3fe0246006e94635c959cc4b6b4d5fe4b130145fd07a3",
+        "role": "assistant",
+        "key": "assistant:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+        "timestamp": 1,
+        "safe": true
+      }
+    ],
+    "prefixHash": "4f8b0fc549b6cb4c94b3fe0246006e94635c959cc4b6b4d5fe4b130145fd07a3"
+  }
+}

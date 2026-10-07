@@ -16,7 +16,7 @@ import { mkdtemp, mkdir, writeFile, readdir, readFile, rm } from 'node:fs/promis
 import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 
 const DAEMON = (process.env.PI_CONTRACT_DAEMON || `node ${resolve('dist/session-daemon.mjs')}`).split(/\s+/);
@@ -125,7 +125,8 @@ test('hello advertises workbench capabilities', async () => {
   const info = await c.call('hello');
   assert.equal(info.protocolVersion, 1);
   assert.equal(info.agentCapabilities?.loadSession, true);
-  assert.equal(info.agentCapabilities?._meta?.['pi-workbench']?.version, 1);
+  assert.equal(info.agentCapabilities?._meta?.['pi-workbench']?.version, 2);
+  assert.equal(info.agentCapabilities?._meta?.['pi-workbench']?.history, true);
 });
 
 test('validation rejects malformed requests without destroying valid work', async () => {
@@ -212,6 +213,33 @@ test('watchers receive session events; unsubscribed clients receive none', async
   } finally { watcher.close(); idle.close(); }
 });
 
+test('watch subscriptions are bounded at 32 per socket', async () => {
+  const c = await Wire.open(socketPath);
+  try {
+    for (let i = 0; i < 32; i++)
+      assert.equal(await c.call('_watch', { sessionId: `fake-${i}`, enabled: true }), true);
+    await expectError(c.call('_watch', { sessionId: 'fake-32', enabled: true }), /订阅已满/);
+    // Re-watching an existing subscription still works at the limit.
+    assert.equal(await c.call('_watch', { sessionId: 'fake-0', enabled: true }), true);
+  } finally { c.close(); }
+});
+
+test('request whitelist and method params are validated', async () => {
+  const c = state.client;
+  await expectError(c.call('request', { sessionId: 'x', method: 'session/set_config_option', params: {} }), /无效参数/);
+  await expectError(c.call('request', { sessionId: 'x', method: 'session/set_mode', params: {} }), /无效参数/);
+  await expectError(c.call('request', { sessionId: 'x', method: '_pi_workbench/fork', params: { entryId: 'e' } }), /无效参数/);
+  await expectError(c.call('request', { sessionId: 'x', method: 'session/set_mode', params: { modeId: 'high' } }), /不存在/);
+  // Frozen validation edges: explicit `null` is NOT a missing argument (JS
+  // `=== undefined` semantics) and the ≤10000 limit counts UTF-16 units.
+  await expectError(c.call('request', { sessionId: 'x', method: 'session/set_mode', params: null }), /ACP 参数必须是对象/);
+  await expectError(c.call('permission', { sessionId: 'x', permissionId: 'p', optionId: null }), /无效参数：optionId/);
+  await expectError(c.call('prompt', { sessionId: 'x', prompt: [{ type: 'text', text: 'x' }], source: null }), /消息来源无效/);
+  // 3334 CJK chars = 3334 UTF-16 units (≤10000, passes text() validation) but
+  // 10002 UTF-8 bytes — an implementation measuring byte length wrongly rejects.
+  await expectError(c.call('state', { sessionId: '中'.repeat(3334) }), /不存在/);
+});
+
 test('permission requests surface in state and resolve via the permission method', async () => {
   const c = state.client;
   const pending = c.call('prompt', { sessionId: state.sessionId, prompt: [{ type: 'text', text: 'permission' }] }, { timeout: 0 });
@@ -249,6 +277,8 @@ test('duplicate request id returns the original result without re-executing', as
   const second = await c.call('create', { cwd: workspace }, { id });
   assert.equal(second.id, first.id);
   await expectError(c.call('create', { cwd: '/' }, { id }), /已被其他操作使用|冲突/);
+  // Same id under a different method also fails the fingerprint check.
+  await expectError(c.call('prompt', { sessionId: state.sessionId, prompt: [{ type: 'text', text: 'x' }] }, { id }), /已被其他操作使用|冲突/);
 });
 
 test('state responses larger than 512 KiB arrive as reassemblable fragments', async () => {
@@ -258,6 +288,55 @@ test('state responses larger than 512 KiB arrive as reassemblable fragments', as
   const s = await c.call('state', { sessionId: state.sessionId });
   assert.ok(c.fragmentCount > before, 'expected fragmented response');
   assert.ok(s.snapshot.entries.some(e => e.role === 'assistant' && e.text.length >= 600 * 1024));
+});
+
+test('a fragment stream cut by disconnect rejects the pending call', async () => {
+  const c = await Wire.open(socketPath);
+  const orig = c.dispatch.bind(c);
+  let cut = false;
+  c.dispatch = item => { if (!cut && item && item.fragment !== undefined) { cut = true; c.close(); return; } orig(item); };
+  // state.sessionId already holds the >600 KiB 'big' transcript → state fragments.
+  await expectError(c.call('state', { sessionId: state.sessionId }, { timeout: 0 }), /connection closed/);
+  assert.ok(cut, 'response must have been mid-fragmentation when the socket died');
+});
+
+test('on-disk artifacts match the format contract', async () => {
+  const { stat, readFile, readdir } = await import('node:fs/promises');
+  const mode = async p => (await stat(p)).mode & 0o777;
+  assert.equal(await mode(socketPath), 0o600);
+  assert.equal(await mode(join(dataDir, 'service')), 0o700);
+  const index = JSON.parse(await readFile(join(dataDir, 'history', 'index.json'), 'utf8'));
+  assert.ok(Array.isArray(index.sessions) && Array.isArray(index.deleted));
+  const receipts = (await readdir(join(dataDir, 'service', 'requests'))).filter(n => /^[a-f0-9]{64}\.json$/.test(n));
+  assert.ok(receipts.length >= 2, 'expected prompt receipts on disk');
+  for (const name of receipts) {
+    const r = JSON.parse(await readFile(join(dataDir, 'service', 'requests', name), 'utf8'));
+    assert.match(r.fingerprint, /^[a-f0-9]{64}$/);
+    assert.ok(['running', 'completed', 'interrupted'].includes(r.status));
+  }
+});
+
+test('corrupt artifacts fail closed instead of being migrated or dropped', async () => {
+  const indexFile = join(dataDir, 'history', 'index.json');
+  const original = await readFile(indexFile, 'utf8');
+  // Valid JSON with an invalid shape triggers the fail-closed path (raw syntax errors propagate too).
+  await writeFile(indexFile, '{"sessions":"corrupt","deleted":[]}');
+  await expectError(state.client.call('list'), /无效|损坏|not valid JSON/);
+  await writeFile(indexFile, original);
+  assert.ok(Array.isArray(await state.client.call('list')));
+
+  // A malformed receipt file must refuse startup entirely.
+  await stopDaemon();
+  const corrupt = join(dataDir, 'service', 'requests', 'a'.repeat(64) + '.json');
+  await writeFile(corrupt, 'not json');
+  const failed = spawn(DAEMON[0], [...DAEMON.slice(1), '--config', configFile, '--data-dir', dataDir], { stdio: ['ignore', 'ignore', 'ignore'] });
+  const code = await Promise.race([new Promise(r => failed.once('exit', r)), delay(8000).then(() => 'timeout')]);
+  assert.notEqual(code, 0, 'daemon must refuse a corrupt receipt instead of wiping it');
+  if (code === 'timeout') failed.kill('SIGKILL');
+  await rm(corrupt, { force: true });
+  startDaemon(); await waitSocket();
+  state.client = await Wire.open(socketPath);
+  await state.client.call('hello');
 });
 
 test('daemon restart marks in-flight work interrupted and refuses replay', async () => {
@@ -302,6 +381,41 @@ test('remove deletes the session from history and rejects further state', async 
   const list = await c.call('list');
   assert.ok(!list.some(s => s.id === state.sessionId));
   await expectError(c.call('state', { sessionId: state.sessionId }), /不存在|删除/);
+});
+
+test('historyWrite/historyRemove round-trip a delegated snapshot', async () => {
+  const c = state.client;
+  const id = 'workbench:codex:contract-' + Math.random().toString(36).slice(2);
+  const snapshot = { id, cwd: workspace, harness: 'codex', title: 'delegated', updated: Date.now(), entries: [{ id: 'e1', role: 'user', text: 'hi' }], contextComplete: true };
+  const saved = await c.call('historyWrite', { snapshot });
+  assert.equal(saved.id, id);
+  assert.ok(typeof saved.revision === 'string' && saved.revision);
+  assert.ok(saved.sessionNumber >= 1);
+  // Non-pi harness stays invisible to list() but is stored in the shared index.
+  assert.ok(!(await c.call('list')).some(s => s.id === id));
+  // A stale base revision conflicts; the fresh one succeeds.
+  await expectError(c.call('historyWrite', { snapshot }), /另一个窗口更新/);
+  const saved2 = await c.call('historyWrite', { snapshot: { ...snapshot, revision: saved.revision } });
+  assert.notEqual(saved2.revision, saved.revision);
+  const gone = await c.call('historyRemove', { sessionId: id });
+  assert.equal(gone, undefined);
+  await expectError(c.call('historyRemove', { sessionId: id }), /会话不存在/);
+});
+
+test('historyWrite accepts a caller-held fresh lease', async () => {
+  const c = state.client;
+  const id = 'workbench:codex:leased-' + Math.random().toString(36).slice(2);
+  // Simulate an extension holding the session lock: mkdir + fresh mtime.
+  const lockDir = join(dataDir, 'history', 'session-' + createHash('sha256').update(id).digest('hex') + '.lock');
+  await mkdir(lockDir, { recursive: true });
+  try {
+    const snapshot = { id, cwd: workspace, harness: 'codex', title: 'leased', updated: Date.now(), entries: [], contextComplete: true };
+    const saved = await c.call('historyWrite', { snapshot });
+    assert.equal(saved.id, id);
+    await c.call('historyRemove', { sessionId: id });
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
 });
 
 // --- runner -----------------------------------------------------------------

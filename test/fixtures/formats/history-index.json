@@ -1,0 +1,21 @@
+{
+  "sessions": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "harness": "pi",
+      "cwd": "/home/user/project",
+      "title": "帮我修复登录问题",
+      "updated": 1759700000000,
+      "entries": [],
+      "stored": true,
+      "sessionNumber": 3,
+      "revision": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+      "contextComplete": true,
+      "configs": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "anthropic/claude-sonnet-4-6", "options": []}],
+      "modes": {"currentModeId": "low", "availableModes": [{"id": "low", "name": "Thinking: low"}]}
+    }
+  ],
+  "deleted": ["11111111-2222-3333-4444-555555555555"],
+  "nextSessionNumber": 4
+}

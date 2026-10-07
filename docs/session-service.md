@@ -26,6 +26,17 @@ systemctl --user status pi-sessions
 journalctl --user -u pi-sessions -f
 ```
 
+### Rust daemon（实验性替代）
+
+`rust/` workspace 提供 `pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB），协议与磁盘格式与 Node 版逐字节兼容，通过同一套 22 项 contract 验证。
+
+```bash
+cd rust && cargo build --release -p pi-acp-session-daemon
+# ExecStart 改为：/absolute/path/to/rust/target/release/pi-acp-session-daemon --config %h/.config/pi-acp-workbench/sessions.json
+```
+
+差异：`sessions.json` 缺省 `command` 时，Rust daemon 依次尝试 `PI_ADAPTER` 环境变量、可执行文件旁边的 `pi-adapter.mjs`，都不存在则要求显式 `command`/`args`（Node 版默认 `process.execPath` + `dist/pi-adapter.mjs`）。工作进程仍是 `node pi-adapter.mjs`。禁止新旧 daemon 共用同一 `--data-dir` 并行运行（锁会拒绝，但设计上只允许一个）。
+
 退出 SSH 后仍运行，需要账户启用 linger：`loginctl enable-linger "$USER"`。服务未启动时插件会报连接错误，不会回退到直接启动 Pi。自定义数据目录用 daemon 的 `--data-dir`；插件设置 `piAcp.serviceSocket` 指向该目录下 `service/sessions.sock`，Telegram 使用相同 `--data-dir`。
 
 ## 进程生命周期

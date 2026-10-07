@@ -77,3 +77,46 @@ it('detects stale revisions even after another client releases its lock', async(
   await a.claim('one'); await expect(a.write(snapshot('one'))).rejects.toThrow('另一个窗口更新');
   await a.read(old); await expect(a.write(snapshot('one'))).resolves.toMatchObject({id:'one'});
 });
+
+// --- Protocol v2 delegated writes (historyWrite/historyRemove over socket) ---
+it('writeDelegated writes without a local lease when the session is unheld', async()=>{
+  const {a,b} = await pair();
+  const saved = await b.writeDelegated(snapshot('delegated'));
+  expect(saved.revision).toBeTruthy();
+  expect((await a.list()).map(s=>s.id)).toEqual(['delegated']);
+});
+it('writeDelegated honors a caller-held live lease and the caller base revision', async()=>{
+  const {a,b} = await pair();
+  // a holds the lease (live holder); b's delegated write must still proceed.
+  await a.claim('owned');
+  const saved = await b.writeDelegated(snapshot('owned'));
+  // Stale caller base conflicts; current base succeeds.
+  await expect(b.writeDelegated({...snapshot('owned'),revision:undefined})).rejects.toThrow('另一个窗口更新');
+  const again = await b.writeDelegated({...snapshot('owned'),revision:saved.revision});
+  expect(again.revision).not.toBe(saved.revision);
+  await a.release('owned');
+});
+it('writeDelegated with a locally held lease takes the plain path; callers must carry the base revision', async()=>{
+  const {a,b} = await pair();
+  await a.claim('local');
+  // Same-store writeDelegated with a locally held lease takes the plain path.
+  const saved = await a.writeDelegated(snapshot('local'));
+  await a.release('local');
+  // Delegated writes check the CALLER's base revision — absent base conflicts.
+  await expect(b.writeDelegated(snapshot('local'))).rejects.toThrow('另一个窗口更新');
+  await expect(b.writeDelegated({...snapshot('local'),revision:saved.revision})).resolves.toMatchObject({id:'local'});
+});
+it('remote delegate routes write/remove/clear over the socket path', async()=>{
+  const {a} = await pair();
+  const calls:string[] = [];
+  a.remote = {
+    write: async s => {calls.push('write:'+s.id);return {...s,revision:'r1',sessionNumber:1,stored:true};},
+    remove: async id => {calls.push('remove:'+(id??'*'));},
+  };
+  await a.write(snapshot('x'));
+  await a.remove('x');
+  await a.clear();
+  expect(calls).toEqual(['write:x','remove:x','remove:*']);
+  // remote writes never touched the directory
+  await expect(readFile(join(a.root,'index.json'),'utf8')).rejects.toThrow();
+});

@@ -1,6 +1,6 @@
 # 磁盘数据格式规范
 
-本文件冻结 `~/.pi/pi-acp-workbench/`（或 `--data-dir` 指定目录）下的全部持久化格式。Rust 重写与 TS 实现**并发读写同一目录**，因此以下均为字节级不变量；格式变更需要更新本文件、全部实现与 contract 测试。
+本文件冻结 `~/.pi/pi-acp-workbench/`（或 `--data-dir` 指定目录）下的全部持久化格式。Rust 与 TS 实现**并发读写同一目录**，因此以下均为字节级不变量；格式变更需要更新本文件、全部实现与 contract 测试。
 
 通用约定：
 
@@ -34,7 +34,7 @@
     └── <harness>.json                 # pi / codex / claude
 ```
 
-## 2. 锁语义（proper-lockfile 兼容，重写前请对照 `proper-lockfile@4.1.2` 源码核实）
+## 2. 锁语义（proper-lockfile 兼容，改动前请对照 `proper-lockfile@4.1.2` 源码核实）
 
 **不得改用 `flock`/`flockfile`**——mkdir 锁与 flock 互不感知，混用会导致双写。
 
@@ -45,6 +45,13 @@
 - 会话索引写事务规则：先 commit `index.json`（含 tombstone）再删除/修改快照文件——失败不得复活已删历史。
 
 ## 3. `history/` 共享历史
+
+### 写路径（协议 v2 起）
+
+扩展端首选通过 socket `historyWrite`/`historyRemove` 委托 daemon 写入（见
+service-protocol.md §4）；旧版 daemon 下扩展回退为直接文件写。无论哪条
+路径，本节锁与文件语义完全一致：daemon 内部短时 claim、验证调用方
+（扩展）持有的活跃租约，或拒绝 daemon 自持 runtime 的会话。
 
 ### index.json
 

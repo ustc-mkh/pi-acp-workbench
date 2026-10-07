@@ -1,0 +1,46 @@
+{
+  "name": "orphaned-result",
+  "kind": "points",
+  "description": "an unmatched tool result is never a safe cut",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "unknown",
+        "content": []
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "not safe"
+          }
+        ],
+        "timestamp": 1,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "expected": {
+    "forkPoints": [
+      {
+        "entryId": "1",
+        "hash": "",
+        "role": "assistant",
+        "key": "assistant:a19c238cc9d785d89beacf00e6b8f9b697bc7273facffef73ebbe6f42f8bb4ea",
+        "timestamp": 1,
+        "safe": false
+      }
+    ],
+    "prefixHash": "d76fa115695251f0939a5a19142da7953f196042b9e015cd1a602f9a1699fd6d"
+  }
+}

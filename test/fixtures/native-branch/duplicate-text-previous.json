@@ -1,0 +1,60 @@
+{
+  "name": "duplicate-text-previous",
+  "kind": "bind",
+  "description": "previously verified mappings survive ambiguity",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "same"
+          }
+        ],
+        "timestamp": 10,
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "message",
+      "id": "1",
+      "parentId": "0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "same"
+          }
+        ],
+        "timestamp": 20,
+        "stopReason": "stop"
+      }
+    }
+  ],
+  "uiEntries": [
+    {
+      "id": "a",
+      "role": "assistant",
+      "text": "same"
+    },
+    {
+      "id": "b",
+      "role": "assistant",
+      "text": "same"
+    }
+  ],
+  "previous": {
+    "a": {
+      "entryId": "0",
+      "hash": "__from_points__"
+    }
+  },
+  "expected": {
+    "bound": {}
+  }
+}

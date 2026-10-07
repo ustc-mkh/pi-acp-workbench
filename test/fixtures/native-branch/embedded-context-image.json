@@ -1,0 +1,60 @@
+{
+  "name": "embedded-context-image",
+  "kind": "bind",
+  "description": "embedded context and images match native text without re-encoding",
+  "entries": [
+    {
+      "type": "message",
+      "id": "0",
+      "parentId": null,
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "look\n[Embedded Context] file:///a (text/plain)\ncode"
+          },
+          {
+            "type": "image",
+            "data": "native-resized-image"
+          }
+        ],
+        "timestamp": 1
+      }
+    }
+  ],
+  "uiEntries": [
+    {
+      "id": "user",
+      "role": "user",
+      "text": "look 📎a",
+      "contextBlocks": [
+        {
+          "type": "text",
+          "text": "look"
+        },
+        {
+          "type": "resource",
+          "resource": {
+            "uri": "file:///a",
+            "mimeType": "text/plain",
+            "text": "code"
+          }
+        },
+        {
+          "type": "image",
+          "mimeType": "image/png",
+          "data": "original-image"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "bound": {
+      "user": {
+        "entryId": "0",
+        "hash": "dc598ff43a2738e8e4a33e3b686754c408592635d085c86abb9d599a93b7386e"
+      }
+    }
+  }
+}
