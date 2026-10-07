@@ -24,6 +24,16 @@ async function fixture(maxWorkers=2,idleMs=900000,mode='context'){
  const host=new TelegramSessions({test:root},socket);cleanup.push(()=>host.dispose());const client=new SessionClient(socket);cleanup.push(()=>client.dispose());
  return {root,service,server,host,client,socket,audit,agents};
 }
+it('restricts new sessions to canonical workspace roots, rejecting symlink escapes',async()=>{
+ const {root,socket,client}=await fixture();
+ const allowed=join(root,'allowed'),outside=join(root,'outside');await mkdir(allowed);await mkdir(outside);
+ await symlink(outside,join(allowed,'escape'));await symlink(allowed,join(root,'alias'));
+ const host=new TelegramSessions({main:allowed},socket,true);cleanup.push(()=>host.dispose());
+ await expect(host.create(outside)).rejects.toThrow('workspaces');
+ await expect(host.create(join(allowed,'escape'))).rejects.toThrow('workspaces');
+ await expect(host.create(join(root,'alias'))).resolves.toMatchObject({cwd:allowed});
+ await expect(client.call('nope',{sessionId:'x'})).rejects.toMatchObject({code:'unknown_method'});
+});
 it('shares a running task between desktop and phone; detaching desktop does not kill Pi',async()=>{
  const {root,host,socket,client}=await fixture();
  const state=vi.fn(),agent=new RemoteAgent({cwd:root,command:'unused',args:[],update:()=>{},permission:vi.fn(),closed:()=>{},log:()=>{}},state,socket);cleanup.push(()=>agent.dispose());

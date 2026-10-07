@@ -6,6 +6,7 @@ pub struct Config {
     pub chat_id: i64,
     pub allowed_user_ids: Vec<i64>,
     pub workspaces: BTreeMap<String, String>,
+    pub restrict_to_workspaces: bool,
 }
 
 pub fn parse(value: &Value) -> Result<Config, String> {
@@ -42,13 +43,30 @@ pub fn parse(value: &Value) -> Result<Config, String> {
             workspaces.insert(name.clone(), path.unwrap().to_string());
         }
     }
+    let restrict_to_workspaces = match v.get("restrictToWorkspaces") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("restrictToWorkspaces 必须是布尔值。")?,
+    };
     let unknown: Vec<&str> = v
         .keys()
         .map(String::as_str)
-        .filter(|k| !["chatId", "allowedUserIds", "workspaces"].contains(k))
+        .filter(|k| !["chatId", "allowedUserIds", "workspaces", "restrictToWorkspaces"].contains(k))
         .collect();
     if !unknown.is_empty() {
         return Err(format!("不支持的 Telegram 配置字段：{}", unknown.join(", ")));
     }
-    Ok(Config { chat_id: chat_id, allowed_user_ids: allowed, workspaces })
+    Ok(Config { chat_id: chat_id, allowed_user_ids: allowed, workspaces, restrict_to_workspaces })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validates_workspace_restriction() {
+        assert!(!parse(&json!({"chatId":-1,"allowedUserIds":[1]})).unwrap().restrict_to_workspaces);
+        assert!(parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":true})).unwrap().restrict_to_workspaces);
+        assert!(parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":"yes"})).is_err());
+    }
 }

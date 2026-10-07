@@ -1,6 +1,6 @@
 # Telegram 接入
 
-Telegram relay 是独立的常驻进程，关闭 VS Code 后仍可对话和执行任务。提供两个等价实现：`node dist/telegram-daemon.mjs`（Node.js，默认）和 `rust/target/release/pi-acp-telegram-daemon`（Rust，单二进制，空闲 RSS ~5 MB 对比 Node ~60-100 MB）。两者接受完全相同的 `--config` / `--data-dir` / `--discover` 参数与环境变量，读写相同的 `~/.pi/pi-acp-workbench/telegram/` 格式；切换只需改 systemd unit 的 `ExecStart` 并重启。Rust 构建：`cargo build --release --manifest-path rust/Cargo.toml`；等价性验证：`npm run test:contract:telegram`（默认测 Rust 二进制，`PI_TG_DAEMON="node dist/telegram-daemon.mjs"` 可跑 TS 实现）。一个私人群组 Topic 对应一个 Pi session；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
+Telegram relay 是独立的常驻进程，关闭 VS Code 后仍可对话和执行任务。提供两个等价实现：`node dist/telegram-daemon.mjs`（Node.js，默认）和 `rust/target/release/pi-acp-telegram-daemon`（Rust，单二进制，空闲 RSS ~5 MB 对比 Node ~60-100 MB）。两者的生产构建接受相同的 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，读写相同的 `~/.pi/pi-acp-workbench/telegram/` 格式；切换只需改 systemd unit 的 `ExecStart` 并重启。Rust 构建：`cargo build --release --manifest-path rust/Cargo.toml`；等价性验证：`npm run test:contract:telegram`（默认测 Rust 二进制，`PI_TG_DAEMON="node dist/telegram-daemon.mjs"` 可跑 TS 实现）。一个私人群组 Topic 对应一个 Pi session；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
 
 本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复使用纯文本，避免不完整 Markdown 导致 Telegram 拒绝流式更新。
 
@@ -61,7 +61,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。`workspaces` 只是 `/new` 的快捷入口，不限制目录访问；可直接使用 `/new /absolute/path`。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。默认 `workspaces` 只是 `/new` 的快捷入口，可直接使用 `/new /absolute/path`。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
 
 ### 3. 作为用户服务常驻
 
@@ -99,7 +99,7 @@ journalctl --user -u pi-telegram -f
 - 完成通知在发送前落盘，网络恢复后重试。发送已成功但确认落盘前崩溃时可能重复通知，不会重跑 Pi 任务。
 - 强制杀进程不会自动继续中断的模型请求；原生历史和本地记录保留。需要继续时在原话题发新消息。
 
-`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。`PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS` 是两个实现共有的测试钩子（覆盖 Bot API 基地址与发送节奏），永远不要出现在生产 unit 中。
+`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。生产实现忽略 `PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS`，固定使用 Telegram 官方端点和 3100 ms 发送间隔。TS 契约测试通过 `test/telegram-contract-entry.mjs` 显式注入模拟传输；Rust 契约测试单独构建 `contract-test` feature 到 `rust/target/contract/`。测试二进制支持这两个环境变量，禁止部署到生产。
 
 ## 维护与升级范围
 

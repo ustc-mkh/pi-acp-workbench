@@ -57,7 +57,7 @@ export class SessionClient {
       socket.on('error',()=>{});
       socket.once('close',()=>{clearTimeout(timer);const error=new Error('Pi 会话服务连接已断开。请检查 pi-sessions.service；任务不会自动重发。');reject(error);this.connecting=undefined;this.socket=undefined;
         for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error);}this.pending.clear();if(!this.closed)this.lost(error.message);});
-      responseReader(socket,item=>{if(item.event){this.event(item.event);return;}const p=this.pending.get(item.id);if(!p)return;this.pending.delete(item.id);clearTimeout(p.timer);item.error?p.reject(new Error(item.error)):p.resolve(item.value);});
+      responseReader(socket,item=>{if(item.event){this.event(item.event);return;}const p=this.pending.get(item.id);if(!p)return;this.pending.delete(item.id);clearTimeout(p.timer);item.error?p.reject(Object.assign(new Error(item.error), {code:item.code})):p.resolve(item.value);});
     });
   }
   watch(sessionId:string,enabled=true){return this.call('_watch',{sessionId,enabled});}
@@ -144,7 +144,7 @@ export class SessionServer {
         if(this.pending>=WIRE_LIMITS.pending||this.pendingBytes+bytes>WIRE_LIMITS.pendingBytes){this.send(socket,{id:item.id,error:'会话服务请求队列已满，请稍后重试。'});return;}
         this.pending++;this.pendingBytes+=bytes;
         void Promise.resolve().then(()=>this.handle(item.method,item.params,item.id,event=>this.send(socket,{event})))
-          .then(value=>this.send(socket,{id:item.id,value}),error=>this.send(socket,{id:item.id,error:error instanceof Error?error.message:String(error)}))
+          .then(value=>this.send(socket,{id:item.id,value}),error=>this.send(socket,{id:item.id,error:error instanceof Error?error.message:String(error),code:(error as {code?:string})?.code}))
           .finally(()=>{this.pending--;this.pendingBytes-=bytes;});
       },delta=>{this.bufferedBytes+=delta;return this.bufferedBytes<=WIRE_LIMITS.pendingBytes;});
     });

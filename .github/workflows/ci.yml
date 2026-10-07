@@ -1,0 +1,23 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:all
+      - run: cargo test --manifest-path rust/Cargo.toml
+      - run: cargo build --manifest-path rust/Cargo.toml
+      - run: npm run test:contract
+      - run: PI_CONTRACT_DAEMON="$PWD/rust/target/debug/pi-acp-session-daemon" node scripts/service-contract.mjs
+      - run: npm run test:contract:telegram
+      - run: PI_TG_DAEMON="node dist/telegram-daemon.mjs" node scripts/telegram-contract.mjs
+      - run: npm audit --omit=dev

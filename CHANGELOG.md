@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- 修复协议 v2 委托历史写入的版本基线：只用本窗口读写的 revision，轮询不推进；远程写成功同步版本，降级文件写不再误报冲突。
+- 未知服务方法增加稳定错误码 `unknown_method`；启动 hello 失败后自动重试。清空共享历史确认明确提示会停止 Telegram 在内的所有任务。
+- Telegram 新增可选 `restrictToWorkspaces`（真实路径匹配工作区根）；生产构建移除传输环境变量钩子，测试通过显式注入或隔离 Rust feature 使用模拟 API。
+- 压缩 Webview bundle，VSIX 排除 source map；根忽略列表显式排除 `rust/target/`；新增 TS/Rust 单元和双实现契约 CI。
+
 - 依赖安全修复：通过 npm overrides 将 mermaid 传递依赖的 katex 统一为 0.19.0，消除原型链污染漏洞（GHSA-238p-pmpm-9mq7）。
 - 工作进程退出后 `stop()` 立即返回，不再固定等待 1.5 秒 SIGKILL 兜底计时器；空闲回收、原生分支与批量关闭更快。
 - 会话 Socket 按行解析不再对剩余缓冲做逐行 Buffer 往返，单数据块多行时从 O(n²) 降为 O(n)，同时保留残留字符串对源数据块的释放。
@@ -11,7 +16,7 @@
 - 打包脚本版本号改由 `npm_package_version` 注入，不再随版本升级过时。
 - 会话服务 wire 协议与磁盘格式固化为规范文档（docs/service-protocol.md、docs/data-formats.md）；新增 `npm run test:contract` 黑盒契约测试（19 项），只通过 socket 验证实现，可用于未来的替代实现。
 - `scripts/export-fixtures.mjs` 导出 native-branch 哈希/绑定 fixtures 与磁盘格式 golden 样例（test/fixtures/），为替代实现提供逐比特断言目标；Rust 双实现见 docs/architecture.md。
-- 新增 Rust 版 Telegram relay（`rust/` workspace，Phase 1）：`pi-acp-core` 共享库（socket wire client、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16 切分）+ `pi-acp-telegram-daemon` 单二进制，与 Node 实现参数/格式完全兼容，systemd 改 `ExecStart` 即切换；空闲 RSS ~5 MB。`npm run test:contract:telegram` 用模拟 Bot API 与模拟会话服务验证 9 项 contract，同一套件对 Rust 与 TS 实现均通过（`PI_TG_DAEMON` 切换）。为此 `telegram-api` 新增 `PI_TELEGRAM_API_BASE`/`PI_TELEGRAM_PACE_MS` 测试钩子（仅限测试环境）。
+- 新增 Rust 版 Telegram relay（`rust/` workspace，Phase 1）：`pi-acp-core` 共享库（socket wire client、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16 切分）+ `pi-acp-telegram-daemon` 单二进制，与 Node 实现参数/格式完全兼容，systemd 改 `ExecStart` 即切换；空闲 RSS ~5 MB。`npm run test:contract:telegram` 用模拟 Bot API 与模拟会话服务验证 9 项 contract，同一套件对 Rust 与 TS 实现均通过（`PI_TG_DAEMON` 切换）。模拟 API 钩子现已移至独立测试入口 / Rust `contract-test` feature，不影响生产构建。
 - 会话服务协议升至 v2（Phase 3）：新增 `historyWrite`/`historyRemove` 命令，扩展端共享历史写路径可委托给 daemon（`hello` 宣告 `history` 能力时启用，旧版 daemon 透明回退文件写）；租约语义见 docs/service-protocol.md §4。契约测试增至 22 项，对 TS 与 Rust 双实现全过。
 - 新增 Rust 版会话服务 daemon（Phase 2）：`pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB vs Node ~79 MB），实现 wire 服务端（分块/背压/订阅路由/全部限制）、serviceCommand 校验、TaskQueue、RequestJournal（幂等/中断恢复/30 天清理）、SharedHistoryStore（乐观锁/租约/编号分配）、SessionPreferences、Telegram outbox 发布、workspace-diff/turn-diff、native-branch 哈希、ACP v1 客户端子集与进程组管理（setsid+killpg）。`PI_CONTRACT_DAEMON` 对同一 19 项 contract 全过；`sessions.json` 缺省 `command` 时按 `PI_ADAPTER` 环境变量或可执行文件旁边的 `pi-adapter.mjs` 解析 worker（Node 版默认 `process.execPath`）。部署与已知差异见 docs/session-service.md「Rust daemon」小节。
 

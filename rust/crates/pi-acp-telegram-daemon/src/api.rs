@@ -1,6 +1,6 @@
 //! TelegramApi port (src/telegram-api.ts): paced sends, 429 honor, redacted errors.
-//! PI_TELEGRAM_API_BASE overrides the `https://api.telegram.org/bot<token>` prefix
-//! (testing/contract only — never configured by the extension).
+//! Production builds always use Telegram's official endpoint and caller pace.
+//! The opt-in contract-test feature enables mock transport environment hooks.
 use pi_acp_core::utf16::telegram_chunks;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,9 +45,13 @@ pub struct TelegramApi {
 
 impl TelegramApi {
     pub fn new(token: &str, interval: Duration, stop: CancellationToken) -> Self {
+        #[cfg(not(feature = "contract-test"))]
+        let base = format!("https://api.telegram.org/bot{token}");
+        #[cfg(feature = "contract-test")]
         let base = std::env::var("PI_TELEGRAM_API_BASE")
             .unwrap_or_else(|_| format!("https://api.telegram.org/bot{token}"));
         // Test hook: contract suites set PI_TELEGRAM_PACE_MS instead of waiting 3.1s/send.
+        #[cfg(feature = "contract-test")]
         let interval = std::env::var("PI_TELEGRAM_PACE_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())

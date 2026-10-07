@@ -197,7 +197,7 @@
     "test:harness": "node scripts/harness-reconnect-smoke.mjs",
     "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs",
     "test:contract": "npm run build && node scripts/service-contract.mjs",
-    "test:contract:telegram": "cargo build --manifest-path rust/Cargo.toml && node scripts/telegram-contract.mjs",
+    "test:contract:telegram": "cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/telegram-contract.mjs",
     "telegram": "node dist/telegram-daemon.mjs",
     "sessions": "node dist/session-daemon.mjs",
     "test:memory": "node scripts/memory-smoke.mjs"

@@ -1,7 +1,7 @@
 //! Rust port of src/telegram-daemon.ts — CLI-compatible:
 //!   PI_TELEGRAM_BOT_TOKEN=... pi-acp-telegram-daemon --config /path/telegram.json
 //!     [--data-dir /path/pi-acp-workbench] [--discover] [--help]
-//! Extra testing hook: PI_TELEGRAM_API_BASE overrides the Bot API base URL.
+//! Isolated contract-test builds support mock Bot API environment hooks.
 mod api;
 mod bridge;
 mod config;
@@ -174,7 +174,7 @@ async fn run() -> Result<(), String> {
         Err(e) => return Err(format!("无法读取 Telegram 绑定：{e}")),
     }
 
-    let host = Sessions::connect(cfg.workspaces.clone(), &root.join("service/sessions.sock"))
+    let host = Sessions::connect(cfg.workspaces.clone(), &root.join("service/sessions.sock"), cfg.restrict_to_workspaces)
         .await
         .map_err(|e| format!("无法连接会话服务：{e}"))?;
 

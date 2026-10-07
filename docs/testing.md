@@ -101,7 +101,7 @@ cat "$PI_TEST_ROOT/result.json"
 
 `npm run test:contract` 运行 `scripts/service-contract.mjs`：只通过 Unix socket 驱动 daemon 的黑盒协议验证（自带最小 wire 客户端，不 import 服务实现），覆盖方法/参数校验、违规连接隔离、大帧上限、会话编号、事件订阅与上限、授权流转、取消、同 ID 幂等、>512 KiB 分块响应、磁盘产物格式与损坏拒启动、重启中断防重放、数据目录单例锁与删除语义。`test/fixtures/` 存放 native-branch 哈希 fixtures（`scripts/export-fixtures.mjs` 生成）与磁盘格式 golden 样例，供替代实现逐比特断言。规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)；用 `PI_CONTRACT_DAEMON=/path/to/other-daemon` 可对替代实现跑同一套件——Rust daemon（`rust/target/{debug,release}/pi-acp-session-daemon`）已全过。
 
-`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 9 项黑盒测试（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；`PI_TG_DAEMON` env 在 Rust 与 TS 实现间切换，默认跑 Rust 版。
+`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 10 项黑盒测试（含 restrictToWorkspaces 符号链接越界拒绝）（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；`PI_TG_DAEMON` env 在 Rust 与 TS 实现间切换，默认跑 Rust 版。
 
 Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键序对拍、wire 孤立代理分块重组；pi-acp-session-daemon 的 native-branch fixtures 9 例逐字节哈希、journal/queue/diff 等单测）。
 

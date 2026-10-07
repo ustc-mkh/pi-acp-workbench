@@ -1,4 +1,5 @@
 import {isAbsolute} from 'node:path';
+import {realpath} from 'node:fs/promises';
 import type {ChatState,Snapshot,Entry} from './shared';
 import type {ServiceState} from './session-protocol';
 import {SessionClient} from './session-wire';
@@ -22,7 +23,7 @@ export interface TelegramSessionHost {
 export class TelegramSessions implements TelegramSessionHost {
   private client:SessionClient;
   private listeners=new Map<string,TelegramTurnListener>();
-  constructor(private workspaces:Record<string,string>,socket?:string) {
+  constructor(private workspaces:Record<string,string>,socket?:string,private restrictToWorkspaces=false) {
     this.client=new SessionClient(socket,event=>{
       if(event.type==='state')for(const permission of event.permissions)this.listeners.get(event.snapshot.id)?.permission(permission);
     });
@@ -32,6 +33,12 @@ export class TelegramSessions implements TelegramSessionHost {
     const names=Object.keys(this.workspaces);
     const cwd=workspace&&isAbsolute(workspace)?workspace:this.workspaces[workspace||(names.length===1?names[0]:'')];
     if(!cwd)throw new Error(`请指定绝对目录路径或工作区别名：${names.join(', ')}`);
+    if(this.restrictToWorkspaces){
+      const canonical=await realpath(cwd);
+      const allowed=await Promise.all(Object.values(this.workspaces).map(path=>realpath(path)));
+      if(!allowed.includes(canonical))throw new Error('目录不在允许的 workspaces 中。');
+      return this.client.call<Snapshot>('create',{cwd:canonical},undefined,0);
+    }
     return this.client.call<Snapshot>('create',{cwd},undefined,0);
   }
   async history(id:string) {return (await this.client.call<ServiceState>('state',{sessionId:id})).snapshot.entries;}

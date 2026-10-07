@@ -62,7 +62,7 @@ class Wire {
     const p = this.pending.get(item.id);
     if (!p) return;
     this.pending.delete(item.id); clearTimeout(p.timer);
-    item.error !== undefined ? p.reject(new Error(item.error)) : p.resolve(item.value);
+    item.error !== undefined ? p.reject(Object.assign(new Error(item.error),{code:item.code})) : p.resolve(item.value);
   }
   static async open(path) {
     const socket = createConnection(path);
@@ -131,7 +131,7 @@ test('hello advertises workbench capabilities', async () => {
 
 test('validation rejects malformed requests without destroying valid work', async () => {
   const c = state.client;
-  await expectError(c.call('nope', { sessionId: 'x' }), /未知服务操作/);
+  await assert.rejects(c.call('nope', { sessionId: 'x' }), {code:'unknown_method'});
   await expectError(c.call('state', {}), /sessionId/);
   await expectError(c.call('create', { cwd: 'relative/path' }), /绝对目录/);
   await expectError(c.call('prompt', { sessionId: 'x', prompt: [] }), /消息格式/);

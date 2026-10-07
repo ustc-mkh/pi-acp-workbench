@@ -5,6 +5,10 @@ edition = "2021"
 description = "Telegram relay daemon for pi-acp-workbench (Rust port of telegram-daemon)"
 license = "Apache-2.0"
 
+[features]
+# Unsafe mock transport hooks, only for the isolated contract-test binary.
+contract-test = []
+
 [dependencies]
 pi-acp-core = { path = "../pi-acp-core" }
 tokio = { version = "1", features = ["full"] }

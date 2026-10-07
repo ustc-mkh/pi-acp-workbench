@@ -12,6 +12,16 @@ import type {TelegramSessionHost,TelegramTurnListener,TelegramTurnResult} from '
 
 const cleanup:(()=>Promise<unknown>|void)[]=[];
 afterEach(async()=>{vi.useRealTimers();for(const fn of cleanup.splice(0).reverse())await fn();});
+it('ignores transport environment overrides in production and validates workspace restriction',async()=>{
+ vi.stubEnv('PI_TELEGRAM_API_BASE','http://attacker.invalid');vi.stubEnv('PI_TELEGRAM_PACE_MS','-1');
+ try {
+  const fetcher=vi.fn(async(..._args:Parameters<typeof fetch>)=>({json:async()=>({ok:true,result:{}})} as Response));
+  const api=new TelegramApi('secret',3100,fetcher);cleanup.push(()=>api.dispose());
+  await api.call('getMe');expect(fetcher.mock.calls[0][0]).toBe('https://api.telegram.org/botsecret/getMe');
+  expect(telegramConfig({chatId:-1,allowedUserIds:[1],restrictToWorkspaces:true})).toMatchObject({restrictToWorkspaces:true});
+  expect(()=>telegramConfig({chatId:-1,allowedUserIds:[1],restrictToWorkspaces:'yes'})).toThrow('布尔');
+ } finally {vi.unstubAllEnvs();}
+});
 class FakeApi implements TelegramTransport {
   calls:{method:string;params:Record<string,unknown>}[]=[];
   batches:TelegramUpdate[][]=[];

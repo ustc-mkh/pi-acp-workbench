@@ -50,7 +50,7 @@ export function serviceCommand(method:string,params:unknown):ServiceCommand {
     if(params.method==='_pi_workbench/fork'){text(args.entryId,'entryId');text(args.hash,'hash');}
     return {kind:method,sessionId,method:params.method as AgentMethod,params:args};
   }
-  throw new Error('未知服务操作');
+  throw Object.assign(new Error('未知服务操作'), {code:'unknown_method'});
 }
 export function durableCommand(command:ServiceCommand):boolean {
   return command.kind==='create'||command.kind==='prompt'||command.kind==='request'&&['_pi_workbench/fork','session/set_mode','session/set_config_option'].includes(command.method);

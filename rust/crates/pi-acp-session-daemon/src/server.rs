@@ -254,7 +254,13 @@ impl Shared {
             let frame = match result {
                 Ok(Value::Null) if method == "remove" || method == "historyRemove" => json!({ "id": id }),
                 Ok(value) => json!({ "id": id, "value": value }),
-                Err(error) => json!({ "id": id, "error": error }),
+                Err(error) => {
+                    let mut frame = json!({ "id": id, "error": error });
+                    if !matches!(method.as_str(), "hello" | "list" | "create" | "state" | "cancel" | "remove" | "permission" | "prompt" | "request" | "historyWrite" | "historyRemove") {
+                        frame["code"] = json!("unknown_method");
+                    }
+                    frame
+                },
             };
             shared.send(&conn, frame);
             shared.pending.fetch_sub(1, Ordering::SeqCst);

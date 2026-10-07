@@ -4,6 +4,7 @@
 !LICENSE
 !CHANGELOG.md
 !dist/**
+dist/**/*.map
 !media/pi.svg
 !THIRD_PARTY_NOTICES.txt
 !docs/telegram.md

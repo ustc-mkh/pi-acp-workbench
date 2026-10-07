@@ -13,6 +13,20 @@ async function pair() {
 async function seed(store:SharedHistoryStore,snapshot:Snapshot){await store.claim(snapshot.id);try{return await store.write(snapshot);}finally{await store.release(snapshot.id);}}
 const snapshot = (id:string):Snapshot => ({harness:'pi',id,cwd:'/project',title:id,updated:Date.now(),contextComplete:true,entries:[{id:'user',role:'user',text:'hello'}]});
 afterEach(async()=>{for(const store of stores.splice(0))await store.releaseAll();for(const dir of directories.splice(0))await rm(dir,{recursive:true,force:true});});
+it('delegates with the last owned revision, not a polled revision, and survives file fallback',async()=>{
+  const {a,b}=await pair();await a.claim('one');
+  const first=await a.write(snapshot('one'));
+  a.remote={write:s=>b.writeDelegated(s),remove:async()=>{}};
+  const second=await a.write(snapshot('one'));
+  expect(second.revision).not.toBe(first.revision);
+  a.remote=undefined;
+  await expect(a.write(snapshot('one'))).resolves.toMatchObject({id:'one'});
+  a.remote={write:s=>b.writeDelegated(s),remove:async()=>{}};
+  const baseline=(await a.list())[0];
+  await b.writeDelegated({...snapshot('one'),revision:baseline.revision});
+  await a.list(); // Polling must not authorize overwriting another writer.
+  await expect(a.write({...snapshot('one'),revision:(await a.list())[0].revision})).rejects.toThrow('另一个窗口更新');
+});
 it('shares all histories without losing concurrent additions or pruning to 20', async()=>{
   const {a,b} = await pair();
   await Promise.all(Array.from({length:24},(_,i)=>seed(i%2?a:b,snapshot(String(i)))));

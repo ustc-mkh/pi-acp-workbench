@@ -131,7 +131,11 @@ export class SharedHistoryStore extends SnapshotStore {
     finally { if (claimed) await this.release(snapshot.id); }
   }
   async write(snapshot: Snapshot): Promise<Snapshot> {
-    if (this.remote) return this.remote.write(snapshot);
+    if (this.remote) {
+      const saved = await this.remote.write({...snapshot, revision:this.seen.get(snapshot.id)});
+      this.seen.set(saved.id, saved.revision);
+      return saved;
+    }
     return this.persist(snapshot, false);
   }
   private persist(snapshot: Snapshot, external: boolean): Promise<Snapshot> {

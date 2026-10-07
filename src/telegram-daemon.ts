@@ -1,17 +1,18 @@
 import { readFile, mkdir, realpath, stat } from 'node:fs/promises';
 import { join, resolve, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { lock } from 'proper-lockfile';
 import { TelegramApi } from './telegram-api';
+export { TelegramApi } from './telegram-api';
 import { TelegramBridge, type TelegramBridgeState } from './telegram-bridge';
 import { TelegramSessions } from './telegram-sessions';
 import { telegramConfig } from './telegram-config';
 import { TelegramEvents } from './telegram-events';
 import {writeAtomicJson} from './atomic-json';
 
-async function main() {
+export async function main(createApi:(token:string)=>TelegramApi=token=>new TelegramApi(token)) {
   const args=process.argv.slice(2);
   if(args.includes('--help')){
     console.log('Usage: PI_TELEGRAM_BOT_TOKEN=... node dist/telegram-daemon.mjs --config /path/telegram.json\nOptional: --data-dir /path/pi-acp-workbench (default ~/.pi/pi-acp-workbench)');return;
@@ -19,7 +20,7 @@ async function main() {
   const token=process.env.PI_TELEGRAM_BOT_TOKEN;
   if(!token||!/^\d+:[\w-]{20,}$/.test(token))throw new Error('请通过 PI_TELEGRAM_BOT_TOKEN 环境变量提供 BotFather token，不要放入项目配置或命令参数。');
   if(args.includes('--discover')){
-    const api=new TelegramApi(token);
+    const api=createApi(token);
     try {
       const updates=await api.call<import('./telegram-api').TelegramUpdate[]>('getUpdates',{timeout:20,allowed_updates:['message']});
       for(const update of updates)if(update.message)console.log(JSON.stringify({chatId:update.message.chat.id,userId:update.message.from?.id,threadId:update.message.message_thread_id}));
@@ -38,7 +39,7 @@ async function main() {
   if(dataIndex>=0&&(!args[dataIndex+1]||args[dataIndex+1].startsWith('--')))throw new Error('--data-dir 需要目录路径。');
   const root=dataIndex<0?join(homedir(),'.pi','pi-acp-workbench'):resolve(args[dataIndex+1]);
   const directory=join(root,'telegram');await mkdir(directory,{recursive:true,mode:0o700});
-  const api=new TelegramApi(token);
+  const api=createApi(token);
   const report=(error:unknown)=>console.error(`[telegram] ${(error instanceof Error?error.message:String(error)).split(token).join('[redacted]')}`);
   let relay:TelegramBridge|undefined,host:TelegramSessions|undefined,release:(()=>Promise<void>)|undefined;
   let compromised=false,stopping=false;
@@ -59,7 +60,7 @@ async function main() {
       state=JSON.parse(await readFile(file,'utf8'));
       if((state.silent!==undefined&&typeof state.silent!=='boolean')||(state.notifications!==undefined&&typeof state.notifications!=='boolean')||(state.historySent!==undefined&&(!state.historySent||typeof state.historySent!=='object'||Array.isArray(state.historySent)||Object.values(state.historySent).some(v=>!Array.isArray(v)||v.some(k=>typeof k!=='string'))))||state.version!==1||state.botId!==bot.id||state.chatId!==config.chatId||!Array.isArray(state.topics)||!Array.isArray(state.delivered)||state.delivered.some(id=>typeof id!=='string')||state.topics.some(t=>typeof t.sessionId!=='string'||!Number.isSafeInteger(t.threadId)||t.threadId<=0)||state.offset!==undefined&&(!Number.isSafeInteger(state.offset)||state.offset<0))throw new Error('Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。');
     } catch(error) {if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-    host=new TelegramSessions(config.workspaces,join(root,'service','sessions.sock'));
+    host=new TelegramSessions(config.workspaces,join(root,'service','sessions.sock'),config.restrictToWorkspaces);
     const events=new TelegramEvents(join(directory,'events'));
     relay=new TelegramBridge(api,host,state,{...config,save:s=>writeAtomicJson(file,s,true),report});
     await relay.initialize(bot.username);
@@ -79,7 +80,7 @@ async function main() {
     process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);
   }
 }
-main().catch(error=>{
+if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{
   const message=error instanceof Error?error.message:'Telegram 启动失败。';
   console.error(process.env.PI_TELEGRAM_BOT_TOKEN?message.split(process.env.PI_TELEGRAM_BOT_TOKEN).join('[redacted]'):message);
   process.exitCode=1;

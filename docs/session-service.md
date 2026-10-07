@@ -26,6 +26,12 @@ systemctl --user status pi-sessions
 journalctl --user -u pi-sessions -f
 ```
 
+### 实现维护策略
+
+Node/TypeScript 是当前唯一默认实现；Rust 保持实验性，不自动切换生产部署。下一次稳定版发布前评估双实现维护成本和契约覆盖，再决定是否收敛，未完成评估前不承诺删除任一实现。CI 对两套实现运行同一服务与 Telegram 契约。
+
+桌面端「清空历史」会删除整个服务器账户的共享历史，并停止服务上的全部会话任务（包括 Telegram）；界面会进行二次确认。只想停止一个任务时请使用取消，而不是清空历史。
+
 ### Rust daemon（实验性替代）
 
 `rust/` workspace 提供 `pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB），协议与磁盘格式与 Node 版逐字节兼容，通过同一套 22 项 contract 验证。

@@ -108,12 +108,8 @@ export class ConversationHistory {
         snapshot.sessionNumber??=allocateSessionNumber(numbering,snapshot);
         await this.options.storage.update('nextSessionNumber',numbering.nextSessionNumber);
       }
-      // Delegated writes (protocol v2) are optimistic-locked on the CALLER's
-      // base revision; snapshots built from ChatState never carry one, so
-      // inject the revision from our last-known index stubs (refreshed by the
-      // list() below after every save). File-mode stores check their own
-      // `seen` map instead — the field is ignored there.
-      if(this.shared)snapshot.revision??=this.items.find(s=>s.id===snapshot.id)?.revision;
+      // SharedHistoryStore supplies the caller's last read/write revision;
+      // polling the index must never advance the optimistic-lock baseline.
       const index=await this.persistence.write(snapshot,epoch,()=>!this.forgotten.has(snapshot.id)&&this.options.enabled());
       if(!index)return;
       const state=this.options.current();if(state.sessionId===index.id)state.sessionNumber=index.sessionNumber;

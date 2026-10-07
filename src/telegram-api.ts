@@ -27,7 +27,10 @@ export class TelegramApi implements TelegramTransport {
   private outgoing: Promise<unknown> = Promise.resolve();
   private nextSend = 0;
   private queued=0;
-  constructor(private token:string, private intervalMs=Number(process.env.PI_TELEGRAM_PACE_MS)||3100, private fetcher:typeof fetch=fetch) {}
+  constructor(private token:string, private intervalMs=3100, private fetcher:typeof fetch=fetch,
+    private base=`https://api.telegram.org/bot${token}`) {
+    if(!Number.isFinite(intervalMs)||intervalMs<0)throw new Error('无效的 Telegram 发送间隔。');
+  }
 
   call<T>(method:string, params:Record<string,unknown>={}):Promise<T> {
     const paced = ['sendMessage','editMessageText','createForumTopic'].includes(method);
@@ -50,8 +53,7 @@ export class TelegramApi implements TelegramTransport {
     for (let attempt=0; ; attempt++) {
       let result: {ok:boolean;result:T;error_code?:number;description?:string;parameters?:{retry_after?:number}};
       try {
-        // PI_TELEGRAM_API_BASE (testing only) replaces the bot<token> URL prefix.
-        const base=(process.env.PI_TELEGRAM_API_BASE||`https://api.telegram.org/bot${this.token}`).replace(/\/+$/,'');
+        const base=this.base.replace(/\/+$/,'');
         const response = await this.fetcher(`${base}/${method}`, {
           method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(params),
           signal:AbortSignal.any([this.abort.signal, AbortSignal.timeout(method==='getUpdates'?40000:20000)]),

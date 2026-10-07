@@ -34,6 +34,7 @@ pub struct RunHandle {
 pub struct Sessions {
     client: Arc<WireClient>,
     workspaces: BTreeMap<String, String>,
+    restrict_to_workspaces: bool,
 }
 
 fn stub(value: &Value) -> Option<SessionStub> {
@@ -46,8 +47,8 @@ fn stub(value: &Value) -> Option<SessionStub> {
 }
 
 impl Sessions {
-    pub async fn connect(workspaces: BTreeMap<String, String>, socket: &Path) -> Result<Self, WireError> {
-        Ok(Sessions { client: Arc::new(WireClient::connect(socket).await?), workspaces })
+    pub async fn connect(workspaces: BTreeMap<String, String>, socket: &Path, restrict_to_workspaces: bool) -> Result<Self, WireError> {
+        Ok(Sessions { client: Arc::new(WireClient::connect(socket).await?), workspaces, restrict_to_workspaces })
     }
 
     pub async fn list(&self) -> Result<Vec<SessionStub>, WireError> {
@@ -71,6 +72,15 @@ impl Sessions {
             let names = self.workspaces.keys().cloned().collect::<Vec<_>>().join(", ");
             return Err(WireError::Service(format!("请指定绝对目录路径或工作区别名：{names}")));
         };
+        let cwd = if self.restrict_to_workspaces {
+            let canonical = tokio::fs::canonicalize(&cwd).await.map_err(|_| WireError::Service("目录不在允许的 workspaces 中。".into()))?;
+            let mut allowed = false;
+            for path in self.workspaces.values() {
+                if tokio::fs::canonicalize(path).await.ok().as_ref() == Some(&canonical) { allowed = true; break; }
+            }
+            if !allowed { return Err(WireError::Service("目录不在允许的 workspaces 中。".into())); }
+            canonical.to_string_lossy().into_owned()
+        } else { cwd };
         let snapshot = self.client.call_timeout("create", json!({ "cwd": cwd }), None).await?;
         stub(&snapshot).ok_or(WireError::Protocol("create snapshot"))
     }

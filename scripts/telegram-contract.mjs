@@ -11,12 +11,14 @@ import { spawn } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createSocketServer } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 
-const DAEMON = (process.env.PI_TG_DAEMON || resolve('rust/target/debug/pi-acp-telegram-daemon')).split(/\s+/);
+const DAEMON = (process.env.PI_TG_DAEMON || resolve('rust/target/contract/debug/pi-acp-telegram-daemon')).split(/\s+/);
+// Keep the familiar TS selector, but launch a test-only dependency-injection entry.
+if(DAEMON[0]==='node'&&DAEMON[1]?.endsWith('dist/telegram-daemon.mjs'))DAEMON[1]=resolve('test/telegram-contract-entry.mjs');
 const TOKEN = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const CHAT = -1009999;
 const USER = 42;
@@ -205,9 +207,10 @@ const root = await mkdtemp(join(tmpdir(), 'pi-tg-contract-'));
 const workspace = join(root, 'workspace');
 const dataDir = join(root, 'data');
 await mkdir(workspace, { recursive: true });
+await symlink(root,join(workspace,'escape'));
 await mkdir(join(dataDir, 'service'), { recursive: true });
 const configFile = join(root, 'telegram.json');
-await writeFile(configFile, JSON.stringify({ chatId: CHAT, allowedUserIds: [USER], workspaces: { main: workspace } }));
+await writeFile(configFile, JSON.stringify({ chatId: CHAT, allowedUserIds: [USER], workspaces: { main: workspace }, restrictToWorkspaces: true }));
 
 const tg = await startTelegramMock();
 const socketPath = join(dataDir, 'service', 'sessions.sock');
@@ -255,6 +258,12 @@ test('messages from other users and chats are ignored', async () => {
   message('wrong chat', { chat: -555 });
   await delay(400);
   assert.equal(telegram.inbox.length, before);
+});
+
+test('/new rejects a symlink escape from restricted workspaces',async()=>{
+  message(`/new ${join(workspace,'escape')}`);
+  await waitSent('sendMessage',{text:t=>t.includes?.('目录不在允许的 workspaces 中')});
+  assert.equal(sessions.list.size,0);
 });
 
 test('/new creates a session, a topic and binds them', async () => {

@@ -107,14 +107,16 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     // Protocol v2: delegate shared-history writes to the daemon so file locks
     // converge on a single implementation. Older daemons (no `history`
     // capability) fall back to the in-process file path transparently.
-    void this.serviceClient.call<{agentCapabilities?:{_meta?:{'pi-workbench'?:{history?:boolean}}}}>('hello').then(result=>{
+    let historyRetry:NodeJS.Timeout|undefined;
+    const negotiateHistory=()=>void this.serviceClient.call<{agentCapabilities?:{_meta?:{'pi-workbench'?:{history?:boolean}}}}>('hello').then(result=>{
+      if(this.disposed)return;
       if(!result?.agentCapabilities?._meta?.['pi-workbench']?.history||!this.sharedHistory)return;
       const guard=async<T>(call:Promise<T>,fallback:()=>Promise<T>)=>{
         try{return await call;}
         catch(error){
           // Daemon downgraded to protocol v1 mid-session: drop the delegate
           // once and fall back to the file path for this and future writes.
-          if(/未知服务操作/.test(String(error))){this.sharedHistory!.remote=undefined;return fallback();}
+          if((error as {code?:string})?.code==='unknown_method'){this.sharedHistory!.remote=undefined;return fallback();}
           throw error;
         }
       };
@@ -122,7 +124,13 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         write:snapshot=>guard(this.serviceClient.call('historyWrite',{snapshot},undefined,0),()=>this.sharedHistory!.write(snapshot)),
         remove:id=>guard(this.serviceClient.call('historyRemove',id===undefined?{}:{sessionId:id},undefined,0),()=>id===undefined?this.sharedHistory!.clear():this.sharedHistory!.remove(id)),
       };
-    }).catch(()=>{});
+    }).catch(error=>{
+      if(this.disposed)return;
+      this.log.appendLine(`[history hello] ${String(error)}`);
+      historyRetry=setTimeout(negotiateHistory,5000);historyRetry.unref();
+    });
+    if(!agentFactory)negotiateHistory();
+    this.resources.push({dispose:()=>clearTimeout(historyRetry)});
     this.telemetry=new ConversationStatistics(context.workspaceState,this.persistence,()=>({agent:this.agent,state:this.state,harness:this.harness,conversationId:this.conversationId,
       retained:this.config.get('persistHistory',true)&&!this.forgottenSessions.has(this.state.sessionId||'')}),value=>{this.contextWindow=value;},()=>this.emit());
     this.historyStore.start();
@@ -518,7 +526,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.emit(); return;
       }
       if (message.type === 'deleteHistory' || message.type === 'clearHistory') {
-        if (this.sharedHistory && await vscode.window.showWarningMessage(message.type === 'clearHistory' ? '清空此服务器账户的全部共享会话？所有客户端都会失去这些历史记录。' : '删除此共享会话？所有客户端都会失去这条历史记录。', {modal:true}, '删除') !== '删除') return;
+        if (this.sharedHistory && await vscode.window.showWarningMessage(message.type === 'clearHistory' ? '清空此服务器账户的全部共享会话？所有客户端都会失去这些历史记录，所有正在运行的任务（包括 Telegram）都会停止。' : '删除此共享会话？所有客户端都会失去这条历史记录。', {modal:true}, '删除') !== '删除') return;
         if (message.type === 'deleteHistory') {
           const forgotten = this.history.find(item => item.id === message.id);
           if (!forgotten) return;

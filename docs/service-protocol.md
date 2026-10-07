@@ -17,9 +17,11 @@
 - 客户端 → 服务端请求帧：`{"id": "<string>", "method": "<string>", "params": {…}}`
 - 服务端 → 客户端帧：
   - 成功响应 `{"id": "<同请求>", "value": <any>}`
-  - 错误响应 `{"id": "<同请求>", "error": "<string>"}`
+  - 错误响应 `{"id": "<同请求>", "error": "<string>", "code": "<可选稳定错误码>"}`；未知方法的 `code` 为 `unknown_method`，客户端不得依赖本地化文案判断能力
   - 事件推送 `{"event": <object>}`（无 `id`，不对应任何请求）
   - 分块帧 `{"fragment": "<string>", "last": <boolean>}`（见 §5）
+
+共享历史委托扩展版本为 v2；`hello.protocolVersion:1` 仍指 ACP v1，不能改为 2。通过 `_meta.pi-workbench.history:true` 协商委托能力。
 
 ## 3. 客户端约束（服务端强制执行）
 
