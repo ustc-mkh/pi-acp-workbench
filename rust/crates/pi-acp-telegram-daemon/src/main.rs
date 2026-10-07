@@ -309,14 +309,20 @@ async fn run() -> Result<(), String> {
         let stop = stop.clone();
         tokio::spawn(async move {
             while !stop.is_cancelled() {
-                match events::scan(&events_dir).await {
-                    Ok(list) => {
-                        for event in list {
-                            if stop.is_cancelled() {
-                                break;
-                            }
-                            if bridge.consume(&event).await {
-                                let _ = events::remove(&events_dir, &event.id).await;
+                match events::Scanner::open(&events_dir).await {
+                    Ok(mut scanner) => {
+                        while !stop.is_cancelled() {
+                            match scanner.next().await {
+                                Ok(Some(event)) => {
+                                    if bridge.consume(&event).await {
+                                        let _ = events::remove(&events_dir, &event.id).await;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(error) => {
+                                    eprintln!("[telegram] outbox 扫描失败：{error}");
+                                    break;
+                                }
                             }
                         }
                     }

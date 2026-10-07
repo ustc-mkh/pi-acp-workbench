@@ -64,11 +64,21 @@ fn now_ms() -> u64 {
 
 pub struct TelegramEvents {
     directory: PathBuf,
+    #[cfg(test)]
+    write_gate: Option<Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
+    write_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl TelegramEvents {
     pub fn new(directory: PathBuf) -> Self {
-        TelegramEvents { directory }
+        TelegramEvents {
+            directory,
+            #[cfg(test)]
+            write_gate: None,
+            #[cfg(test)]
+            write_attempts: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// events/<sha256(event.id)>.json — must match the consumer's reader rule.
@@ -80,6 +90,13 @@ impl TelegramEvents {
     }
 
     pub async fn write(&self, event: &TurnEvent) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            self.write_attempts.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.write_gate {
+                gate.acquire().await.map_err(|e| e.to_string())?.forget();
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -393,6 +410,110 @@ impl DesktopTelegramTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_storage_keeps_only_latest_pending_event_and_flushes_terminal_state() {
+        let dir = test_dir();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut events = TelegramEvents::new(dir.clone());
+        events.write_gate = Some(gate.clone());
+        let events = Arc::new(events);
+        let entries = Arc::new(Mutex::new(vec![entry("assistant", "initial")]));
+        let current = entries.clone();
+        let get: StateAccessor = Arc::new(move || {
+            Some((
+                "session-1".into(),
+                Some(7),
+                current.lock().unwrap().clone(),
+                0,
+            ))
+        });
+        let (report, errors) = report_sink();
+        let turn = DesktopTelegramTurn::new(
+            events.clone(),
+            get,
+            "/work".into(),
+            0,
+            "coalesced".into(),
+            "telegram".into(),
+            report,
+            Arc::new(AtomicBool::new(false)),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while events.write_attempts.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for i in 0..50 {
+            *entries.lock().unwrap() = vec![entry("assistant", &format!("version {i}"))];
+            DesktopTelegramTurn::capture_shared(&turn.inner);
+            turn.publish();
+        }
+        assert_eq!(events.write_attempts.load(Ordering::SeqCst), 1);
+        let shared = turn.inner.clone();
+        let end = tokio::spawn(async move {
+            turn.finish(None, Some("end_turn")).await;
+            turn
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !shared.state.lock().unwrap().ended {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        gate.add_permits(2);
+        let turn = tokio::time::timeout(Duration::from_secs(2), end)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(events.write_attempts.load(Ordering::SeqCst), 2);
+        assert!(errors.lock().unwrap().is_empty());
+        let event: Value =
+            serde_json::from_slice(&tokio::fs::read(events.file("coalesced")).await.unwrap())
+                .unwrap();
+        assert_eq!(event["text"], "version 49");
+        assert_eq!(event["status"], "completed");
+        assert!(!turn.inner.state.lock().unwrap().writer_active);
+        assert!(turn.inner.state.lock().unwrap().pending.is_none());
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_outbox_storage_failure_is_reported_and_writer_drains() {
+        let dir = test_dir();
+        let backup = dir.with_extension("backup");
+        let events = Arc::new(TelegramEvents::new(dir.clone()));
+        let (report, errors) = report_sink();
+        let turn = DesktopTelegramTurn::new(
+            events.clone(),
+            accessor(vec![entry("assistant", "final")], 0),
+            "/work".into(),
+            0,
+            "failure".into(),
+            "telegram".into(),
+            report,
+            Arc::new(AtomicBool::new(false)),
+        );
+        turn.wait_writes().await;
+        tokio::fs::rename(&dir, &backup).await.unwrap();
+        tokio::fs::write(&dir, "not a directory").await.unwrap();
+        turn.finish(None, Some("end_turn")).await;
+        assert_eq!(errors.lock().unwrap().len(), 1);
+        assert!(!turn.inner.state.lock().unwrap().writer_active);
+        assert!(turn.inner.state.lock().unwrap().pending.is_none());
+        let old: Value = serde_json::from_slice(
+            &tokio::fs::read(backup.join(events.file("failure").file_name().unwrap()))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(old["status"], "running");
+        tokio::fs::remove_file(&dir).await.unwrap();
+        tokio::fs::remove_dir_all(&backup).await.unwrap();
+    }
 
     fn test_dir() -> PathBuf {
         std::env::temp_dir().join(format!("pi-outbox-test-{}", uuid::Uuid::new_v4().simple()))

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Rust relay 覆盖迁移：Telegram 黑盒契约扩展至 23 项，覆盖磁盘游标失败、投递/history 重试、真实排队取消、静音切换、权限隔离、Unicode/429 和 webhook 边界；新增事务/清理/队列与慢盘 outbox Rust 单测，删除已迁移的两个 TS 长运行参考用例。
+- Rust relay outbox 改为惰性逐条读取，避免一次性加载整个积压；在实际读取阶段强制文件大小上限，而不只检查 metadata。
+
 - Rust 收敛第二阶段：删除 TS 会话服务、队列、收据、socket 服务端和服务端命令校验；TS 只保留协议客户端/DTO。会话、原生分支、偏好、Diff 和存储失败回归直接启动 Rust 服务，不再依赖 TS 内嵌实现。
 - 补 Rust 收据落盘后取消、写失败不执行、队列溢出、响应隔离及连接/请求资源回收测试；故障注入仅 cfg(test)。内存检查改为真实 Rust RSS/FD/worker 浸泡，CI 执行；Rust 预览缓冲测试覆盖大源文本、Unicode 和过量容量小字符串。
 

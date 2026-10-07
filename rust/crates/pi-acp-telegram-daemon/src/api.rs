@@ -72,6 +72,57 @@ mod production_tests {
     }
 }
 
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn network_errors_never_expose_the_token_or_request_url() {
+        let token = "synthetic-private-token";
+        let mut api = TelegramApi::new(token, Duration::ZERO, CancellationToken::new());
+        api.base = format!("http://127.0.0.1:0/bot{token}");
+        api.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let error = api.call("getMe", json!({})).await.unwrap_err();
+        assert!(error.message.contains("网络请求失败"));
+        assert!(!error.message.contains(token));
+        assert!(!error.message.contains("http://"));
+    }
+    #[tokio::test]
+    async fn bounds_paced_queue_and_releases_every_slot_on_shutdown() {
+        let stop = CancellationToken::new();
+        let mut api = TelegramApi::new("synthetic", Duration::from_secs(3600), stop.clone());
+        api.base = "http://127.0.0.1:0".into(); // Never contact Telegram even if this test regresses.
+        api.pace.lock().await.next_send = Instant::now() + Duration::from_secs(3600);
+        let api = Arc::new(api);
+        let mut tasks = Vec::new();
+        for _ in 0..QUEUE_LIMIT {
+            let api = api.clone();
+            tasks.push(tokio::spawn(async move {
+                api.call("sendMessage", json!({"text":"held"})).await
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while api.queued.load(Ordering::SeqCst) != QUEUE_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(api
+            .call("sendMessage", json!({"text":"overflow"}))
+            .await
+            .unwrap_err()
+            .message
+            .contains("发送队列已满"));
+        stop.cancel();
+        for task in tasks {
+            assert!(task.await.unwrap().unwrap_err().message.contains("已停止"));
+        }
+        assert_eq!(api.queued.load(Ordering::SeqCst), 0);
+    }
+}
+
 impl TelegramApi {
     pub fn new(token: &str, interval: Duration, stop: CancellationToken) -> Self {
         #[cfg(not(feature = "contract-test"))]

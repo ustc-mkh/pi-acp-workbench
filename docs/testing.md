@@ -109,6 +109,10 @@ Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键�
 
 `npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。生产发布前还需完整覆盖迁移与长时间浸泡检查。
 
+Telegram 黑盒契约目前 23 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。旧 `telegram.test.ts` 仍保留为未完成逐项映射的参考，不能据此宣称全部行为等价。
+
+Rust relay outbox 扫描为逐条消费，每次读取有硬大小限制；惰性读取、损坏/身份不匹配、过期删除和超大文件跳过均有单测。
+
 ## Rust 内存与资源增长检查
 
 `npm run test:memory` 预置 1024 份约 64 MiB 的任务收据，启动真实 Rust 服务，执行 1200 次重复请求查询和 150 次 socket 连接/关闭，从 Linux `/proc` 采集服务 RSS、文件描述符与 worker 数量。断开后 FD 回到基线；收据复用和只读状态不启动 worker，后续批次 RSS 不持续增长。不需要真实 Pi、Bot token 或模型请求，CI 会执行。
@@ -117,4 +121,4 @@ Rust stream 单测独立验证 32 个预览处理共 128 MiB 源文本后只保�
 
 `workspace-diff.test.ts` 使用临时 Git 仓库验证只读采集，不修改真实项目的 index/工作树；`messages.test.ts` 与浏览器冒烟覆盖末尾汇总渲染。
 
-`long-running.test.ts` 通过真实 Rust 服务覆盖超过 16 MiB 的 Unicode 历史分块传输与订阅隔离；其两个 relay/outbox 参考用例仍待迁移。Rust server 单测验证超大响应隔离、32 连接/128 请求上限及字节/队列回收。`session-client.test.ts` 的 transport-only mock 只验证 TS 客户端超时不重放、晚到结果忽略、序列化/待处理上限与断线分块清理，不实现另一套会话服务。`atomic-json.test.ts` 验证 fsync/rename 顺序和同步失败时不发布文件；服务集成测试验证收据失败不启动 worker、创建/分支去重以及 ID 异内容冲突。这些测试不等价于真实掉电实验。功能回归继续使用 `npm run verify`。
+`long-running.test.ts` 通过真实 Rust 服务覆盖超过 16 MiB 的 Unicode 历史分块传输与订阅隔离；原两个 relay/outbox 参考用例已经迁移到 Rust outbox/API/stream 单测并删除。Rust server 单测验证超大响应隔离、32 连接/128 请求上限及字节/队列回收。`session-client.test.ts` 的 transport-only mock 只验证 TS 客户端超时不重放、晚到结果忽略、序列化/待处理上限与断线分块清理，不实现另一套会话服务。`atomic-json.test.ts` 验证 fsync/rename 顺序和同步失败时不发布文件；服务集成测试验证收据失败不启动 worker、创建/分支去重以及 ID 异内容冲突。这些测试不等价于真实掉电实验。功能回归继续使用 `npm run verify`。

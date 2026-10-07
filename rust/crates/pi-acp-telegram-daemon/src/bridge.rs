@@ -28,6 +28,9 @@ const SYNC_BATCH: usize = 20;
 const HISTORY_SLICE: usize = 20;
 const HISTORY_MAX: usize = 100;
 
+#[cfg(test)]
+mod tests;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
