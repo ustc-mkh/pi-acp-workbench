@@ -12,8 +12,13 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - run: npm ci
+      - run: npm run format:check
       - run: npm run test:all
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
       - run: cargo test --manifest-path rust/Cargo.toml
       - run: cargo build --manifest-path rust/Cargo.toml
       - run: npm run test:contract

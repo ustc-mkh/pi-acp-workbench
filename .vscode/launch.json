@@ -1,1 +1,13 @@
-{"version":"0.2.0","configurations":[{"name":"Run Pi ACP Extension","type":"extensionHost","request":"launch","args":["--extensionDevelopmentPath=${workspaceFolder}"],"outFiles":["${workspaceFolder}/dist/**/*.cjs"],"preLaunchTask":"build"}]}
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Pi ACP Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.cjs"],
+      "preLaunchTask": "build"
+    }
+  ]
+}

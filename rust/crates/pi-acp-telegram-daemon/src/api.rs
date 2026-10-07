@@ -26,7 +26,10 @@ impl std::error::Error for ApiError {}
 type Result<T> = std::result::Result<T, ApiError>;
 
 fn err<T>(message: impl Into<String>) -> Result<T> {
-    Err(ApiError { code: 0, message: message.into() })
+    Err(ApiError {
+        code: 0,
+        message: message.into(),
+    })
 }
 
 struct Pace {
@@ -62,7 +65,9 @@ impl TelegramApi {
             base: base.trim_end_matches('/').to_string(),
             token: token.to_string(),
             interval,
-            pace: Mutex::new(Pace { next_send: Instant::now() }),
+            pace: Mutex::new(Pace {
+                next_send: Instant::now(),
+            }),
             queued: AtomicUsize::new(0),
             stop,
         }
@@ -103,11 +108,21 @@ impl TelegramApi {
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let url = format!("{}/{}", self.base, method);
-        let timeout = if method == "getUpdates" { Duration::from_secs(40) } else { Duration::from_secs(20) };
+        let timeout = if method == "getUpdates" {
+            Duration::from_secs(40)
+        } else {
+            Duration::from_secs(20)
+        };
         for attempt in 0.. {
             let body: Value = {
                 let pending = async {
-                    let response = self.http.post(&url).timeout(timeout).json(&params).send().await?;
+                    let response = self
+                        .http
+                        .post(&url)
+                        .timeout(timeout)
+                        .json(&params)
+                        .send()
+                        .await?;
                     response.json::<Value>().await
                 };
                 tokio::select! {
@@ -122,7 +137,9 @@ impl TelegramApi {
                 return Ok(body.get("result").cloned().unwrap_or(Value::Null));
             }
             let code = body.get("error_code").and_then(Value::as_i64).unwrap_or(0);
-            let retry_after = body.pointer("/parameters/retry_after").and_then(Value::as_i64);
+            let retry_after = body
+                .pointer("/parameters/retry_after")
+                .and_then(Value::as_i64);
             if code == 429 && attempt < 2 && matches!(retry_after, Some(r) if r > 0 && r <= 120) {
                 let delay = Duration::from_secs(retry_after.unwrap() as u64);
                 tokio::select! {
@@ -134,7 +151,10 @@ impl TelegramApi {
                 .get("description")
                 .and_then(Value::as_str)
                 .unwrap_or("API 请求失败");
-            return Err(ApiError { code, message: format!("Telegram: {}", self.redact(description)) });
+            return Err(ApiError {
+                code,
+                message: format!("Telegram: {}", self.redact(description)),
+            });
         }
         unreachable!()
     }

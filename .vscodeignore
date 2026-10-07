@@ -3,7 +3,13 @@
 !README.md
 !LICENSE
 !CHANGELOG.md
-!dist/**
+# vsce treats every negated pattern as an allowlist, regardless of rule order.
+# A broad !dist/** would override source-map exclusions.
+!dist/**/*.js
+!dist/**/*.mjs
+!dist/**/*.cjs
+!dist/**/*.css
+!dist/fonts/*.{woff,woff2,ttf}
 dist/**/*.map
 !media/pi.svg
 !THIRD_PARTY_NOTICES.txt

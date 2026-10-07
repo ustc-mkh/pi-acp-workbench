@@ -94,7 +94,12 @@ impl TaskQueue {
             let lane = inner
                 .lanes
                 .entry(id.to_string())
-                .or_insert_with(|| Arc::new(Lane { lock: Mutex::new(()), queued: AtomicUsize::new(0) }))
+                .or_insert_with(|| {
+                    Arc::new(Lane {
+                        lock: Mutex::new(()),
+                        queued: AtomicUsize::new(0),
+                    })
+                })
                 .clone();
             lane.queued.fetch_add(1, Ordering::SeqCst);
             // TS: const epoch = this.epochs.get(id) || 0;
@@ -122,7 +127,11 @@ impl TaskQueue {
             // Global budget — the FIFO semaphore replaces the TS waiters/active
             // counter. acquire() only fails on a closed semaphore, which never
             // happens here; the message matches the closest contract error.
-            let _permit = self.semaphore.acquire().await.map_err(|_| "会话服务正在停止".to_string())?;
+            let _permit = self
+                .semaphore
+                .acquire()
+                .await
+                .map_err(|_| "会话服务正在停止".to_string())?;
             check()?;
             operation(check).await
         }
@@ -135,7 +144,11 @@ impl TaskQueue {
         }
         let mut inner = self.inner.lock().unwrap();
         if lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
-            && inner.lanes.get(id).map(|l| Arc::ptr_eq(l, &lane)).unwrap_or(false)
+            && inner
+                .lanes
+                .get(id)
+                .map(|l| Arc::ptr_eq(l, &lane))
+                .unwrap_or(false)
         {
             inner.lanes.remove(id);
             inner.epochs.remove(id);

@@ -137,7 +137,12 @@ fn is_enoent(error: &std::io::Error) -> bool {
 
 /// Read-only git subprocess — see the TS `git()` helper. Never passes args that
 /// mutate the worktree; `allow_diff` exists only for `diff --no-index` exit 1.
-async fn git(cwd: &Path, args: &[&str], max_buffer: usize, allow_diff: bool) -> Result<String, String> {
+async fn git(
+    cwd: &Path,
+    args: &[&str],
+    max_buffer: usize,
+    allow_diff: bool,
+) -> Result<String, String> {
     let run = async {
         let mut command = tokio::process::Command::new("git");
         command
@@ -195,7 +200,11 @@ async fn git(cwd: &Path, args: &[&str], max_buffer: usize, allow_diff: bool) -> 
 /// Port of readState(). Ok(None) mirrors the TS `ENOENT → return undefined`
 /// path (file disappeared between ls-files and read). Any other error is
 /// reported to capture() which records the file as unreadable.
-async fn read_state(root: &Path, name: &str, budget: &mut u64) -> Result<Option<FileState>, String> {
+async fn read_state(
+    root: &Path,
+    name: &str,
+    budget: &mut u64,
+) -> Result<Option<FileState>, String> {
     use std::os::unix::fs::MetadataExt;
     let file = resolve(root, name);
     if !inside(root, &file) {
@@ -210,17 +219,38 @@ async fn read_state(root: &Path, name: &str, budget: &mut u64) -> Result<Option<
         }
         let info = tokio::fs::symlink_metadata(&file).await?;
         let mode = (info.mode() & 0o177777) as u64;
-        let signature = format!("metadata:{}:{}:{}:{}", mode, info.size(), mtime_ms(&info), ctime_ms(&info));
+        let signature = format!(
+            "metadata:{}:{}:{}:{}",
+            mode,
+            info.size(),
+            mtime_ms(&info),
+            ctime_ms(&info)
+        );
         if info.file_type().is_symlink() {
             let text = tokio::fs::read_link(&file).await?;
             let text = text.to_string_lossy().into_owned();
-            return Ok(Some(FileState { signature: format!("link:{text}"), text: Some(text), mode, omitted: None }));
+            return Ok(Some(FileState {
+                signature: format!("link:{text}"),
+                text: Some(text),
+                mode,
+                omitted: None,
+            }));
         }
         if !info.is_file() {
-            return Ok(Some(FileState { signature, text: None, mode, omitted: Some("非普通文件（目录或子模块）".into()) }));
+            return Ok(Some(FileState {
+                signature,
+                text: None,
+                mode,
+                omitted: Some("非普通文件（目录或子模块）".into()),
+            }));
         }
         if info.size() > FILE_BYTES || *budget + info.size() > SNAPSHOT_BYTES {
-            return Ok(Some(FileState { signature, text: None, mode, omitted: Some("文件或快照超过采集上限".into()) }));
+            return Ok(Some(FileState {
+                signature,
+                text: None,
+                mode,
+                omitted: Some("文件或快照超过采集上限".into()),
+            }));
         }
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -244,7 +274,9 @@ async fn read_state(root: &Path, name: &str, budget: &mut u64) -> Result<Option<
                     .map_err(|e| e.to_string())?
             };
             #[cfg(not(target_os = "linux"))]
-            let actual = tokio::fs::canonicalize(&file).await.map_err(|e| e.to_string())?;
+            let actual = tokio::fs::canonicalize(&file)
+                .await
+                .map_err(|e| e.to_string())?;
             if !inside(root, &actual) {
                 return Err("打开的文件超出工作区".to_string());
             }
@@ -254,7 +286,10 @@ async fn read_state(root: &Path, name: &str, budget: &mut u64) -> Result<Option<
             let mut buffer = vec![0u8; limit];
             let mut length = 0usize;
             while length < buffer.len() {
-                let n = handle.read(&mut buffer[length..]).await.map_err(|e| e.to_string())?;
+                let n = handle
+                    .read(&mut buffer[length..])
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if n == 0 {
                     break;
                 }
@@ -329,19 +364,34 @@ async fn capture(root: &Path, known: impl Iterator<Item = String>) -> Result<Cap
     // Relative paths from ls-files are relative to cwd, so a nested workspace stays scoped to that directory.
     let listed = git(
         root,
-        &["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".",
+        ],
         GIT_MAX_BUFFER,
         false,
     )
     .await?;
-    let mut names: HashSet<String> = listed.split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
+    let mut names: HashSet<String> = listed
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
     for name in known {
         names.insert(name); // An ignore-rule change must not masquerade as deletion.
     }
     if names.len() > FILES_LIMIT {
         return Err(format!("工作区超过 {FILES_LIMIT} 个文件，未采集完整差异。"));
     }
-    let mut result = Capture { files: HashMap::new(), warnings: Vec::new() };
+    let mut result = Capture {
+        files: HashMap::new(),
+        warnings: Vec::new(),
+    };
     let mut budget = 0u64;
     let deadline = Instant::now() + Duration::from_millis(COLLECTION_MS);
     let mut sorted: Vec<String> = names.into_iter().collect();
@@ -368,11 +418,15 @@ async fn capture(root: &Path, known: impl Iterator<Item = String>) -> Result<Cap
             }
         }
     }
-    let omitted = result.files.values().filter(|f| f.omitted.is_some()).count();
+    let omitted = result
+        .files
+        .values()
+        .filter(|f| f.omitted.is_some())
+        .count();
     if omitted > 0 {
-        result
-            .warnings
-            .push(format!("{omitted} 个文件未采集文本内容（大小限制、二进制、子模块或读取失败）。"));
+        result.warnings.push(format!(
+            "{omitted} 个文件未采集文本内容（大小限制、二进制、子模块或读取失败）。"
+        ));
     }
     Ok(result)
 }
@@ -392,7 +446,11 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
         }
     }
     let mut diff = TurnDiff {
-        status: if warnings.is_empty() { "complete".into() } else { "partial".into() },
+        status: if warnings.is_empty() {
+            "complete".into()
+        } else {
+            "partial".into()
+        },
         files: Vec::new(),
         warnings,
     };
@@ -429,7 +487,9 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
                 new_mode: current.map(|c| c.mode),
                 omitted: None,
             };
-            if old.is_some_and(|o| o.omitted.is_some()) || current.is_some_and(|c| c.omitted.is_some()) {
+            if old.is_some_and(|o| o.omitted.is_some())
+                || current.is_some_and(|c| c.omitted.is_some())
+            {
                 file.omitted = old
                     .and_then(|o| o.omitted.clone())
                     .or_else(|| current.and_then(|c| c.omitted.clone()));
@@ -442,8 +502,11 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
                     file.omitted = Some("本轮差异内容超过展示上限".into());
                 } else {
                     if directory.is_none() {
-                        let dir = std::env::temp_dir().join(format!("pi-turn-diff-{}", uuid::Uuid::new_v4().simple()));
-                        tokio::fs::create_dir(&dir).await.map_err(|e| e.to_string())?;
+                        let dir = std::env::temp_dir()
+                            .join(format!("pi-turn-diff-{}", uuid::Uuid::new_v4().simple()));
+                        tokio::fs::create_dir(&dir)
+                            .await
+                            .map_err(|e| e.to_string())?;
                         directory = Some(dir);
                     }
                     let dir = directory.clone().unwrap();
@@ -478,21 +541,45 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
                         Ok(raw) => {
                             let lines: Vec<&str> = raw.split('\n').collect();
                             let start = lines.iter().position(|l| l.starts_with("@@"));
-                            let hunks: Vec<&str> = start.map(|s| lines[s..].to_vec()).unwrap_or_default();
+                            let hunks: Vec<&str> =
+                                start.map(|s| lines[s..].to_vec()).unwrap_or_default();
                             file.added = hunks.iter().filter(|l| l.starts_with('+')).count() as u64;
-                            file.removed = hunks.iter().filter(|l| l.starts_with('-')).count() as u64;
-                            let mut headers = vec![format!("diff --git {} {}", label("a/", name), label("b/", name))];
+                            file.removed =
+                                hunks.iter().filter(|l| l.starts_with('-')).count() as u64;
+                            let mut headers = vec![format!(
+                                "diff --git {} {}",
+                                label("a/", name),
+                                label("b/", name)
+                            )];
                             match (old, current) {
-                                (None, Some(c)) => headers.push(format!("new file mode {:o}", c.mode)),
-                                (Some(o), None) => headers.push(format!("deleted file mode {:o}", o.mode)),
+                                (None, Some(c)) => {
+                                    headers.push(format!("new file mode {:o}", c.mode))
+                                }
+                                (Some(o), None) => {
+                                    headers.push(format!("deleted file mode {:o}", o.mode))
+                                }
                                 (Some(o), Some(c)) if o.mode != c.mode => {
                                     headers.push(format!("old mode {:o}", o.mode));
                                     headers.push(format!("new mode {:o}", c.mode));
                                 }
                                 _ => {}
                             }
-                            headers.push(format!("--- {}", if old.is_some() { label("a/", name) } else { "/dev/null".into() }));
-                            headers.push(format!("+++ {}", if current.is_some() { label("b/", name) } else { "/dev/null".into() }));
+                            headers.push(format!(
+                                "--- {}",
+                                if old.is_some() {
+                                    label("a/", name)
+                                } else {
+                                    "/dev/null".into()
+                                }
+                            ));
+                            headers.push(format!(
+                                "+++ {}",
+                                if current.is_some() {
+                                    label("b/", name)
+                                } else {
+                                    "/dev/null".into()
+                                }
+                            ));
                             file.patch = Some(
                                 headers
                                     .iter()
@@ -503,7 +590,9 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
                             );
                             file.before = Some(old_text);
                             file.after = Some(new_text);
-                            let bytes = serde_json::to_string(&file).map(|s| s.len() as u64).unwrap_or(u64::MAX);
+                            let bytes = serde_json::to_string(&file)
+                                .map(|s| s.len() as u64)
+                                .unwrap_or(u64::MAX);
                             if used + bytes > RESULT_BYTES {
                                 file.before = None;
                                 file.after = None;
@@ -540,10 +629,17 @@ impl WorkspaceDiff {
     /// One baseline per actual prompt. The caller owns finalization even on cancellation/error.
     pub async fn begin(cwd: &str) -> Self {
         async fn inner(cwd: &str) -> Result<(PathBuf, Capture), String> {
-            let root = tokio::fs::canonicalize(cwd).await.map_err(|e| e.to_string())?;
-            if git(&root, &["rev-parse", "--is-inside-work-tree"], GIT_MAX_BUFFER, false)
-                .await?
-                .trim()
+            let root = tokio::fs::canonicalize(cwd)
+                .await
+                .map_err(|e| e.to_string())?;
+            if git(
+                &root,
+                &["rev-parse", "--is-inside-work-tree"],
+                GIT_MAX_BUFFER,
+                false,
+            )
+            .await?
+            .trim()
                 != "true"
             {
                 return Err("not a worktree".into());
@@ -552,11 +648,17 @@ impl WorkspaceDiff {
             Ok((root, before))
         }
         match inner(cwd).await {
-            Ok((root, before)) => WorkspaceDiff { root, before: Some(before), error: None },
+            Ok((root, before)) => WorkspaceDiff {
+                root,
+                before: Some(before),
+                error: None,
+            },
             Err(e) => WorkspaceDiff {
                 root: PathBuf::from(cwd),
                 before: None,
-                error: Some(format!("无法建立本轮基线：需要 Git 工作区且文件数量/体积在采集限制内。{e}")),
+                error: Some(format!(
+                    "无法建立本轮基线：需要 Git 工作区且文件数量/体积在采集限制内。{e}"
+                )),
             },
         }
     }
@@ -576,7 +678,11 @@ impl WorkspaceDiff {
                 };
                 match attempt.await {
                     Ok(diff) => diff,
-                    Err(e) => TurnDiff { status: "unavailable".into(), files: Vec::new(), warnings: vec![e] },
+                    Err(e) => TurnDiff {
+                        status: "unavailable".into(),
+                        files: Vec::new(),
+                        warnings: vec![e],
+                    },
                 }
             }
         };
@@ -598,7 +704,11 @@ pub fn turn_diff_title(diff: &TurnDiff) -> String {
         diff.files.len(),
         added,
         removed,
-        if diff.status == "partial" { "（部分结果）" } else { "" }
+        if diff.status == "partial" {
+            "（部分结果）"
+        } else {
+            ""
+        }
     )
 }
 
@@ -610,7 +720,10 @@ pub fn turn_diff_text(diff: &TurnDiff) -> String {
             file.path,
             file.added,
             file.removed,
-            file.omitted.as_deref().map(|o| format!(" · {o}")).unwrap_or_default()
+            file.omitted
+                .as_deref()
+                .map(|o| format!(" · {o}"))
+                .unwrap_or_default()
         ));
     }
     lines.extend(diff.warnings.iter().cloned());
@@ -621,7 +734,13 @@ pub fn turn_diff_text(diff: &TurnDiff) -> String {
 mod tests {
     use super::*;
 
-    fn file(path: &str, status: &str, added: u64, removed: u64, omitted: Option<&str>) -> TurnFileDiff {
+    fn file(
+        path: &str,
+        status: &str,
+        added: u64,
+        removed: u64,
+        omitted: Option<&str>,
+    ) -> TurnFileDiff {
         TurnFileDiff {
             path: path.into(),
             status: status.into(),
@@ -644,11 +763,20 @@ mod tests {
             warnings: vec![],
         };
         assert_eq!(turn_diff_title(&diff), "本轮修改 · 1 个文件 · +3 −1");
-        assert_eq!(turn_diff_text(&diff), "本轮修改 · 1 个文件 · +3 −1\na.ts: +3 −1");
+        assert_eq!(
+            turn_diff_text(&diff),
+            "本轮修改 · 1 个文件 · +3 −1\na.ts: +3 −1"
+        );
 
         let partial = TurnDiff {
             status: "partial".into(),
-            files: vec![file("b.bin", "added", 1, 0, Some("二进制或非 UTF-8 文件，不展示内容"))],
+            files: vec![file(
+                "b.bin",
+                "added",
+                1,
+                0,
+                Some("二进制或非 UTF-8 文件，不展示内容"),
+            )],
             warnings: vec!["w".into()],
         };
         assert_eq!(
@@ -656,7 +784,11 @@ mod tests {
             "本轮修改 · 1 个文件 · +1 −0（部分结果）\nb.bin: +1 −0 · 二进制或非 UTF-8 文件，不展示内容\nw"
         );
 
-        let unavailable = TurnDiff { status: "unavailable".into(), files: vec![], warnings: vec!["boom".into()] };
+        let unavailable = TurnDiff {
+            status: "unavailable".into(),
+            files: vec![],
+            warnings: vec!["boom".into()],
+        };
         assert_eq!(turn_diff_title(&unavailable), "本轮修改 · 未能采集");
         assert_eq!(turn_diff_text(&unavailable), "本轮修改 · 未能采集\nboom");
     }
@@ -668,21 +800,52 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .expect("git must be available for this test");
-        assert!(status.status.success(), "git {args:?} failed: {:?}", String::from_utf8_lossy(&status.stderr));
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {:?}",
+            String::from_utf8_lossy(&status.stderr)
+        );
     }
 
     #[tokio::test]
     async fn workspace_diff_reports_changes() {
-        let dir = std::env::temp_dir().join(format!("pi-diff-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("pi-diff-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         git_ok(&dir, &["init"]);
-        git_ok(&dir, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"]);
+        git_ok(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
         git_ok(&dir, &["add", "a.txt"]);
-        git_ok(&dir, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add"]);
+        git_ok(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "add",
+            ],
+        );
 
         let mut changes = WorkspaceDiff::begin(dir.to_str().unwrap()).await;
-        assert!(changes.error.is_none(), "baseline must succeed in a git worktree");
+        assert!(
+            changes.error.is_none(),
+            "baseline must succeed in a git worktree"
+        );
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
         let entry = changes.finish().await;
@@ -693,7 +856,11 @@ mod tests {
             diff.files.iter().map(|f| (f.path.as_str(), f)).collect();
         let a = by_path["a.txt"];
         assert_eq!((a.status.as_str(), a.added, a.removed), ("modified", 1, 0));
-        assert!(a.patch.as_deref().unwrap().contains("diff --git \"a/a.txt\" \"b/a.txt\""));
+        assert!(a
+            .patch
+            .as_deref()
+            .unwrap()
+            .contains("diff --git \"a/a.txt\" \"b/a.txt\""));
         let b = by_path["b.txt"];
         assert_eq!(b.status, "added");
         assert!(b.patch.as_deref().unwrap().contains("new file mode 100"));
@@ -704,13 +871,18 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_diff_unavailable_outside_git() {
-        let dir = std::env::temp_dir().join(format!("pi-diff-nogit-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("pi-diff-nogit-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut changes = WorkspaceDiff::begin(dir.to_str().unwrap()).await;
         let entry = changes.finish().await;
         let diff = entry.diff.clone().unwrap();
         assert_eq!(diff.status, "unavailable");
-        assert!(diff.warnings[0].contains("无法建立本轮基线"), "{:?}", diff.warnings);
+        assert!(
+            diff.warnings[0].contains("无法建立本轮基线"),
+            "{:?}",
+            diff.warnings
+        );
         assert!(entry.text().starts_with("本轮修改 · 未能采集"));
         let _ = std::fs::remove_dir_all(&dir);
     }

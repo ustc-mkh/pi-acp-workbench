@@ -29,11 +29,18 @@ pub struct TurnEvent {
 }
 
 fn is_event_name(name: &str) -> bool {
-    name.len() == 69 && name.ends_with(".json") && name[..64].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    name.len() == 69
+        && name.ends_with(".json")
+        && name[..64]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 fn event_file(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{}.json", hex::encode(Sha256::digest(id.as_bytes()))))
+    dir.join(format!(
+        "{}.json",
+        hex::encode(Sha256::digest(id.as_bytes()))
+    ))
 }
 
 /// One scan pass; mirrors iterate(): too-old files are deleted, invalid ones skipped.
@@ -47,16 +54,28 @@ pub async fn scan(dir: &Path) -> io::Result<Vec<TurnEvent>> {
             continue;
         }
         let file = entry.path();
-        let Ok(meta) = entry.metadata().await else { continue };
-        if meta.modified().ok().and_then(|m| m.elapsed().ok()).map(|age| age > MAX_AGE).unwrap_or(false) {
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|age| age > MAX_AGE)
+            .unwrap_or(false)
+        {
             let _ = tokio::fs::remove_file(&file).await;
             continue;
         }
         if meta.len() > MAX_SIZE {
             continue;
         }
-        let Ok(body) = tokio::fs::read(&file).await else { continue };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else { continue };
+        let Ok(body) = tokio::fs::read(&file).await else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            continue;
+        };
         if !value.is_object() {
             continue;
         }
@@ -67,11 +86,18 @@ pub async fn scan(dir: &Path) -> io::Result<Vec<TurnEvent>> {
             .iter()
             .all(|k| value.get(*k).map(|v| v.is_string()).unwrap_or(true));
         let status = value.get("status").and_then(|v| v.as_str());
-        let updated_ok = value.get("updated").and_then(|v| v.as_f64()).map(|u| u.is_finite()).unwrap_or(false);
+        let updated_ok = value
+            .get("updated")
+            .and_then(|v| v.as_f64())
+            .map(|u| u.is_finite())
+            .unwrap_or(false);
         if !valid_strings
             || !optional
             || !updated_ok
-            || !matches!(status, Some("running" | "completed" | "cancelled" | "failed"))
+            || !matches!(
+                status,
+                Some("running" | "completed" | "cancelled" | "failed")
+            )
         {
             continue;
         }

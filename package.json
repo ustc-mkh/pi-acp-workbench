@@ -188,6 +188,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
+    "format": "prettier --write . && cargo fmt --manifest-path rust/Cargo.toml --all",
+    "format:check": "prettier --check . && cargo fmt --manifest-path rust/Cargo.toml --all -- --check",
     "test": "npm run check && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && vitest run",
     "verify": "npm run test:all && npm run test:browser",
@@ -229,6 +231,7 @@
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
     "jsdom": "^26.1.0",
+    "prettier": "3.6.2",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   },

@@ -8,15 +8,27 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-pub async fn write_atomic_json<T: Serialize>(path: &Path, value: &T, durable: bool) -> io::Result<()> {
+pub async fn write_atomic_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+    durable: bool,
+) -> io::Result<()> {
     let tmp: PathBuf = path.with_file_name(format!(
         "{}.{}.tmp",
-        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         Uuid::new_v4()
     ));
-    let body = serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let body =
+        serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let result = async {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).await?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .await?;
         // mode() is tokio::fs::OpenOptions' own unix method — no trait import needed.
         file.write_all(&body).await?;
         if durable {

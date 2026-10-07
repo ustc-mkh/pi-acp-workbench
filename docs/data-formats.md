@@ -109,7 +109,7 @@ Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`
 ## 6. `preferences/<harness>.json`
 
 ```json
-{"version":1,"preferences":[{"kind":"model|thinking","value":"<string>"}]}
+{ "version": 1, "preferences": [{ "kind": "model|thinking", "value": "<string>" }] }
 ```
 
 最多 2 项、kind 不重复。新建会话读取并应用；格式不符报错且**不覆盖**原文件。扩展端写 codex/claude，服务写 pi——同文件双写者，必须原子写。

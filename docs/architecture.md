@@ -18,19 +18,19 @@ Webview 只处理渲染和用户意图，不直接访问模型或文件系统。
 
 ## 职责拆分与合并
 
-| 模块 | 单一职责 |
-| --- | --- |
-| `session-protocol.ts` | 当前服务命令、共享响应类型及入口参数校验；客户端不再依赖服务实现的类型 |
-| `task-queue.ts` | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘 |
-| `request-journal.ts` | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口 |
-| `session-service.ts` | 工作进程/租约、会话状态、prompt 与原生分支；路由处决定调度，不在操作中重复入队 |
-| `workspace-diff.ts` / `turn-diff.ts` | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统 |
-| `workspace-documents.ts` | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验 |
-| `webview/messages.ts` | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用 |
-| `atomic-json.ts` | 快照、收据、outbox 共用原子写入；关键文件额外同步磁盘 |
-| `conversation-history.ts` | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent |
-| `conversation-statistics.ts` | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果 |
-| `session-preferences.ts` | 账户级模型/thinking 组合的校验与持久原子保存 |
+| 模块                                 | 单一职责                                                                             |
+| ------------------------------------ | ------------------------------------------------------------------------------------ |
+| `session-protocol.ts`                | 当前服务命令、共享响应类型及入口参数校验；客户端不再依赖服务实现的类型               |
+| `task-queue.ts`                      | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                             |
+| `request-journal.ts`                 | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                       |
+| `session-service.ts`                 | 工作进程/租约、会话状态、prompt 与原生分支；路由处决定调度，不在操作中重复入队       |
+| `workspace-diff.ts` / `turn-diff.ts` | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统          |
+| `workspace-documents.ts`             | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验              |
+| `webview/messages.ts`                | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用 |
+| `atomic-json.ts`                     | 快照、收据、outbox 共用原子写入；关键文件额外同步磁盘                                |
+| `conversation-history.ts`            | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                      |
+| `conversation-statistics.ts`         | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                   |
+| `session-preferences.ts`             | 账户级模型/thinking 组合的校验与持久原子保存                                         |
 
 继续保持独立的边界：`session-settings` 是纯选择器解析，`session-configuration` 是 ACP 设置应用；本地 `AgentProcess` 与服务客户端 `RemoteAgent` 生命周期不同，不应合并。共享索引事务锁与会话租约保护的对象不同，也不能为了减少模块而合并。
 
@@ -42,35 +42,35 @@ Webview 只处理渲染和用户意图，不直接访问模型或文件系统。
 
 ## Harness 边界
 
-`src/harness.ts` 定义 Pi、Codex、Claude Code 三个 profile、启动配置和 Session ID 转换。Pi 使用独立 sessions.json；另外两者使用 piAcp.codex.* / piAcp.claude.*，只在扩展宿主启动用户已安装的 ACP 适配器，不自动安装软件。
+`src/harness.ts` 定义 Pi、Codex、Claude Code 三个 profile、启动配置和 Session ID 转换。Pi 使用独立 sessions.json；另外两者使用 piAcp.codex._ / piAcp.claude._，只在扩展宿主启动用户已安装的 ACP 适配器，不自动安装软件。
 
 `AgentProcess.request()` 是带 sessionId 请求的统一边界：非 Pi 本地 ID 为 workbench:<harness>:<编码后的原生ID>，RPC 出站还原原生 ID，通知/权限入站加入命名空间。新 Pi ID 不允许占用保留前缀。完整快照与索引必须显式记录 harness；缺失或不匹配时拒绝恢复，不从 ID 推断缺失元数据。租约、编号与历史删除均使用本地 ID。不得在宿主绕过 request() 直接发送带本地 ID 的标准请求。
 
 Codex 的 fast-mode 和 collaboration_mode 选择器隐藏，创建/恢复时通过标准 set_config_option 固定为 off/default；拒绝旧 UI 修改这两个配置，偏好保存也排除它们。其他模型、思考和权限配置照常，Pi/Claude 不应用这些覆盖。
 
-selectedHarness 按工作区持久化；非 Pi 的 activeSession 放在 harness.<id>.* 键下。模型/thinking 偏好独立保存在账户目录，不再读写 workspaceState.sessionPreferences 或 harness.<id>.sessionPreferences。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/分支期间不允许切换。
+selectedHarness 按工作区持久化；非 Pi 的 activeSession 放在 harness.<id>.\* 键下。模型/thinking 偏好独立保存在账户目录，不再读写 workspaceState.sessionPreferences 或 harness.<id>.sessionPreferences。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/分支期间不允许切换。
 
 恢复一律请求 session/load，错误原样报告并保留本地记录；即使是空会话也不会自动 session/new 或替换 ID。用户明确新建才创建会话。没有针对供应商特定缺失错误码的重建分支。
 
 SlashCommands 将菜单挂载到 Webview body，以 fixed 定位绕过 footer 的 overflow:auto 裁剪；内容始终来自当前会话 available_commands_update，不硬编码 CLI 命令。键盘补全会阻止默认 Enter 发送。
 
-Codex / Claude 第一阶段不开放上下文编辑，也不调用 _pi_workbench/*。标准选择器/图片/历史恢复按 initialize 声明及后续通知处理；缺少 loadSession 时只读展示，不把本地记录自动灌入新会话。不声明尚未实现的文件/终端委托、认证网关或子会话扩展。登录按钮启动本地终端，不接收或保存用户输入的凭据。
+Codex / Claude 第一阶段不开放上下文编辑，也不调用 \_pi_workbench/\*。标准选择器/图片/历史恢复按 initialize 声明及后续通知处理；缺少 loadSession 时只读展示，不把本地记录自动灌入新会话。不声明尚未实现的文件/终端委托、认证网关或子会话扩展。登录按钮启动本地终端，不接收或保存用户输入的凭据。
 
 ## 创建、恢复与活动会话
 
 `ChatProvider.start()` 必须显式接收 `'new'` 或一个 Snapshot，不能用缺省参数意外创建会话。
 
-| 用户操作 / 事件 | 行为 |
-| --- | --- |
-| 首次打开、没有历史 | 显示欢迎页面；不启动 Agent、不创建会话 |
-| 打开已有工作区 | 自动恢复 `activeSession` 对应历史，至多尝试一次 |
-| Webview 重载 / 重复 ready | 保留当前状态，不反复连接 |
-| 顶部 +、欢迎页新建、Pi: New Session | 显式新建空会话并继承最近设置 |
-| 点击历史 | Pi 读取服务当前状态；其他 harness 先取得锁再加载；其他工作区只读 |
-| 释放会话 | Pi 仅断开客户端，任务继续；其他 harness 保存并断开 Agent、释放锁 |
-| 重新连接 | 恢复当前会话；没有当前会话时尝试上次活动历史；不自动降级为新建 |
-| 恢复失败或不支持 session/load | 留下错误与原会话记录，等待重试或用户主动新建 |
-| 分支 | 用户显式要求的新分支，包含所选记录之前及本条内容 |
+| 用户操作 / 事件                     | 行为                                                             |
+| ----------------------------------- | ---------------------------------------------------------------- |
+| 首次打开、没有历史                  | 显示欢迎页面；不启动 Agent、不创建会话                           |
+| 打开已有工作区                      | 自动恢复 `activeSession` 对应历史，至多尝试一次                  |
+| Webview 重载 / 重复 ready           | 保留当前状态，不反复连接                                         |
+| 顶部 +、欢迎页新建、Pi: New Session | 显式新建空会话并继承最近设置                                     |
+| 点击历史                            | Pi 读取服务当前状态；其他 harness 先取得锁再加载；其他工作区只读 |
+| 释放会话                            | Pi 仅断开客户端，任务继续；其他 harness 保存并断开 Agent、释放锁 |
+| 重新连接                            | 恢复当前会话；没有当前会话时尝试上次活动历史；不自动降级为新建   |
+| 恢复失败或不支持 session/load       | 留下错误与原会话记录，等待重试或用户主动新建                     |
+| 分支                                | 用户显式要求的新分支，包含所选记录之前及本条内容                 |
 
 只有明确的活动指针才会触发自动恢复；缺失时保持欢迎页。`activeSession: null` 表示明确无可恢复活动历史，避免删除当前历史后重启又打开另一段对话。删除本地历史不会中断正在运行的 Agent。关闭历史持久化时，重启回到欢迎页，但当前运行内仍可重连活跃会话。
 
@@ -88,16 +88,16 @@ Pi 由会话服务独占偏好读写，桌面和 Telegram 因而使用同一组�
 
 ## 存储与缓存
 
-| 位置 / 键 | 用途 |
-| --- | --- |
-| ~/.pi/pi-acp-workbench/history/index.json | 默认共享模式：全部会话索引、删除 tombstone、nextSessionNumber  |
-| ~/.pi/pi-acp-workbench/history/conversations | 带版本的完整快照，索引提交后清理上一版本；新目录/文件 POSIX 权限为 0700/0600 |
-| workspaceState.history / storageUri/conversations | 本地模式：最近 20 个索引和快照；仅用于 Codex / Claude 本地模式 |
-| workspaceState.activeSession | 最后活动的持久化会话 ID，null 表示无 |
-| ~/.pi/pi-acp-workbench/preferences/{harness}.json | 跨工作区共享的最近模型/thinking 组合 |
-| workspaceState.usageRecords / usageTitles | 已去重用量和逻辑对话标题 |
-| workspaceState.prices | 用户覆盖单价 |
-| SessionCache（仅内存） | 至多 2 个空闲连接，序列化记录预算 32 MiB，LRU 淘汰 |
+| 位置 / 键                                         | 用途                                                                         |
+| ------------------------------------------------- | ---------------------------------------------------------------------------- |
+| ~/.pi/pi-acp-workbench/history/index.json         | 默认共享模式：全部会话索引、删除 tombstone、nextSessionNumber                |
+| ~/.pi/pi-acp-workbench/history/conversations      | 带版本的完整快照，索引提交后清理上一版本；新目录/文件 POSIX 权限为 0700/0600 |
+| workspaceState.history / storageUri/conversations | 本地模式：最近 20 个索引和快照；仅用于 Codex / Claude 本地模式               |
+| workspaceState.activeSession                      | 最后活动的持久化会话 ID，null 表示无                                         |
+| ~/.pi/pi-acp-workbench/preferences/{harness}.json | 跨工作区共享的最近模型/thinking 组合                                         |
+| workspaceState.usageRecords / usageTitles         | 已去重用量和逻辑对话标题                                                     |
+| workspaceState.prices                             | 用户覆盖单价                                                                 |
+| SessionCache（仅内存）                            | 至多 2 个空闲连接，序列化记录预算 32 MiB，LRU 淘汰                           |
 
 共享历史由 `src/shared-history.ts` 的索引事务锁、会话租约、revision 和删除 tombstone 保护。Pi 只由服务写入，插件通过请求读取/删除；服务失去租约则终止对应进程。Codex / Claude 仍由插件持锁，其他窗口只读。Pi 的多客户端同步来自服务推送，不依赖历史轮询。
 
@@ -137,7 +137,7 @@ Pi 的 `persistHistory=false` 只隐藏列表，服务继续保存任务。其�
 
 Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，每个补丁都断言唯一匹配，位置缺失或重复时直接失败。用量日志解析结果按文件身份、大小和修改时间缓存，避免同一轮分页反复扫描；文件变化后重新解析。宿主收齐分页后一次合并和保存统计。
 
-只有协商 agentCapabilities._meta['pi-workbench'].version=1 后，宿主才使用：
+只有协商 agentCapabilities.\_meta['pi-workbench'].version=1 后，宿主才使用：
 
 - `_pi_workbench/inspect`：分页读取真实 usage、模型价格、原生有效上下文和 forkPoints。
 - `_pi_workbench/fork` / `cancel_fork`：原生分支及取消，需额外协商 `nativeFork=true`。
@@ -173,11 +173,11 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 
 两个长驻进程各有 TypeScript（`src/session-daemon.ts`、`src/telegram-daemon.ts`）与 Rust（`rust/` workspace）实现。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的冻结契约逐字节对齐，由同一套黑盒 contract 验证（`npm run test:contract` / `npm run test:contract:telegram`，`PI_CONTRACT_DAEMON` / `PI_TG_DAEMON` 选择被测实现）。部署时只改 systemd `ExecStart` 即可切换；严禁新旧 daemon 共用同一 `--data-dir` 并行运行（锁会拒绝第二个实例）。
 
-| crate | 对应 TS | 职责 |
-| --- | --- | --- |
-| `pi-acp-session-daemon` | session-daemon / session-service / session-wire 服务端等 | wire 服务端、命令校验、TaskQueue、RequestJournal、共享历史、偏好、outbox 发布、workspace-diff、native-branch 哈希、ACP client 子集、进程组管理 |
-| `pi-acp-telegram-daemon` | telegram-daemon / telegram-bridge / telegram-stream / telegram-sessions | Bot 长轮询、话题绑定、outbox 消费、节流发送 |
-| `pi-acp-core` | session-wire 客户端 / atomic-json / 锁 | wire 客户端、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16/canonical 序列化 |
+| crate                    | 对应 TS                                                                 | 职责                                                                                                                                           |
+| ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pi-acp-session-daemon`  | session-daemon / session-service / session-wire 服务端等                | wire 服务端、命令校验、TaskQueue、RequestJournal、共享历史、偏好、outbox 发布、workspace-diff、native-branch 哈希、ACP client 子集、进程组管理 |
+| `pi-acp-telegram-daemon` | telegram-daemon / telegram-bridge / telegram-stream / telegram-sessions | Bot 长轮询、话题绑定、outbox 消费、节流发送                                                                                                    |
+| `pi-acp-core`            | session-wire 客户端 / atomic-json / 锁                                  | wire 客户端、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16/canonical 序列化                                                                    |
 
 Webview、扩展宿主与 `pi-adapter.mjs` 永远保持 JS/TS：渲染生态与 Pi 进程内扩展机制没有 Rust 通道；Rust daemon 只是 spawn `node pi-adapter.mjs` 作为工作进程。动机仅为常驻内存（Node ~60–100 MB → Rust ~5–9 MB RSS）与单二进制部署。
 

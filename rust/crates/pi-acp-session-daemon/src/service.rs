@@ -2,7 +2,6 @@
 //! Runtime locks are std::sync::Mutex and are NEVER held across .await; session
 //! serialization comes from TaskQueue lanes + the busy flag, exactly like TS.
 use crate::agent::{AgentOptions, AgentProcess};
-use std::future::Future;
 use crate::diff::WorkspaceDiff;
 use crate::history::{SessionInUseError, SharedHistoryStore};
 use crate::journal::RequestJournal;
@@ -16,6 +15,7 @@ use crate::updates::{apply_update, initial_state, next_id};
 use pi_acp_core::utf16::utf16_head;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,20 +23,26 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 type Rt = Arc<Mutex<Runtime>>;
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
 type Broadcast = Arc<dyn Fn(Value) + Send + Sync>;
 /// Non-'static boxed future so operations may borrow &self/&command.
-type OpFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>;
+type OpFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>;
 
 /// Permission callback that always resolves 'cancelled' — transient workers.
 fn auto_cancel_permission() -> crate::agent::PermissionCb {
-    Arc::new(|_| -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
-        Box::pin(async { json!({ "outcome": { "outcome": "cancelled" } }) })
-    })
+    Arc::new(
+        |_| -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+            Box::pin(async { json!({ "outcome": { "outcome": "cancelled" } }) })
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +88,12 @@ pub struct SessionService {
 }
 
 impl SessionService {
-    pub fn new(root: &std::path::Path, config: ServiceConfig, broadcast: Broadcast, report: Report) -> Arc<Self> {
+    pub fn new(
+        root: &std::path::Path,
+        config: ServiceConfig,
+        broadcast: Broadcast,
+        report: Report,
+    ) -> Arc<Self> {
         let runtimes: Arc<Mutex<HashMap<String, Rt>>> = Arc::new(Mutex::new(HashMap::new()));
         let map_for_lease = runtimes.clone();
         let runtimes_field = runtimes;
@@ -119,7 +130,8 @@ impl SessionService {
     fn spawn_idle_sweep(self: &Arc<Self>) {
         let service = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(service.config.idle_ms.min(30_000)));
+            let mut interval =
+                tokio::time::interval(Duration::from_millis(service.config.idle_ms.min(30_000)));
             interval.tick().await; // skip immediate tick
             loop {
                 interval.tick().await;
@@ -209,7 +221,9 @@ impl SessionService {
                 .min_by_key(|(_, r)| r.lock().unwrap().used)
                 .map(|(id, rt)| (id.clone(), rt.clone()))
         };
-        let Some((id, rt)) = idle else { return Err("工作进程均忙碌".into()) };
+        let Some((id, rt)) = idle else {
+            return Err("工作进程均忙碌".into());
+        };
         self.evict(&id, &rt).await;
         Ok(())
     }
@@ -238,13 +252,17 @@ impl SessionService {
                     let Some(rt) = rt.upgrade() else { return };
                     let event = {
                         let mut r = rt.lock().unwrap();
-                        if notification.get("sessionId").and_then(Value::as_str) != Some(r.snapshot.id.as_str()) {
+                        if notification.get("sessionId").and_then(Value::as_str)
+                            != Some(r.snapshot.id.as_str())
+                        {
                             return;
                         }
                         if r.replay {
                             // During session/load replay only commands are accepted;
                             // the persisted transcript stays authoritative.
-                            if notification.pointer("/update/sessionUpdate").and_then(Value::as_str)
+                            if notification
+                                .pointer("/update/sessionUpdate")
+                                .and_then(Value::as_str)
                                 == Some("available_commands_update")
                             {
                                 r.state.commands = notification
@@ -278,7 +296,8 @@ impl SessionService {
                             return json!({ "outcome": { "outcome": "cancelled" } });
                         };
                         service_permission(&rt, request, broadcast, &closed).await
-                    }) as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
+                    })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
                 })
             },
             log: report.clone(),
@@ -301,7 +320,11 @@ impl SessionService {
 
     /// Disposable worker for create()/saveFork() — replaying updates into an
     /// owned initial state; permissions auto-cancelled.
-    fn spawn_transient(&self, cwd: &str, state: Arc<Mutex<ChatState>>) -> Result<Arc<AgentProcess>, String> {
+    fn spawn_transient(
+        &self,
+        cwd: &str,
+        state: Arc<Mutex<ChatState>>,
+    ) -> Result<Arc<AgentProcess>, String> {
         let report = self.report.clone();
         Ok(Arc::new(AgentProcess::spawn(AgentOptions {
             cwd: cwd.to_string(),
@@ -309,7 +332,11 @@ impl SessionService {
             args: self.config.args.clone(),
             env: self.agent_env(),
             update: Arc::new(move |n| {
-                apply_update(&mut state.lock().unwrap(), &n.get("update").cloned().unwrap_or(Value::Null), true)
+                apply_update(
+                    &mut state.lock().unwrap(),
+                    &n.get("update").cloned().unwrap_or(Value::Null),
+                    true,
+                )
             }),
             permission: auto_cancel_permission(),
             log: report,
@@ -320,11 +347,21 @@ impl SessionService {
 
     /// TS list(): only harness 'pi'.
     pub async fn list(&self) -> Result<Vec<Snapshot>, String> {
-        Ok(self.store.list().await?.into_iter().filter(|s| s.harness.as_deref() == Some("pi")).collect())
+        Ok(self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .filter(|s| s.harness.as_deref() == Some("pi"))
+            .collect())
     }
 
     async fn index(&self, id: &str) -> Result<Snapshot, String> {
-        self.list().await?.into_iter().find(|s| s.id == id).ok_or_else(|| "会话不存在".to_string())
+        self.list()
+            .await?
+            .into_iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "会话不存在".to_string())
     }
 
     async fn runtime(&self, id: &str) -> Result<Rt, String> {
@@ -349,7 +386,10 @@ impl SessionService {
                 state.native_forks = snapshot.native_forks.clone();
                 state.commands = snapshot.commands.clone().unwrap_or_default();
                 let rt = Arc::new(Mutex::new(Runtime {
-                    snapshot: Snapshot { entries: vec![], ..snapshot },
+                    snapshot: Snapshot {
+                        entries: vec![],
+                        ..snapshot
+                    },
                     state,
                     agent: None,
                     busy: true,
@@ -362,7 +402,10 @@ impl SessionService {
                     cancel_task: None,
                     error: None,
                 }));
-                self.runtimes.lock().unwrap().insert(id.to_string(), rt.clone());
+                self.runtimes
+                    .lock()
+                    .unwrap()
+                    .insert(id.to_string(), rt.clone());
                 Ok(rt)
             }
             Err(e) => {
@@ -393,10 +436,18 @@ impl SessionService {
             let mut session = agent.create_session(Some(&session_id)).await?;
             let prefs = model_preferences(&rt.lock().unwrap().state);
             if let Some(warning) = apply_preferences(agent.as_ref(), &mut session, &prefs).await? {
-                rt.lock().unwrap().state.entries.push(Entry::text_entry(next_id(), "notice", warning));
+                rt.lock().unwrap().state.entries.push(Entry::text_entry(
+                    next_id(),
+                    "notice",
+                    warning,
+                ));
             }
             let mut r = rt.lock().unwrap();
-            if let Some(configs) = session.get("configOptions").and_then(Value::as_array).cloned() {
+            if let Some(configs) = session
+                .get("configOptions")
+                .and_then(Value::as_array)
+                .cloned()
+            {
                 r.state.configs = Some(configs);
             }
             // TS: `r.state.modes = session.modes || r.state.modes` — a falsy
@@ -424,7 +475,12 @@ impl SessionService {
             return Ok(view_state(&rt.lock().unwrap()));
         }
         let snapshot = self.store.read(&index).await?;
-        let interrupted = self.journal.last(id).await?.map(|r| r.status == "interrupted").unwrap_or(false);
+        let interrupted = self
+            .journal
+            .last(id)
+            .await?
+            .map(|r| r.status == "interrupted")
+            .unwrap_or(false);
         let mut out = json!({
             "snapshot": snapshot,
             "busy": false,
@@ -438,7 +494,12 @@ impl SessionService {
     }
 
     /// TS handle(): validation → durability → queueing decision (once).
-    pub async fn handle(&self, method: &str, params: Value, request_id: &str) -> Result<Value, String> {
+    pub async fn handle(
+        &self,
+        method: &str,
+        params: Value,
+        request_id: &str,
+    ) -> Result<Value, String> {
         if self.closed.load(Ordering::SeqCst) {
             return Err("会话服务正在停止".into());
         }
@@ -446,15 +507,29 @@ impl SessionService {
         if durable_command(&command) {
             return self
                 .journal
-                .run(request_id, method, &params, command_session_id(&command), &self.queue, || {
+                .run(
+                    request_id,
+                    method,
+                    &params,
+                    command_session_id(&command),
+                    &self.queue,
+                    || self.execute(&command, request_id),
+                )
+                .await;
+        }
+        if matches!(
+            command,
+            ServiceCommand::Remove { .. }
+                | ServiceCommand::HistoryWrite { .. }
+                | ServiceCommand::HistoryRemove { .. }
+        ) || matches!(&command, ServiceCommand::Request { method, .. } if method == "_pi_workbench/inspect")
+        {
+            return self
+                .queue
+                .run(command_session_id(&command), |_check| {
                     self.execute(&command, request_id)
                 })
                 .await;
-        }
-        if matches!(command, ServiceCommand::Remove { .. } | ServiceCommand::HistoryWrite { .. } | ServiceCommand::HistoryRemove { .. })
-            || matches!(&command, ServiceCommand::Request { method, .. } if method == "_pi_workbench/inspect")
-        {
-            return self.queue.run(command_session_id(&command), |_check| self.execute(&command, request_id)).await;
         }
         self.execute(&command, request_id).await
     }
@@ -481,14 +556,24 @@ impl SessionService {
         }
     }
 
-    async fn execute_session(&self, command: &ServiceCommand, request_id: &str) -> Result<Value, String> {
+    async fn execute_session(
+        &self,
+        command: &ServiceCommand,
+        request_id: &str,
+    ) -> Result<Value, String> {
         let id = command_session_id(command);
         self.index(id).await?;
         match command {
             ServiceCommand::State { .. } => self.state(id).await,
-            ServiceCommand::Permission { permission_id, option_id, .. } => {
+            ServiceCommand::Permission {
+                permission_id,
+                option_id,
+                ..
+            } => {
                 let rt = self.runtimes.lock().unwrap().get(id).cloned();
-                let Some(rt) = rt else { return Ok(Value::Bool(false)) };
+                let Some(rt) = rt else {
+                    return Ok(Value::Bool(false));
+                };
                 let sender = {
                     let mut r = rt.lock().unwrap();
                     let ticket = r.state.permissions.iter().find(|p| &p.id == permission_id);
@@ -498,7 +583,10 @@ impl SessionService {
                             .request
                             .get("options")
                             .and_then(Value::as_array)
-                            .map(|opts| opts.iter().any(|o| o.get("optionId").and_then(Value::as_str) == Some(opt)))
+                            .map(|opts| {
+                                opts.iter()
+                                    .any(|o| o.get("optionId").and_then(Value::as_str) == Some(opt))
+                            })
                             .unwrap_or(false),
                         (Some(_), None) => true,
                     };
@@ -528,8 +616,15 @@ impl SessionService {
                 self.store.remove(id).await?;
                 Ok(Value::Null)
             }
-            ServiceCommand::Request { method, params, .. } if method == "_pi_workbench/cancel_fork" => {
-                let agent = self.runtimes.lock().unwrap().get(id).and_then(|rt| rt.lock().unwrap().agent.clone());
+            ServiceCommand::Request { method, params, .. }
+                if method == "_pi_workbench/cancel_fork" =>
+            {
+                let agent = self
+                    .runtimes
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .and_then(|rt| rt.lock().unwrap().agent.clone());
                 match agent {
                     // TS forwards only {sessionId:id} — client params dropped.
                     Some(agent) => agent.request(method, json!({ "sessionId": id })).await,
@@ -537,10 +632,18 @@ impl SessionService {
                 }
             }
             ServiceCommand::Request { method, params, .. }
-                if method == "_pi_workbench/inspect" && !params.get("force").and_then(Value::as_bool).unwrap_or(false) =>
+                if method == "_pi_workbench/inspect"
+                    && !params
+                        .get("force")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
             {
-                let has_agent =
-                    self.runtimes.lock().unwrap().get(id).is_some_and(|rt| rt.lock().unwrap().agent.is_some());
+                let has_agent = self
+                    .runtimes
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_some_and(|rt| rt.lock().unwrap().agent.is_some());
                 if !has_agent {
                     let state = self.state(id).await?;
                     return Ok(json!({
@@ -548,10 +651,16 @@ impl SessionService {
                         "contextWindow": state.pointer("/snapshot/contextWindow").cloned().unwrap_or(Value::Null),
                     }));
                 }
-                self.with_worker(id, |rt, agent| self.run_command(rt, agent, command, request_id)).await
+                self.with_worker(id, |rt, agent| {
+                    self.run_command(rt, agent, command, request_id)
+                })
+                .await
             }
             ServiceCommand::Prompt { .. } | ServiceCommand::Request { .. } => {
-                self.with_worker(id, |rt, agent| self.run_command(rt, agent, command, request_id)).await
+                self.with_worker(id, |rt, agent| {
+                    self.run_command(rt, agent, command, request_id)
+                })
+                .await
             }
             _ => Err("无效服务操作".into()),
         }
@@ -597,11 +706,22 @@ impl SessionService {
         result
     }
 
-    fn run_command<'a>(&'a self, rt: Rt, agent: Arc<AgentProcess>, command: &'a ServiceCommand, request_id: &'a str) -> OpFuture<'a> {
+    fn run_command<'a>(
+        &'a self,
+        rt: Rt,
+        agent: Arc<AgentProcess>,
+        command: &'a ServiceCommand,
+        request_id: &'a str,
+    ) -> OpFuture<'a> {
         Box::pin(async move {
             match command {
-                ServiceCommand::Prompt { session_id, prompt, source } => {
-                    self.prompt(&rt, &agent, session_id, prompt, source, request_id).await
+                ServiceCommand::Prompt {
+                    session_id,
+                    prompt,
+                    source,
+                } => {
+                    self.prompt(&rt, &agent, session_id, prompt, source, request_id)
+                        .await
                 }
                 ServiceCommand::Request { .. } => self.agent_request(&rt, &agent, command).await,
                 _ => unreachable!(),
@@ -609,11 +729,27 @@ impl SessionService {
         })
     }
 
-    async fn agent_request(&self, rt: &Rt, agent: &Arc<AgentProcess>, command: &ServiceCommand) -> Result<Value, String> {
-        let ServiceCommand::Request { method, params, session_id } = command else { unreachable!() };
+    async fn agent_request(
+        &self,
+        rt: &Rt,
+        agent: &Arc<AgentProcess>,
+        command: &ServiceCommand,
+    ) -> Result<Value, String> {
+        let ServiceCommand::Request {
+            method,
+            params,
+            session_id,
+        } = command
+        else {
+            unreachable!()
+        };
         let mut outgoing = params.clone();
         outgoing["sessionId"] = json!(session_id);
-        let timeout = if method == "_pi_workbench/fork" { 180_000 } else { 30_000 };
+        let timeout = if method == "_pi_workbench/fork" {
+            180_000
+        } else {
+            30_000
+        };
         if method == "_pi_workbench/fork" {
             let wanted_entry = params.get("entryId").and_then(Value::as_str);
             let wanted_hash = params.get("hash").and_then(Value::as_str);
@@ -625,21 +761,33 @@ impl SessionService {
                         .as_ref()
                         .and_then(|m| m.get(&entry.id))
                         .is_some_and(|p| {
-                            Some(p.entry_id.as_str()) == wanted_entry && Some(p.hash.as_str()) == wanted_hash
+                            Some(p.entry_id.as_str()) == wanted_entry
+                                && Some(p.hash.as_str()) == wanted_hash
                         })
                 })
             };
-            let Some(index) = index else { return Err("原生分支位置无法匹配".into()) };
-            let result = agent.with_timeout(agent.request(method, outgoing), timeout).await?;
-            let new_id = result.get("sessionId").and_then(Value::as_str).unwrap_or_default().to_string();
+            let Some(index) = index else {
+                return Err("原生分支位置无法匹配".into());
+            };
+            let result = agent
+                .with_timeout(agent.request(method, outgoing), timeout)
+                .await?;
+            let new_id = result
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             self.save_fork(rt, agent, new_id, index).await?;
             self.save(rt).await?;
             return Ok(result);
         }
-        let result = agent.with_timeout(agent.request(method, outgoing), timeout).await?;
+        let result = agent
+            .with_timeout(agent.request(method, outgoing), timeout)
+            .await?;
         if method == "_pi_workbench/inspect" {
             let points: Vec<crate::native::NativeForkPoint> =
-                serde_json::from_value(result.get("forkPoints").cloned().unwrap_or(json!([]))).unwrap_or_default();
+                serde_json::from_value(result.get("forkPoints").cloned().unwrap_or(json!([])))
+                    .unwrap_or_default();
             let mut r = rt.lock().unwrap();
             r.state.native_forks = Some(bind_native_forks(
                 &r.state.entries,
@@ -651,7 +799,10 @@ impl SessionService {
             }
         }
         if method == "session/set_config_option" {
-            rt.lock().unwrap().state.configs = result.get("configOptions").and_then(Value::as_array).cloned();
+            rt.lock().unwrap().state.configs = result
+                .get("configOptions")
+                .and_then(Value::as_array)
+                .cloned();
         }
         if method == "session/set_mode" {
             if let Some(modes) = &mut rt.lock().unwrap().state.modes {
@@ -661,14 +812,23 @@ impl SessionService {
             }
         }
         self.save(rt).await?;
-        if matches!(method.as_str(), "session/set_config_option" | "session/set_mode") {
+        if matches!(
+            method.as_str(),
+            "session/set_config_option" | "session/set_mode"
+        ) {
             let state = rt.lock().unwrap().state.clone();
             self.preferences.save("pi", &state).await?;
         }
         Ok(result)
     }
 
-    async fn save_fork(&self, rt: &Rt, agent: &Arc<AgentProcess>, new_id: String, index: usize) -> Result<(), String> {
+    async fn save_fork(
+        &self,
+        rt: &Rt,
+        agent: &Arc<AgentProcess>,
+        new_id: String,
+        index: usize,
+    ) -> Result<(), String> {
         let mut snapshot = {
             let r = rt.lock().unwrap();
             Snapshot {
@@ -692,7 +852,10 @@ impl SessionService {
         .await;
         fork.stop().await;
         let settings = settings?;
-        snapshot.configs = settings.get("configOptions").and_then(Value::as_array).cloned();
+        snapshot.configs = settings
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .cloned();
         snapshot.modes = settings.get("modes").cloned();
         snapshot.title = snapshot
             .entries
@@ -719,9 +882,16 @@ impl SessionService {
         let image_capable = agent
             .info()
             .await
-            .and_then(|i| i.pointer("/agentCapabilities/promptCapabilities/image").and_then(Value::as_bool))
+            .and_then(|i| {
+                i.pointer("/agentCapabilities/promptCapabilities/image")
+                    .and_then(Value::as_bool)
+            })
             .unwrap_or(false);
-        if prompt.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("image")) && !image_capable {
+        if prompt
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+            && !image_capable
+        {
             return Err("当前 Pi 适配器不支持图片".into());
         }
         let prefs_state = rt.lock().unwrap().state.clone();
@@ -729,7 +899,10 @@ impl SessionService {
         let settings_before = {
             let r = rt.lock().unwrap();
             serde_json::to_string(
-                &model_preferences(&r.state).iter().map(|p| json!({"kind":p.kind,"value":p.value})).collect::<Vec<_>>(),
+                &model_preferences(&r.state)
+                    .iter()
+                    .map(|p| json!({"kind":p.kind,"value":p.value}))
+                    .collect::<Vec<_>>(),
             )
             .unwrap_or_default()
         };
@@ -758,7 +931,12 @@ impl SessionService {
                         // session_number: None — TS reads state.sessionNumber,
                         // which is never assigned, so the outbox event omits
                         // the key entirely (spec-optional; parity wins).
-                        (r.snapshot.id.clone(), None, r.state.entries.clone(), r.state.permissions.len())
+                        (
+                            r.snapshot.id.clone(),
+                            None,
+                            r.state.entries.clone(),
+                            r.state.permissions.len(),
+                        )
                     })
                 })
             };
@@ -813,7 +991,11 @@ impl SessionService {
             match outcome {
                 Ok(result) => {
                     if result.get("stopReason").and_then(Value::as_str) != Some("end_turn") {
-                        let reason = result.get("stopReason").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let reason = result
+                            .get("stopReason")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
                         rt.lock().unwrap().state.entries.push(Entry::text_entry(
                             next_id(),
                             "notice",
@@ -835,7 +1017,11 @@ impl SessionService {
                     r.state.entries.push(Entry::text_entry(
                         next_id(),
                         "notice",
-                        if cancelled { "本轮已停止。".into() } else { format!("本轮失败：{error}") },
+                        if cancelled {
+                            "本轮已停止。".into()
+                        } else {
+                            format!("本轮失败：{error}")
+                        },
                     ));
                     Ok(json!({ "stopReason": "cancelled" }))
                 }
@@ -866,7 +1052,10 @@ impl SessionService {
         let settings_after = {
             let r = rt.lock().unwrap();
             serde_json::to_string(
-                &model_preferences(&r.state).iter().map(|p| json!({"kind":p.kind,"value":p.value})).collect::<Vec<_>>(),
+                &model_preferences(&r.state)
+                    .iter()
+                    .map(|p| json!({"kind":p.kind,"value":p.value}))
+                    .collect::<Vec<_>>(),
             )
             .unwrap_or_default()
         };
@@ -878,7 +1067,15 @@ impl SessionService {
         if let Some(publication) = publication {
             let (error, stop_reason) = {
                 let r = rt.lock().unwrap();
-                (r.error.clone(), result.as_ref().ok().and_then(|v| v.get("stopReason")).and_then(Value::as_str).map(String::from))
+                (
+                    r.error.clone(),
+                    result
+                        .as_ref()
+                        .ok()
+                        .and_then(|v| v.get("stopReason"))
+                        .and_then(Value::as_str)
+                        .map(String::from),
+                )
             };
             publication.finish(error, stop_reason.as_deref()).await;
         }
@@ -889,7 +1086,11 @@ impl SessionService {
     /// (calling extension) — the store verifies freshness; a runtime we own
     /// means the session is live here → SessionInUse like claim().
     async fn history_write(&self, snapshot: &Value) -> Result<Value, String> {
-        let id = snapshot.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let id = snapshot
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if self.runtimes.lock().unwrap().contains_key(&id) {
             return Err(SessionInUseError.to_string());
         }
@@ -897,7 +1098,10 @@ impl SessionService {
         // type fails serde, so degrade to id + verbatim extras rather than
         // reject (Snapshot.extra round-trips unknown keys byte-for-byte).
         let snap: Snapshot = serde_json::from_value(snapshot.clone()).unwrap_or_else(|_| {
-            let mut snap = Snapshot { id: id.clone(), ..Default::default() };
+            let mut snap = Snapshot {
+                id: id.clone(),
+                ..Default::default()
+            };
             if let Value::Object(map) = snapshot {
                 snap.extra = map.clone();
             }
@@ -915,8 +1119,13 @@ impl SessionService {
                 // snapshotting and allocation would escape eviction and be
                 // tombstoned by clear() while still holding its lease.
                 self.exclusive(|| async {
-                    let runtimes: Vec<(String, Arc<Mutex<Runtime>>)> =
-                        self.runtimes.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let runtimes: Vec<(String, Arc<Mutex<Runtime>>)> = self
+                        .runtimes
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
                     for (sid, rt) in runtimes {
                         self.evict(&sid, &rt).await;
                     }
@@ -966,7 +1175,11 @@ impl SessionService {
                 let r = rt.lock().unwrap();
                 r.busy
                     && reference.is_some()
-                    && r.agent.as_ref().zip(reference.as_ref()).map(|(a, b)| Arc::ptr_eq(a, b)).unwrap_or(false)
+                    && r.agent
+                        .as_ref()
+                        .zip(reference.as_ref())
+                        .map(|(a, b)| Arc::ptr_eq(a, b))
+                        .unwrap_or(false)
             };
             if kill {
                 if let Some(agent) = rt.lock().unwrap().agent.take() {
@@ -1005,11 +1218,18 @@ impl SessionService {
                 let warning = apply_preferences(agent.as_ref(), &mut session, &preferences).await?;
                 if warning.is_none() {
                     let mut prefs_state = ChatState::default();
-                    prefs_state.configs = session.get("configOptions").and_then(Value::as_array).cloned();
+                    prefs_state.configs = session
+                        .get("configOptions")
+                        .and_then(Value::as_array)
+                        .cloned();
                     prefs_state.modes = session.get("modes").cloned();
                     self.preferences.save("pi", &prefs_state).await?;
                 }
-                let session_id = session.get("sessionId").and_then(Value::as_str).unwrap_or_default().to_string();
+                let session_id = session
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let commands_cache = initial.lock().unwrap().commands.clone();
                 self.store.claim(&session_id).await?;
                 let written = self
@@ -1025,7 +1245,10 @@ impl SessionService {
                             None => vec![],
                         },
                         commands: Some(commands_cache.clone()),
-                        configs: session.get("configOptions").and_then(Value::as_array).cloned(),
+                        configs: session
+                            .get("configOptions")
+                            .and_then(Value::as_array)
+                            .cloned(),
                         modes: session.get("modes").cloned(),
                         context_complete: Some(true),
                         ..Default::default()
@@ -1149,7 +1372,10 @@ fn command_session_id(command: &ServiceCommand) -> &str {
 fn view_state(r: &Runtime) -> Value {
     let mut snapshot = serde_json::to_value(&r.snapshot).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut snapshot {
-        map.insert("entries".into(), serde_json::to_value(&r.state.entries).unwrap_or(json!([])));
+        map.insert(
+            "entries".into(),
+            serde_json::to_value(&r.state.entries).unwrap_or(json!([])),
+        );
         // TS: `configs: undefined` → JSON.stringify drops the key entirely;
         // emit absent rather than null so wire bytes match.
         if let Some(v) = &r.state.configs {
@@ -1159,7 +1385,10 @@ fn view_state(r: &Runtime) -> Value {
             map.insert("modes".into(), v.clone());
         }
         if let Some(m) = &r.state.native_forks {
-            map.insert("nativeForks".into(), serde_json::to_value(m).unwrap_or(Value::Null));
+            map.insert(
+                "nativeForks".into(),
+                serde_json::to_value(m).unwrap_or(Value::Null),
+            );
         }
     }
     let mut state = json!({
@@ -1176,14 +1405,23 @@ fn view_state(r: &Runtime) -> Value {
 
 fn view_state_with_type(r: &Runtime) -> Value {
     let mut v = view_state(r);
-    v.as_object_mut().unwrap().insert("type".into(), json!("state"));
+    v.as_object_mut()
+        .unwrap()
+        .insert("type".into(), json!("state"));
     v
 }
 
 /// TS permission(): ticket + 5 min timeout + resolve-on-settle.
-async fn service_permission(rt: &Rt, request: Value, broadcast: Broadcast, closed: &AtomicBool) -> Value {
+async fn service_permission(
+    rt: &Rt,
+    request: Value,
+    broadcast: Broadcast,
+    closed: &AtomicBool,
+) -> Value {
     let cancelled = || json!({ "outcome": { "outcome": "cancelled" } });
-    let too_big = serde_json::to_vec(&request).map(|v| v.len() > 256 * 1024).unwrap_or(true);
+    let too_big = serde_json::to_vec(&request)
+        .map(|v| v.len() > 256 * 1024)
+        .unwrap_or(true);
     let id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel::<Option<String>>();
     {
@@ -1192,7 +1430,10 @@ async fn service_permission(rt: &Rt, request: Value, broadcast: Broadcast, close
             return cancelled();
         }
         r.permissions.insert(id.clone(), tx);
-        r.state.permissions.push(Permission { id: id.clone(), request });
+        r.state.permissions.push(Permission {
+            id: id.clone(),
+            request,
+        });
     }
     {
         let r = rt.lock().unwrap();
@@ -1214,5 +1455,3 @@ async fn service_permission(rt: &Rt, request: Value, broadcast: Broadcast, close
         None => cancelled(),
     }
 }
-
-

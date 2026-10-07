@@ -26,18 +26,25 @@ fn data_root(args: &[String]) -> Result<PathBuf, String> {
     match index {
         Some(i) => {
             let value = args.get(i + 1).filter(|v| !v.starts_with("--"));
-            value.map(|v| std::fs::canonicalize(v).unwrap_or_else(|_| PathBuf::from(v))).ok_or("--data-dir 需要目录路径。".into())
+            value
+                .map(|v| std::fs::canonicalize(v).unwrap_or_else(|_| PathBuf::from(v)))
+                .ok_or("--data-dir 需要目录路径。".into())
         }
         None => Ok(dirs_home().join(".pi/pi-acp-workbench")),
     }
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeState, String> {
@@ -49,16 +56,30 @@ fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeStat
         || !v.get("topics").and_then(Value::as_array).is_some_and(|a| {
             a.iter().all(|t| {
                 t.get("sessionId").and_then(Value::as_str).is_some()
-                    && t.get("threadId").and_then(Value::as_i64).is_some_and(|id| id > 0)
+                    && t.get("threadId")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|id| id > 0)
             })
         })
-        || !v.get("delivered").and_then(Value::as_array).is_some_and(|a| a.iter().all(|d| d.is_string()))
-        || v.get("offset").map(|o| o.as_i64().is_some_and(|i| i >= 0)).unwrap_or(true) == false
+        || !v
+            .get("delivered")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().all(|d| d.is_string()))
+        || v.get("offset")
+            .map(|o| o.as_i64().is_some_and(|i| i >= 0))
+            .unwrap_or(true)
+            == false
         || v.get("silent").map(|s| s.is_boolean()).unwrap_or(true) == false
-        || v.get("notifications").map(|s| s.is_boolean()).unwrap_or(true) == false
+        || v.get("notifications")
+            .map(|s| s.is_boolean())
+            .unwrap_or(true)
+            == false
         || v.get("historySent").map(|h| {
             h.as_object().is_some_and(|m| {
-                m.values().all(|v| v.as_array().is_some_and(|a| a.iter().all(|k| k.is_string())))
+                m.values().all(|v| {
+                    v.as_array()
+                        .is_some_and(|a| a.iter().all(|k| k.is_string()))
+                })
             })
         }) != Some(true)
     {
@@ -74,15 +95,27 @@ fn report_fn(token: String) -> impl Fn(&str) + Send + Sync + 'static {
 async fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help") {
-        println!("Usage: PI_TELEGRAM_BOT_TOKEN=... pi-acp-telegram-daemon --config /path/telegram.json");
+        println!(
+            "Usage: PI_TELEGRAM_BOT_TOKEN=... pi-acp-telegram-daemon --config /path/telegram.json"
+        );
         println!("Optional: --data-dir /path/pi-acp-workbench (default ~/.pi/pi-acp-workbench)");
         return Ok(());
     }
     let token = std::env::var("PI_TELEGRAM_BOT_TOKEN").unwrap_or_default();
     let valid_token = {
         let mut parts = token.splitn(2, ':');
-        let id_ok = parts.next().map(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
-        let secret_ok = parts.next().map(|p| p.len() >= 20 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(false);
+        let id_ok = parts
+            .next()
+            .map(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false);
+        let secret_ok = parts
+            .next()
+            .map(|p| {
+                p.len() >= 20
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            })
+            .unwrap_or(false);
         id_ok && secret_ok
     };
     if !valid_token {
@@ -90,11 +123,18 @@ async fn run() -> Result<(), String> {
     }
 
     let stop = CancellationToken::new();
-    let api = Arc::new(TelegramApi::new(&token, Duration::from_millis(3100), stop.clone()));
+    let api = Arc::new(TelegramApi::new(
+        &token,
+        Duration::from_millis(3100),
+        stop.clone(),
+    ));
 
     if args.iter().any(|a| a == "--discover") {
         let updates = api
-            .call("getUpdates", serde_json::json!({ "timeout": 20, "allowed_updates": ["message"] }))
+            .call(
+                "getUpdates",
+                serde_json::json!({ "timeout": 20, "allowed_updates": ["message"] }),
+            )
             .await
             .map_err(|e| e.message)?;
         for update in updates.as_array().cloned().unwrap_or_default() {
@@ -115,7 +155,8 @@ async fn run() -> Result<(), String> {
     let config_file = arg_value(&args, "--config")
         .ok_or("需要 --config /absolute/path/telegram.json；示例见 docs/telegram.md。")?;
     let raw: Value = serde_json::from_str(
-        &std::fs::read_to_string(config_file).map_err(|e| format!("无法读取 Telegram 配置：{e}"))?,
+        &std::fs::read_to_string(config_file)
+            .map_err(|e| format!("无法读取 Telegram 配置：{e}"))?,
     )
     .map_err(|e| format!("Telegram 配置必须为 JSON 对象：{e}"))?;
     let mut cfg = config::parse(&raw)?;
@@ -123,21 +164,36 @@ async fn run() -> Result<(), String> {
         if !Path::new(&path).is_absolute() {
             return Err(format!("工作区 {name} 必须使用绝对路径。"));
         }
-        let real = std::fs::canonicalize(&path).map_err(|e| format!("工作区 {name} 解析失败：{e}"))?;
+        let real =
+            std::fs::canonicalize(&path).map_err(|e| format!("工作区 {name} 解析失败：{e}"))?;
         if !real.is_dir() {
             return Err(format!("工作区 {name} 不是目录。"));
         }
-        cfg.workspaces.insert(name, real.to_string_lossy().into_owned());
+        cfg.workspaces
+            .insert(name, real.to_string_lossy().into_owned());
     }
 
     let root = data_root(&args)?;
     let directory = root.join("telegram");
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
         .map_err(|e| format!("无法创建数据目录：{e}"))?;
 
-    let bot = api.call("getMe", serde_json::json!({})).await.map_err(|e| e.message)?;
-    let bot_id = bot.get("id").and_then(Value::as_i64).ok_or("getMe 响应无效")?;
-    let username = bot.get("username").and_then(Value::as_str).unwrap_or_default().to_string();
+    let bot = api
+        .call("getMe", serde_json::json!({}))
+        .await
+        .map_err(|e| e.message)?;
+    let bot_id = bot
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or("getMe 响应无效")?;
+    let username = bot
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
 
     let stop_for_compromise = stop.clone();
     let lock = MkdirLock::acquire(
@@ -166,17 +222,22 @@ async fn run() -> Result<(), String> {
     };
     match std::fs::read_to_string(&state_file) {
         Ok(body) => {
-            let value: Value = serde_json::from_str(&body)
-                .map_err(|_| "Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。".to_string())?;
+            let value: Value = serde_json::from_str(&body).map_err(|_| {
+                "Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。".to_string()
+            })?;
             data = validate_state(&value, bot_id, cfg.chat_id)?;
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("无法读取 Telegram 绑定：{e}")),
     }
 
-    let host = Sessions::connect(cfg.workspaces.clone(), &root.join("service/sessions.sock"), cfg.restrict_to_workspaces)
-        .await
-        .map_err(|e| format!("无法连接会话服务：{e}"))?;
+    let host = Sessions::connect(
+        cfg.workspaces.clone(),
+        &root.join("service/sessions.sock"),
+        cfg.restrict_to_workspaces,
+    )
+    .await
+    .map_err(|e| format!("无法连接会话服务：{e}"))?;
 
     let report: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(report_fn(token.clone()));
     let bridge = Bridge::new(
@@ -195,7 +256,11 @@ async fn run() -> Result<(), String> {
     bridge.initialize(&username).await?;
     println!(
         "Telegram relay ready: @{username}, {}; send /help in the configured Topics group.",
-        cfg.workspaces.keys().cloned().collect::<Vec<_>>().join(", ")
+        cfg.workspaces
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // SIGINT/SIGTERM → graceful shutdown.

@@ -27,10 +27,10 @@
 
 相同显式 worker 配置、隔离临时数据目录，不创建会话或启动 Pi worker；服务 ready 后等待 3 秒，从 `/proc/<pid>/status` 读取 RSS：
 
-| 实现 | 产物 | ready 耗时 | 空闲 RSS |
-| --- | --- | --- | --- |
-| TS 会话服务 | 当前 `dist/session-daemon.mjs` | 138 ms | 78,520 KiB（约 76.7 MiB） |
-| Rust 会话服务 | 当前 debug 二进制 | 3 ms | 9,372 KiB（约 9.2 MiB） |
+| 实现          | 产物                           | ready 耗时 | 空闲 RSS                  |
+| ------------- | ------------------------------ | ---------- | ------------------------- |
+| TS 会话服务   | 当前 `dist/session-daemon.mjs` | 138 ms     | 78,520 KiB（约 76.7 MiB） |
+| Rust 会话服务 | 当前 debug 二进制              | 3 ms       | 9,372 KiB（约 9.2 MiB）   |
 
 这是单次样本，不是正式性能基准。未测 Telegram RSS、满载 CPU、工作进程总内存或长时间稳定性。只能支持“Rust 会话服务空闲占用明显较低”，不能据此宣称总系统内存下降相同比例。
 
@@ -65,14 +65,14 @@
 
 迁移重点：
 
-| 现有测试资产 | Rust 收敛前需要的替代验证 |
-| --- | --- |
-| `test/telegram-sessions.test.ts` | 多窗口/手机共用任务、取消、队列/容量/回收、幂等、原生分支、磁盘失败不执行/不重试 |
-| `test/session-preferences.test.ts` 的服务相关用例 | 跨目录/重启偏好、新建使用默认值时恢复偏好、不可用值不损坏原文件 |
-| `test/telegram.test.ts` | 游标持久化失败禁止执行、绑定/通知事务失败、终态投递重试、history sync、去重、静音、权限隔离 |
-| `test/long-running.test.ts` | 背压、队列上限、断线分块、超大响应隔离、超时不重放 |
-| `test/memory-soak.ts` | 外部 daemon RSS/资源数量稳定性；不能继续读取已删 TS 实现的私有字段 |
-| `test/controller.test.ts` 的真实服务用例 | 扩展通过真实 `SessionClient` / `RemoteAgent` 连接 Rust 子进程 |
+| 现有测试资产                                      | Rust 收敛前需要的替代验证                                                                   |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `test/telegram-sessions.test.ts`                  | 多窗口/手机共用任务、取消、队列/容量/回收、幂等、原生分支、磁盘失败不执行/不重试            |
+| `test/session-preferences.test.ts` 的服务相关用例 | 跨目录/重启偏好、新建使用默认值时恢复偏好、不可用值不损坏原文件                             |
+| `test/telegram.test.ts`                           | 游标持久化失败禁止执行、绑定/通知事务失败、终态投递重试、history sync、去重、静音、权限隔离 |
+| `test/long-running.test.ts`                       | 背压、队列上限、断线分块、超大响应隔离、超时不重放                                          |
+| `test/memory-soak.ts`                             | 外部 daemon RSS/资源数量稳定性；不能继续读取已删 TS 实现的私有字段                          |
+| `test/controller.test.ts` 的真实服务用例          | 扩展通过真实 `SessionClient` / `RemoteAgent` 连接 Rust 子进程                               |
 
 优先将外部可观察行为提升为共享黑盒契约；故障注入、事务细节和资源释放则补 Rust 单测。不要为了测试保留一整套可运行 TS 服务。测试专用 mock socket server / mock agent 不属于第二套生产实现。
 

@@ -74,7 +74,10 @@ fn is_hex64(bytes: &[u8]) -> bool {
 
 impl RequestJournal {
     pub fn new(directory: PathBuf) -> Self {
-        RequestJournal { directory, in_flight: Mutex::new(HashMap::new()) }
+        RequestJournal {
+            directory,
+            in_flight: Mutex::new(HashMap::new()),
+        }
     }
 
     #[allow(dead_code)] // TS pendingCount parity (diagnostics)
@@ -89,7 +92,8 @@ impl RequestJournal {
 
     /// TS lastFile(sessionId) = join(directory, 'session-' + sha256(sessionId) + '.json').
     fn last_file(&self, session_id: &str) -> PathBuf {
-        self.directory.join(format!("session-{}.json", sha256_hex(session_id)))
+        self.directory
+            .join(format!("session-{}.json", sha256_hex(session_id)))
     }
 
     /// TS read(file): ENOENT → None; >MAX_RECEIPT_BYTES → '任务收据过大';
@@ -123,7 +127,8 @@ impl RequestJournal {
         else {
             return Err(MALFORMED.into());
         };
-        if !matches!(status, "running" | "completed" | "interrupted") || !is_hex64(fingerprint.as_bytes())
+        if !matches!(status, "running" | "completed" | "interrupted")
+            || !is_hex64(fingerprint.as_bytes())
         {
             return Err(MALFORMED.into());
         }
@@ -228,7 +233,10 @@ impl RequestJournal {
                     let (task, _) = broadcast::channel(1);
                     in_flight.insert(
                         request_id.to_string(),
-                        Pending { fingerprint: fingerprint.clone(), task },
+                        Pending {
+                            fingerprint: fingerprint.clone(),
+                            task,
+                        },
                     );
                     Dedup::Owner
                 }
@@ -238,11 +246,18 @@ impl RequestJournal {
             // Lagged is unreachable (single send into a capacity-1 channel);
             // Closed means the owner future was dropped mid-flight — a state JS
             // cannot express — so it maps to the shutdown error.
-            return receiver.recv().await.map_err(|_| "会话服务正在停止".to_string()).and_then(|r| r);
+            return receiver
+                .recv()
+                .await
+                .map_err(|_| "会话服务正在停止".to_string())
+                .and_then(|r| r);
         }
         // TS: queue.run(sessionId || 'create:' + id, async check => { ... })
-        let lane_id =
-            if session_id.is_empty() { format!("create:{request_id}") } else { session_id.to_string() };
+        let lane_id = if session_id.is_empty() {
+            format!("create:{request_id}")
+        } else {
+            session_id.to_string()
+        };
         let request_id_owned = request_id.to_string();
         let session_id_owned = session_id.to_string();
         let result = queue
@@ -251,7 +266,9 @@ impl RequestJournal {
                 let existing = self.get(&request_id_owned).await?;
                 check()?;
                 if let Some(existing) = existing {
-                    if existing.session_id != session_id_owned || existing.fingerprint != fingerprint {
+                    if existing.session_id != session_id_owned
+                        || existing.fingerprint != fingerprint
+                    {
                         return Err("请求 ID 已被其他操作使用".into());
                     }
                     if existing.status != "completed" {
@@ -328,7 +345,9 @@ impl RequestJournal {
             .mode(0o700)
             .create(&self.directory)
             .map_err(|e| e.to_string())?;
-        let mut entries = fs::read_dir(&self.directory).await.map_err(|e| e.to_string())?;
+        let mut entries = fs::read_dir(&self.directory)
+            .await
+            .map_err(|e| e.to_string())?;
         while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -338,7 +357,9 @@ impl RequestJournal {
                 continue;
             }
             let file = entry.path();
-            let Some(receipt) = self.read(&file).await? else { continue };
+            let Some(receipt) = self.read(&file).await? else {
+                continue;
+            };
             // TS: this.file(r.id) !== file → '任务收据 ID 不匹配'
             if self.file(&receipt.id) != file {
                 return Err("任务收据 ID 不匹配".into());
@@ -354,11 +375,11 @@ impl RequestJournal {
             // TS order: last() read → recover → rewrite receipt → maybe marker.
             let last = self.last(&receipt.session_id).await?;
             recover(interrupted.clone()).await?;
-            write_atomic_json(&file, &interrupted, true).await.map_err(|e| e.to_string())?;
+            write_atomic_json(&file, &interrupted, true)
+                .await
+                .map_err(|e| e.to_string())?;
             // TS: if (r.sessionId && (!last || last.id === r.id)) rewrite marker.
-            if !receipt.session_id.is_empty()
-                && last.map(|l| l.id == receipt.id).unwrap_or(true)
-            {
+            if !receipt.session_id.is_empty() && last.map(|l| l.id == receipt.id).unwrap_or(true) {
                 write_atomic_json(&self.last_file(&receipt.session_id), &interrupted, true)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -389,8 +410,10 @@ impl RequestJournal {
                 continue;
             }
             let file = entry.path();
-            let Some(mtime) =
-                fs::metadata(&file).await.ok().and_then(|m| m.modified().ok())
+            let Some(mtime) = fs::metadata(&file)
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
             else {
                 continue; // unreadable → keep for manual inspection
             };
@@ -411,8 +434,13 @@ impl RequestJournal {
     /// pending sender is dropped right after broadcasting its run() outcome, so
     /// subscribing then dropping our own clone resolves on send or close.
     pub async fn drain(&self) {
-        let senders: Vec<broadcast::Sender<Result<Value, String>>> =
-            self.in_flight.lock().await.values().map(|p| p.task.clone()).collect();
+        let senders: Vec<broadcast::Sender<Result<Value, String>>> = self
+            .in_flight
+            .lock()
+            .await
+            .values()
+            .map(|p| p.task.clone())
+            .collect();
         for sender in senders {
             let mut receiver = sender.subscribe();
             drop(sender); // don't hold the channel open against a dropped owner

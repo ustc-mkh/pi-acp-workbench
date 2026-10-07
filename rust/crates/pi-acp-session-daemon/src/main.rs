@@ -29,11 +29,16 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 fn load_config(path: &str) -> Result<ServiceConfig, String> {
@@ -46,7 +51,11 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
     // config, not a silent default (1.5 / "3" / -2 must all be rejected).
     let max_workers = match raw.get("maxWorkers") {
         None => 3usize,
-        Some(v) => v.as_u64().filter(|n| (1..=8).contains(n)).map(|n| n as usize).ok_or_else(invalid)?,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (1..=8).contains(n))
+            .map(|n| n as usize)
+            .ok_or_else(invalid)?,
     };
     let idle_ms = match raw.get("idleMs") {
         None => 900_000,
@@ -54,19 +63,30 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
     };
     let args: Vec<String> = match raw.get("args") {
         None | Some(Value::Null) => Vec::new(),
-        Some(v) if v.as_array().is_some_and(|a| a.iter().all(|x| x.is_string())) => {
-            v.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect()
+        Some(v)
+            if v.as_array()
+                .is_some_and(|a| a.iter().all(|x| x.is_string())) =>
+        {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_str().unwrap().to_string())
+                .collect()
         }
         _ => return Err(invalid()),
     };
     let mut env: HashMap<String, String> = match raw.get("env") {
         None | Some(Value::Null) => HashMap::new(),
-        Some(v) if v.as_object().is_some_and(|m| m.values().all(|x| x.is_string())) => v
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-            .collect(),
+        Some(v)
+            if v.as_object()
+                .is_some_and(|m| m.values().all(|x| x.is_string())) =>
+        {
+            v.as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                .collect()
+        }
         _ => return Err(invalid()),
     };
     // TS defaults: command=process.execPath (node) args=[dist/pi-adapter.mjs].
@@ -87,7 +107,10 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
                 })
                 .filter(|p| p.exists());
             let Some(adapter) = adapter else {
-                return Err("会话配置缺少 command；Rust daemon 需要显式 worker 命令或旁边的 pi-adapter.mjs".into());
+                return Err(
+                    "会话配置缺少 command；Rust daemon 需要显式 worker 命令或旁边的 pi-adapter.mjs"
+                        .into(),
+                );
             };
             env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
             let config = ServiceConfig {
@@ -104,7 +127,13 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
         return Err(invalid());
     }
     env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
-    Ok(ServiceConfig { command, args, env, max_workers, idle_ms })
+    Ok(ServiceConfig {
+        command,
+        args,
+        env,
+        max_workers,
+        idle_ms,
+    })
 }
 
 async fn run() -> Result<(), String> {
@@ -141,7 +170,8 @@ async fn run() -> Result<(), String> {
     .map_err(|e| format!("会话服务已在运行：{e}"))?;
 
     let stop_clone = stop.clone();
-    let server_cell: Arc<tokio::sync::OnceCell<server::SessionServer>> = Arc::new(tokio::sync::OnceCell::new());
+    let server_cell: Arc<tokio::sync::OnceCell<server::SessionServer>> =
+        Arc::new(tokio::sync::OnceCell::new());
     let server_for_broadcast = server_cell.clone();
     let service = SessionService::new(
         &root,
@@ -158,15 +188,22 @@ async fn run() -> Result<(), String> {
     let svc = service.clone();
     let server = server::SessionServer::new(
         root.join("service").join("sessions.sock"),
-        Arc::new(move |method: String, params: Value, request_id: String, _emit| {
-            let svc = svc.clone();
-            Box::pin(async move { svc.handle(&method, params, &request_id).await })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
-        }),
+        Arc::new(
+            move |method: String, params: Value, request_id: String, _emit| {
+                let svc = svc.clone();
+                Box::pin(async move { svc.handle(&method, params, &request_id).await })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<Value, String>> + Send>,
+                    >
+            },
+        ),
     );
     server.listen().await?;
     let _ = server_cell.set(server);
-    println!("Pi session service ready; maxWorkers={}, idleMs={}", config.max_workers, config.idle_ms);
+    println!(
+        "Pi session service ready; maxWorkers={}, idleMs={}",
+        config.max_workers, config.idle_ms
+    );
 
     {
         let stop = stop.clone();

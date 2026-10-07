@@ -37,12 +37,16 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 static THINKING_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:thinking(?:[ _-]level)?|thought[ _-]level|reasoning(?:[ _-](?:effort|level))?)$").unwrap()
+    Regex::new(
+        r"(?i)^(?:thinking(?:[ _-]level)?|thought[ _-]level|reasoning(?:[ _-](?:effort|level))?)$",
+    )
+    .unwrap()
 });
 static THINKING_PREFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:thinking|reasoning(?: effort)?)\s*[:：]\s*").unwrap());
-static LEVEL_NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabled|on)$").unwrap());
+static LEVEL_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabled|on)$").unwrap()
+});
 
 /// isHarnessId (src/harness.ts): the only valid file stems.
 fn is_harness_id(value: &str) -> bool {
@@ -62,7 +66,11 @@ fn vstr(value: Option<&Value>) -> &str {
 /// 'options' in option ? option.options : [option] — flattened to one level.
 fn flatten_options(config_options: Option<&Value>) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for option in config_options.and_then(Value::as_array).cloned().unwrap_or_default() {
+    for option in config_options
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         if let Some(nested) = option.as_object().and_then(|o| o.get("options")) {
             match nested.as_array() {
                 // flatMap appends a non-array return value as a single element.
@@ -110,7 +118,9 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
         let id = vstr(config.get("id"));
         let name = vstr(config.get("name"));
         let category = config.get("category").and_then(Value::as_str);
-        let thinking = category == Some("thought_level") || THINKING_NAME.is_match(id) || THINKING_NAME.is_match(name);
+        let thinking = category == Some("thought_level")
+            || THINKING_NAME.is_match(id)
+            || THINKING_NAME.is_match(name);
         let kind: &'static str = if category == Some("model") || id == "model" {
             "model"
         } else if thinking {
@@ -132,7 +142,11 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
                     let name = vstr(o.get("name"));
                     (
                         vstr(o.get("value")).to_string(),
-                        if thinking { compact_thinking(name) } else { name.to_string() },
+                        if thinking {
+                            compact_thinking(name)
+                        } else {
+                            name.to_string()
+                        },
                     )
                 })
                 .collect(),
@@ -174,13 +188,23 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
     let mut selectors: Vec<Selector> = Vec::new();
     if modes.is_some() && !modes_covered {
         selectors.push(Selector {
-            label: if thinking_modes { "Thinking" } else { "会话模式" }.to_string(),
+            label: if thinking_modes {
+                "Thinking"
+            } else {
+                "会话模式"
+            }
+            .to_string(),
             category: None,
             kind: if thinking_modes { "thinking" } else { "mode" },
             current: vstr(modes.and_then(|m| m.get("currentModeId"))).to_string(),
             options: available
                 .iter()
-                .map(|mode| (vstr(mode.get("id")).to_string(), compact_thinking(vstr(mode.get("name")))))
+                .map(|mode| {
+                    (
+                        vstr(mode.get("id")).to_string(),
+                        compact_thinking(vstr(mode.get("name"))),
+                    )
+                })
                 .collect(),
             change: Change::Mode,
         });
@@ -190,11 +214,17 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
 }
 
 /// sessionPreferences(state): model/thinking/mode selectors → {kind,current}, model first.
-pub fn session_preferences(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<SessionPreference> {
+pub fn session_preferences(
+    configs: Option<&[Value]>,
+    modes: Option<&Value>,
+) -> Vec<SessionPreference> {
     let mut preferences: Vec<SessionPreference> = session_selectors(configs, modes)
         .into_iter()
         .filter(|c| matches!(c.kind, "model" | "thinking" | "mode"))
-        .map(|c| SessionPreference { kind: c.kind.to_string(), value: c.current })
+        .map(|c| SessionPreference {
+            kind: c.kind.to_string(),
+            value: c.current,
+        })
         .collect();
     // JS stable sort: model entries first, rest keep source order.
     preferences.sort_by(|a, b| (b.kind == "model").cmp(&(a.kind == "model")));
@@ -233,21 +263,31 @@ impl SessionPreferences {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.to_string()),
         };
-        let malformed = || format!("模型偏好格式不受支持或已损坏，原文件未修改：{}", file.display());
+        let malformed = || {
+            format!(
+                "模型偏好格式不受支持或已损坏，原文件未修改：{}",
+                file.display()
+            )
+        };
         let data: Value = serde_json::from_str(&text).map_err(|_| malformed())?;
         let preferences = data.get("preferences").and_then(Value::as_array);
         let valid = data.get("version") == Some(&json!(1))
             && preferences.is_some_and(|list| {
                 list.len() <= 2
                     && list.iter().all(|p| {
-                        matches!(p.get("kind").and_then(Value::as_str), Some("model" | "thinking"))
-                            && p.get("value")
-                                .and_then(Value::as_str)
-                                .is_some_and(|v| (1..=10000).contains(&v.encode_utf16().count()))
+                        matches!(
+                            p.get("kind").and_then(Value::as_str),
+                            Some("model" | "thinking")
+                        ) && p
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .is_some_and(|v| (1..=10000).contains(&v.encode_utf16().count()))
                     })
                     && {
                         let mut kinds = std::collections::HashSet::new();
-                        list.iter().all(|p| kinds.insert(p.get("kind").and_then(Value::as_str).unwrap_or("")))
+                        list.iter().all(|p| {
+                            kinds.insert(p.get("kind").and_then(Value::as_str).unwrap_or(""))
+                        })
                     }
             });
         if !valid {
@@ -280,7 +320,9 @@ impl SessionPreferences {
                 .map_err(|e| e.to_string())?;
         }
         #[cfg(not(unix))]
-        tokio::fs::create_dir_all(&self.directory).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(&self.directory)
+            .await
+            .map_err(|e| e.to_string())?;
         // One atomic pair per harness: concurrent writers cannot mix model and thinking.
         let body = json!({
             "version": 1,
@@ -305,8 +347,14 @@ async fn apply_selection(
             let config = session
                 .get("configOptions")
                 .and_then(Value::as_array)
-                .and_then(|list| list.iter().find(|c| vstr(c.get("id")) == id.as_str()).cloned());
-            let Some(config) = config else { return Ok(false) };
+                .and_then(|list| {
+                    list.iter()
+                        .find(|c| vstr(c.get("id")) == id.as_str())
+                        .cloned()
+                });
+            let Some(config) = config else {
+                return Ok(false);
+            };
             if vstr(config.get("currentValue")) == value {
                 return Ok(true);
             }
@@ -357,7 +405,10 @@ async fn apply_selection(
             let session_id = session.get("sessionId").cloned().unwrap_or(Value::Null);
             agent
                 .with_timeout(
-                    agent.request("session/set_mode", json!({"sessionId": session_id, "modeId": value})),
+                    agent.request(
+                        "session/set_mode",
+                        json!({"sessionId": session_id, "modeId": value}),
+                    ),
                     30_000,
                 )
                 .await?;
@@ -385,13 +436,18 @@ pub async fn apply_preferences(
     let mut ordered: Vec<SessionPreference> = preferences.to_vec();
     ordered.sort_by(|a, b| (b.kind == "model").cmp(&(a.kind == "model")));
     for preference in &ordered {
-        let configs = session.get("configOptions").and_then(Value::as_array).cloned();
+        let configs = session
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .cloned();
         let modes = session.get("modes").cloned();
         let control = session_selectors(configs.as_deref(), modes.as_ref())
             .into_iter()
             .find(|c| c.kind == preference.kind);
         let applied = match control {
-            Some(control) => apply_selection(agent, session, &control.change, &preference.value).await?,
+            Some(control) => {
+                apply_selection(agent, session, &control.change, &preference.value).await?
+            }
             None => false,
         };
         if !applied {
@@ -401,7 +457,10 @@ pub async fn apply_preferences(
     Ok(if unavailable.is_empty() {
         None
     } else {
-        Some(format!("上次的设置当前不可用（{}），请检查本次模型与思考选项。", unavailable.join("、")))
+        Some(format!(
+            "上次的设置当前不可用（{}），请检查本次模型与思考选项。",
+            unavailable.join("、")
+        ))
     })
 }
 
@@ -411,7 +470,14 @@ mod tests {
 
     #[test]
     fn regexes_match_ts() {
-        for name in ["thinking", "Thinking_Level", "thought-level", "reasoning", "reasoning effort", "Reasoning_Level"] {
+        for name in [
+            "thinking",
+            "Thinking_Level",
+            "thought-level",
+            "reasoning",
+            "reasoning effort",
+            "Reasoning_Level",
+        ] {
             assert!(THINKING_NAME.is_match(name), "{name}");
         }
         for name in ["thoughtlevel", "reasons", "thinking2", "mode"] {
@@ -419,7 +485,9 @@ mod tests {
         }
         assert_eq!(compact_thinking("Thinking: High"), "High");
         assert_eq!(compact_thinking("reasoning effort：低"), "低");
-        for level in ["off", "NONE", "minimal", "low", "medium", "high", "xhigh", "max", "on"] {
+        for level in [
+            "off", "NONE", "minimal", "low", "medium", "high", "xhigh", "max", "on",
+        ] {
             assert!(LEVEL_NAME.is_match(level), "{level}");
         }
         assert!(!LEVEL_NAME.is_match("turbo"));
@@ -441,22 +509,32 @@ mod tests {
         .unwrap();
         // Duplicate thinking-kind controls collapse to the thought_level one.
         let prefs = session_preferences(Some(&configs), None);
-        assert_eq!(prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["model", "thinking"]);
+        assert_eq!(
+            prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(),
+            ["model", "thinking"]
+        );
         assert_eq!(prefs[0].value, "m1");
         assert_eq!(prefs[1].value, "low");
         // A non-thinking mode set surfaces a 'mode' selector labelled 会话模式.
         let modes = json!({"currentModeId":"a","availableModes":[{"id":"a","name":"Ask"},{"id":"b","name":"Plan"}]});
         let prefs = session_preferences(Some(&configs), Some(&modes));
-        assert_eq!(prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["model", "mode", "thinking"]);
+        assert_eq!(
+            prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(),
+            ["model", "mode", "thinking"]
+        );
         // Thinking-flavoured modes are covered by the thinking control.
         let modes = json!({"currentModeId":"low","availableModes":[{"id":"low","name":"Low"},{"id":"high","name":"High"}]});
         let prefs = session_preferences(Some(&configs), Some(&modes));
-        assert_eq!(prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["model", "thinking"]);
+        assert_eq!(
+            prefs.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(),
+            ["model", "thinking"]
+        );
     }
 
     #[tokio::test]
     async fn preferences_file_roundtrip_and_corruption() {
-        let dir = std::env::temp_dir().join(format!("pi-prefs-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("pi-prefs-test-{}", uuid::Uuid::new_v4().simple()));
         let store = SessionPreferences::new(dir.clone());
         assert!(store.read("pi").await.unwrap().is_empty());
         assert!(store.read("bogus").await.is_err());
@@ -468,14 +546,24 @@ mod tests {
         store.save("pi", &state).await.unwrap();
         let read = store.read("pi").await.unwrap();
         assert_eq!(read.len(), 1);
-        assert_eq!((read[0].kind.as_str(), read[0].value.as_str()), ("model", "m2"));
+        assert_eq!(
+            (read[0].kind.as_str(), read[0].value.as_str()),
+            ("model", "m2")
+        );
         // Corrupt file → read fails, save refuses to overwrite.
         std::fs::write(dir.join("pi.json"), "{broken").unwrap();
         let error = store.read("pi").await.unwrap_err();
-        assert!(error.contains("模型偏好格式不受支持或已损坏，原文件未修改"), "{error}");
+        assert!(
+            error.contains("模型偏好格式不受支持或已损坏，原文件未修改"),
+            "{error}"
+        );
         assert!(store.save("pi", &state).await.is_err());
         // Wrong shape also fails validation without touching the file.
-        std::fs::write(dir.join("pi.json"), r#"{"version":1,"preferences":[{"kind":"mode","value":"x"}]}"#).unwrap();
+        std::fs::write(
+            dir.join("pi.json"),
+            r#"{"version":1,"preferences":[{"kind":"mode","value":"x"}]}"#,
+        )
+        .unwrap();
         assert!(store.read("pi").await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

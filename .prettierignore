@@ -1,0 +1,12 @@
+node_modules/
+dist/
+rust/target/
+playwright-report/
+test-results/
+*.vsix
+package-lock.json
+rust/Cargo.lock
+# Golden fixtures are byte-level protocol/hash compatibility assets.
+test/fixtures/
+# Generated dependency notices.
+THIRD_PARTY_NOTICES.txt

@@ -73,7 +73,10 @@ impl TelegramEvents {
 
     /// events/<sha256(event.id)>.json — must match the consumer's reader rule.
     fn file(&self, id: &str) -> PathBuf {
-        self.directory.join(format!("{}.json", hex::encode(Sha256::digest(id.as_bytes()))))
+        self.directory.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(id.as_bytes()))
+        ))
     }
 
     pub async fn write(&self, event: &TurnEvent) -> Result<(), String> {
@@ -87,10 +90,16 @@ impl TelegramEvents {
                 .map_err(|e| e.to_string())?;
         }
         #[cfg(not(unix))]
-        tokio::fs::create_dir_all(&self.directory).await.map_err(|e| e.to_string())?;
-        pi_acp_core::atomic::write_atomic_json(&self.file(&event.id), event, event.status != "running")
+        tokio::fs::create_dir_all(&self.directory)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        pi_acp_core::atomic::write_atomic_json(
+            &self.file(&event.id),
+            event,
+            event.status != "running",
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     /// rm(file, {force:true}) — the skeleton returns unit, so all errors are
@@ -222,7 +231,9 @@ impl DesktopTelegramTurn {
                         .unwrap_or(0);
                     let mut text = input.text.clone().unwrap_or_default();
                     if attachments > 0 {
-                        text.push_str(&format!("\n[附带 {attachments} 个非文本内容，请在 VS Code 查看]"));
+                        text.push_str(&format!(
+                            "\n[附带 {attachments} 个非文本内容，请在 VS Code 查看]"
+                        ));
                     }
                     s.event.input_text = Some(text);
                 }
@@ -389,7 +400,12 @@ mod tests {
 
     fn accessor(entries: Vec<Entry>, permissions: usize) -> StateAccessor {
         Arc::new(move || {
-            Some(("session-1".to_string(), Some(7u64), entries.clone(), permissions))
+            Some((
+                "session-1".to_string(),
+                Some(7u64),
+                entries.clone(),
+                permissions,
+            ))
         })
     }
 
@@ -400,7 +416,10 @@ mod tests {
     fn report_sink() -> (Report, Arc<Mutex<Vec<String>>>) {
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = errors.clone();
-        (Arc::new(move |e: &str| sink.lock().unwrap().push(e.to_string())), errors)
+        (
+            Arc::new(move |e: &str| sink.lock().unwrap().push(e.to_string())),
+            errors,
+        )
     }
 
     #[tokio::test]
@@ -421,7 +440,8 @@ mod tests {
         );
         turn.finish(None, Some("end_turn")).await;
         let name = format!("{}.json", hex::encode(Sha256::digest(b"service:req-1")));
-        let raw: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap();
         assert_eq!(raw["sessionId"], "session-1");
         assert_eq!(raw["sessionNumber"], 7);
         assert_eq!(raw["status"], "completed");
@@ -448,7 +468,10 @@ mod tests {
         );
         turn.cancel();
         turn.finish(None, Some("end_turn")).await;
-        let file_a = dir.join(format!("{}.json", hex::encode(Sha256::digest(b"service:a"))));
+        let file_a = dir.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(b"service:a"))
+        ));
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&file_a).unwrap()).unwrap();
         assert_eq!(raw["status"], "cancelled");
         // non-end_turn stopReason → failed
@@ -463,7 +486,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         turn2.finish(None, Some("length")).await;
-        let file_b = dir.join(format!("{}.json", hex::encode(Sha256::digest(b"service:b"))));
+        let file_b = dir.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(b"service:b"))
+        ));
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&file_b).unwrap()).unwrap();
         assert_eq!(raw["status"], "failed");
         // explicit error → failed
@@ -478,7 +504,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         turn3.finish(Some("boom".into()), None).await;
-        let file_c = dir.join(format!("{}.json", hex::encode(Sha256::digest(b"service:c"))));
+        let file_c = dir.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(b"service:c"))
+        ));
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&file_c).unwrap()).unwrap();
         assert_eq!(raw["status"], "failed");
         assert_eq!(raw["error"], "boom");
@@ -501,7 +530,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         turn.discard().await;
-        let file = dir.join(format!("{}.json", hex::encode(Sha256::digest(b"service:d"))));
+        let file = dir.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(b"service:d"))
+        ));
         // give the writer a moment if the file write raced the removal — the
         // contract is only that nothing survives discard().
         for _ in 0..20 {

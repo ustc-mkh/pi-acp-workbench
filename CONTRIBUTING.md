@@ -21,6 +21,12 @@ npm run build        # 启动调试前构建
 
 修改 TypeScript 或 Webview 后重新 `npm run build`，再重启调试窗口以加载最新产物。本仓库没有自动 watch / 热更新。`dist/` 为构建结果，不应手工编辑或提交。
 
+## 格式化
+
+`npm run format` 使用 Prettier 格式化 TS/JS、CSS、JSON、YAML 与 Markdown，并用 `cargo fmt` 格式化 Rust。`npm run format:check` 只检查，CI 会强制执行。Rust 工具链须包含 rustfmt（rustup 用户运行 `rustup component add rustfmt`；系统工具链安装对应 rustfmt 包）。配置见 `.prettierrc.json`、`.prettierignore` 和 `.editorconfig`。
+
+构建产物、依赖、锁文件、生成许可证通知以及字节级 golden fixtures 不参与格式化；不要为了通过检查重写 `test/fixtures/` 的协议数据。
+
 ## 不连接真实模型的调试方式
 
 仓库提供模拟 ACP 进程 `test/mock-agent.mjs`。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出；`context-images` 模式声明图片能力，`context-legacy` 使用旧版 modes 思考选项。两种接入方式：
@@ -41,14 +47,14 @@ npm run build        # 启动调试前构建
 
 典型修改路径：
 
-| 需求 | 主要入口 | 对应验证 |
-| --- | --- | --- |
-| 会话创建、重连、切换 | `src/extension.ts` | `test/controller.test.ts` |
-| 模型与思考选项 | `src/session-settings.ts`、`webview/selectors.ts` | selectors / controller 测试 |
-| ACP 传输与进程管理 | `src/agent.ts` | agent 测试、NDJSON mock |
-| Markdown / 数学 / Mermaid | `webview/markdown.ts`、`webview/diagrams.ts` | markdown / diagrams 测试、浏览器冒烟 |
-| 原生会话分支 | `src/native-branch.ts`、`src/pi-native-fork.ts`、`src/pi-enhancements.ts` | native-branch / bundled-adapter 测试 |
-| 消费统计与价格 | telemetry / prices、Webview statistics 模块 | telemetry / statistics / prices 测试 |
+| 需求                      | 主要入口                                                                  | 对应验证                             |
+| ------------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
+| 会话创建、重连、切换      | `src/extension.ts`                                                        | `test/controller.test.ts`            |
+| 模型与思考选项            | `src/session-settings.ts`、`webview/selectors.ts`                         | selectors / controller 测试          |
+| ACP 传输与进程管理        | `src/agent.ts`                                                            | agent 测试、NDJSON mock              |
+| Markdown / 数学 / Mermaid | `webview/markdown.ts`、`webview/diagrams.ts`                              | markdown / diagrams 测试、浏览器冒烟 |
+| 原生会话分支              | `src/native-branch.ts`、`src/pi-native-fork.ts`、`src/pi-enhancements.ts` | native-branch / bundled-adapter 测试 |
+| 消费统计与价格            | telemetry / prices、Webview statistics 模块                               | telemetry / statistics / prices 测试 |
 
 ## 提交与评审
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Mermaid 改为本地 ESM 分块按需加载；首次出现流程图才加载渲染引擎，保留 SVG 净化与错误源码回退。构建前清理旧分块，浏览器冒烟覆盖模块加载与 CSP；VSIX 改为显式产物白名单，避免 `!dist/**` 覆盖 source map 排除规则。
+- TS / Rust 会话 socket 在私有目录中绑定并设置 0600 后原子发布，消除 bind 与 chmod 间的公开权限窗口；失败清理临时 socket，不修改全进程 umask。
+- 全库采用 Prettier + rustfmt，新增格式化命令、编辑器约定和 CI 检查；字节级 fixtures、锁文件及生成产物不格式化。
+
 - 修复协议 v2 委托历史写入的版本基线：只用本窗口读写的 revision，轮询不推进；远程写成功同步版本，降级文件写不再误报冲突。
 - 未知服务方法增加稳定错误码 `unknown_method`；启动 hello 失败后自动重试。清空共享历史确认明确提示会停止 Telegram 在内的所有任务。
 - Telegram 新增可选 `restrictToWorkspaces`（真实路径匹配工作区根）；生产构建移除传输环境变量钩子，测试通过显式注入或隔离 Rust feature 使用模拟 API。

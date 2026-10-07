@@ -29,7 +29,10 @@ const HISTORY_SLICE: usize = 20;
 const HISTORY_MAX: usize = 100;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
@@ -154,8 +157,12 @@ impl Bridge {
         write_atomic_json(&self.shared.opts.state_file, &snapshot, true)
             .await
             .map_err(|e| format!("无法保存 Telegram 状态：{e}"))?;
-        self.shared.notifications_on.store(snapshot.notifications != Some(false), Ordering::SeqCst);
-        self.shared.silent_on.store(snapshot.silent == Some(true), Ordering::SeqCst);
+        self.shared
+            .notifications_on
+            .store(snapshot.notifications != Some(false), Ordering::SeqCst);
+        self.shared
+            .silent_on
+            .store(snapshot.silent == Some(true), Ordering::SeqCst);
         *self.shared.data.write().await = snapshot;
         Ok(())
     }
@@ -186,9 +193,21 @@ impl Bridge {
 
     pub async fn initialize(&self, username: &str) -> Result<(), String> {
         *self.shared.username.write().await = username.to_string();
-        let webhook = self.shared.api.call("getWebhookInfo", json!({})).await.map_err(|e| e.message)?;
-        if webhook.get("url").and_then(Value::as_str).map(|u| !u.is_empty()).unwrap_or(false) {
-            return Err("此 Bot 已配置 webhook，请使用独立 Bot 或先在原服务中关闭 webhook。".into());
+        let webhook = self
+            .shared
+            .api
+            .call("getWebhookInfo", json!({}))
+            .await
+            .map_err(|e| e.message)?;
+        if webhook
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|u| !u.is_empty())
+            .unwrap_or(false)
+        {
+            return Err(
+                "此 Bot 已配置 webhook，请使用独立 Bot 或先在原服务中关闭 webhook。".into(),
+            );
         }
         let chat = self
             .shared
@@ -221,8 +240,18 @@ impl Bridge {
         // service still starting up.
         if let Ok(sessions) = self.shared.host.list().await {
             let known: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-            if self.shared.data.read().await.topics.iter().any(|t| !known.contains(t.session_id.as_str())) {
-                let _ = self.persist(|s| s.topics.retain(|t| known.contains(t.session_id.as_str()))).await;
+            if self
+                .shared
+                .data
+                .read()
+                .await
+                .topics
+                .iter()
+                .any(|t| !known.contains(t.session_id.as_str()))
+            {
+                let _ = self
+                    .persist(|s| s.topics.retain(|t| known.contains(t.session_id.as_str())))
+                    .await;
             }
         }
         Ok(())
@@ -253,7 +282,8 @@ impl Bridge {
                         return Err(error.message);
                     }
                     failures += 1;
-                    let backoff = Duration::from_millis(1000 * 2u64.pow(failures.min(5))).min(Duration::from_secs(30));
+                    let backoff = Duration::from_millis(1000 * 2u64.pow(failures.min(5)))
+                        .min(Duration::from_secs(30));
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         _ = self.shared.opts.stop.cancelled() => return Ok(()),
@@ -271,7 +301,9 @@ impl Bridge {
                             continue;
                         }
                         if let Err(e) = self.persist(|s| s.offset = Some(update_id + 1)).await {
-                            return Err(format!("无法保存 Telegram 游标，已停止接收，避免重复执行任务。{e}"));
+                            return Err(format!(
+                                "无法保存 Telegram 游标，已停止接收，避免重复执行任务。{e}"
+                            ));
                         }
                         if self.shared.handling.fetch_add(1, Ordering::SeqCst) >= HANDLER_LIMIT {
                             self.shared.handling.fetch_sub(1, Ordering::SeqCst);
@@ -307,27 +339,61 @@ impl Bridge {
         }
         let cell = {
             let mut topics = self.shared.topics.lock().await;
-            topics.entry(session.id.clone()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
+            topics
+                .entry(session.id.clone())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         };
         let session_id = session.id.clone();
         let created = cell
             .get_or_try_init(|| async {
-                let number = session.session_number.map(|n| format!("#{n}")).unwrap_or_else(|| "Pi".into());
-                let name = utf16_head(&format!("{number} · {}", if session.title.is_empty() { "新对话" } else { &session.title }), 128);
+                let number = session
+                    .session_number
+                    .map(|n| format!("#{n}"))
+                    .unwrap_or_else(|| "Pi".into());
+                let name = utf16_head(
+                    &format!(
+                        "{number} · {}",
+                        if session.title.is_empty() {
+                            "新对话"
+                        } else {
+                            &session.title
+                        }
+                    ),
+                    128,
+                );
                 let topic = self
                     .shared
                     .api
-                    .call("createForumTopic", json!({ "chat_id": self.shared.opts.chat_id, "name": name }))
+                    .call(
+                        "createForumTopic",
+                        json!({ "chat_id": self.shared.opts.chat_id, "name": name }),
+                    )
                     .await?;
-                let thread_id = topic.get("message_thread_id").and_then(Value::as_i64).unwrap_or(0);
-                self.persist(|s| s.topics.push(Topic { session_id, thread_id }))
-                    .await
-                    .map_err(|e| ApiError { code: 0, message: e })?;
+                let thread_id = topic
+                    .get("message_thread_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                self.persist(|s| {
+                    s.topics.push(Topic {
+                        session_id,
+                        thread_id,
+                    })
+                })
+                .await
+                .map_err(|e| ApiError {
+                    code: 0,
+                    message: e,
+                })?;
                 Ok(thread_id)
             })
             .await;
         let mut topics = self.shared.topics.lock().await;
-        if topics.get(&session.id).map(|c| Arc::ptr_eq(c, &cell)).unwrap_or(false) {
+        if topics
+            .get(&session.id)
+            .map(|c| Arc::ptr_eq(c, &cell))
+            .unwrap_or(false)
+        {
             topics.remove(&session.id);
         }
         created.copied()
@@ -335,7 +401,11 @@ impl Bridge {
 
     async fn stream(&self, id: &str, thread_id: i64) -> Arc<TelegramStream> {
         self.prune().await;
-        self.shared.touched.lock().await.insert(id.to_string(), now_ms());
+        self.shared
+            .touched
+            .lock()
+            .await
+            .insert(id.to_string(), now_ms());
         let mut streams = self.shared.streams.lock().await;
         if let Some(stream) = streams.get(id) {
             return stream.clone();
@@ -377,7 +447,11 @@ impl Bridge {
     async fn prune(&self) {
         let now = now_ms();
         let touched = self.shared.touched.lock().await;
-        let stale: Vec<String> = touched.iter().filter(|(_, t)| now - **t > STREAM_IDLE_MS).map(|(id, _)| id.clone()).collect();
+        let stale: Vec<String> = touched
+            .iter()
+            .filter(|(_, t)| now - **t > STREAM_IDLE_MS)
+            .map(|(id, _)| id.clone())
+            .collect();
         drop(touched);
         for id in stale {
             self.drop_stream(&id).await;
@@ -388,10 +462,20 @@ impl Bridge {
 
     /// Outbox consumer: returns true when the event file can be deleted.
     pub async fn consume(&self, event: &TurnEvent) -> bool {
-        if self.shared.data.read().await.delivered.iter().any(|d| d == &event.id) {
+        if self
+            .shared
+            .data
+            .read()
+            .await
+            .delivered
+            .iter()
+            .any(|d| d == &event.id)
+        {
             return true;
         }
-        if self.shared.opts.stop.is_cancelled() || !self.shared.consuming.lock().await.insert(event.id.clone()) {
+        if self.shared.opts.stop.is_cancelled()
+            || !self.shared.consuming.lock().await.insert(event.id.clone())
+        {
             return false;
         }
         let result = self.consume_inner(event).await;
@@ -404,7 +488,11 @@ impl Bridge {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let Some(session) = sessions.iter().find(|s| s.id == event.session_id && s.cwd == event.cwd).cloned() else {
+        let Some(session) = sessions
+            .iter()
+            .find(|s| s.id == event.session_id && s.cwd == event.cwd)
+            .cloned()
+        else {
             self.drop_stream(&event.id).await;
             return false;
         };
@@ -412,7 +500,14 @@ impl Bridge {
             self.drop_stream(&event.id).await;
             if event.status != "running" {
                 let id = event.id.clone();
-                if self.persist(|s| { s.delivered.push(id); trim(&mut s.delivered, DELIVERED_KEEP); }).await.is_err() {
+                if self
+                    .persist(|s| {
+                        s.delivered.push(id);
+                        trim(&mut s.delivered, DELIVERED_KEEP);
+                    })
+                    .await
+                    .is_err()
+                {
                     return false;
                 }
             }
@@ -424,13 +519,25 @@ impl Bridge {
         };
         let stream = self.stream(&event.id, thread_id).await;
         let text = if let Some(input) = &event.input_text {
-            let body = if event.text.is_empty() && event.status == "running" { "正在处理…" } else if event.text.is_empty() { "本轮没有文本回复。" } else { &event.text };
+            let body = if event.text.is_empty() && event.status == "running" {
+                "正在处理…"
+            } else if event.text.is_empty() {
+                "本轮没有文本回复。"
+            } else {
+                &event.text
+            };
             format!("你（VS Code）：\n{input}\n\nPi：\n{body}")
         } else {
             event.text.clone()
         };
         if event.status == "running" {
-            stream.update(if text.is_empty() { "正在处理…".into() } else { text }).await;
+            stream
+                .update(if text.is_empty() {
+                    "正在处理…".into()
+                } else {
+                    text
+                })
+                .await;
             return false;
         }
         let label = match event.status.as_str() {
@@ -438,15 +545,32 @@ impl Bridge {
             "cancelled" => "⏹ 任务已停止",
             _ => "❌ 任务失败",
         };
-        let number = session.session_number.map(|n| format!(" · #{n}")).unwrap_or_default();
-        let suffix = event.error.as_ref().map(|e| format!("\n{}", utf16_head(e, 700))).unwrap_or_default();
-        if let Err(error) = stream.finish(text, format!("{label}{number}{suffix}")).await {
+        let number = session
+            .session_number
+            .map(|n| format!(" · #{n}"))
+            .unwrap_or_default();
+        let suffix = event
+            .error
+            .as_ref()
+            .map(|e| format!("\n{}", utf16_head(e, 700)))
+            .unwrap_or_default();
+        if let Err(error) = stream
+            .finish(text, format!("{label}{number}{suffix}"))
+            .await
+        {
             self.drop_stream(&event.id).await;
             self.report(&error.message).await;
             return false; // durable event remains for retry
         }
         let id = event.id.clone();
-        if self.persist(|s| { s.delivered.push(id); trim(&mut s.delivered, DELIVERED_KEEP); }).await.is_err() {
+        if self
+            .persist(|s| {
+                s.delivered.push(id);
+                trim(&mut s.delivered, DELIVERED_KEEP);
+            })
+            .await
+            .is_err()
+        {
             return false;
         }
         self.drop_stream(&event.id).await;
@@ -458,9 +582,15 @@ impl Bridge {
             return Ok(());
         }
         let callback = update.get("callback_query");
-        let message = callback.and_then(|c| c.get("message")).or_else(|| update.get("message"));
-        let sender = callback.and_then(|c| c.get("from")).or_else(|| message.and_then(|m| m.get("from")));
-        let Some(message) = message else { return Ok(()) };
+        let message = callback
+            .and_then(|c| c.get("message"))
+            .or_else(|| update.get("message"));
+        let sender = callback
+            .and_then(|c| c.get("from"))
+            .or_else(|| message.and_then(|m| m.get("from")));
+        let Some(message) = message else {
+            return Ok(());
+        };
         if message.pointer("/chat/id").and_then(Value::as_i64) != Some(self.shared.opts.chat_id) {
             return Ok(());
         }
@@ -478,7 +608,10 @@ impl Bridge {
         let thread_id = thread_of(update);
         if let Some(callback) = callback {
             let data = callback.get("data").and_then(Value::as_str).unwrap_or("");
-            let callback_id = callback.get("id").and_then(Value::as_str).unwrap_or_default();
+            let callback_id = callback
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             match data {
                 "notify:on" | "notify:off" => {
                     let on = data == "notify:on";
@@ -487,13 +620,32 @@ impl Bridge {
                         self.shared.streams.lock().await.clear();
                         self.shared.touched.lock().await.clear();
                     }
-                    self.answer_callback(callback_id, if on { "已开启全部会话推送" } else { "已暂停全部会话推送" }).await;
-                    return self.notification_menu(thread_id).await.map_err(|e| e.message);
+                    self.answer_callback(
+                        callback_id,
+                        if on {
+                            "已开启全部会话推送"
+                        } else {
+                            "已暂停全部会话推送"
+                        },
+                    )
+                    .await;
+                    return self
+                        .notification_menu(thread_id)
+                        .await
+                        .map_err(|e| e.message);
                 }
                 "silent:on" | "silent:off" => {
                     let on = data == "silent:on";
                     self.persist(|s| s.silent = Some(on)).await?;
-                    self.answer_callback(callback_id, if on { "已开启静音发送" } else { "已关闭静音发送" }).await;
+                    self.answer_callback(
+                        callback_id,
+                        if on {
+                            "已开启静音发送"
+                        } else {
+                            "已关闭静音发送"
+                        },
+                    )
+                    .await;
                     return self.silent_menu(thread_id).await.map_err(|e| e.message);
                 }
                 _ => {
@@ -502,7 +654,10 @@ impl Bridge {
                 }
             }
         }
-        let text = message.get("text").and_then(Value::as_str).unwrap_or_default();
+        let text = message
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if text.is_empty() {
             return Ok(());
         }
@@ -515,7 +670,14 @@ impl Bridge {
         }
         let (command, argument) = parsed
             .as_ref()
-            .map(|(c, _, a)| (Some(c.to_lowercase()), a.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())))
+            .map(|(c, _, a)| {
+                (
+                    Some(c.to_lowercase()),
+                    a.clone()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                )
+            })
             .unwrap_or((None, None));
         let binding = self
             .shared
@@ -526,7 +688,17 @@ impl Bridge {
             .iter()
             .find(|t| Some(t.thread_id) == thread_id)
             .cloned();
-        match self.dispatch_command(command.as_deref(), argument.as_deref(), binding.as_ref(), thread_id, &parsed, text).await {
+        match self
+            .dispatch_command(
+                command.as_deref(),
+                argument.as_deref(),
+                binding.as_ref(),
+                thread_id,
+                &parsed,
+                text,
+            )
+            .await
+        {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.report(&error).await;
@@ -548,15 +720,26 @@ impl Bridge {
         text: &str,
     ) -> Result<(), String> {
         match command {
-            Some("start" | "help" | "commands") => {
-                self.send(&HELP, thread_id, json!({ "disable_notification": true })).await.map_err(|e| e.message)
-            }
+            Some("start" | "help" | "commands") => self
+                .send(&HELP, thread_id, json!({ "disable_notification": true }))
+                .await
+                .map_err(|e| e.message),
             Some("silent") => self.silent_menu(thread_id).await.map_err(|e| e.message),
-            Some("notifications") => self.notification_menu(thread_id).await.map_err(|e| e.message),
+            Some("notifications") => self
+                .notification_menu(thread_id)
+                .await
+                .map_err(|e| e.message),
             Some("sync") => self.command_sync(thread_id).await,
             Some("history") => {
-                let Some(binding) = binding else { return Err("请先用 /open 编号进入会话话题。".into()) };
-                self.sync_history(&binding.session_id, thread_id.unwrap_or(0), argument == Some("all")).await
+                let Some(binding) = binding else {
+                    return Err("请先用 /open 编号进入会话话题。".into());
+                };
+                self.sync_history(
+                    &binding.session_id,
+                    thread_id.unwrap_or(0),
+                    argument == Some("all"),
+                )
+                .await
             }
             Some("interrupt") => {
                 let (Some(binding), Some(argument)) = (binding, argument) else {
@@ -564,31 +747,61 @@ impl Bridge {
                 };
                 self.bump_generation(&binding.session_id).await;
                 let _ = self.shared.host.cancel(&binding.session_id).await;
-                self.enqueue(&binding.session_id, binding.thread_id, argument.to_string()).await
+                self.enqueue(&binding.session_id, binding.thread_id, argument.to_string())
+                    .await
             }
             Some("stop") => {
                 let stopped = if let Some(binding) = binding {
                     self.bump_generation(&binding.session_id).await;
-                    self.shared.host.cancel(&binding.session_id).await.unwrap_or(false)
+                    self.shared
+                        .host
+                        .cancel(&binding.session_id)
+                        .await
+                        .unwrap_or(false)
                 } else {
                     false
                 };
-                self.send_plain(if stopped { "正在停止本话题任务…" } else { "本话题没有可停止的任务。" }, thread_id)
-                    .await
-                    .map_err(|e| e.message)
+                self.send_plain(
+                    if stopped {
+                        "正在停止本话题任务…"
+                    } else {
+                        "本话题没有可停止的任务。"
+                    },
+                    thread_id,
+                )
+                .await
+                .map_err(|e| e.message)
             }
             Some("status") => {
                 let Some(binding) = binding else {
-                    return self.send_plain("请用 /new 或 /open 创建会话话题。", thread_id).await.map_err(|e| e.message);
+                    return self
+                        .send_plain("请用 /new 或 /open 创建会话话题。", thread_id)
+                        .await
+                        .map_err(|e| e.message);
                 };
-                let status = self.shared.host.status(&binding.session_id).await.map_err(|e| e.to_string())?;
+                let status = self
+                    .shared
+                    .host
+                    .status(&binding.session_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Some(perms) = status.get("permissions").and_then(Value::as_array) {
                     for p in perms {
-                        self.show_permission(&binding.session_id, thread_id.unwrap_or(0), p.clone()).await;
+                        self.show_permission(
+                            &binding.session_id,
+                            thread_id.unwrap_or(0),
+                            p.clone(),
+                        )
+                        .await;
                     }
                 }
                 let busy = status.get("busy").and_then(Value::as_bool).unwrap_or(false)
-                    || self.shared.active.lock().await.contains(&binding.session_id);
+                    || self
+                        .shared
+                        .active
+                        .lock()
+                        .await
+                        .contains(&binding.session_id);
                 let queued = self
                     .shared
                     .lanes
@@ -597,7 +810,13 @@ impl Bridge {
                     .get(&binding.session_id)
                     .map(|l| l.queued.load(Ordering::SeqCst))
                     .unwrap_or(0);
-                let body = utf16_tail(status.get("text").and_then(Value::as_str).unwrap_or_default(), 3000);
+                let body = utf16_tail(
+                    status
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    3000,
+                );
                 self.send(
                     &format!(
                         "会话 {}\n{}；排队消息：{queued}\n{body}",
@@ -618,15 +837,29 @@ impl Bridge {
                     sessions
                         .iter()
                         .take(50)
-                        .map(|s| format!("/open {} — {}", s.session_number.map(|n| n.to_string()).unwrap_or_else(|| s.id.clone()), utf16_head(&s.title, 70)))
+                        .map(|s| {
+                            format!(
+                                "/open {} — {}",
+                                s.session_number
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| s.id.clone()),
+                                utf16_head(&s.title, 70)
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                self.send_plain(&body, thread_id).await.map_err(|e| e.message)
+                self.send_plain(&body, thread_id)
+                    .await
+                    .map_err(|e| e.message)
             }
             Some("new" | "open") => {
                 let session = if command == Some("new") {
-                    self.shared.host.create(argument).await.map_err(|e| e.to_string())?
+                    self.shared
+                        .host
+                        .create(argument)
+                        .await
+                        .map_err(|e| e.to_string())?
                 } else {
                     self.shared
                         .host
@@ -634,14 +867,24 @@ impl Bridge {
                         .await
                         .map_err(|e| e.to_string())?
                         .into_iter()
-                        .find(|s| argument.map(|a| s.session_number.map(|n| n.to_string()) == Some(a.to_string()) || s.id == a).unwrap_or(false))
+                        .find(|s| {
+                            argument
+                                .map(|a| {
+                                    s.session_number.map(|n| n.to_string()) == Some(a.to_string())
+                                        || s.id == a
+                                })
+                                .unwrap_or(false)
+                        })
                         .ok_or("找不到会话，请先用 /sessions 查看编号。")?
                 };
                 let topic = self.ensure_topic(&session).await.map_err(|e| e.message)?;
                 self.send_plain(
                     &format!(
                         "会话 {} 已连接到此话题。直接发文字开始；/stop 停止任务。",
-                        session.session_number.map(|n| format!("#{n}")).unwrap_or_else(|| session.id.clone())
+                        session
+                            .session_number
+                            .map(|n| format!("#{n}"))
+                            .unwrap_or_else(|| session.id.clone())
                     ),
                     Some(topic),
                 )
@@ -650,21 +893,33 @@ impl Bridge {
             }
             _ => {
                 let Some(binding) = binding else {
-                    return Err("此话题尚未绑定会话，请先发送 /new 或 /open 编号，再进入新话题。".into());
+                    return Err(
+                        "此话题尚未绑定会话，请先发送 /new 或 /open 编号，再进入新话题。".into(),
+                    );
                 };
                 let prompt = if let Some((cmd, _bot, _)) = parsed {
-                    format!("/{cmd}{}", argument.map(|a| format!(" {a}")).unwrap_or_default())
+                    format!(
+                        "/{cmd}{}",
+                        argument.map(|a| format!(" {a}")).unwrap_or_default()
+                    )
                 } else {
                     text.to_string()
                 };
-                self.enqueue(&binding.session_id, binding.thread_id, prompt).await
+                self.enqueue(&binding.session_id, binding.thread_id, prompt)
+                    .await
             }
         }
     }
 
     async fn bump_generation(&self, session_id: &str) {
         if self.shared.lanes.lock().await.contains_key(session_id) {
-            *self.shared.generations.lock().await.entry(session_id.to_string()).or_insert(0) += 1;
+            *self
+                .shared
+                .generations
+                .lock()
+                .await
+                .entry(session_id.to_string())
+                .or_insert(0) += 1;
         }
     }
 
@@ -673,12 +928,22 @@ impl Bridge {
     /// lane stays mapped while the guard is held so a second prompt can never
     /// run concurrently — removal happens only under the lanes mutex when the
     /// queued count reaches zero.
-    async fn enqueue(&self, session_id: &str, thread_id: i64, prompt: String) -> Result<(), String> {
+    async fn enqueue(
+        &self,
+        session_id: &str,
+        thread_id: i64,
+        prompt: String,
+    ) -> Result<(), String> {
         let lane = {
             let mut lanes = self.shared.lanes.lock().await;
             let lane = lanes
                 .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(Lane { lock: Mutex::new(()), queued: AtomicUsize::new(0) }))
+                .or_insert_with(|| {
+                    Arc::new(Lane {
+                        lock: Mutex::new(()),
+                        queued: AtomicUsize::new(0),
+                    })
+                })
                 .clone();
             if lane.queued.load(Ordering::SeqCst) >= QUEUE_LIMIT {
                 return Err("排队消息已满，请稍后重试。".into());
@@ -686,12 +951,29 @@ impl Bridge {
             lane.queued.fetch_add(1, Ordering::SeqCst);
             lane
         };
-        let generation = *self.shared.generations.lock().await.get(session_id).unwrap_or(&0);
+        let generation = *self
+            .shared
+            .generations
+            .lock()
+            .await
+            .get(session_id)
+            .unwrap_or(&0);
         let guard = lane.lock.lock().await;
-        self.shared.active.lock().await.insert(session_id.to_string());
+        self.shared
+            .active
+            .lock()
+            .await
+            .insert(session_id.to_string());
         let result = async {
             if self.shared.opts.stop.is_cancelled()
-                || generation != *self.shared.generations.lock().await.get(session_id).unwrap_or(&0)
+                || generation
+                    != *self
+                        .shared
+                        .generations
+                        .lock()
+                        .await
+                        .get(session_id)
+                        .unwrap_or(&0)
             {
                 return Ok(());
             }
@@ -707,7 +989,10 @@ impl Bridge {
                     }
                 }
             });
-            let outcome = run.result.await.map_err(|_| "会话任务异常结束".to_string())?;
+            let outcome = run
+                .result
+                .await
+                .map_err(|_| "会话任务异常结束".to_string())?;
             forward.abort();
             outcome.map(|_| ()).map_err(|e| e.to_string())
         }
@@ -720,7 +1005,10 @@ impl Bridge {
         {
             let mut lanes = self.shared.lanes.lock().await;
             if lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
-                && lanes.get(session_id).map(|l| Arc::ptr_eq(l, &lane)).unwrap_or(false)
+                && lanes
+                    .get(session_id)
+                    .map(|l| Arc::ptr_eq(l, &lane))
+                    .unwrap_or(false)
             {
                 lanes.remove(session_id);
                 self.shared.generations.lock().await.remove(session_id);
@@ -732,7 +1020,14 @@ impl Bridge {
 
     async fn command_sync(&self, thread_id: Option<i64>) -> Result<(), String> {
         if self.shared.syncing_all.swap(true, Ordering::SeqCst) {
-            return self.send("历史同步正在进行，请稍候。", thread_id, json!({ "disable_notification": true })).await.map_err(|e| e.message);
+            return self
+                .send(
+                    "历史同步正在进行，请稍候。",
+                    thread_id,
+                    json!({ "disable_notification": true }),
+                )
+                .await
+                .map_err(|e| e.message);
         }
         let result = async {
             let sessions = self.shared.host.list().await.map_err(|e| e.to_string())?;
@@ -778,7 +1073,11 @@ impl Bridge {
 
     /// History entries not yet sent, oldest first: user/assistant/diff roles with
     /// a sha256 dedup key over `entry.id + '\0' + entry.text`.
-    async fn pending_history(&self, session_id: &str, all: bool) -> Result<Vec<(String, String)>, String> {
+    async fn pending_history(
+        &self,
+        session_id: &str,
+        all: bool,
+    ) -> Result<Vec<(String, String)>, String> {
         let entries: Vec<Value> = self
             .shared
             .host
@@ -786,7 +1085,12 @@ impl Bridge {
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|e| matches!(e.get("role").and_then(Value::as_str), Some("user" | "assistant" | "diff")))
+            .filter(|e| {
+                matches!(
+                    e.get("role").and_then(Value::as_str),
+                    Some("user" | "assistant" | "diff")
+                )
+            })
             .collect();
         let sent: Vec<String> = self
             .shared
@@ -798,14 +1102,35 @@ impl Bridge {
             .and_then(|h| h.get(session_id))
             .cloned()
             .unwrap_or_default();
-        let sliced = if all { entries } else { entries.into_iter().rev().take(HISTORY_SLICE).rev().collect() };
+        let sliced = if all {
+            entries
+        } else {
+            entries
+                .into_iter()
+                .rev()
+                .take(HISTORY_SLICE)
+                .rev()
+                .collect()
+        };
         Ok(sliced
             .into_iter()
             .filter_map(|e| {
                 let role = e.get("role").and_then(Value::as_str)?;
                 let text = e.get("text").and_then(Value::as_str).unwrap_or_default();
-                let key = hex::encode(Sha256::digest(format!("{}\0{text}", e.get("id").and_then(Value::as_str).unwrap_or_default()).as_bytes()));
-                let who = if role == "user" { "你" } else if role == "diff" { "修改汇总" } else { "Pi" };
+                let key = hex::encode(Sha256::digest(
+                    format!(
+                        "{}\0{text}",
+                        e.get("id").and_then(Value::as_str).unwrap_or_default()
+                    )
+                    .as_bytes(),
+                ));
+                let who = if role == "user" {
+                    "你"
+                } else if role == "diff" {
+                    "修改汇总"
+                } else {
+                    "Pi"
+                };
                 Some((key, format!("{who}：\n{text}")))
             })
             .filter(|(key, _)| !sent.contains(key))
@@ -813,23 +1138,52 @@ impl Bridge {
             .collect())
     }
 
-    async fn sync_history(&self, session_id: &str, thread_id: i64, all: bool) -> Result<(), String> {
-        if !self.shared.syncing.lock().await.insert(session_id.to_string()) {
+    async fn sync_history(
+        &self,
+        session_id: &str,
+        thread_id: i64,
+        all: bool,
+    ) -> Result<(), String> {
+        if !self
+            .shared
+            .syncing
+            .lock()
+            .await
+            .insert(session_id.to_string())
+        {
             return Err("此话题正在同步历史。".into());
         }
         let result = async {
             let selected = self.pending_history(session_id, all).await?;
             for (key, body) in &selected {
-                self.send(body, Some(thread_id), json!({ "disable_notification": true })).await.map_err(|e| e.message)?;
+                self.send(
+                    body,
+                    Some(thread_id),
+                    json!({ "disable_notification": true }),
+                )
+                .await
+                .map_err(|e| e.message)?;
                 let key = key.clone();
                 let sid = session_id.to_string();
                 self.persist(|s| {
-                    s.history_sent.get_or_insert_with(HashMap::new).entry(sid).or_default().push(key);
+                    s.history_sent
+                        .get_or_insert_with(HashMap::new)
+                        .entry(sid)
+                        .or_default()
+                        .push(key);
                 })
                 .await?;
             }
             self.send(
-                &format!("已同步 {} 条历史消息。{}", selected.len(), if selected.len() == HISTORY_MAX { "可再次 /history all 继续。" } else { "" }),
+                &format!(
+                    "已同步 {} 条历史消息。{}",
+                    selected.len(),
+                    if selected.len() == HISTORY_MAX {
+                        "可再次 /history all 继续。"
+                    } else {
+                        ""
+                    }
+                ),
                 Some(thread_id),
                 json!({ "disable_notification": true }),
             )
@@ -842,21 +1196,37 @@ impl Bridge {
     }
 
     async fn show_permission(&self, session_id: &str, thread_id: i64, permission: Value) {
-        let permission_id = permission.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-        let options: Vec<Value> = permission.pointer("/request/options").and_then(Value::as_array).cloned().unwrap_or_default();
+        let permission_id = permission
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let options: Vec<Value> = permission
+            .pointer("/request/options")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let key = {
             let mut tickets = self.shared.tickets.lock().await;
             let now = now_ms();
             tickets.retain(|_, t| t.expires > now);
             let mut opts: Vec<Option<String>> = options
                 .iter()
-                .filter_map(|o| o.get("optionId").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|o| {
+                    o.get("optionId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .map(Some)
                 .collect();
             opts.push(None);
             let existing = tickets
                 .iter()
-                .find(|(_, t)| t.session_id == session_id && t.permission_id == permission_id && t.thread_id == thread_id)
+                .find(|(_, t)| {
+                    t.session_id == session_id
+                        && t.permission_id == permission_id
+                        && t.thread_id == thread_id
+                })
                 .map(|(k, _)| k.clone());
             if let Some(k) = existing {
                 // Refresh the option list on the same ticket, keeping its expiry.
@@ -871,7 +1241,13 @@ impl Bridge {
                 }
                 tickets.insert(
                     key.clone(),
-                    Ticket { session_id: session_id.to_string(), permission_id, thread_id, options: opts, expires: now + TICKET_TTL_MS },
+                    Ticket {
+                        session_id: session_id.to_string(),
+                        permission_id,
+                        thread_id,
+                        options: opts,
+                        expires: now + TICKET_TTL_MS,
+                    },
                 );
                 key
             }
@@ -884,9 +1260,21 @@ impl Bridge {
             })
             .collect();
         let cancel_index = options.len();
-        keyboard.push(json!([{ "text": "取消", "callback_data": format!("p:{key}:{cancel_index}") }]));
-        let title = permission.pointer("/request/toolCall/title").and_then(Value::as_str).unwrap_or("工具操作");
-        let detail = utf16_head(&serde_json::to_string_pretty(permission.pointer("/request/toolCall").unwrap_or(&Value::Null)).unwrap_or_default(), 2600);
+        keyboard
+            .push(json!([{ "text": "取消", "callback_data": format!("p:{key}:{cancel_index}") }]));
+        let title = permission
+            .pointer("/request/toolCall/title")
+            .and_then(Value::as_str)
+            .unwrap_or("工具操作");
+        let detail = utf16_head(
+            &serde_json::to_string_pretty(
+                permission
+                    .pointer("/request/toolCall")
+                    .unwrap_or(&Value::Null),
+            )
+            .unwrap_or_default(),
+            2600,
+        );
         if let Err(e) = self
             .send(
                 &format!("需要授权：{title}\n{detail}"),
@@ -912,12 +1300,27 @@ impl Bridge {
             let ticket = {
                 let tickets = self.shared.tickets.lock().await;
                 tickets.get(parts[1]).and_then(|t| {
-                    (Some(t.thread_id) == thread_id && t.expires > now_ms() && index < t.options.len())
-                        .then(|| (t.session_id.clone(), t.permission_id.clone(), t.options[index].clone()))
+                    (Some(t.thread_id) == thread_id
+                        && t.expires > now_ms()
+                        && index < t.options.len())
+                    .then(|| {
+                        (
+                            t.session_id.clone(),
+                            t.permission_id.clone(),
+                            t.options[index].clone(),
+                        )
+                    })
                 })
             };
-            let Some((session_id, permission_id, option)) = ticket else { return false };
-            match self.shared.host.permission(&session_id, &permission_id, option.as_deref()).await {
+            let Some((session_id, permission_id, option)) = ticket else {
+                return false;
+            };
+            match self
+                .shared
+                .host
+                .permission(&session_id, &permission_id, option.as_deref())
+                .await
+            {
                 Ok(true) => {
                     self.shared.tickets.lock().await.shift_remove(parts[1]);
                     true
@@ -926,14 +1329,25 @@ impl Bridge {
             }
         }
         .await;
-        self.answer_callback(callback_id, if accepted { "已提交" } else { "授权已失效或不属于此话题。" }).await;
+        self.answer_callback(
+            callback_id,
+            if accepted {
+                "已提交"
+            } else {
+                "授权已失效或不属于此话题。"
+            },
+        )
+        .await;
     }
 
     async fn answer_callback(&self, callback_id: &str, text: &str) {
         let _ = self
             .shared
             .api
-            .call("answerCallbackQuery", json!({ "callback_query_id": callback_id, "text": text }))
+            .call(
+                "answerCallbackQuery",
+                json!({ "callback_query_id": callback_id, "text": text }),
+            )
             .await;
     }
 
@@ -1005,7 +1419,11 @@ fn parse_command(text: &str) -> Option<(String, Option<String>, Option<String>)>
         Some(i) => (&head[..i], Some(head[i + 1..].to_string())),
         None => (head, None),
     };
-    if command.is_empty() || !command.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if command.is_empty()
+        || !command
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return None;
     }
     if let Some(b) = &bot {

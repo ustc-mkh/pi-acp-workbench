@@ -54,7 +54,8 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex};
 pub type UpdateCb = Arc<dyn Fn(Value) + Send + Sync>;
 /// Async permission bridge: the reader task spawns `cb(params)` per inbound
 /// `session/request_permission` and writes `{id, result: <resolved>}` back.
-pub type PermissionCb = Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Value> + Send>> + Send + Sync>;
+pub type PermissionCb =
+    Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Value> + Send>> + Send + Sync>;
 pub type LogCb = Arc<dyn Fn(&str) + Send + Sync>;
 pub type ClosedCb = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -195,14 +196,12 @@ fn is_json_rpc_id(value: &Value) -> bool {
 
 /// jsonrpc.js isErrorResponse: {code: integer, message: string}.
 fn is_error_response(value: &Value) -> bool {
-    value
-        .as_object()
-        .is_some_and(|o| {
-            o.get("code")
-                .and_then(Value::as_f64)
-                .is_some_and(|c| c.fract() == 0.0)
-                && o.get("message").is_some_and(Value::is_string)
-        })
+    value.as_object().is_some_and(|o| {
+        o.get("code")
+            .and_then(Value::as_f64)
+            .is_some_and(|c| c.fract() == 0.0)
+            && o.get("message").is_some_and(Value::is_string)
+    })
 }
 
 /// Node reports the signal name ('SIGTERM') for `signal || code`; mirror the
@@ -303,7 +302,10 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
         Err(_) => {
             // SDK replies protocolErrorResponse(RequestError.parseError()) and
             // keeps the connection open — it does NOT close on bad JSON.
-            send_wire(inner, json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}));
+            send_wire(
+                inner,
+                json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}),
+            );
             return true;
         }
     };
@@ -319,7 +321,10 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
     }
     let Some(obj) = message.as_object() else {
         // stream.js: protocolErrorResponse(RequestError.invalidRequest(message))
-        send_wire(inner, json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid request", "data": message}}));
+        send_wire(
+            inner,
+            json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid request", "data": message}}),
+        );
         return true;
     };
     let envelope = obj.get("jsonrpc") == Some(&json!("2.0"));
@@ -334,7 +339,10 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
             let inner = inner.clone();
             tokio::spawn(async move {
                 let result = (inner.permission)(params).await;
-                send_wire(&inner, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                send_wire(
+                    &inner,
+                    json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                );
             });
         } else {
             // responder.respondWithError(RequestError.methodNotFound(method))
@@ -366,7 +374,10 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
         return true;
     }
     // Record that is none of request/notification/response-shaped.
-    send_wire(inner, json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid request", "data": message}}));
+    send_wire(
+        inner,
+        json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid request", "data": message}}),
+    );
     true
 }
 
@@ -454,7 +465,11 @@ async fn reader_task(inner: Arc<Inner>, stdout: ChildStdout) {
 
 /// stdin writer — serializes every outbound frame (TS outputWrite chain).
 /// A write/flush error is the TS `child.stdin 'error'` event → fail(e.message).
-async fn writer_task(inner: Arc<Inner>, mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Value>) {
+async fn writer_task(
+    inner: Arc<Inner>,
+    mut stdin: ChildStdin,
+    mut rx: mpsc::UnboundedReceiver<Value>,
+) {
     while let Some(message) = rx.recv().await {
         let mut line = serde_json::to_vec(&message).unwrap_or_default();
         line.push(b'\n');
@@ -571,7 +586,10 @@ impl AgentProcess {
             );
             let _ = monitor.exit_tx.send(true);
         });
-        Ok(Self { inner, info: Mutex::new(None) })
+        Ok(Self {
+            inner,
+            info: Mutex::new(None),
+        })
     }
 
     /// TS `isClosed` — set by dispose() / fail().
@@ -603,7 +621,8 @@ impl AgentProcess {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err("ACP connection closed".to_string());
         }
-        rx.await.unwrap_or_else(|_| Err("ACP connection closed".to_string()))
+        rx.await
+            .unwrap_or_else(|_| Err("ACP connection closed".to_string()))
     }
 
     /// TS withTimeout: on expiry reject 'ACP 请求超过 {s} 秒，连接已关闭。'
@@ -667,7 +686,9 @@ impl AgentProcess {
         let default_ms = self.inner.request_timeout.as_millis() as u64;
         let mut params = json!({"cwd": self.inner.cwd, "mcpServers": []});
         let Some(id) = id else {
-            return self.with_timeout(self.request("session/new", params), default_ms).await;
+            return self
+                .with_timeout(self.request("session/new", params), default_ms)
+                .await;
         };
         let capable = {
             let info = self.info.lock().await;
@@ -690,8 +711,11 @@ impl AgentProcess {
 
     /// TS prompt(): request('session/prompt', {sessionId, prompt}) — no timeout.
     pub async fn prompt(&self, session_id: &str, prompt: Vec<Value>) -> Result<Value, String> {
-        self.request("session/prompt", json!({"sessionId": session_id, "prompt": prompt}))
-            .await
+        self.request(
+            "session/prompt",
+            json!({"sessionId": session_id, "prompt": prompt}),
+        )
+        .await
     }
 
     /// session/cancel notification (no response expected). TS returns the
@@ -738,7 +762,10 @@ mod tests {
     /// test/contract-agent.mjs lives at the repo root, three levels up from
     /// this crate's manifest dir.
     fn agent_path() -> String {
-        format!("{}/../../../test/contract-agent.mjs", env!("CARGO_MANIFEST_DIR"))
+        format!(
+            "{}/../../../test/contract-agent.mjs",
+            env!("CARGO_MANIFEST_DIR")
+        )
     }
 
     struct Cbs {
@@ -774,7 +801,11 @@ mod tests {
                 }),
                 request_timeout: Duration::from_secs(30),
             },
-            Cbs { updates, permissions, closed },
+            Cbs {
+                updates,
+                permissions,
+                closed,
+            },
         )
     }
 
@@ -809,14 +840,21 @@ mod tests {
             n["update"]["sessionUpdate"] == "agent_message_chunk"
                 && n["update"]["content"]["text"] == "echo: hello"
         }));
-        assert!(updates.iter().any(|n| n["update"]["sessionUpdate"] == "tool_call"));
+        assert!(updates
+            .iter()
+            .any(|n| n["update"]["sessionUpdate"] == "tool_call"));
 
         // permission → cb fires → respond selected → end_turn
         let pending = {
             let agent = agent.clone();
             let session_id = session_id.clone();
             tokio::spawn(async move {
-                agent.prompt(&session_id, vec![json!({"type": "text", "text": "permission"})]).await
+                agent
+                    .prompt(
+                        &session_id,
+                        vec![json!({"type": "text", "text": "permission"})],
+                    )
+                    .await
             })
         };
         let request = tokio::time::timeout(Duration::from_secs(5), cbs.permissions.recv())
@@ -834,7 +872,9 @@ mod tests {
             let agent = agent.clone();
             let session_id = session_id.clone();
             tokio::spawn(async move {
-                agent.prompt(&session_id, vec![json!({"type": "text", "text": "wait"})]).await
+                agent
+                    .prompt(&session_id, vec![json!({"type": "text", "text": "wait"})])
+                    .await
             })
         };
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -846,7 +886,10 @@ mod tests {
 
         agent.stop().await;
         assert!(agent.is_closed());
-        assert!(cbs.closed.try_recv().is_err(), "clean stop must not call closed cb");
+        assert!(
+            cbs.closed.try_recv().is_err(),
+            "clean stop must not call closed cb"
+        );
     }
 
     #[tokio::test]
@@ -856,7 +899,10 @@ mod tests {
         agent.initialize().await.expect("initialize");
 
         // contract-agent declares loadSession → session/load merges the id in.
-        let session = agent.create_session(Some("native-123")).await.expect("session/load");
+        let session = agent
+            .create_session(Some("native-123"))
+            .await
+            .expect("session/load");
         assert_eq!(session["sessionId"], json!("native-123"));
 
         // 'crash' → process.exit(7): pending rejects with the close reason and
@@ -883,8 +929,14 @@ mod tests {
         let agent = AgentProcess::spawn(options).expect("spawn contract-agent");
 
         // No initialize → no agentCapabilities → verbatim refusal.
-        let error = agent.create_session(Some("x")).await.expect_err("must refuse load");
-        assert_eq!(error, "此 Agent 未声明 session/load 能力，无法恢复远端会话。");
+        let error = agent
+            .create_session(Some("x"))
+            .await
+            .expect_err("must refuse load");
+        assert_eq!(
+            error,
+            "此 Agent 未声明 session/load 能力，无法恢复远端会话。"
+        );
 
         // with_timeout: verbatim rejection + fail() → closed cb message.
         let error = agent

@@ -23,13 +23,17 @@ pub fn parse(value: &Value) -> Result<Config, String> {
         .ok_or("allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。")?;
     let mut allowed = Vec::new();
     for id in users {
-        allowed.push(id.as_i64().filter(|id| *id > 0).ok_or(
-            "allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。",
-        )?);
+        allowed.push(
+            id.as_i64()
+                .filter(|id| *id > 0)
+                .ok_or("allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。")?,
+        );
     }
     let mut workspaces = BTreeMap::new();
     if let Some(map) = v.get("workspaces") {
-        let map = map.as_object().ok_or("workspaces 必须是工作区名称到本机目录的映射。")?;
+        let map = map
+            .as_object()
+            .ok_or("workspaces 必须是工作区名称到本机目录的映射。")?;
         for (name, path) in map {
             let valid_name = !name.is_empty()
                 && name
@@ -45,17 +49,35 @@ pub fn parse(value: &Value) -> Result<Config, String> {
     }
     let restrict_to_workspaces = match v.get("restrictToWorkspaces") {
         None => false,
-        Some(value) => value.as_bool().ok_or("restrictToWorkspaces 必须是布尔值。")?,
+        Some(value) => value
+            .as_bool()
+            .ok_or("restrictToWorkspaces 必须是布尔值。")?,
     };
     let unknown: Vec<&str> = v
         .keys()
         .map(String::as_str)
-        .filter(|k| !["chatId", "allowedUserIds", "workspaces", "restrictToWorkspaces"].contains(k))
+        .filter(|k| {
+            ![
+                "chatId",
+                "allowedUserIds",
+                "workspaces",
+                "restrictToWorkspaces",
+            ]
+            .contains(k)
+        })
         .collect();
     if !unknown.is_empty() {
-        return Err(format!("不支持的 Telegram 配置字段：{}", unknown.join(", ")));
+        return Err(format!(
+            "不支持的 Telegram 配置字段：{}",
+            unknown.join(", ")
+        ));
     }
-    Ok(Config { chat_id: chat_id, allowed_user_ids: allowed, workspaces, restrict_to_workspaces })
+    Ok(Config {
+        chat_id: chat_id,
+        allowed_user_ids: allowed,
+        workspaces,
+        restrict_to_workspaces,
+    })
 }
 
 #[cfg(test)]
@@ -65,8 +87,18 @@ mod tests {
 
     #[test]
     fn validates_workspace_restriction() {
-        assert!(!parse(&json!({"chatId":-1,"allowedUserIds":[1]})).unwrap().restrict_to_workspaces);
-        assert!(parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":true})).unwrap().restrict_to_workspaces);
-        assert!(parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":"yes"})).is_err());
+        assert!(
+            !parse(&json!({"chatId":-1,"allowedUserIds":[1]}))
+                .unwrap()
+                .restrict_to_workspaces
+        );
+        assert!(
+            parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":true}))
+                .unwrap()
+                .restrict_to_workspaces
+        );
+        assert!(
+            parse(&json!({"chatId":-1,"allowedUserIds":[1],"restrictToWorkspaces":"yes"})).is_err()
+        );
     }
 }

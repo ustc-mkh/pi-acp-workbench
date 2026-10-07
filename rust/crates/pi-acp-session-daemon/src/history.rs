@@ -39,13 +39,13 @@
 //!   valid number; else floor = valid(nextSessionNumber)?next:1 → max+1;
 //!   overflow → '会话编号已超过安全范围。'
 use crate::types::Snapshot;
-use std::io;
 use pi_acp_core::atomic::write_atomic_json;
 use pi_acp_core::canonical::sha256_hex;
 use pi_acp_core::mkdir_lock::{LockError, MkdirLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::ops::AsyncFnOnce;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
@@ -72,7 +72,10 @@ const INDEX_LOCK_RETRIES: u32 = 20;
 pub struct SessionInUseError;
 impl std::fmt::Display for SessionInUseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "此会话正在另一个窗口中使用，当前仅查看。请在原窗口释放会话或关闭窗口后重新连接。")
+        write!(
+            f,
+            "此会话正在另一个窗口中使用，当前仅查看。请在原窗口释放会话或关闭窗口后重新连接。"
+        )
     }
 }
 impl std::error::Error for SessionInUseError {}
@@ -151,9 +154,17 @@ impl SharedHistoryStore {
         // nextSessionNumber is ignored (TS `valid()` discards it, floor=1).
         let mut index = Index::default();
         for stub in data["sessions"].as_array().unwrap() {
-            index.sessions.push(serde_json::from_value::<Snapshot>(stub.clone()).map_err(|_| INDEX_INVALID.to_string())?);
+            index.sessions.push(
+                serde_json::from_value::<Snapshot>(stub.clone())
+                    .map_err(|_| INDEX_INVALID.to_string())?,
+            );
         }
-        index.deleted = data["deleted"].as_array().unwrap().iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        index.deleted = data["deleted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         index.next_session_number = data.get("nextSessionNumber").and_then(Value::as_u64);
         Ok(index)
     }
@@ -170,10 +181,16 @@ impl SharedHistoryStore {
         self.initialize().await?;
         *self.transaction_error.lock().unwrap() = None;
         let flag = self.transaction_error.clone();
-        let lock = MkdirLock::acquire_retry(&self.root, LOCK_UPDATE, LOCK_STALE, INDEX_LOCK_RETRIES, move || {
-            // proper-lockfile onCompromised → TS transactionError; commit aborts.
-            *flag.lock().unwrap() = Some(LOCK_COMPROMISED.into());
-        })
+        let lock = MkdirLock::acquire_retry(
+            &self.root,
+            LOCK_UPDATE,
+            LOCK_STALE,
+            INDEX_LOCK_RETRIES,
+            move || {
+                // proper-lockfile onCompromised → TS transactionError; commit aborts.
+                *flag.lock().unwrap() = Some(LOCK_COMPROMISED.into());
+            },
+        )
         .await
         .map_err(|e| e.to_string())?;
         let result = async {
@@ -219,7 +236,9 @@ impl SharedHistoryStore {
             if let Some(error) = self.transaction_error.lock().unwrap().clone() {
                 return Err(error);
             }
-            tokio::fs::rename(&tmp, &file).await.map_err(|e| e.to_string())?;
+            tokio::fs::rename(&tmp, &file)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(())
         }
         .await;
@@ -252,11 +271,16 @@ impl SharedHistoryStore {
         // TS: existing lease is a no-op unless the lease was lost.
         if self.leases.lock().await.contains_key(id) {
             if self.lost.lock().unwrap().contains(id) {
-                return Err(LockError::Io(io::Error::new(io::ErrorKind::Other, "共享会话锁已失效，请重新连接。")));
+                return Err(LockError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    "共享会话锁已失效，请重新连接。",
+                )));
             }
             return Ok(());
         }
-        self.initialize().await.map_err(|e| LockError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+        self.initialize()
+            .await
+            .map_err(|e| LockError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         let key = self.root.join(format!("session-{}", sha256_hex(id)));
         let lost = self.lost.clone();
         let on_lease_lost = self.on_lease_lost.clone();
@@ -300,7 +324,8 @@ impl SharedHistoryStore {
 
     /// TS SnapshotStore.file(key) → conversations/<sha256(key)>.json.
     fn snapshot_file(&self, storage_key: &str) -> PathBuf {
-        self.conversations.join(format!("{}.json", sha256_hex(storage_key)))
+        self.conversations
+            .join(format!("{}.json", sha256_hex(storage_key)))
     }
 
     /// TS key(snapshot): `${id}:${revision}` — shared history requires one.
@@ -370,10 +395,15 @@ impl SharedHistoryStore {
                 }
                 return Err("共享会话已被删除，请刷新历史列表。".into());
             };
-            let mut data = self.raw_read(&current, &Self::storage_key(&current)?).await?;
+            let mut data = self
+                .raw_read(&current, &Self::storage_key(&current)?)
+                .await?;
             // TS: if (this.leases.has(data.id)) this.seen.set(data.id, data.revision)
             if self.leases.lock().await.contains_key(&data.id) {
-                self.seen.lock().await.insert(data.id.clone(), data.revision.clone());
+                self.seen
+                    .lock()
+                    .await
+                    .insert(data.id.clone(), data.revision.clone());
             }
             // TS: {...data, sessionNumber:current.sessionNumber}
             data.session_number = current.session_number;
@@ -462,12 +492,17 @@ impl SharedHistoryStore {
             let mut version = snapshot.clone();
             version.session_number = Some(allocate_session_number(index, snapshot)?);
             version.revision = Some(Uuid::new_v4().to_string());
-            let saved = self.raw_write(&version, &Self::storage_key(&version)?).await?;
+            let saved = self
+                .raw_write(&version, &Self::storage_key(&version)?)
+                .await?;
             // TS: index.sessions = [saved, ...sessions.filter(s => s.id !== id)]
             index.sessions.retain(|s| s.id != snapshot.id);
             index.sessions.insert(0, saved.clone());
             self.commit(index).await?;
-            self.seen.lock().await.insert(saved.id.clone(), saved.revision.clone());
+            self.seen
+                .lock()
+                .await
+                .insert(saved.id.clone(), saved.revision.clone());
             if let Some(current) = current {
                 self.raw_remove(&Self::storage_key(&current)?).await;
             }
@@ -512,7 +547,6 @@ impl SharedHistoryStore {
         })
         .await
     }
-
 }
 
 /// TS validateSnapshot() on a typed Snapshot: id/cwd strings and the entries
@@ -550,7 +584,10 @@ fn validate_snapshot_value(data: &Value) -> Result<(), String> {
 /// only owns 'pi' sessions, so other harnesses and workbench:(codex|claude):
 /// namespaced ids are always foreign and rejected.
 fn check_harness(id: &str, harness: Option<&str>) -> Result<(), String> {
-    if harness != Some("pi") || id.starts_with("workbench:codex:") || id.starts_with("workbench:claude:") {
+    if harness != Some("pi")
+        || id.starts_with("workbench:codex:")
+        || id.starts_with("workbench:claude:")
+    {
         return Err(HARNESS_UNSUPPORTED.into());
     }
     Ok(())
@@ -571,7 +608,11 @@ pub fn allocate_session_number(index: &mut Index, snapshot: &Snapshot) -> Result
         .filter(|id| !id.is_empty())
         .unwrap_or(snapshot.id.as_str());
     let existing = index.sessions.iter().find(|s| {
-        let key = s.conversation_id.as_deref().filter(|id| !id.is_empty()).unwrap_or(s.id.as_str());
+        let key = s
+            .conversation_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(s.id.as_str());
         key == logical && valid(s.session_number).is_some()
     });
     if let Some(existing) = existing {
@@ -657,7 +698,10 @@ mod tests {
         let b = SharedHistoryStore::new(root.clone(), None);
         a.claim("s1").await.unwrap();
         // A second claim across processes/instances is refused while leased.
-        assert_eq!(b.claim("s1").await.unwrap_err(), SessionInUseError.to_string());
+        assert_eq!(
+            b.claim("s1").await.unwrap_err(),
+            SessionInUseError.to_string()
+        );
         a.write(&snapshot("s1")).await.unwrap();
         a.release("s1").await;
 
@@ -691,7 +735,10 @@ mod tests {
         fork.conversation_id = Some("s1".into());
         assert_eq!(allocate_session_number(&mut index, &fork).unwrap(), 1);
         // Unrelated session takes nextSessionNumber as floor.
-        assert_eq!(allocate_session_number(&mut index, &snapshot("s3")).unwrap(), 2);
+        assert_eq!(
+            allocate_session_number(&mut index, &snapshot("s3")).unwrap(),
+            2
+        );
         assert_eq!(index.next_session_number, Some(3));
     }
 }

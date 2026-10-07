@@ -12,7 +12,11 @@ type BoxReport = Arc<dyn Fn(&ApiError) + Send + Sync>;
 
 enum Command {
     Preview(String),
-    Finish { text: String, notification: String, ack: oneshot::Sender<Result<(), ApiError>> },
+    Finish {
+        text: String,
+        notification: String,
+        ack: oneshot::Sender<Result<(), ApiError>>,
+    },
 }
 
 pub struct TelegramStream {
@@ -30,8 +34,12 @@ impl TelegramStream {
         report: BoxReport,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Command>(64);
-        tokio::spawn(flush_loop(api, chat_id, thread_id, interval, enabled, silent, report, rx));
-        TelegramStream { tx: Mutex::new(Some(tx)) }
+        tokio::spawn(flush_loop(
+            api, chat_id, thread_id, interval, enabled, silent, report, rx,
+        ));
+        TelegramStream {
+            tx: Mutex::new(Some(tx)),
+        }
     }
 
     /// Update the coalesced preview; oversized text keeps the last 3800 UTF-16
@@ -51,9 +59,19 @@ impl TelegramStream {
     /// Final chunks plus the completion notification. Errors from Telegram are
     /// propagated so the caller keeps the durable event for retry.
     pub async fn finish(&self, text: String, notification: String) -> Result<(), ApiError> {
-        let Some(tx) = self.tx.lock().await.take() else { return Ok(()) };
+        let Some(tx) = self.tx.lock().await.take() else {
+            return Ok(());
+        };
         let (ack, result) = oneshot::channel();
-        if tx.send(Command::Finish { text, notification, ack }).await.is_err() {
+        if tx
+            .send(Command::Finish {
+                text,
+                notification,
+                ack,
+            })
+            .await
+            .is_err()
+        {
             return Ok(());
         }
         result.await.unwrap_or(Ok(()))
@@ -143,9 +161,17 @@ async fn finish(
     }
     let mut parts = chunks(&text);
     if let Some(id) = *message_id {
-        let first = if parts.is_empty() { "本轮没有文本回复。".to_string() } else { parts.remove(0) };
+        let first = if parts.is_empty() {
+            "本轮没有文本回复。".to_string()
+        } else {
+            parts.remove(0)
+        };
         if first != shown || shown.encode_utf16().count() > 3800 {
-            api.call("editMessageText", json!({ "chat_id": chat_id, "message_id": id, "text": first })).await?;
+            api.call(
+                "editMessageText",
+                json!({ "chat_id": chat_id, "message_id": id, "text": first }),
+            )
+            .await?;
         }
     }
     for part in parts {
@@ -158,10 +184,13 @@ async fn finish(
         .await?;
     }
     if enabled.load(Ordering::SeqCst) {
-        api.call("sendMessage", json!({
-            "chat_id": chat_id, "message_thread_id": thread_id,
-            "text": notification, "disable_notification": silent.load(Ordering::SeqCst),
-        }))
+        api.call(
+            "sendMessage",
+            json!({
+                "chat_id": chat_id, "message_thread_id": thread_id,
+                "text": notification, "disable_notification": silent.load(Ordering::SeqCst),
+            }),
+        )
         .await?;
     }
     Ok(())

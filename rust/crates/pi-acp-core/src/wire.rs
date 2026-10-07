@@ -42,7 +42,10 @@ impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WireError::Io(e) => write!(f, "{e}"),
-            WireError::Closed => write!(f, "Pi 会话服务连接已断开。请检查 pi-sessions.service；任务不会自动重发。"),
+            WireError::Closed => write!(
+                f,
+                "Pi 会话服务连接已断开。请检查 pi-sessions.service；任务不会自动重发。"
+            ),
             WireError::PendingFull => write!(f, "待处理服务请求过多"),
             WireError::Timeout => write!(f, "会话服务响应超时"),
             WireError::Service(m) => write!(f, "{m}"),
@@ -80,7 +83,9 @@ impl WireClient {
     pub async fn connect(path: &Path) -> Result<Self, WireError> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(path))
             .await
-            .map_err(|_| WireError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")))??;
+            .map_err(|_| {
+                WireError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout"))
+            })??;
         let (read, write) = stream.into_split();
         let (events, _) = broadcast::channel(256);
         let inner = Arc::new(Inner {
@@ -101,11 +106,17 @@ impl WireClient {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, WireError> {
-        self.call_timeout(method, params, Some(DEFAULT_TIMEOUT)).await
+        self.call_timeout(method, params, Some(DEFAULT_TIMEOUT))
+            .await
     }
 
     /// `timeout: None` mirrors the TypeScript `timeout: 0` (prompt/create await the turn).
-    pub async fn call_timeout(&self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value, WireError> {
+    pub async fn call_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, WireError> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(WireError::Closed);
         }
@@ -118,8 +129,9 @@ impl WireClient {
             }
             pending.insert(id.clone(), tx);
         }
-        let mut frame = serde_json::to_vec(&json!({ "id": id, "method": method, "params": params }))
-            .map_err(|_| WireError::Protocol("serialize request"))?;
+        let mut frame =
+            serde_json::to_vec(&json!({ "id": id, "method": method, "params": params }))
+                .map_err(|_| WireError::Protocol("serialize request"))?;
         frame.push(b'\n');
         let wrote = self.inner.writer.lock().await.write_all(&frame).await;
         if let Err(e) = wrote {
@@ -144,7 +156,11 @@ impl WireClient {
     }
 
     pub async fn watch(&self, session_id: &str, enabled: bool) -> Result<Value, WireError> {
-        self.call("_watch", json!({ "sessionId": session_id, "enabled": enabled })).await
+        self.call(
+            "_watch",
+            json!({ "sessionId": session_id, "enabled": enabled }),
+        )
+        .await
     }
 
     pub async fn dispose(&self) {
@@ -198,7 +214,11 @@ fn parse_fragment_frame(text: &str) -> Option<(Vec<u16>, bool)> {
             c => units.extend_from_slice(c.encode_utf16(&mut [0u16; 2])),
         }
     }
-    let rest: String = text[chars.peek().map(|(i, _)| *i + key_pos + 10).unwrap_or(text.len())..].to_string();
+    let rest: String = text[chars
+        .peek()
+        .map(|(i, _)| *i + key_pos + 10)
+        .unwrap_or(text.len())..]
+        .to_string();
     let last = rest.contains("\"last\":true") || rest.contains("\"last\": true");
     Some((units, last))
 }
@@ -212,10 +232,12 @@ mod tests {
     /// raw unit; reassembly via from_utf16 must restore the pair.
     #[test]
     fn fragment_frame_keeps_lone_surrogate() {
-        let (units, last) = parse_fragment_frame("{\"fragment\":\"prefix \\ud835\",\"last\":false}").unwrap();
+        let (units, last) =
+            parse_fragment_frame("{\"fragment\":\"prefix \\ud835\",\"last\":false}").unwrap();
         assert!(!last);
         assert_eq!(*units.last().unwrap(), 0xD835);
-        let (tail, last) = parse_fragment_frame("{\"fragment\":\"\\udd4a tail\",\"last\":true}").unwrap();
+        let (tail, last) =
+            parse_fragment_frame("{\"fragment\":\"\\udd4a tail\",\"last\":true}").unwrap();
         assert!(last);
         assert_eq!(tail[0], 0xDD4A);
         let mut all = units;
@@ -238,7 +260,9 @@ impl Inner {
             line.clear();
             // Mid-fragment streams must continue within 10 s (spec §5).
             let incoming = if self.fragments.lock().await.is_some() {
-                match tokio::time::timeout(FRAGMENT_TIMEOUT, reader.read_until(b'\n', &mut line)).await {
+                match tokio::time::timeout(FRAGMENT_TIMEOUT, reader.read_until(b'\n', &mut line))
+                    .await
+                {
                     Ok(r) => r,
                     Err(_) => break,
                 }
@@ -251,7 +275,9 @@ impl Inner {
                     if line.len() > LINE_LIMIT {
                         break;
                     }
-                    let Ok(text) = std::str::from_utf8(&line) else { break };
+                    let Ok(text) = std::str::from_utf8(&line) else {
+                        break;
+                    };
                     let text = text.trim_end();
                     match serde_json::from_str::<Value>(text) {
                         Ok(item) => item,
@@ -291,7 +317,11 @@ impl Inner {
             return Err(()); // interleaved frames inside a fragment stream
         }
         // TS: `if (item.event)` — falsy (null/false/0/"") falls through.
-        if item.get("event").is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false)) && !matches!(v, Value::Number(n) if n.as_f64() == Some(0.0)) && !matches!(v, Value::String(s) if s.is_empty())) {
+        if item.get("event").is_some_and(|v| {
+            !matches!(v, Value::Null | Value::Bool(false))
+                && !matches!(v, Value::Number(n) if n.as_f64() == Some(0.0))
+                && !matches!(v, Value::String(s) if s.is_empty())
+        }) {
             let _ = self.events.send(item["event"].clone());
             return Ok(());
         }

@@ -40,7 +40,7 @@
 //! - broadcast(event): sessionId = event.snapshot?.id || event.notification?.sessionId;
 //!   only subscribed sockets. Oversized encode → fallback
 //!   {event:{type:'serviceError',sessionId,error:'会话状态超过 64 MiB，请创建新会话。'}}.
-//! - listen(): mkdir parent 0700, rm stale socket, bind, chmod 0600.
+//! - listen(): bind inside a private 0700 directory, chmod 0600, then publish by rename.
 //! - dispose(): destroy all sockets, close listener, rm socket file.
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -76,9 +76,8 @@ const FRAGMENT_MIN: usize = 512 * 1024;
 /// TS body.slice() step — 128 Ki UTF-16 code units; may split surrogate pairs.
 const FRAGMENT_UNITS: usize = 128 * 1024;
 
-pub type Handler = Arc<
-    dyn Fn(String, Value, String, mpsc::UnboundedSender<Value>) -> HandlerFuture + Send + Sync,
->;
+pub type Handler =
+    Arc<dyn Fn(String, Value, String, mpsc::UnboundedSender<Value>) -> HandlerFuture + Send + Sync>;
 pub type HandlerFuture = std::pin::Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
 
 /// TS `Outgoing` — per-socket writer state plus _watch subscriptions.
@@ -121,10 +120,13 @@ impl Shared {
     /// Returns false when the added bytes push the total past 32 MiB.
     fn adjust_buffered(&self, delta: isize) -> bool {
         if delta >= 0 {
-            self.buffered_bytes.fetch_add(delta as usize, Ordering::SeqCst) + delta as usize
+            self.buffered_bytes
+                .fetch_add(delta as usize, Ordering::SeqCst)
+                + delta as usize
                 <= MAX_PENDING_BYTES
         } else {
-            self.buffered_bytes.fetch_sub((-delta) as usize, Ordering::SeqCst);
+            self.buffered_bytes
+                .fetch_sub((-delta) as usize, Ordering::SeqCst);
             true
         }
     }
@@ -165,8 +167,7 @@ impl Shared {
             Some(body) => self.enqueue(conn, body),
             None => {
                 if let Some(id) = frame.get("id").and_then(Value::as_str) {
-                    let fallback =
-                        json!({ "id": id, "error": "会话响应超过 64 MiB，请缩小查询范围或创建新会话。" });
+                    let fallback = json!({ "id": id, "error": "会话响应超过 64 MiB，请缩小查询范围或创建新会话。" });
                     if let Some(body) = encode(&fallback, LINE_LIMIT) {
                         self.enqueue(conn, body);
                     }
@@ -229,13 +230,19 @@ impl Shared {
         // TS pending/pendingBytes guard → error frame (not a destroy).
         if self.pending.fetch_add(1, Ordering::SeqCst) >= MAX_PENDING {
             self.pending.fetch_sub(1, Ordering::SeqCst);
-            self.send(conn, json!({ "id": id, "error": "会话服务请求队列已满，请稍后重试。" }));
+            self.send(
+                conn,
+                json!({ "id": id, "error": "会话服务请求队列已满，请稍后重试。" }),
+            );
             return Ok(());
         }
         if self.pending_bytes.fetch_add(size, Ordering::SeqCst) + size > MAX_PENDING_BYTES {
             self.pending_bytes.fetch_sub(size, Ordering::SeqCst);
             self.pending.fetch_sub(1, Ordering::SeqCst);
-            self.send(conn, json!({ "id": id, "error": "会话服务请求队列已满，请稍后重试。" }));
+            self.send(
+                conn,
+                json!({ "id": id, "error": "会话服务请求队列已满，请稍后重试。" }),
+            );
             return Ok(());
         }
 
@@ -252,15 +259,30 @@ impl Shared {
             // `remove`/`historyRemove` resolve `undefined` in TS → the value
             // key is OMITTED; other commands resolve a real JSON value.
             let frame = match result {
-                Ok(Value::Null) if method == "remove" || method == "historyRemove" => json!({ "id": id }),
+                Ok(Value::Null) if method == "remove" || method == "historyRemove" => {
+                    json!({ "id": id })
+                }
                 Ok(value) => json!({ "id": id, "value": value }),
                 Err(error) => {
                     let mut frame = json!({ "id": id, "error": error });
-                    if !matches!(method.as_str(), "hello" | "list" | "create" | "state" | "cancel" | "remove" | "permission" | "prompt" | "request" | "historyWrite" | "historyRemove") {
+                    if !matches!(
+                        method.as_str(),
+                        "hello"
+                            | "list"
+                            | "create"
+                            | "state"
+                            | "cancel"
+                            | "remove"
+                            | "permission"
+                            | "prompt"
+                            | "request"
+                            | "historyWrite"
+                            | "historyRemove"
+                    ) {
                         frame["code"] = json!("unknown_method");
                     }
                     frame
-                },
+                }
             };
             shared.send(&conn, frame);
             shared.pending.fetch_sub(1, Ordering::SeqCst);
@@ -312,8 +334,8 @@ async fn reader_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut read: OwnedReadHa
     let mut buffer: Vec<u8> = Vec::with_capacity(8192);
     let mut chunk = [0u8; 64 * 1024];
     let mut bytes = 0usize; // TS `bytes` — buffered byte count under `adjust`
-    // TS arms the 10 s timer ONCE when a remainder first appears and clears it
-    // when the buffer empties — it is NOT refreshed by later chunks.
+                            // TS arms the 10 s timer ONCE when a remainder first appears and clears it
+                            // when the buffer empties — it is NOT refreshed by later chunks.
     let mut deadline: Option<tokio::time::Instant> = None;
     'read: loop {
         let n = match deadline {
@@ -417,8 +439,10 @@ async fn flush_body(
     let units: Vec<u16> = body.encode_utf16().collect();
     for (i, slice) in units.chunks(FRAGMENT_UNITS).enumerate() {
         let last = (i + 1) * FRAGMENT_UNITS >= units.len();
-        let frame =
-            format!("{{\"fragment\":\"{}\",\"last\":{last}}}\n", encode_fragment(slice));
+        let frame = format!(
+            "{{\"fragment\":\"{}\",\"last\":{last}}}\n",
+            encode_fragment(slice)
+        );
         write_frame(write, frame.as_bytes(), cancel).await?;
     }
     Ok(())
@@ -442,11 +466,7 @@ async fn write_frame(
 
 /// TS emit closure: `event => this.send(socket, {event})` — scoped to this one
 /// socket; broadcast() is the global path.
-async fn emit_loop(
-    shared: Arc<Shared>,
-    conn: Arc<Conn>,
-    mut rx: mpsc::UnboundedReceiver<Value>,
-) {
+async fn emit_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut rx: mpsc::UnboundedReceiver<Value>) {
     loop {
         let event = tokio::select! {
             _ = conn.cancel.cancelled() => break,
@@ -491,8 +511,7 @@ fn encode_fragment(units: &[u16]) -> String {
                 let low = units.get(i + 1).copied().unwrap_or(0);
                 if (0xDC00..=0xDFFF).contains(&low) {
                     // intact pair — emit the scalar like JSON.stringify does.
-                    let scalar =
-                        0x1_0000 + (((u as u32) - 0xD800) << 10) + (low as u32 - 0xDC00);
+                    let scalar = 0x1_0000 + (((u as u32) - 0xD800) << 10) + (low as u32 - 0xDC00);
                     out.push(char::from_u32(scalar).unwrap_or('\u{FFFD}'));
                     i += 1;
                 } else {
@@ -527,6 +546,98 @@ fn js_truthy(v: &Value) -> bool {
     }
 }
 
+/// Keep the socket private throughout bind/chmod and clean failed publication.
+struct PrivateSocket {
+    directory: PathBuf,
+    path: PathBuf,
+    listener: Option<UnixListener>,
+}
+
+impl PrivateSocket {
+    fn bind(target: &std::path::Path) -> Result<Self, String> {
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let directory = parent.join(format!(".s-{}", &suffix[..8]));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|e| format!("无法创建 socket 私有目录：{e}"))?;
+        let mut staged = Self {
+            path: directory.join("s"),
+            directory,
+            listener: None,
+        };
+        staged.listener = Some(
+            UnixListener::bind(&staged.path).map_err(|e| format!("无法监听会话 socket：{e}"))?,
+        );
+        std::fs::set_permissions(&staged.path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("无法设置会话 socket 权限：{e}"))?;
+        Ok(staged)
+    }
+
+    fn publish(mut self, target: &std::path::Path) -> Result<UnixListener, String> {
+        std::fs::rename(&self.path, target).map_err(|e| format!("无法发布会话 socket：{e}"))?;
+        Ok(self.listener.take().expect("bound private socket"))
+    }
+}
+
+impl Drop for PrivateSocket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publishes_only_a_private_socket_and_remains_connectable() {
+        let root = std::env::temp_dir().join(format!("pi-socket-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let target = root.join("sessions.sock");
+        let staged = PrivateSocket::bind(&target).unwrap();
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::metadata(&staged.directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let directory = staged.directory.clone();
+        let listener = staged.publish(&target).unwrap();
+        assert!(!directory.exists());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let client = tokio::net::UnixStream::connect(&target).await.unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+        drop((peer, client, listener));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_publication_cleans_the_private_directory() {
+        let root = std::env::temp_dir().join(format!("pi-socket-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let target = root.join("occupied");
+        std::fs::create_dir(&target).unwrap();
+        let staged = PrivateSocket::bind(&target).unwrap();
+        let directory = staged.directory.clone();
+        assert!(staged.publish(&target).is_err());
+        assert!(!directory.exists());
+        assert!(target.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 pub struct SessionServer {
     path: PathBuf,
     shared: Arc<Shared>,
@@ -552,8 +663,7 @@ impl SessionServer {
         }
     }
 
-    /// TS listen(): mkdir(dirname,0700) → rm stale socket → bind → chmod 0600 →
-    /// serve connections until dispose().
+    /// Bind privately, set 0600, atomically publish, then serve until dispose().
     pub async fn listen(&self) -> Result<(), String> {
         if let Some(dir) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::DirBuilder::new()
@@ -568,17 +678,16 @@ impl SessionServer {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("无法清理旧会话 socket：{e}")),
         }
-        let listener =
-            UnixListener::bind(&self.path).map_err(|e| format!("无法监听会话 socket：{e}"))?;
-        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("无法设置会话 socket 权限：{e}"))?;
+        let listener = PrivateSocket::bind(&self.path)?.publish(&self.path)?;
         let shared = self.shared.clone();
         let task = self
             .shared
             .accept_task
             .lock()
             .unwrap()
-            .replace(tokio::spawn(async move { shared.accept_loop(listener).await }));
+            .replace(tokio::spawn(
+                async move { shared.accept_loop(listener).await },
+            ));
         if let Some(task) = task {
             task.abort(); // double-listen: the older loop loses the path anyway
         }
@@ -595,8 +704,7 @@ impl SessionServer {
         };
         // TS `sessionId && subscriptions.has(sessionId)` — a non-string value
         // can never match a Set<string>, and a falsy one short-circuits.
-        let Some(session_id) = session_id.and_then(Value::as_str).filter(|s| !s.is_empty())
-        else {
+        let Some(session_id) = session_id.and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             return;
         };
         let targets: Vec<Arc<Conn>> = self

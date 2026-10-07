@@ -5,12 +5,21 @@ import type { SnapshotStore } from './snapshots';
 export class HistoryPersistence {
   private tail: Promise<void> = Promise.resolve();
   private version = 0;
-  get pending() { return this.tail; }
-  get epoch() { return this.version; }
+  get pending() {
+    return this.tail;
+  }
+  get epoch() {
+    return this.version;
+  }
 
-  constructor(private store: SnapshotStore, private shared: boolean) {}
+  constructor(
+    private store: SnapshotStore,
+    private shared: boolean,
+  ) {}
 
-  invalidate() { this.version++; }
+  invalidate() {
+    this.version++;
+  }
 
   enqueue(operation: () => Promise<void>) {
     this.tail = this.tail.catch(() => {}).then(operation);

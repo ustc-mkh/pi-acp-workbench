@@ -23,5 +23,12 @@ export function turnDiffTitle(diff: TurnDiff): string {
   return `本轮修改 · ${diff.files.length} 个文件 · +${added} −${removed}${diff.status === 'partial' ? '（部分结果）' : ''}`;
 }
 export function turnDiffText(diff: TurnDiff): string {
-  return [turnDiffTitle(diff), ...diff.files.map(file => `${file.path}: +${file.added} −${file.removed}${file.omitted ? ` · ${file.omitted}` : ''}`), ...diff.warnings].join('\n');
+  return [
+    turnDiffTitle(diff),
+    ...diff.files.map(
+      (file) =>
+        `${file.path}: +${file.added} −${file.removed}${file.omitted ? ` · ${file.omitted}` : ''}`,
+    ),
+    ...diff.warnings,
+  ].join('\n');
 }

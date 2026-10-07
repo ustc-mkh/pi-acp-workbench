@@ -135,7 +135,11 @@ impl MkdirLock {
                 }
             }
         });
-        Ok(MkdirLock { dir, compromised, heartbeat })
+        Ok(MkdirLock {
+            dir,
+            compromised,
+            heartbeat,
+        })
     }
     pub fn compromised(&self) -> bool {
         self.compromised.load(Ordering::SeqCst)

@@ -14,11 +14,18 @@ exports.run = async function () {
   assert(api.getState().entries[0].text.includes('\\begin{align}'));
   const config = vscode.workspace.getConfiguration('piAcp');
   await config.update('command', 'node', vscode.ConfigurationTarget.Global);
-  await config.update('args', [path.join(extension.extensionPath, 'test', 'mock-agent.mjs')], vscode.ConfigurationTarget.Global);
+  await config.update(
+    'args',
+    [path.join(extension.extensionPath, 'test', 'mock-agent.mjs')],
+    vscode.ConfigurationTarget.Global,
+  );
   await vscode.commands.executeCommand('piAcp.newSession');
   assert.equal(api.getState().status, 'ready', JSON.stringify(api.getState()));
   assert.equal(api.getState().sessionId, 'test-session');
-  const doc = await vscode.workspace.openTextDocument({ content: 'const x = 1;', language: 'typescript' });
+  const doc = await vscode.workspace.openTextDocument({
+    content: 'const x = 1;',
+    language: 'typescript',
+  });
   // Use a saved file because context attachment intentionally requires a file-backed editor.
   const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'context.ts');
   await vscode.workspace.fs.writeFile(uri, Buffer.from(doc.getText()));
@@ -26,5 +33,22 @@ exports.run = async function () {
   editor.selection = new vscode.Selection(0, 0, 0, 5);
   await vscode.commands.executeCommand('piAcp.attachSelection');
   assert.equal(api.getState().attachments[0].text, 'const');
-  await fs.writeFile(process.env.PI_HOST_TEST_RESULT, JSON.stringify({ passed: true, vscode: vscode.version, checks: ['activation', 'commands', 'offline preview', 'actual ACP stdio session', 'editor selection attachment'] }, null, 2));
+  await fs.writeFile(
+    process.env.PI_HOST_TEST_RESULT,
+    JSON.stringify(
+      {
+        passed: true,
+        vscode: vscode.version,
+        checks: [
+          'activation',
+          'commands',
+          'offline preview',
+          'actual ACP stdio session',
+          'editor selection attachment',
+        ],
+      },
+      null,
+      2,
+    ),
+  );
 };

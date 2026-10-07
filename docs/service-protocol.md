@@ -9,7 +9,7 @@
 - Unix domain socket，默认路径 `~/.pi/pi-acp-workbench/service/sessions.sock`，即 `<data-dir>/service/sessions.sock`。
 - daemon CLI 约定：`--config <sessions.json 绝对路径>` 与可选 `--data-dir <目录>`（默认 `~/.pi/pi-acp-workbench`）。
 - 服务目录 `0700`，socket 文件 `chmod 0600`。**无应用层认证**：访问控制仅依赖文件权限，同 UID 进程均可连接（与 docker.sock 同级边界）。
-- 服务启动时 `rm` 旧 socket 文件后 listen；同一 `<data-dir>` 只允许一个 daemon（依赖 `<data-dir>/service` 的目录锁，见 data-formats.md）。第二个 daemon 必须拒绝启动而非接管。
+- 服务启动时 `rm` 旧 socket 文件，在同一父目录下创建私有 `0700` 临时目录并绑定 socket；设置 socket `0600` 后通过原子 `rename` 发布到正式路径，再清理临时目录。正式路径不存在 bind→chmod 权限窗口，不修改进程级 `umask`；同一 `<data-dir>` 只允许一个 daemon（依赖 `<data-dir>/service` 的目录锁，见 data-formats.md）。第二个 daemon 必须拒绝启动而非接管。
 
 ## 2. 帧格式
 
@@ -25,17 +25,17 @@
 
 ## 3. 客户端约束（服务端强制执行）
 
-| 约束 | 值 | 违反时行为 |
-| --- | --- | --- |
-| `id` | string，≤200 字符 | 销毁 socket |
-| `method` | string | 销毁 socket |
-| `params` | 必须是 object（非数组/null） | 销毁 socket |
-| 单连接入站缓冲 | 16 MiB | 销毁 socket |
-| 不完整帧超时 | 10 s（无 `\n` 收尾的残留缓冲） | 销毁 socket |
-| 全局并发连接 | 32 | 新连接立即销毁 |
-| 全局 pending 请求 | 128 个 / 32 MiB | 响应 `{id, error: 队列已满}` |
-| 每 socket 会话订阅 | ≤32 个 sessionId | 响应 `{id, error: 订阅已满}` |
-| 每请求 sessionId | ≤1000 字符非空 string | 响应 `{id, error}` |
+| 约束               | 值                             | 违反时行为                   |
+| ------------------ | ------------------------------ | ---------------------------- |
+| `id`               | string，≤200 字符              | 销毁 socket                  |
+| `method`           | string                         | 销毁 socket                  |
+| `params`           | 必须是 object（非数组/null）   | 销毁 socket                  |
+| 单连接入站缓冲     | 16 MiB                         | 销毁 socket                  |
+| 不完整帧超时       | 10 s（无 `\n` 收尾的残留缓冲） | 销毁 socket                  |
+| 全局并发连接       | 32                             | 新连接立即销毁               |
+| 全局 pending 请求  | 128 个 / 32 MiB                | 响应 `{id, error: 队列已满}` |
+| 每 socket 会话订阅 | ≤32 个 sessionId               | 响应 `{id, error: 订阅已满}` |
+| 每请求 sessionId   | ≤1000 字符非空 string          | 响应 `{id, error}`           |
 
 非法 JSON、上述字段校验失败 → 服务端直接销毁该连接，**不回错误响应**。
 
@@ -45,20 +45,20 @@
 
 入参校验逻辑对应 `serviceCommand()`。所有 `text` 参数规则：非空 string、≤10000 字符，违反返回 `{id,error:"无效参数：<name>"}`。
 
-| method | params | 返回值 | 持久化 |
-| --- | --- | --- | --- |
-| `hello` | `{}` | `{protocolVersion:1, agentInfo:{name:'pi-session-service',title,version:'1'}, agentCapabilities:{loadSession:true, promptCapabilities:{image:true,embeddedContext:true}, _meta:{'pi-workbench':{version:2,inspect:true,nativeFork:true,history:true}}}}` | 否 |
-| `list` | `{}` | `Snapshot[]`（仅 `harness==='pi'`，按 `updated` 降序；快照的 `entries` 为空数组） | 否 |
-| `create` | `{cwd}` | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`） | **是** |
-| `state` | `{sessionId}` | `ServiceState = {snapshot, busy, permissions, commands, error?}`；`snapshot` 含完整 `entries` | 否 |
-| `cancel` | `{sessionId}` | `boolean`（无可取消任务返回 `false`） | 否 |
-| `remove` | `{sessionId}` | `undefined`（响应帧为 `{"id":…}`，无 `value` 键） | 否（排队执行） |
-| `permission` | `{sessionId, permissionId, optionId?}` | `boolean`（票据不存在/选项非法返回 `false`） | 否 |
-| `prompt` | `{sessionId, prompt:ContentBlock[], source?:'desktop'\|'telegram'}` | `{stopReason:string}` | **是** |
-| `request` | `{sessionId, method, params?}` | 透传 ACP 结果 | 部分是 |
-| `_watch` | `{sessionId, enabled:boolean}` | `true` | 否 |
-| `historyWrite` | `{snapshot:Snapshot}` | 持久化后的 `Snapshot`（index stub；服务端回写 `sessionNumber`） | 否（排队执行） |
-| `historyRemove` | `{sessionId?}` | `undefined`（响应帧为 `{"id":…}`，无 `value` 键，同 `remove`） | 否（排队执行） |
+| method          | params                                                              | 返回值                                                                                                                                                                                                                                                   | 持久化         |
+| --------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `hello`         | `{}`                                                                | `{protocolVersion:1, agentInfo:{name:'pi-session-service',title,version:'1'}, agentCapabilities:{loadSession:true, promptCapabilities:{image:true,embeddedContext:true}, _meta:{'pi-workbench':{version:2,inspect:true,nativeFork:true,history:true}}}}` | 否             |
+| `list`          | `{}`                                                                | `Snapshot[]`（仅 `harness==='pi'`，按 `updated` 降序；快照的 `entries` 为空数组）                                                                                                                                                                        | 否             |
+| `create`        | `{cwd}`                                                             | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`）                                                                                                                      | **是**         |
+| `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, error?}`；`snapshot` 含完整 `entries`                                                                                                                                                            | 否             |
+| `cancel`        | `{sessionId}`                                                       | `boolean`（无可取消任务返回 `false`）                                                                                                                                                                                                                    | 否             |
+| `remove`        | `{sessionId}`                                                       | `undefined`（响应帧为 `{"id":…}`，无 `value` 键）                                                                                                                                                                                                        | 否（排队执行） |
+| `permission`    | `{sessionId, permissionId, optionId?}`                              | `boolean`（票据不存在/选项非法返回 `false`）                                                                                                                                                                                                             | 否             |
+| `prompt`        | `{sessionId, prompt:ContentBlock[], source?:'desktop'\|'telegram'}` | `{stopReason:string}`                                                                                                                                                                                                                                    | **是**         |
+| `request`       | `{sessionId, method, params?}`                                      | 透传 ACP 结果                                                                                                                                                                                                                                            | 部分是         |
+| `_watch`        | `{sessionId, enabled:boolean}`                                      | `true`                                                                                                                                                                                                                                                   | 否             |
+| `historyWrite`  | `{snapshot:Snapshot}`                                               | 持久化后的 `Snapshot`（index stub；服务端回写 `sessionNumber`）                                                                                                                                                                                          | 否（排队执行） |
+| `historyRemove` | `{sessionId?}`                                                      | `undefined`（响应帧为 `{"id":…}`，无 `value` 键，同 `remove`）                                                                                                                                                                                           | 否（排队执行） |
 
 `historyWrite`/`historyRemove`（协议版本 2，`hello` 的 `_meta.pi-workbench.history:true` 宣告）把扩展端共享历史写路径收编为 socket 命令：
 
@@ -93,11 +93,11 @@
 
 `_watch` 建立会话级订阅。事件帧为 `{"event": <object>}`，只投递给订阅了该 sessionId 的连接：
 
-| event.type | 载荷 | 触发 |
-| --- | --- | --- |
-| `state` | `{type:'state', snapshot, busy, permissions, commands, error?}` | 会话运行时状态变化（含 prompt 生命周期结束） |
-| `update` | `{type:'update', notification:<ACP SessionNotification>}` | worker 发出 `session/update`（replay 阶段除外） |
-| `serviceError` | `{type:'serviceError', sessionId, error}` | 状态超过 64 MiB 等无法传输的错误 |
+| event.type     | 载荷                                                            | 触发                                            |
+| -------------- | --------------------------------------------------------------- | ----------------------------------------------- |
+| `state`        | `{type:'state', snapshot, busy, permissions, commands, error?}` | 会话运行时状态变化（含 prompt 生命周期结束）    |
+| `update`       | `{type:'update', notification:<ACP SessionNotification>}`       | worker 发出 `session/update`（replay 阶段除外） |
+| `serviceError` | `{type:'serviceError', sessionId, error}`                       | 状态超过 64 MiB 等无法传输的错误                |
 
 路由依据：`event.snapshot.id` 或 `event.notification.sessionId`。事件帧同样受 64 MiB 编码上限约束；超限降级为 `serviceError` 帧。
 

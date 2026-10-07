@@ -119,7 +119,15 @@ pub struct ChatState {
 
 impl Entry {
     pub fn text_entry(id: String, role: &str, text: String) -> Self {
-        Entry { id, role: role.to_string(), text: Some(text), message_id: None, context_blocks: None, tool: None, diff: None }
+        Entry {
+            id,
+            role: role.to_string(),
+            text: Some(text),
+            message_id: None,
+            context_blocks: None,
+            tool: None,
+            diff: None,
+        }
     }
     pub fn is(&self, role: &str) -> bool {
         self.role == role

@@ -180,7 +180,11 @@ mod tests {
             ),
         ];
         for (method, params, expected) in cases {
-            assert_eq!(request_fingerprint(method, &params), expected, "params={params}");
+            assert_eq!(
+                request_fingerprint(method, &params),
+                expected,
+                "params={params}"
+            );
         }
     }
 
@@ -211,7 +215,9 @@ mod tests {
         assert_eq!(canonical_json_string(&big), "9007199254740992");
         // Canonical object with float params — expected from Node stringify.
         assert_eq!(
-            canonical_json_string(&json!({"m":"x","p":{"a":1.5,"b":1e21,"c":1e-7,"d":9007199254740993.0}})),
+            canonical_json_string(
+                &json!({"m":"x","p":{"a":1.5,"b":1e21,"c":1e-7,"d":9007199254740993.0}})
+            ),
             "{\"m\":\"x\",\"p\":{\"a\":1.5,\"b\":1e+21,\"c\":1e-7,\"d\":9007199254740992}}"
         );
     }

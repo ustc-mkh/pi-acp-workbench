@@ -47,13 +47,24 @@ fn stub(value: &Value) -> Option<SessionStub> {
 }
 
 impl Sessions {
-    pub async fn connect(workspaces: BTreeMap<String, String>, socket: &Path, restrict_to_workspaces: bool) -> Result<Self, WireError> {
-        Ok(Sessions { client: Arc::new(WireClient::connect(socket).await?), workspaces, restrict_to_workspaces })
+    pub async fn connect(
+        workspaces: BTreeMap<String, String>,
+        socket: &Path,
+        restrict_to_workspaces: bool,
+    ) -> Result<Self, WireError> {
+        Ok(Sessions {
+            client: Arc::new(WireClient::connect(socket).await?),
+            workspaces,
+            restrict_to_workspaces,
+        })
     }
 
     pub async fn list(&self) -> Result<Vec<SessionStub>, WireError> {
         let snapshots = self.client.call("list", json!({})).await?;
-        Ok(snapshots.as_array().map(|a| a.iter().filter_map(stub).collect()).unwrap_or_default())
+        Ok(snapshots
+            .as_array()
+            .map(|a| a.iter().filter_map(stub).collect())
+            .unwrap_or_default())
     }
 
     pub async fn create(&self, workspace: Option<&str>) -> Result<SessionStub, WireError> {
@@ -69,19 +80,38 @@ impl Sessions {
                 name.and_then(|n| self.workspaces.get(&n).cloned())
             });
         let Some(cwd) = cwd else {
-            let names = self.workspaces.keys().cloned().collect::<Vec<_>>().join(", ");
-            return Err(WireError::Service(format!("请指定绝对目录路径或工作区别名：{names}")));
+            let names = self
+                .workspaces
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(WireError::Service(format!(
+                "请指定绝对目录路径或工作区别名：{names}"
+            )));
         };
         let cwd = if self.restrict_to_workspaces {
-            let canonical = tokio::fs::canonicalize(&cwd).await.map_err(|_| WireError::Service("目录不在允许的 workspaces 中。".into()))?;
+            let canonical = tokio::fs::canonicalize(&cwd)
+                .await
+                .map_err(|_| WireError::Service("目录不在允许的 workspaces 中。".into()))?;
             let mut allowed = false;
             for path in self.workspaces.values() {
-                if tokio::fs::canonicalize(path).await.ok().as_ref() == Some(&canonical) { allowed = true; break; }
+                if tokio::fs::canonicalize(path).await.ok().as_ref() == Some(&canonical) {
+                    allowed = true;
+                    break;
+                }
             }
-            if !allowed { return Err(WireError::Service("目录不在允许的 workspaces 中。".into())); }
+            if !allowed {
+                return Err(WireError::Service("目录不在允许的 workspaces 中。".into()));
+            }
             canonical.to_string_lossy().into_owned()
-        } else { cwd };
-        let snapshot = self.client.call_timeout("create", json!({ "cwd": cwd }), None).await?;
+        } else {
+            cwd
+        };
+        let snapshot = self
+            .client
+            .call_timeout("create", json!({ "cwd": cwd }), None)
+            .await?;
         stub(&snapshot).ok_or(WireError::Protocol("create snapshot"))
     }
 
@@ -91,18 +121,33 @@ impl Sessions {
 
     pub async fn history(&self, id: &str) -> Result<Vec<Value>, WireError> {
         let state = self.state(id).await?;
-        Ok(state.pointer("/snapshot/entries").and_then(Value::as_array).cloned().unwrap_or_default())
+        Ok(state
+            .pointer("/snapshot/entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// `{busy, permissions, text, error}` exactly like TelegramSessions.status().
     pub async fn status(&self, id: &str) -> Result<Value, WireError> {
         let state = self.state(id).await?;
-        let entries = state.pointer("/snapshot/entries").and_then(Value::as_array).cloned().unwrap_or_default();
-        let last_user = entries.iter().rposition(|e| e.get("role").and_then(Value::as_str) == Some("user"));
+        let entries = state
+            .pointer("/snapshot/entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let last_user = entries
+            .iter()
+            .rposition(|e| e.get("role").and_then(Value::as_str) == Some("user"));
         let text = entries
             .iter()
             .skip(last_user.map(|i| i + 1).unwrap_or(0))
-            .filter(|e| matches!(e.get("role").and_then(Value::as_str), Some("assistant" | "diff")))
+            .filter(|e| {
+                matches!(
+                    e.get("role").and_then(Value::as_str),
+                    Some("assistant" | "diff")
+                )
+            })
             .filter_map(|e| e.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -124,7 +169,8 @@ impl Sessions {
             let mut events = events_inner;
             while let Ok(event) = events.recv().await {
                 if event.get("type").and_then(Value::as_str) != Some("state")
-                    || event.pointer("/snapshot/id").and_then(Value::as_str) != Some(session.as_str())
+                    || event.pointer("/snapshot/id").and_then(Value::as_str)
+                        != Some(session.as_str())
                 {
                     continue;
                 }
@@ -158,18 +204,34 @@ impl Sessions {
                 }),
             }
         });
-        RunHandle { result, permissions: rx }
+        RunHandle {
+            result,
+            permissions: rx,
+        }
     }
 
     pub async fn cancel(&self, id: &str) -> Result<bool, WireError> {
-        Ok(self.client.call("cancel", json!({ "sessionId": id })).await?.as_bool().unwrap_or(false))
+        Ok(self
+            .client
+            .call("cancel", json!({ "sessionId": id }))
+            .await?
+            .as_bool()
+            .unwrap_or(false))
     }
 
-    pub async fn permission(&self, id: &str, permission_id: &str, option_id: Option<&str>) -> Result<bool, WireError> {
+    pub async fn permission(
+        &self,
+        id: &str,
+        permission_id: &str,
+        option_id: Option<&str>,
+    ) -> Result<bool, WireError> {
         let option = option_id.map(Value::from).unwrap_or(Value::Null);
         Ok(self
             .client
-            .call("permission", json!({ "sessionId": id, "permissionId": permission_id, "optionId": option }))
+            .call(
+                "permission",
+                json!({ "sessionId": id, "permissionId": permission_id, "optionId": option }),
+            )
             .await?
             .as_bool()
             .unwrap_or(false))

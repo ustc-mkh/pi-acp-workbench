@@ -92,7 +92,10 @@ fn js_write(out: &mut String, value: &Value) {
             out.push(']');
         }
         Value::Object(map) => {
-            let mut indexed: Vec<(u64, &String)> = map.keys().filter_map(|k| array_index(k).map(|n| (n, k))).collect();
+            let mut indexed: Vec<(u64, &String)> = map
+                .keys()
+                .filter_map(|k| array_index(k).map(|n| (n, k)))
+                .collect();
             indexed.sort_by_key(|(n, _)| *n);
             let rest = map.keys().filter(|k| array_index(k).is_none());
             out.push('{');
@@ -158,10 +161,23 @@ fn canonical_entries(path: &[Value]) -> Vec<Option<Value>> {
     let mut labels: Vec<String> = Vec::new();
     for entry in path {
         if entry.get("type").and_then(Value::as_str) == Some("label") {
-            labels.push(entry.get("id").and_then(Value::as_str).unwrap_or("").to_string());
+            labels.push(
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
         } else {
             for id in labels.drain(..) {
-                next.insert(id, entry.get("id").and_then(Value::as_str).unwrap_or("").to_string());
+                next.insert(
+                    id,
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
             }
         }
     }
@@ -179,7 +195,8 @@ fn canonical_entries(path: &[Value]) -> Vec<Option<Value>> {
                 if object.get("type").and_then(Value::as_str) == Some("compaction") {
                     if let Some(kept) = object.get("firstKeptEntryId").and_then(Value::as_str) {
                         if let Some(remapped) = next.get(kept) {
-                            object.insert("firstKeptEntryId".into(), Value::String(remapped.clone()));
+                            object
+                                .insert("firstKeptEntryId".into(), Value::String(remapped.clone()));
                         }
                     }
                 }
@@ -212,7 +229,12 @@ fn text_of(content: Option<&Value>) -> String {
         Some(Value::Array(parts)) => parts
             .iter()
             .filter(|c| c.get("type").and_then(Value::as_str) == Some("text"))
-            .map(|c| c.get("text").and_then(Value::as_str).unwrap_or("").to_string())
+            .map(|c| {
+                c.get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
             .collect(),
         _ => String::new(),
     }
@@ -223,7 +245,11 @@ pub fn native_text_key(role: &str, text: &str) -> String {
 }
 
 /// Rebuild tool pairing state from the tracked messages map.
-fn rebuild(messages: &HashMap<String, Value>, calls: &mut HashSet<String>, results: &mut HashSet<String>) {
+fn rebuild(
+    messages: &HashMap<String, Value>,
+    calls: &mut HashSet<String>,
+    results: &mut HashSet<String>,
+) {
     calls.clear();
     results.clear();
     for message in messages.values() {
@@ -256,7 +282,15 @@ pub fn native_fork_points(path: &[Value]) -> Result<Vec<NativeForkPoint>, String
     let positions: HashMap<String, usize> = path
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.get("id").and_then(Value::as_str).unwrap_or("").to_string(), i))
+        .map(|(i, e)| {
+            (
+                e.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                i,
+            )
+        })
         .collect();
     for (i, e) in path.iter().enumerate() {
         if let Some(c) = &canonical[i] {
@@ -268,7 +302,11 @@ pub fn native_fork_points(path: &[Value]) -> Result<Vec<NativeForkPoint>, String
         }
         let ty = e.get("type").and_then(Value::as_str).unwrap_or("");
         let message = e.get("message").filter(|m| !m.is_null());
-        let id = e.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let id = e
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if ty == "message" {
             if let Some(m) = message {
                 messages.insert(id.clone(), m.clone());
@@ -318,7 +356,11 @@ pub fn native_fork_points(path: &[Value]) -> Result<Vec<NativeForkPoint>, String
             if let Some(p) = position {
                 if p >= context_start {
                     if e.get("replacement") == Some(&Value::Null) {
-                        let target = e.get("targetId").and_then(Value::as_str).unwrap_or("").to_string();
+                        let target = e
+                            .get("targetId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         messages.remove(&target);
                     } else if let Some(old) = old {
                         // {...old, content: replacement} — missing `replacement`
@@ -328,7 +370,11 @@ pub fn native_fork_points(path: &[Value]) -> Result<Vec<NativeForkPoint>, String
                         if let Some(object) = updated.as_object_mut() {
                             object.insert("content".into(), replacement);
                         }
-                        let target = e.get("targetId").and_then(Value::as_str).unwrap_or("").to_string();
+                        let target = e
+                            .get("targetId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                         messages.insert(target, updated);
                     }
                     rebuild(&messages, &mut calls, &mut results);
@@ -373,7 +419,11 @@ fn js_number_string(value: Option<f64>) -> String {
         None => "undefined".into(),
         Some(v) if v.is_nan() => "NaN".into(),
         Some(v) if v.is_infinite() => {
-            if v > 0.0 { "Infinity".into() } else { "-Infinity".into() }
+            if v > 0.0 {
+                "Infinity".into()
+            } else {
+                "-Infinity".into()
+            }
         }
         Some(v) => format!("{v}"),
     }
@@ -390,14 +440,20 @@ fn ui_text(entry: &Entry) -> String {
     blocks
         .iter()
         .map(|b| match b.get("type").and_then(Value::as_str) {
-            Some("text") => b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+            Some("text") => b
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             Some("resource_link") => {
                 let uri = b.get("uri").and_then(Value::as_str).unwrap_or("undefined");
                 format!("\n[Context] {uri}")
             }
             Some("resource") => {
                 let resource = b.get("resource");
-                let has_text = resource.and_then(Value::as_object).is_some_and(|r| r.contains_key("text"));
+                let has_text = resource
+                    .and_then(Value::as_object)
+                    .is_some_and(|r| r.contains_key("text"));
                 if has_text {
                     let uri = resource
                         .and_then(|r| r.get("uri"))
@@ -432,7 +488,9 @@ pub fn bind_native_forks(
     let mut keys: HashMap<String, usize> = HashMap::new();
     for e in entries {
         if e.role == "user" || e.role == "assistant" {
-            *keys.entry(native_text_key(&e.role, &ui_text(e))).or_default() += 1;
+            *keys
+                .entry(native_text_key(&e.role, &ui_text(e)))
+                .or_default() += 1;
         }
     }
     for e in entries {
@@ -461,7 +519,10 @@ pub fn bind_native_forks(
             if point.safe {
                 out.insert(
                     e.id.clone(),
-                    NativeBranchTarget { entry_id: point.entry_id.clone(), hash: point.hash.clone() },
+                    NativeBranchTarget {
+                        entry_id: point.entry_id.clone(),
+                        hash: point.hash.clone(),
+                    },
                 );
             }
         }
@@ -487,8 +548,10 @@ mod tests {
         Fixture {
             kind: fixture["kind"].as_str().unwrap().to_string(),
             entries: fixture["entries"].as_array().cloned().unwrap_or_default(),
-            ui_entries: serde_json::from_value(fixture.get("uiEntries").cloned().unwrap_or(json!([])))
-                .unwrap_or_default(),
+            ui_entries: serde_json::from_value(
+                fixture.get("uiEntries").cloned().unwrap_or(json!([])),
+            )
+            .unwrap_or_default(),
             previous: serde_json::from_value(fixture.get("previous").cloned().unwrap_or(json!({})))
                 .unwrap_or_default(),
             expected: fixture["expected"].clone(),
@@ -507,18 +570,49 @@ mod tests {
                     );
                     return;
                 }
-                let points = native_fork_points(&fixture.entries).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let points =
+                    native_fork_points(&fixture.entries).unwrap_or_else(|e| panic!("{name}: {e}"));
                 let expected_points = fixture.expected["forkPoints"].as_array().unwrap();
-                assert_eq!(points.len(), expected_points.len(), "{name}: forkPoints length");
-                for (i, (point, expected)) in points.iter().zip(expected_points.iter()).enumerate() {
+                assert_eq!(
+                    points.len(),
+                    expected_points.len(),
+                    "{name}: forkPoints length"
+                );
+                for (i, (point, expected)) in points.iter().zip(expected_points.iter()).enumerate()
+                {
                     let field = |k: &str| expected.get(k);
-                    assert_eq!(Some(&point.entry_id), field("entryId").and_then(Value::as_str).map(|s| s.to_string()).as_ref(), "{name}: point {i} entryId");
-                    assert_eq!(point.hash, field("hash").and_then(Value::as_str).unwrap_or(""), "{name}: point {i} hash");
-                    assert_eq!(point.role, field("role").and_then(Value::as_str).unwrap_or(""), "{name}: point {i} role");
-                    assert_eq!(point.key, field("key").and_then(Value::as_str).unwrap_or(""), "{name}: point {i} key");
-                    assert_eq!(point.safe, field("safe").and_then(Value::as_bool).unwrap_or(false), "{name}: point {i} safe");
+                    assert_eq!(
+                        Some(&point.entry_id),
+                        field("entryId")
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_string())
+                            .as_ref(),
+                        "{name}: point {i} entryId"
+                    );
+                    assert_eq!(
+                        point.hash,
+                        field("hash").and_then(Value::as_str).unwrap_or(""),
+                        "{name}: point {i} hash"
+                    );
+                    assert_eq!(
+                        point.role,
+                        field("role").and_then(Value::as_str).unwrap_or(""),
+                        "{name}: point {i} role"
+                    );
+                    assert_eq!(
+                        point.key,
+                        field("key").and_then(Value::as_str).unwrap_or(""),
+                        "{name}: point {i} key"
+                    );
+                    assert_eq!(
+                        point.safe,
+                        field("safe").and_then(Value::as_bool).unwrap_or(false),
+                        "{name}: point {i} safe"
+                    );
                     match field("timestamp") {
-                        Some(t) => assert_eq!(point.timestamp, t.as_f64(), "{name}: point {i} timestamp"),
+                        Some(t) => {
+                            assert_eq!(point.timestamp, t.as_f64(), "{name}: point {i} timestamp")
+                        }
                         None => assert_eq!(point.timestamp, None, "{name}: point {i} timestamp"),
                     }
                 }
@@ -529,14 +623,20 @@ mod tests {
                 );
             }
             "bind" => {
-                let points = native_fork_points(&fixture.entries).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let points =
+                    native_fork_points(&fixture.entries).unwrap_or_else(|e| panic!("{name}: {e}"));
                 let bound = bind_native_forks(&fixture.ui_entries, &points, &fixture.previous);
                 let expected: BTreeMap<String, NativeBranchTarget> =
                     serde_json::from_value(fixture.expected["bound"].clone()).unwrap();
                 assert_eq!(bound.len(), expected.len(), "{name}: bound size");
                 for (key, target) in &expected {
-                    let actual = bound.get(key).unwrap_or_else(|| panic!("{name}: missing bound[{key}]"));
-                    assert_eq!(&actual.entry_id, &target.entry_id, "{name}: bound[{key}].entryId");
+                    let actual = bound
+                        .get(key)
+                        .unwrap_or_else(|| panic!("{name}: missing bound[{key}]"));
+                    assert_eq!(
+                        &actual.entry_id, &target.entry_id,
+                        "{name}: bound[{key}].entryId"
+                    );
                     assert_eq!(&actual.hash, &target.hash, "{name}: bound[{key}].hash");
                 }
             }
@@ -546,7 +646,14 @@ mod tests {
 
     macro_rules! fixture {
         ($name:literal) => {
-            check($name, include_str!(concat!("../../../../test/fixtures/native-branch/", $name, ".json")));
+            check(
+                $name,
+                include_str!(concat!(
+                    "../../../../test/fixtures/native-branch/",
+                    $name,
+                    ".json"
+                )),
+            );
         };
     }
 
@@ -575,14 +682,23 @@ mod tests {
         )
         .unwrap();
         let path = native_path(&entries, Some("1")).unwrap();
-        assert_eq!(path.iter().map(|e| e["id"].as_str().unwrap()).collect::<Vec<_>>(), ["0", "1"]);
-        assert!(native_path(&entries, Some("missing")).unwrap_err().contains("不完整"));
+        assert_eq!(
+            path.iter()
+                .map(|e| e["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["0", "1"]
+        );
+        assert!(native_path(&entries, Some("missing"))
+            .unwrap_err()
+            .contains("不完整"));
         // Cyclic parent chain fails closed.
         let cyclic: Vec<Value> = serde_json::from_str(
             r#"[{"type":"message","id":"0","parentId":"0","message":{"role":"user","content":[]}}]"#,
         )
         .unwrap();
-        assert!(native_path(&cyclic, Some("0")).unwrap_err().contains("不完整"));
+        assert!(native_path(&cyclic, Some("0"))
+            .unwrap_err()
+            .contains("不完整"));
         // Duplicate ids fail closed.
         let dup: Vec<Value> = serde_json::from_str(
             r#"[
@@ -591,7 +707,8 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        assert!(native_path(&dup, Some("0")).unwrap_err().contains("重复节点"));
+        assert!(native_path(&dup, Some("0"))
+            .unwrap_err()
+            .contains("重复节点"));
     }
 }
-

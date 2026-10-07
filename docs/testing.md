@@ -4,9 +4,9 @@
 
 ## 两个主要入口
 
-| 场景 | 命令 | 执行内容 |
-| --- | --- | --- |
-| 日常修改 | `npm test` | 类型检查 + 受未提交改动影响的测试 |
+| 场景          | 命令             | 执行内容                                        |
+| ------------- | ---------------- | ----------------------------------------------- |
+| 日常修改      | `npm test`       | 类型检查 + 受未提交改动影响的测试               |
 | 提交 / 发布前 | `npm run verify` | 类型检查 + 全部自动测试 + 构建 + 真实浏览器冒烟 |
 
 `npm test` 包含已暂存、未暂存及未跟踪文件，通过 Vitest 的依赖图选择测试。工作区没有相关改动时仅类型检查，不代表执行过完整回归。包配置、锁文件、构建脚本、模拟进程和原生适配器代码变更会自动触发全部测试，因为子进程加载不在普通导入图中。CSS / 布局变更应执行 `verify`。
@@ -29,7 +29,7 @@ npx vitest run test/controller.test.ts -t 'native branch'
 CHROME_PATH=/absolute/path/to/chromium npm run test:browser
 ```
 
-截图统一放在已忽略的 `test-results/browser/`。测试需要允许本地端口和子进程；它不等价于真实 VS Code Webview 的 CSP / 宿主集成验证。
+截图统一放在已忽略的 `test-results/browser/`。测试需要允许本地端口和子进程；包含 ESM 分块、Mermaid 按需加载和等价本地资源 CSP 下的渲染检查，但不等价于真实 VS Code Webview 的宿主集成验证。
 
 验证后用 `npm run package` 打包。VSCE 的 prepublish 钩子执行一次类型检查与构建，输出父目录 `pi-acp-workbench-<version>.vsix`，不再重复构建。打包本身不运行完整测试。构建同时生成增强适配器、渲染资源与第三方许可证声明。
 
