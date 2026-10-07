@@ -1,4 +1,4 @@
-//! Rust port of src/telegram-daemon.ts — CLI-compatible:
+//! Production Telegram relay (no alternate Node daemon):
 //!   PI_TELEGRAM_BOT_TOKEN=... pi-acp-telegram-daemon --config /path/telegram.json
 //!     [--data-dir /path/pi-acp-workbench] [--discover] [--help]
 //! Isolated contract-test builds support mock Bot API environment hooks.
@@ -74,18 +74,43 @@ fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeStat
             .map(|s| s.is_boolean())
             .unwrap_or(true)
             == false
-        || v.get("historySent").map(|h| {
-            h.as_object().is_some_and(|m| {
-                m.values().all(|v| {
-                    v.as_array()
-                        .is_some_and(|a| a.iter().all(|k| k.is_string()))
+        || v.get("historySent")
+            .map(|h| {
+                h.as_object().is_some_and(|m| {
+                    m.values().all(|v| {
+                        v.as_array()
+                            .is_some_and(|a| a.iter().all(|k| k.is_string()))
+                    })
                 })
             })
-        }) != Some(true)
+            .unwrap_or(true)
+            == false
     {
         return Err(invalid());
     }
     serde_json::from_value(value.clone()).map_err(|_| invalid())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn optional_history_sync_state_is_not_required_to_restart() {
+        let value = json!({"version":1,"botId":123,"chatId":-100,"topics":[],"delivered":[]});
+        let state = validate_state(&value, 123, -100).unwrap();
+        let saved = serde_json::to_value(state).unwrap();
+        assert!(saved.get("historySent").is_none());
+        assert!(validate_state(&saved, 123, -100).is_ok());
+        let mut invalid = value;
+        invalid["historySent"] = Value::Null;
+        assert!(validate_state(&invalid, 123, -100).is_err());
+        invalid["historySent"] = json!({"session":["hash"]});
+        assert!(validate_state(&invalid, 123, -100).is_ok());
+        invalid["historySent"] = json!({"session":[42]});
+        assert!(validate_state(&invalid, 123, -100).is_err());
+    }
 }
 
 fn report_fn(token: String) -> impl Fn(&str) + Send + Sync + 'static {

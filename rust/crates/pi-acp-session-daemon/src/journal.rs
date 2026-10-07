@@ -72,6 +72,173 @@ fn is_hex64(bytes: &[u8]) -> bool {
     bytes.len() == 64 && bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::sync::oneshot;
+
+    struct Root(PathBuf);
+    impl Root {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!("pi-journal-{}", uuid::Uuid::new_v4())))
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn shares_in_flight_results_and_replays_after_restart_without_execution() {
+        let root = Root::new();
+        let journal = Arc::new(RequestJournal::new(root.0.clone()));
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        let queue = Arc::new(TaskQueue::new(1, 100));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let params = json!({"cwd":"/work","nested":{"a":1,"b":2}});
+        let (release, held) = oneshot::channel();
+        let (entered, started) = oneshot::channel();
+        let j = journal.clone();
+        let q = queue.clone();
+        let count = calls.clone();
+        let args = params.clone();
+        let first = tokio::spawn(async move {
+            j.run("id", "create", &args, "", &q, || async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                entered.send(()).unwrap();
+                held.await.unwrap();
+                Ok(json!({"created":"one"}))
+            })
+            .await
+        });
+        started.await.unwrap();
+        assert_eq!(journal.pending_count().await, 1);
+        assert_eq!(
+            journal
+                .run(
+                    "id",
+                    "create",
+                    &json!({"cwd":"/other"}),
+                    "",
+                    &queue,
+                    || async { panic!("must not execute") }
+                )
+                .await
+                .unwrap_err(),
+            "请求 ID 已被其他操作使用"
+        );
+        let j = journal.clone();
+        let q = queue.clone();
+        let duplicate = tokio::spawn(async move {
+            j.run(
+                "id",
+                "create",
+                &json!({"nested":{"b":2,"a":1},"cwd":"/work"}),
+                "",
+                &q,
+                || async { panic!("duplicate executed") },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), json!({"created":"one"}));
+        assert_eq!(duplicate.await.unwrap().unwrap(), json!({"created":"one"}));
+        assert_eq!(journal.pending_count().await, 0);
+        let restarted = RequestJournal::new(root.0.clone());
+        restarted.initialize(|_| async { Ok(()) }).await.unwrap();
+        assert_eq!(
+            restarted
+                .run("id", "create", &params, "", &queue, || async {
+                    panic!("replayed operation executed")
+                })
+                .await
+                .unwrap(),
+            json!({"created":"one"})
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        queue.close().await;
+    }
+
+    #[tokio::test]
+    async fn preserves_invalid_receipts_without_migration_or_deletion() {
+        let root = Root::new();
+        let journal = RequestJournal::new(root.0.clone());
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        let file = journal.file("unsupported");
+        let content =
+            json!({"id":"unsupported","sessionId":"one","status":"completed","result":"old"})
+                .to_string();
+        fs::write(&file, &content).await.unwrap();
+        assert_eq!(journal.get("unsupported").await.unwrap_err(), MALFORMED);
+        assert_eq!(fs::read_to_string(&file).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn initial_receipt_failure_never_invokes_the_side_effect() {
+        let root = Root::new();
+        fs::create_dir_all(&root.0).await.unwrap();
+        let blocked = root.0.join("blocked");
+        fs::write(&blocked, "not a directory").await.unwrap();
+        let journal = RequestJournal::new(blocked);
+        let queue = TaskQueue::new(1, 100);
+        let calls = AtomicUsize::new(0);
+        assert!(journal
+            .run(
+                "id",
+                "create",
+                &json!({"cwd":"/work"}),
+                "",
+                &queue,
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Value::Null)
+                }
+            )
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.pending_count().await, 0);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_execution_is_tombstoned_and_never_repeated() {
+        let root = Root::new();
+        let journal = RequestJournal::new(root.0.clone());
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        let queue = TaskQueue::new(1, 100);
+        let params = json!({"sessionId":"s"});
+        assert_eq!(
+            journal
+                .run("id", "prompt", &params, "s", &queue, || async {
+                    Err("disk failure".into())
+                })
+                .await
+                .unwrap_err(),
+            "disk failure"
+        );
+        assert_eq!(
+            journal.get("id").await.unwrap().unwrap().status,
+            "interrupted"
+        );
+        assert!(journal
+            .run("id", "prompt", &params, "s", &queue, || async {
+                panic!("interrupted work replayed")
+            })
+            .await
+            .unwrap_err()
+            .contains("不会自动重放"));
+        assert_eq!(journal.pending_count().await, 0);
+    }
+}
+
 impl RequestJournal {
     pub fn new(directory: PathBuf) -> Self {
         RequestJournal {

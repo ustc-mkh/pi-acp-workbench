@@ -4,7 +4,6 @@
 // service Unix socket — so the suite never touches Telegram or a real daemon.
 //
 //   node scripts/telegram-contract.mjs
-//   PI_TG_DAEMON="node dist/telegram-daemon.mjs" node scripts/telegram-contract.mjs  (TypeScript)
 //   PI_TG_DAEMON=/path/to/daemon node scripts/telegram-contract.mjs   (default: cargo build output)
 
 import { spawn } from 'node:child_process';
@@ -19,9 +18,6 @@ import assert from 'node:assert/strict';
 const DAEMON = (
   process.env.PI_TG_DAEMON || resolve('rust/target/contract/debug/pi-acp-telegram-daemon')
 ).split(/\s+/);
-// Keep the familiar TS selector, but launch a test-only dependency-injection entry.
-if (DAEMON[0] === 'node' && DAEMON[1]?.endsWith('dist/telegram-daemon.mjs'))
-  DAEMON[1] = resolve('test/telegram-contract-entry.mjs');
 const TOKEN = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const CHAT = -1009999;
 const USER = 42;

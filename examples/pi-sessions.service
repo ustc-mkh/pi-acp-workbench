@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/absolute/path/to/pi-acp-workbench
-ExecStart=/absolute/path/to/node /absolute/path/to/pi-acp-workbench/dist/session-daemon.mjs --config %h/.config/pi-acp-workbench/sessions.json
+ExecStart=/absolute/path/to/pi-acp-workbench/service-dist/pi-acp-session-daemon --config %h/.config/pi-acp-workbench/sessions.json
 Restart=on-failure
 RestartSec=35
 TimeoutStopSec=30

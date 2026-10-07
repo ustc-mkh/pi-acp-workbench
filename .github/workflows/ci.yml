@@ -22,7 +22,8 @@ jobs:
       - run: cargo test --manifest-path rust/Cargo.toml
       - run: cargo build --manifest-path rust/Cargo.toml
       - run: npm run test:contract
-      - run: PI_CONTRACT_DAEMON="$PWD/rust/target/debug/pi-acp-session-daemon" node scripts/service-contract.mjs
       - run: npm run test:contract:telegram
-      - run: PI_TG_DAEMON="node dist/telegram-daemon.mjs" node scripts/telegram-contract.mjs
+      - run: npm run test:integration:rust
+      - run: npm run build:services
+      - run: npm run sessions -- --help
       - run: npm audit --omit=dev

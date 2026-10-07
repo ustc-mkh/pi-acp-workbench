@@ -10,7 +10,7 @@ Telegram Bot → TelegramBridge → TelegramSessions ┘                 ├─ 
 Codex / Claude：ChatProvider → AgentProcess（保留本地运行方式）
 ```
 
-`session-daemon.ts` 是唯一 Pi 进程所有者；`session-service.ts` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。`session-wire.ts` 使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间仅向会话订阅者广播 ACP 增量与生命周期状态。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
+Rust `pi-acp-session-daemon` 是唯一 Pi 进程所有者；`rust/crates/pi-acp-session-daemon/src/service.rs` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。扩展通过 `session-wire.ts` 的客户端使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间仅向会话订阅者广播 ACP 增量与生命周期状态。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
 
 默认 3 个工作进程，空闲 15 分钟回收。容量满时排队，空闲进程优先淘汰；回收先终止进程组再释放槽位。新建短暂启动 Pi 取得原生 ID，查看已有历史不启动 Pi。进程组终止与 systemd 控制组兜底互补，详见 [运行与恢复边界](session-service.md)。
 
@@ -146,7 +146,7 @@ Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi
 
 ## Telegram 常驻服务
 
-`telegram-daemon.ts` 只管理 Bot 长轮询与 Telegram 权限边界，`telegram-sessions.ts` 是会话服务客户端，不再启动进程。`rust/` 下有等价的 Rust relay 实现，参数与磁盘格式完全兼容，见文末「双实现：Rust 常驻进程」。删除原有 desktop-control 与 telegram-routing 分支。服务统一发布任务进度和完成 outbox，即使插件或 Telegram 离线也可保存结果。客户端旧的完成投递分支已删除，Telegram run 只等待任务状态，不再读取整段历史拼接一个随后被丢弃的回复。
+Rust `pi-acp-telegram-daemon` 只管理 Bot 长轮询与 Telegram 权限边界，其 `sessions.rs` 是会话服务客户端，不启动 Pi 进程。生产服务只保留 Rust 入口，参数与既有磁盘格式兼容，见文末「Rust 常驻进程」。删除原有 desktop-control 与 telegram-routing 分支。服务统一发布任务进度和完成 outbox，即使插件或 Telegram 离线也可保存结果。客户端旧的完成投递分支已删除，Telegram run 只等待任务状态，不再读取整段历史拼接一个随后被丢弃的回复。
 
 `telegram-stream.ts` 合并消息，`telegram-api.ts` 节流并处理限流。游标先持久化再分发；发送、新建、分支和设置命令使用带方法/参数指纹的持久化 ID 收据，拒绝 ID 异内容复用，重启后未完成请求标记中断而不重放。关键收据、游标和最终 outbox 经通用 atomic-json 工具同步文件与父目录后才报告成功，周期进度仍使用普通原子替换。绑定、通知收据、推送开关持久化成功后才更新内存。通知发送与落盘不是分布式事务，因此崩溃边界可能重复通知，但不能重跑任务。
 
@@ -169,9 +169,9 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 - 共享快照用 revision 检查更新冲突，会话锁与索引事务锁承担不同职责；不要为了简化而合并或绕过。
 - 改动底层能力后运行 `npm run verify`；涉及 Pi 原生树接口时额外运行 `npm run test:native-fork`。这些验证不要求真实模型请求。
 
-## 双实现：Rust 常驻进程
+## Rust 常驻进程
 
-两个长驻进程各有 TypeScript（`src/session-daemon.ts`、`src/telegram-daemon.ts`）与 Rust（`rust/` workspace）实现。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的冻结契约逐字节对齐，由同一套黑盒 contract 验证（`npm run test:contract` / `npm run test:contract:telegram`，`PI_CONTRACT_DAEMON` / `PI_TG_DAEMON` 选择被测实现）。部署时只改 systemd `ExecStart` 即可切换；严禁新旧 daemon 共用同一 `--data-dir` 并行运行（锁会拒绝第二个实例）。
+生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。部分旧 TS 内部模块暂留供故障测试迁移，不再有 daemon 入口或生产构建，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
 
 | crate                    | 对应 TS                                                                 | 职责                                                                                                                                           |
 | ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -181,4 +181,4 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 
 Webview、扩展宿主与 `pi-adapter.mjs` 永远保持 JS/TS：渲染生态与 Pi 进程内扩展机制没有 Rust 通道；Rust daemon 只是 spawn `node pi-adapter.mjs` 作为工作进程。动机仅为常驻内存（Node ~60–100 MB → Rust ~5–9 MB RSS）与单二进制部署。
 
-跨实现最易漂移的三点（规范已逐条固化）：mkdir 锁必须兼容 proper-lockfile 的心跳/stale/compromised 语义（禁止 flock）；分块响应按 UTF-16 code unit 切片、可切断代理对；收据指纹与 fork 哈希的 canonical JSON 按 UTF-16 序排键。两实现的有意差异与部署差异见 [session-service.md](session-service.md) 的 Rust daemon 小节。
+跨实现最易漂移的三点（规范已逐条固化）：mkdir 锁必须兼容 proper-lockfile 的心跳/stale/compromised 语义（禁止 flock）；分块响应按 UTF-16 code unit 切片、可切断代理对；收据指纹与 fork 哈希的 canonical JSON 按 UTF-16 序排键。部署与旧版本切换见 [session-service.md](session-service.md)。

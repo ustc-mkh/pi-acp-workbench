@@ -15,7 +15,7 @@
 
 ### 1. 准备运行环境
 
-Pi 服务需要 **Linux、Node.js 22+ 和用户级 systemd**。使用 Remote SSH / WSL 时，以下操作在扩展宿主所在的机器、同一用户账户下完成。
+Pi 服务使用 Rust 常驻进程，运行需要 **Linux、Node.js 22+ 和用户级 systemd**；从源码构建还需要 Rust/Cargo。使用 Remote SSH / WSL 时，以下操作在扩展宿主所在的机器、同一用户账户下完成。
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent
@@ -32,7 +32,7 @@ pi
 git clone https://github.com/ustc-mkh/pi-acp-workbench.git
 cd pi-acp-workbench
 npm ci
-npm run build
+npm run build:services
 
 mkdir -p ~/.config/pi-acp-workbench ~/.config/systemd/user
 chmod 700 ~/.config/pi-acp-workbench
@@ -43,7 +43,7 @@ cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 编辑两个文件：
 
 - `sessions.json`：将 `env.PI_ACP_PI_COMMAND` 改为 Pi 可执行文件的绝对路径；Pi 的代理变量也放在 `env` 中。
-- `pi-sessions.service`：将 Node 和仓库的占位路径替换为实际绝对路径。Node 路径可用 `node -p process.execPath` 查询。
+- `pi-sessions.service`：将仓库的占位路径替换为实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。该目录同时包含 JS 适配器；Node 必须在服务的 PATH 中，否则在 `sessions.json` 显式设置 Node `command` 和适配器 `args`。
 
 ```bash
 chmod 600 ~/.config/pi-acp-workbench/sessions.json
@@ -96,7 +96,7 @@ chmod 600 ~/.config/pi-acp-workbench/telegram.json ~/.config/pi-acp-workbench/te
 cp examples/pi-telegram.service ~/.config/systemd/user/pi-telegram.service
 ```
 
-编辑 `pi-telegram.service` 中的 Node 和仓库绝对路径，然后启动：
+编辑 `pi-telegram.service` 中的仓库绝对路径，指向 `service-dist/pi-acp-telegram-daemon`，然后启动：
 
 ```bash
 systemctl --user daemon-reload

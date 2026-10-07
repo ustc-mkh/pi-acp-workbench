@@ -1,3 +1,5 @@
+// Migration-only reference for legacy fault tests. No production daemon entry
+// or build uses this implementation; new service behavior belongs in rust/.
 import { randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { join, isAbsolute } from 'node:path';

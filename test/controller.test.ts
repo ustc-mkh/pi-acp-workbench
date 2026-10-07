@@ -1456,32 +1456,25 @@ it('warns about unavailable inherited values without retrying or silently creati
 });
 
 it('uses the production remote Pi client and receives phone turns without owning a process', async () => {
-  const { SessionService } = await import('../src/session-service');
-  const { SessionServer, SessionClient } = await import('../src/session-wire');
+  const { startRustService } = await import('./rust-service');
+  const { SessionClient } = await import('../src/session-wire');
   host.provider.dispose();
   await host.provider.persistence.pending;
   const root = mkdtempSync(resolve(tmpdir(), 'pi-remote-controller-')),
     socket = resolve(root, 'service', 'sessions.sock');
   host.config = { sharedHistory: false, serviceSocket: socket };
   host.stored.clear();
-  let server: InstanceType<typeof SessionServer>;
-  const service = new SessionService(
-    root,
-    {
+  let service: Awaited<ReturnType<typeof startRustService>> | undefined;
+  const phone = new SessionClient(socket);
+  try {
+    service = await startRustService(root, {
       command: process.execPath,
       args: [resolve('test/mock-agent.mjs'), 'context-native'],
       env: { PI_TEST_AUDIT: resolve(root, 'audit.jsonl') },
       maxWorkers: 1,
       idleMs: 900000,
-    },
-    (event) => server.broadcast(event),
-    () => {},
-  );
-  const phone = new SessionClient(socket);
-  try {
-    await service.initialize();
-    server = new SessionServer(socket, (m, p, id) => service.handle(m, p, id));
-    await server.listen();
+    });
+    expect(service.socket).toBe(socket);
     activateExtension(context);
     await host.provider.historyReady;
     await host.provider.perform({ type: 'new' });
@@ -1510,8 +1503,7 @@ it('uses the production remote Pi client and receives phone turns without owning
   } finally {
     host.provider.dispose();
     phone.dispose();
-    await server!.dispose();
-    await service.dispose();
+    await service?.stop();
     rmSync(root, { recursive: true, force: true });
   }
 }, 15000);

@@ -4,20 +4,20 @@ Pi 由独立的 `pi-sessions.service` 启动和管理。VS Code 与 Telegram 都
 
 ## 安装
 
-需要 Linux、Node 22+、可用的 Pi 和用户级 systemd。服务与 VS Code Remote 扩展运行在同一服务器账户。此版本不支持 Windows 的本地管道。
+生产会话服务仅使用 Rust daemon。需要 Linux、Node 22+、可用的 Pi 和用户级 systemd；从源码构建需要 Rust/Cargo。服务与 VS Code Remote 扩展运行在同一服务器账户。此版本不支持 Windows 的本地管道。
 
 ```bash
 npm ci
-npm run build
+npm run build:services
 mkdir -p ~/.config/pi-acp-workbench ~/.config/systemd/user
 chmod 700 ~/.config/pi-acp-workbench
 cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
 cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 ```
 
-Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。编辑 `sessions.json` 的 Pi 可执行文件路径；编辑 unit 中 Node、仓库绝对路径。凭据继续由 Pi 管理。代理变量、`PI_ACP_PI_COMMAND`、模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。
+Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。编辑 `sessions.json` 的 Pi 可执行文件路径；编辑 unit 中仓库绝对路径，指向 `service-dist/pi-acp-session-daemon`。凭据继续由 Pi 管理。代理变量、`PI_ACP_PI_COMMAND`、模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。
 
-默认使用内置 `pi-adapter.mjs`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；它必须支持原生会话加载和 Workbench 原生分支扩展。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
+`npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；它必须支持原生会话加载和 Workbench 原生分支扩展。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
 
 ```bash
 systemctl --user daemon-reload
@@ -28,20 +28,13 @@ journalctl --user -u pi-sessions -f
 
 ### 实现维护策略
 
-Node/TypeScript 是当前唯一默认实现；Rust 保持实验性，不自动切换生产部署。下一次稳定版发布前评估双实现维护成本和契约覆盖，再决定是否收敛，未完成评估前不承诺删除任一实现。CI 对两套实现运行同一服务与 Telegram 契约。
+Rust 是生产服务的唯一实现。TS daemon 入口与构建目标已删除；部分 TS 内部实现暂时只供旧故障单测使用，覆盖迁移完毕后删除，不再发布或维护第二套生产服务。契约、真实双服务集成及迁移进度见 [Rust 收敛进度](rust-migration.md)。
 
 桌面端「清空历史」会删除整个服务器账户的共享历史，并停止服务上的全部会话任务（包括 Telegram）；界面会进行二次确认。只想停止一个任务时请使用取消，而不是清空历史。
 
-### Rust daemon（实验性替代）
+### 从旧 Node 服务切换
 
-`rust/` workspace 提供 `pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB），协议与磁盘格式与 Node 版逐字节兼容，通过同一套 22 项 contract 验证。
-
-```bash
-cd rust && cargo build --release -p pi-acp-session-daemon
-# ExecStart 改为：/absolute/path/to/rust/target/release/pi-acp-session-daemon --config %h/.config/pi-acp-workbench/sessions.json
-```
-
-差异：`sessions.json` 缺省 `command` 时，Rust daemon 依次尝试 `PI_ADAPTER` 环境变量、可执行文件旁边的 `pi-adapter.mjs`，都不存在则要求显式 `command`/`args`（Node 版默认 `process.execPath` + `dist/pi-adapter.mjs`）。工作进程仍是 `node pi-adapter.mjs`。禁止新旧 daemon 共用同一 `--data-dir` 并行运行（锁会拒绝，但设计上只允许一个）。
+先等任务结束，停止 Telegram，再停止会话服务并备份数据目录；确认 Pi 子进程退出后执行 `npm run build:services`，更新两个 unit 的 `ExecStart` 并依次启动会话服务、Telegram。已有当前格式数据继续使用，不自动转换或删除。不要在服务运行时覆盖 `service-dist/`。回滚使用切换前的发布版本和备份，禁止新旧 daemon 共用同一 `--data-dir` 并行运行。
 
 退出 SSH 后仍运行，需要账户启用 linger：`loginctl enable-linger "$USER"`。服务未启动时插件会报连接错误，不会回退到直接启动 Pi。自定义数据目录用 daemon 的 `--data-dir`；插件设置 `piAcp.serviceSocket` 指向该目录下 `service/sessions.sock`，Telegram 使用相同 `--data-dir`。
 
@@ -83,7 +76,7 @@ Pi 的历史、锁和任务收据由服务统一管理。两端同时提交按�
 
 Telegram 发送队列最多 64 个请求，最多 32 个活动预览，5 分钟没有更新的预览会释放；每个预览仅保留约 3800 字符且独立复制，避免短子串间接保留整篇长回复。授权票据最多 128 个并定期过期；Pi 每个会话最多保留 32 个待授权请求，单个授权请求超过 256 KiB 时取消该授权。
 
-这些限制不能把整个系统内存固定为某个数值：当前长对话全文、历史/话题索引和历史同步记录仍随数据量增长；Pi 及其工具子进程也有自己的内存消耗。不要把 Node 的 RSS 暂未回落直接判定为泄漏，要结合 GC 后堆大小、活动任务和整个 systemd 控制组观察。
+这些限制不能把整个系统内存固定为某个数值：当前长对话全文、历史/话题索引和历史同步记录仍随数据量增长；Pi 及其工具子进程也有自己的内存消耗。不要把常驻服务或 Node 工作进程的 RSS 暂未回落直接判定为泄漏，要结合 GC 后堆大小、活动任务和整个 systemd 控制组观察。
 
 模板启用内存/任务统计，可查看整个服务（包括子进程）：
 

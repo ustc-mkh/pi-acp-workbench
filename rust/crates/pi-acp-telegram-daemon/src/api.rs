@@ -46,6 +46,32 @@ pub struct TelegramApi {
     stop: CancellationToken,
 }
 
+#[cfg(all(test, not(feature = "contract-test")))]
+mod production_tests {
+    use super::*;
+
+    #[test]
+    fn production_transport_ignores_mock_environment_hooks() {
+        let keys = ["PI_TELEGRAM_API_BASE", "PI_TELEGRAM_PACE_MS"];
+        let previous: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
+        std::env::set_var(keys[0], "http://attacker.invalid");
+        std::env::set_var(keys[1], "1");
+        let api = TelegramApi::new(
+            "synthetic-token",
+            Duration::from_millis(3100),
+            CancellationToken::new(),
+        );
+        for (key, value) in keys.iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert_eq!(api.base, "https://api.telegram.org/botsynthetic-token");
+        assert_eq!(api.interval, Duration::from_millis(3100));
+    }
+}
+
 impl TelegramApi {
     pub fn new(token: &str, interval: Duration, stop: CancellationToken) -> Self {
         #[cfg(not(feature = "contract-test"))]

@@ -93,23 +93,27 @@ cat "$PI_TEST_ROOT/result.json"
 
 ## 独立会话服务回归
 
-`test/telegram-sessions.test.ts` 使用临时 socket、共享存储和真实 ACP mock 子进程，覆盖桌面断开后手机继续、请求去重、队列与进程上限、空闲回收、首次授权生效、重启中断防重放和原生分支设置。原桌面接管、消息删除兼容入口及对应测试已删除；`task-queue.test.ts` 独立验证调度/取消，`request-journal.test.ts` 验证幂等、当前格式校验及写盘后取消边界。控制器测试通过注入 ACP 传输保留 UI/其他 harness 的回归，独立服务集成验证真实 RemoteAgent 和 TelegramSessions。
+迁移期间，`test/telegram-sessions.test.ts` 暂用旧 TS 内部实现与临时 socket、共享存储和真实 ACP mock 子进程，覆盖桌面断开后手机继续、请求去重、队列与进程上限、空闲回收、首次授权生效、重启中断防重放和原生分支设置。原桌面接管、消息删除兼容入口及对应测试已删除；`task-queue.test.ts` 独立验证调度/取消，`request-journal.test.ts` 验证幂等、当前格式校验及写盘后取消边界。控制器测试通过注入 ACP 传输保留 UI/其他 harness 的回归；真实远程 Pi 用例改为启动 Rust daemon，验证 RemoteAgent 的订阅、手机任务与桌面取消。旧 TS 故障测试不等价于 Rust 生产覆盖，迁移清单见 [rust-migration.md](rust-migration.md)。
 
 发布前执行 `npm run verify`，并执行 `npm run test:native-fork` 验证安装的 Pi 原生树接口；均不发送真实模型任务。
 
 ## 会话服务 Contract 测试
 
-`npm run test:contract` 运行 `scripts/service-contract.mjs`：只通过 Unix socket 驱动 daemon 的黑盒协议验证（自带最小 wire 客户端，不 import 服务实现），覆盖方法/参数校验、违规连接隔离、大帧上限、会话编号、事件订阅与上限、授权流转、取消、同 ID 幂等、>512 KiB 分块响应、磁盘产物格式与损坏拒启动、重启中断防重放、数据目录单例锁与删除语义。`test/fixtures/` 存放 native-branch 哈希 fixtures（`scripts/export-fixtures.mjs` 生成）与磁盘格式 golden 样例，供替代实现逐比特断言。规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)；用 `PI_CONTRACT_DAEMON=/path/to/other-daemon` 可对替代实现跑同一套件——Rust daemon（`rust/target/{debug,release}/pi-acp-session-daemon`）已全过。
+`npm run test:contract` 运行 `scripts/service-contract.mjs`：只通过 Unix socket 驱动 daemon 的黑盒协议验证（自带最小 wire 客户端，不 import 服务实现），覆盖方法/参数校验、违规连接隔离、大帧上限、会话编号、事件订阅与上限、授权流转、取消、同 ID 幂等、>512 KiB 分块响应、磁盘产物格式与损坏拒启动、重启中断防重放、数据目录单例锁与删除语义。`test/fixtures/` 存放 native-branch 哈希 fixtures（`scripts/export-fixtures.mjs` 生成）与磁盘格式 golden 样例，供替代实现逐比特断言。规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)；默认先构建并测试 Rust daemon；`PI_CONTRACT_DAEMON=/path/to/daemon` 可指定其他 Rust 构建产物。
 
-`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 10 项黑盒测试（含 restrictToWorkspaces 符号链接越界拒绝）（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；`PI_TG_DAEMON` env 在 Rust 与 TS 实现间切换，默认跑 Rust 版。
+`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 10 项黑盒测试（含 restrictToWorkspaces 符号链接越界拒绝）（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；只测试 Rust；`PI_TG_DAEMON` 可指定另一个 Rust 测试构建产物（需支持隔离的模拟传输）。
 
 Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键序对拍、wire 孤立代理分块重组；pi-acp-session-daemon 的 native-branch fixtures 9 例逐字节哈希、journal/queue/diff 等单测）。
 
-## 可选的内存增长检查
+## 真实 Rust 双服务集成
+
+`npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。生产发布前还需完整覆盖迁移与长时间浸泡检查。
+
+## 可选的内存增长检查（旧 TS 参考）
 
 `npm run test:memory` 在临时目录使用 `--expose-gc` 运行独立检查，不需要真实 Pi、Bot token 或模型请求，不加入日常默认测试。
 
-它预置 1024 份约 64 MiB 的任务收据，执行 1200 次重复请求查询、150 次 socket 连接/关闭，并向 32 个预览输入共 128 MiB 长文本。每批采集多次显式 GC 后的 JS 堆，检查收据不常驻、预览不保留大字符串、队列/连接/版本缓存回到空状态。此检查验证特定路径的稳定性，不等价于数周生产浸泡测试，也不测量第三方 Pi/模型 SDK 的全部内存行为。
+目前此检查仍针对旧 TS 参考实现，不是 Rust 生产内存验收，待迁移为外部 RSS/FD 检查。它预置 1024 份约 64 MiB 的任务收据，执行 1200 次重复请求查询、150 次 socket 连接/关闭，并向 32 个预览输入共 128 MiB 长文本。每批采集多次显式 GC 后的 JS 堆，检查收据不常驻、预览不保留大字符串、队列/连接/版本缓存回到空状态。此检查验证特定路径的稳定性，不等价于数周生产浸泡测试，也不测量第三方 Pi/模型 SDK 的全部内存行为。
 
 `workspace-diff.test.ts` 使用临时 Git 仓库验证只读采集，不修改真实项目的 index/工作树；`messages.test.ts` 与浏览器冒烟覆盖末尾汇总渲染。
 

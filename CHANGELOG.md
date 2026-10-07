@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 开始 Rust 契约单实现迁移：删除 TS daemon 入口及生产构建，npm/systemd 默认只运行 Rust；新增独立 `build:services` 产物与 SHA-256 清单，旧 TS 内部故障测试暂留待覆盖迁移，不宣称已完成源码淘汰。
+- 桌面真实 RemoteAgent 测试改接 Rust；新增两个真实 Rust daemon 的授权/取消/离线 outbox 集成及 queue/journal 故障回归。
+- 修复 Rust Telegram 重启时错误要求可选 `historySent` 存在，保留非法类型拒绝和游标防重放校验。
+
 - Mermaid 改为本地 ESM 分块按需加载；首次出现流程图才加载渲染引擎，保留 SVG 净化与错误源码回退。构建前清理旧分块，浏览器冒烟覆盖模块加载与 CSP；VSIX 改为显式产物白名单，避免 `!dist/**` 覆盖 source map 排除规则。
 - TS / Rust 会话 socket 在私有目录中绑定并设置 0600 后原子发布，消除 bind 与 chmod 间的公开权限窗口；失败清理临时 socket，不修改全进程 umask。
 - 全库采用 Prettier + rustfmt，新增格式化命令、编辑器约定和 CI 检查；字节级 fixtures、锁文件及生成产物不格式化。

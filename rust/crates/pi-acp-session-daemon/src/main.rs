@@ -1,9 +1,9 @@
-//! Rust port of src/session-daemon.ts — CLI-compatible:
+//! Production session service:
 //!   pi-acp-session-daemon --config /absolute/path/sessions.json [--data-dir /path]
 //!
-//! Default worker resolution differs from the TS daemon (which defaults to
-//! `node dist/pi-adapter.mjs`): when `command` is absent the binary looks for
-//! `pi-adapter.mjs` beside itself, then requires `command`/`args` in the config.
+//! When command is absent, resolve PI_ADAPTER or pi-adapter.mjs beside this
+//! binary and launch it with Node from PATH. build:services ships the complete
+//! runtime directory; custom workers require explicit command/args.
 mod agent;
 mod diff;
 mod history;

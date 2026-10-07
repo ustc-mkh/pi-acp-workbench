@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 // Black-box contract suite for the session service wire protocol (docs/service-protocol.md)
 // and disk formats (docs/data-formats.md). Drives a daemon over its Unix socket only —
-// nothing is imported from src/, so the same suite validates the TypeScript daemon today
-// and the Rust daemon later.
+// nothing is imported from src/. The production service is the Rust daemon.
 //
 //   npm run test:contract
-//   PI_CONTRACT_DAEMON="node dist/session-daemon.mjs" node scripts/service-contract.mjs
 //   PI_CONTRACT_DAEMON="/path/to/rust-daemon" node scripts/service-contract.mjs
 //
 // The daemon must accept `--config <sessions.json>` and `--data-dir <dir>`.
@@ -20,7 +18,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 
 const DAEMON = (
-  process.env.PI_CONTRACT_DAEMON || `node ${resolve('dist/session-daemon.mjs')}`
+  process.env.PI_CONTRACT_DAEMON || resolve('rust/target/debug/pi-acp-session-daemon')
 ).split(/\s+/);
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 

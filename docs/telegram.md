@@ -1,6 +1,6 @@
 # Telegram 接入
 
-Telegram relay 是独立的常驻进程，关闭 VS Code 后仍可对话和执行任务。提供两个等价实现：`node dist/telegram-daemon.mjs`（Node.js，默认）和 `rust/target/release/pi-acp-telegram-daemon`（Rust，单二进制，空闲 RSS ~5 MB 对比 Node ~60-100 MB）。两者的生产构建接受相同的 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，读写相同的 `~/.pi/pi-acp-workbench/telegram/` 格式；切换只需改 systemd unit 的 `ExecStart` 并重启。Rust 构建：`cargo build --release --manifest-path rust/Cargo.toml`；等价性验证：`npm run test:contract:telegram`（默认测 Rust 二进制，`PI_TG_DAEMON="node dist/telegram-daemon.mjs"` 可跑 TS 实现）。一个私人群组 Topic 对应一个 Pi session；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
+Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话和执行任务。生产入口为 `service-dist/pi-acp-telegram-daemon`，通过 `npm run build:services` 构建；不再发布 Node relay。接受 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，继续读写 `~/.pi/pi-acp-workbench/telegram/` 的既有格式。契约验证为 `npm run test:contract:telegram`，真实 Rust 会话服务与 relay 集成为 `npm run test:integration:rust`。一个私人群组 Topic 对应一个 Pi session；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
 
 本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复使用纯文本，避免不完整 Markdown 导致 Telegram 拒绝流式更新。
 
@@ -20,11 +20,11 @@ Telegram relay 是独立的常驻进程，关闭 VS Code 后仍可对话和执�
 
 ### 2. 配置服务器
 
-要求 Node.js 22+、已配置凭据的 Pi、当前仓库的构建产物。以实际执行 Pi 的服务器账户操作：
+要求 Node.js 22+、已配置凭据的 Pi、当前仓库的 Rust 服务构建产物；从源码构建需要 Rust/Cargo。以实际执行 Pi 的服务器账户操作：
 
 ```bash
 npm ci
-npm run build
+npm run build:services
 mkdir -p ~/.config/pi-acp-workbench
 chmod 700 ~/.config/pi-acp-workbench
 cp examples/telegram.json ~/.config/pi-acp-workbench/telegram.json
@@ -70,7 +70,7 @@ mkdir -p ~/.config/systemd/user
 cp examples/pi-telegram.service ~/.config/systemd/user/pi-telegram.service
 ```
 
-编辑服务中的 `WorkingDirectory` 和 `ExecStart`，替换所有 `/absolute/path/...`。Node 的实际路径可用 `node -p process.execPath` 查询；systemd 不会自动加载交互式 shell 的 Node 版本管理器配置。随后运行：
+编辑服务中的 `WorkingDirectory` 和 `ExecStart`，替换所有 `/absolute/path/...`，指向 `service-dist/pi-acp-telegram-daemon`。会话服务的 Node 工作进程另需正确的 PATH 或显式 `command`；systemd 不会自动加载交互式 shell 的 Node 版本管理器配置。随后运行：
 
 ```bash
 systemctl --user daemon-reload
@@ -80,9 +80,7 @@ journalctl --user -u pi-telegram -f
 
 如果需要退出 SSH 后用户服务仍常驻，服务器还需为此账户启用 linger：`loginctl enable-linger "$USER"`（是否需要管理员权限取决于服务器配置）。关闭 VS Code 不影响这个独立服务；关闭服务器会停止任务。
 
-使用 Rust 实现时把 `ExecStart` 改为 `/absolute/path/pi-acp-telegram-daemon --config /absolute/path/telegram.json`，其余不变（同一目录、锁与状态文件）。
-
-升级代码后重新构建并执行 `systemctl --user restart pi-telegram`。只重启 Telegram 不会停止已提交到 Pi 服务的任务；尚未提交的内存排队消息不会重放。升级 Pi 服务前先等待任务完成。停止服务用 `systemctl --user stop pi-telegram`。
+升级代码前先等任务结束并停止两个服务，重新执行 `npm run build:services`，然后依次启动会话服务与 Telegram。只重启 Telegram 不会停止已提交到 Pi 服务的任务；尚未提交的内存排队消息不会重放。升级 Pi 服务前先等待任务完成。停止服务用 `systemctl --user stop pi-telegram`。
 
 ### 4. 桌面与手机共享会话
 
@@ -99,7 +97,7 @@ journalctl --user -u pi-telegram -f
 - 完成通知在发送前落盘，网络恢复后重试。发送已成功但确认落盘前崩溃时可能重复通知，不会重跑 Pi 任务。
 - 强制杀进程不会自动继续中断的模型请求；原生历史和本地记录保留。需要继续时在原话题发新消息。
 
-`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。生产实现忽略 `PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS`，固定使用 Telegram 官方端点和 3100 ms 发送间隔。TS 契约测试通过 `test/telegram-contract-entry.mjs` 显式注入模拟传输；Rust 契约测试单独构建 `contract-test` feature 到 `rust/target/contract/`。测试二进制支持这两个环境变量，禁止部署到生产。
+`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。生产实现忽略 `PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS`，固定使用 Telegram 官方端点和 3100 ms 发送间隔。Rust 契约及集成测试单独构建 `contract-test` feature 到 `rust/target/contract/`。测试二进制支持这两个环境变量，禁止部署到生产。
 
 ## 维护与升级范围
 

@@ -1,3 +1,4 @@
+// Migration-only reference for legacy fault tests; the production relay is Rust.
 import { randomBytes, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {

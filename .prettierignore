@@ -1,5 +1,7 @@
 node_modules/
 dist/
+service-dist/
+service-dist.*.tmp/
 rust/target/
 playwright-report/
 test-results/

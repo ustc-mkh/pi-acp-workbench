@@ -183,3 +183,121 @@ impl TaskQueue {
 }
 
 pub type Check = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+    use tokio::time::{timeout, Duration};
+
+    async fn pending(queue: &TaskQueue, count: usize) {
+        timeout(Duration::from_secs(2), async {
+            while queue.pending_count() != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancels_old_generations_but_preserves_later_session_work() {
+        let queue = Arc::new(TaskQueue::new(1, 100));
+        let ran = Arc::new(StdMutex::new(Vec::new()));
+        let (release, held) = oneshot::channel();
+        let (entered, started) = oneshot::channel();
+        let q = queue.clone();
+        let events = ran.clone();
+        let first = tokio::spawn(async move {
+            q.run("one", |_| async move {
+                events.lock().unwrap().push("first");
+                entered.send(()).unwrap();
+                held.await.unwrap();
+                Ok(())
+            })
+            .await
+        });
+        started.await.unwrap();
+        let q = queue.clone();
+        let events = ran.clone();
+        let second = tokio::spawn(async move {
+            q.run("one", |_| async move {
+                events.lock().unwrap().push("second");
+                Ok(())
+            })
+            .await
+        });
+        pending(&queue, 2).await;
+        queue.cancel("one").await;
+        let q = queue.clone();
+        let events = ran.clone();
+        let third = tokio::spawn(async move {
+            q.run("one", |_| async move {
+                events.lock().unwrap().push("third");
+                Ok(())
+            })
+            .await
+        });
+        pending(&queue, 3).await;
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert_eq!(second.await.unwrap().unwrap_err(), "排队请求已取消");
+        third.await.unwrap().unwrap();
+        assert_eq!(*ran.lock().unwrap(), vec!["first", "third"]);
+        assert_eq!(queue.pending_count(), 0);
+        let inner = queue.inner.lock().unwrap();
+        assert!(inner.lanes.is_empty());
+        assert!(inner.epochs.is_empty());
+        drop(inner);
+        queue.close().await;
+    }
+
+    #[tokio::test]
+    async fn caps_global_execution_and_rejects_new_work_while_draining() {
+        let queue = Arc::new(TaskQueue::new(2, 100));
+        let hold = Arc::new(Semaphore::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for id in ["a", "b", "c"] {
+            let q = queue.clone();
+            let gate = hold.clone();
+            let running = active.clone();
+            tasks.push(tokio::spawn(async move {
+                q.run(id, |_| async move {
+                    running.fetch_add(1, Ordering::SeqCst);
+                    gate.acquire().await.unwrap().forget();
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        pending(&queue, 3).await;
+        timeout(Duration::from_secs(2), async {
+            while active.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        queue.mark_closed();
+        assert_eq!(
+            queue.run("d", |_| async { Ok(()) }).await.unwrap_err(),
+            "会话服务正在停止"
+        );
+        hold.add_permits(2);
+        let mut completed = 0;
+        let mut cancelled = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(()) => completed += 1,
+                Err(error) => {
+                    assert_eq!(error, "排队请求已取消");
+                    cancelled += 1;
+                }
+            }
+        }
+        assert_eq!((completed, cancelled), (2, 1));
+        queue.close().await;
+        assert_eq!(queue.pending_count(), 0);
+    }
+}

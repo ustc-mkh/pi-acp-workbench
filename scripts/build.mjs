@@ -15,30 +15,6 @@ await Promise.all([
     sourcemap: true,
   }),
   build({
-    entryPoints: ['src/session-daemon.ts'],
-    outfile: 'dist/session-daemon.mjs',
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    target: 'node22',
-    sourcemap: true,
-    banner: {
-      js: 'import { createRequire as __sessionRequire } from "node:module"; const require = __sessionRequire(import.meta.url);',
-    },
-  }),
-  build({
-    entryPoints: ['src/telegram-daemon.ts'],
-    outfile: 'dist/telegram-daemon.mjs',
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    target: 'node22',
-    sourcemap: true,
-    banner: {
-      js: 'import { createRequire as __telegramRequire } from "node:module"; const require = __telegramRequire(import.meta.url);',
-    },
-  }),
-  build({
     entryPoints: ['webview/main.ts'],
     outdir: 'dist',
     entryNames: 'webview',
