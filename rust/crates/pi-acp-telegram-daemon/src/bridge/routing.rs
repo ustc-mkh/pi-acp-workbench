@@ -15,6 +15,13 @@ impl InputClass {
         if update.get("callback_query").is_some() {
             return Self::Control;
         }
+        if update
+            .pointer("/message/reply_to_message/text")
+            .and_then(Value::as_str)
+            == Some("请输入服务器上的绝对目录路径，回复这条消息即可。")
+        {
+            return Self::Command;
+        }
         match update
             .pointer("/message/text")
             .and_then(Value::as_str)
@@ -24,8 +31,8 @@ impl InputClass {
         {
             Some("stop" | "interrupt") => Self::Control,
             Some(
-                "start" | "help" | "commands" | "new" | "open" | "sessions" | "sync" | "history"
-                | "silent" | "notifications" | "status",
+                "start" | "help" | "commands" | "menu" | "settings" | "new" | "open" | "sessions"
+                | "sync" | "syncall" | "history" | "silent" | "notifications" | "status",
             ) => Self::Command,
             _ => Self::Prompt,
         }

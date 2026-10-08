@@ -110,6 +110,7 @@ Snapshot 字段（含可选项）：`id`、`cwd`、`title`、`updated`(ms)、`en
 ## 7. 第三方/不归本规范
 
 - `pi-adapter` 的状态目录（`PI_ACP_WORKBENCH_STATE_DIR` 或 `~/.pi/pi-acp`）的 `session-map.json` 由 JS 适配器持有（`mutateAdapterStore` 事务），Rust daemon 不直接读写。
+- adapter registry 的 session 记录可含 `workbenchFastMode: "on" | "off"`，缺省不恢复 Fast 设置，非法值拒绝恢复且保留原文件；仅用于 Pi 尚未持久化对话的空会话。已有对话或 Fast custom 节点时原生分支优先。原生 `customType: "pi-acp-workbench/fast-mode"` 节点使用 `data: {version:1, enabled:boolean}`，不进入模型上下文；按 leaf 的 parent 链寻找最近设置，不使用其他分支节点。registry upsert 保留此可选字段，写入沿用已有锁与 durable 原子提交。
 - Pi 原生会话文件（`.jsonl`）由 Pi 进程持有；native-fork 流程只读复制 + 校验，不修改源文件（见 `native-branch.ts` 与 `pi-native-fork.ts`）。
 
 ## 8. nativeForks / fork 哈希

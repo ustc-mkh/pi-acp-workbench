@@ -279,13 +279,38 @@ async fn run() -> Result<(), String> {
         tokio::spawn(async move { bridge.maintenance().await })
     };
 
+    // Setup writes a one-shot request next to its config. Keep it on failure so
+    // the next start can retry using the normal durable history checkpoints.
+    let setup_sync = {
+        let bridge = bridge.clone();
+        let request = PathBuf::from(format!("{config_file}.sync-request"));
+        tokio::spawn(async move {
+            match tokio::fs::read_to_string(&request).await {
+                Ok(body) if matches!(body.trim(), "preview" | "latest20") => {
+                    match bridge.command_sync(None).await {
+                        Ok(true) => {
+                            if let Err(error) = tokio::fs::remove_file(&request).await {
+                                eprintln!("[telegram] 无法清理 setup 同步请求：{error}");
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!("[telegram] setup 历史同步失败：{error}"),
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => eprintln!("[telegram] setup 历史同步请求无效。"),
+                Err(error) => eprintln!("[telegram] 无法读取 setup 同步请求：{error}"),
+            }
+        })
+    };
+
     let poll_result = bridge.poll().await;
     if let Err(e) = &poll_result {
         eprintln!("[telegram] {}", e.replace(&token, "[redacted]"));
     }
     stop.cancel();
     bridge.dispose().await;
-    let _ = tokio::join!(sweep, maintenance);
+    let _ = tokio::join!(sweep, maintenance, setup_sync);
     lock.release().await;
     poll_result
 }

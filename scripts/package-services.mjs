@@ -28,6 +28,7 @@ const files = [
   'pi-acp-telegram-daemon',
   'pi-adapter.mjs',
   'pi-native-fork.mjs',
+  'pi-fast-mode.mjs',
 ];
 assert.deepEqual(Object.keys(manifest.files).sort(), files.toSorted());
 for (const file of files) {
@@ -56,6 +57,10 @@ try {
   await cp('docs/service-release.md', join(staging, 'README.md'));
   await cp('docs/service-release.md', join(staging, 'service-release.md'));
   await cp('docs/rust-acceptance.md', join(staging, 'rust-acceptance.md'));
+  await cp('docs/telegram.md', join(staging, 'telegram.md'));
+  await mkdir(join(staging, 'scripts/lib'), { recursive: true });
+  await cp('scripts/setup-telegram.mjs', join(staging, 'scripts/setup-telegram.mjs'));
+  await cp('scripts/lib/telegram-setup.mjs', join(staging, 'scripts/lib/telegram-setup.mjs'));
   await cp('THIRD_PARTY_NOTICES.txt', join(staging, 'THIRD_PARTY_NOTICES.txt'));
   await writeRustNotices(manifest.target, staging);
   await mkdir(join(staging, 'examples'));

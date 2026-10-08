@@ -30,7 +30,7 @@ npm run build        # 启动调试前构建
 
 ## 不连接真实模型的调试方式
 
-仓库提供模拟 ACP 进程 `test/mock-agent.mjs`。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出；`context-images` 模式声明图片能力，`context-legacy` 使用旧版 modes 思考选项。两种接入方式：
+仓库提供模拟 ACP 进程 `test/mock-agent.mjs`。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出；`context-images` 模式声明图片能力。两种接入方式：
 
 - Codex / Claude：在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中将 `command` 设为 Node 可执行文件，`args` 设为 `["/absolute/path/to/test/mock-agent.mjs", "<mode>"]`，重启 `pi-sessions`。
 - Pi：临时修改会话服务 `sessions.json` 的 `command` / `args` 为同样的 Node + 脚本路径，重启 `pi-sessions`。
@@ -89,7 +89,7 @@ Rust 依赖漏洞检查：安装 `cargo install cargo-audit --locked --version 0
 当前固定为 `pi-acp@0.0.34`，`scripts/build-adapter.mjs` 通过严格断言扩展上游 bundle。升级时：
 
 1. 阅读上游 release / 源码变化，更新 package.json 的精确版本与 package-lock.json；不要使用浮动版本。
-2. 对照旧、新 `node_modules/pi-acp/dist/index.js`，逐项审查 `replaceExactlyOnce` 和 `assertRequestErrorBinding`：Agent/RPC 构造、原生分支隔离、注册表锁、错误传播、超时、取消及上下文统计都必须保持原有语义。对应最小 RPC 契约在 `src/pi-rpc-types.ts`。
+2. 对照旧、新 `node_modules/pi-acp/dist/index.js`，逐项审查 `replaceExactlyOnce` 和 `assertRequestErrorBinding`：Agent/RPC 构造、原生分支隔离、Fast 扩展加载 / 配置 / 空会话恢复、注册表锁及可选字段保留、错误传播、超时、取消及上下文统计都必须保持原有语义。对应最小 RPC 契约在 `src/pi-rpc-types.ts`。
 3. 运行 `npm run build`。替换目标缺失、重复或 RequestError 绑定变化必须使构建失败；确认新的上游语义后才能调整断言，不能改成宽松替换或吞掉错误。
 4. 运行 `npx vitest run test/build-adapter.test.ts test/bundled-adapter.test.ts test/native-branch.test.ts test/native-fixtures.test.ts test/usage-cache.test.ts`，验证真实 bundle、错误/取消、注册表并发、原生分支哈希和用量分页。只有有意修改数据格式时才执行 `npm run fixtures`，并检查 TS 冻结输出、Rust 切点绑定及磁盘 / wire 契约的一致性；不要用重生成 fixture 来掩盖兼容性失败。
 5. 运行 `npm run verify`、`npm audit --omit=dev` 和 Rust audit；检查许可证通知、更新 CHANGELOG，并在 PR 中列出每个变更的补丁入口和行为验证。

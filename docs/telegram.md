@@ -4,7 +4,65 @@ Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话�
 
 本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复将 Markdown 转成 Telegram 原生 entities；流式不完整片段按安全文本处理，长代码与中文 / emoji 分块保留格式。
 
-## 配置与部署
+## 一键配置（推荐）
+
+在运行 Pi 的服务器上，以会话服务的同一用户账户操作。需要 Linux x86_64、Node.js 22+、已完成供应商登录或 API key 配置的 Pi、curl、用户级 systemd，以及服务程序。向导不下载或替换这些程序。
+
+### 准备 Bot 和群组
+
+已有 Bot token 可直接使用；尚未创建时，在 Telegram 的 **@BotFather** 用 `/newbot` 创建专用 Bot。建立私人群组并启用 **Topics / 话题**，将 Bot 设为管理员并允许管理话题。群内成员都能看到回复，只有配置的用户 ID 能控制 Pi。
+
+服务器须能访问 Telegram API，无需开放入站端口。同一个 Bot 应只由本服务使用，已有 webhook 或其他轮询器会导致冲突。
+
+### 运行向导并配对
+
+在仓库目录执行：
+
+```bash
+npm run telegram:setup
+```
+
+使用包含配置脚本的服务发布包时，也可在解压目录直接执行，无需安装 npm 依赖或编译 Rust：
+
+```bash
+node scripts/setup-telegram.mjs
+```
+
+1. 按终端提示输入 Bot token，输入内容隐藏。
+2. 用个人身份在私人话题群中发送终端显示的一次性配对码；不要使用匿名管理员身份。向导自动获取群组 ID 和你的用户 ID。
+3. 查看群组、授权用户和目录范围，确认应用配置。向导保存配置、安装用户级 unit，启动并启用 Telegram 服务；后台按 /sync 规则建立话题：最新 5 个会话各取最后 10 条，其余各取最后 2 条文字消息。
+4. 在群里发送 `/help` 或 `/menu`，点击“新建会话”，选择目录和 Harness。进入新建的话题，使用设置卡片选择模型与思考强度，直接发文字开始任务。
+
+首次配置无需选择项目目录，也无需登记后续项目。路径是 **Pi 所在服务器上的绝对路径**，目录须已存在且服务账户能够访问；尚不存在时先在服务器创建。例如，发送 `/new /home/alice/projects/app` 或 `/new /mnt/data/another-project` 可创建两个不同项目的会话，无需重新运行向导。
+
+脚本依次查找包内服务程序、`~/.local/share/pi-acp-workbench/current/` 和仓库 `service-dist/`。程序位于其他位置时指定：
+
+```bash
+npm run telegram:setup -- --service-dir /absolute/path/to/services
+# 在解压包内运行时使用：
+node scripts/setup-telegram.mjs --service-dir /absolute/path/to/services
+```
+
+已有会话服务保持其配置与运行状态；未安装 unit 时，向导用同目录的 session daemon 创建默认用户级服务。全程不调用 sudo。终端须处于正常用户登录会话，能够访问 `systemctl --user`。
+
+### 配置文件和自启动
+
+默认配置保存在 `~/.config/pi-acp-workbench/telegram.json`，token 保存在同目录的 `telegram.env`，unit 保存在 `~/.config/systemd/user/pi-telegram.service`；设置了 `XDG_CONFIG_HOME` 时，使用该目录替代 `~/.config`。配置和 token 文件权限为 0600，配置及备份目录为 0700。当前终端的标准代理变量也会写入私有 env 文件，供服务使用。
+
+向导尝试 `loginctl --no-ask-password enable-linger`。成功后，服务可在未登录时开机启动，并在退出登录后继续运行；本机策略拒绝时，会明确提示只启用登录后自启动，不索取管理员密码。
+
+```bash
+systemctl --user status pi-telegram
+journalctl --user -u pi-telegram -f
+```
+
+### 修改已有配置
+
+再次运行同一向导，可沿用 token、群组、授权用户和可选工作区别名。旧配置已启用目录限制时，向导询问“保留现有目录限制（仅允许已配置的目录）？”，输入 `n` 即可允许当前服务账户可访问的任意目录；已有别名仍可作为快捷入口使用。
+
+覆盖前自动备份，启动失败恢复旧文件及原有 Telegram 服务。重新配对会暂时停止本机 Telegram 轮询，配对期间不要发送任务；现有 Pi 任务继续执行。token 不进入命令参数、仓库或输出。
+
+## 手工配置与部署
 
 ### 1. 建立 Bot 和私人 Topics 群组
 
@@ -20,7 +78,7 @@ Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话�
 
 ### 2. 配置服务器
 
-仅支持 Linux x86_64，要求 Node.js 22+、已配置凭据的 Pi、当前仓库的 Rust 服务构建产物；从源码构建需要 Rust/Cargo。以实际执行 Pi 的服务器账户操作：
+要求与向导一致；服务程序可使用发布包，或从源码构建（需要 Rust/Cargo）。以下示例在仓库中执行；使用发布包时可直接创建下方 JSON 配置，无需构建：
 
 ```bash
 npm ci
@@ -30,23 +88,20 @@ chmod 700 ~/.config/pi-acp-workbench
 cp examples/telegram.json ~/.config/pi-acp-workbench/telegram.json
 ```
 
-编辑配置，填入真实的群组 ID、自己的 Telegram 用户数字 ID 和工作区别名对应的项目绝对路径：
+编辑配置，填入真实的群组 ID 和自己的 Telegram 用户数字 ID；项目目录在创建会话时指定：
 
 ```json
 {
   "chatId": -1001234567890,
   "allowedUserIds": [123456789],
-  "workspaces": {
-    "workbench": "/absolute/path/to/pi-acp-workbench",
-    "another": "/absolute/path/to/another-project"
-  },
-  "restrictToWorkspaces": true
+  "workspaces": {},
+  "restrictToWorkspaces": false
 }
 ```
 
 数字是占位符，必须替换。使用数字 ID，不使用昵称、用户名或“第一个给 Bot 发消息的人”作为授权依据。群组 ID 和用户 ID 必须同时匹配。匿名管理员、Bot、其他群组及其他用户的输入均不执行。
 
-Token 只通过 `PI_TELEGRAM_BOT_TOKEN` 环境变量提供。可使用编辑器创建 `~/.config/pi-acp-workbench/telegram.env`，内容如下，再设置 `chmod 600 ~/.config/pi-acp-workbench/telegram.env`。不要把真实 token 放到仓库或命令参数中。
+Token 只通过 `PI_TELEGRAM_BOT_TOKEN` 环境变量提供。可使用编辑器创建 `~/.config/pi-acp-workbench/telegram.env`，内容如下，再设置 `chmod 600 ~/.config/pi-acp-workbench/telegram{.json,.env}`。不要把真实 token 放到仓库或命令参数中。
 
 ```text
 PI_TELEGRAM_BOT_TOKEN=替换为BotFather给出的token
@@ -62,7 +117,26 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置包含群组、用户、可选工作区别名、`serviceSocket` 及 `restrictToWorkspaces`。目录限制开关缺省为 `false`。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。`/sessions` 和 `/open` 同样只显示或连接这些目录中的会话；已有话题中的状态、历史、任务、停止和授权请求也会重新检查工作区范围。无法解析的目录会被拒绝。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的启动命令、参数、环境变量和 `maxWorkers` 放在 `sessions.json`，Telegram 配置只负责接入身份、工作区别名、目录限制和 `serviceSocket`。Token 不进入 Pi 服务或 Pi 子进程。
+
+#### 可选：工作区别名和目录限制
+
+默认 `workspaces` 为空、`restrictToWorkspaces` 为 `false`，使用 `/new /服务器上的绝对路径` 即可。若常用某个项目，可添加快捷别名：
+
+```json
+{
+  "workspaces": {
+    "project": "/absolute/path/to/project"
+  },
+  "restrictToWorkspaces": false
+}
+```
+
+将这两个字段合并到现有 `telegram.json`，保留群组和用户 ID。保留 `restrictToWorkspaces:false` 时，既可用 `/new project`，也可用其他绝对路径。`/new` 不带参数时打开目录选择面板；输入其他目录可回复向导提示消息中的绝对路径。
+
+只有主动需要目录限制时，才设置 `restrictToWorkspaces:true` 并列出允许目录。此时 `/new` 只接受声明的目录根，不包含子目录；绝对路径解析真实路径后匹配。`/sessions`、`/open` 和已有话题的操作同样检查目录范围，无法解析的目录会被拒绝。目录限制不是 Pi 命令的文件系统沙箱。
+
+手工编辑配置后，执行 `systemctl --user restart pi-telegram` 生效；只重启 relay 不会停止会话服务上的 Pi 任务。
 
 ### 3. 作为用户服务常驻
 
@@ -112,13 +186,20 @@ journalctl --user -u pi-telegram -f
 
 ### 创建和继续会话
 
-发送 `/new /absolute/path/to/project` 可按绝对路径创建会话；开启 restrictToWorkspaces 时必须匹配配置目录根，未开启时可使用当前账户能够访问的有效目录。也可发送 `/new workbench` 创建会话及独立话题；仅配置一个工作区时可以省略名称。在话题中直接发文字即可与对应 Pi session 对话，`/compact` 等未被服务占用的命令转交 Pi。当前仅支持文字输入，回复支持 Markdown entities。
+发送 `/menu` 打开按钮面板。在已有会话话题中直接显示该会话的设置卡片；在普通话题显示新建、已有会话和历史摘要入口。`/settings` 为同一入口，`/help` 同时显示帮助与面板。
+
+- **新建会话**：点击新建，选择工作区别名或最近目录，点击 Pi / Codex / Claude 创建会话。也可用 `/new /absolute/path/to/project` 或 `/new project` 直接进入 Harness 选择。无参数 `/new` 打开目录选择；输入新目录时回复专门的提示消息，不会作为模型指令发送。目录仍按服务器账户权限和 `restrictToWorkspaces` 检查。未安装或未登录的 Harness 会显示创建失败原因。
+- **模型 / 思考强度**：新建或 `/open` 后在会话话题展示设置卡片。点击选择按钮，分页查看真实 Agent 提供的选项，当前项带 ✓，供应商分组保留在名称中。切换模型后刷新思考强度和实际生效值；未提供对应选项时显示说明。设置沿用服务端的按 Harness 偏好，与桌面端共享，新建会话继承。
+- **其他 Harness**：已有会话卡片中的“用其他 Harness 新建”沿用项目目录，重新选择 Harness 并创建独立会话。
+- **任务与面板**：卡片支持状态、停止和更多历史。执行或排队时拒绝修改设置，不取消当前任务。按钮绑定发起用户、消息和话题；15 分钟未操作或服务重启后失效，用 `/menu` 重开。重复点击不会重复创建会话；取消向导不创建会话。
+
+在会话话题中直接发文字即可对话，`/compact` 等未被服务占用的命令转交当前 Agent。当前仅支持文字输入，回复支持 Markdown entities。
 
 `/sessions` 列出最近 50 个各 harness 的会话（开启工作区限制时仅显示允许目录），`/open 12` 为已有编号会话创建或打开话题。也可以使用完整 Session ID。
 
 ### 将以前的会话同步到 Telegram
 
-- `/sync`：自动为旧 Pi 会话创建话题，并在各自话题同步未导出的文字历史；已有话题也会补齐。每次最多 20 个会话、每个会话 100 条消息。重复 `/sync` 跳过已同步内容并继续，无需再发 `/history`。
+- setup 完成后和 `/sync` 使用同一同步方式：自动为可访问的各 Harness 会话建立话题，按会话更新时间从新到旧排序，最新 5 个会话各取最后 10 条文字消息，其余各取最后 2 条。先截取窗口，再跳过已导出的内容；重复执行不会补更旧的历史。每个话题提示手动执行 `/history` 获取更多消息，`/history all` 分批获取完整历史。普通服务重启不发起新同步，setup 未完成的请求会保留以便重试。
 - 在会话话题中发送 `/history`：同步最近 20 条用户/助手消息中尚未导出的部分。
 - `/history all`：从早到晚分批同步文字历史，每次最多 100 条，可重复执行。
 
@@ -157,6 +238,9 @@ Telegram Bot API 的 [`sendMessage.disable_notification`](https://core.telegram.
 `/notifications` 仍是自动投递总开关：关闭后暂停自动回复，`/silent` 不会重新开启投递。若只想接收无声回复，请保持 `/notifications` 开启，再开启 `/silent`。关闭静音只允许正常提醒，实际声音仍由手机与群组设置决定。
 
 ### 常见情况
+
+- 提示“目录不在允许的 workspaces 中”：重新运行配置向导，对保留目录限制回答 `n`；也可手工设置 `restrictToWorkspaces:false` 后重启 Telegram 服务。
+- 提示目录不存在或无权访问：使用 Pi 所在服务器的绝对路径，先创建目录并确认服务账户有权限。手机或本地电脑的路径不能直接作为远端服务器路径。
 
 - 提示忙碌或连接已满：同会话任务会串行执行；检查正在运行的任务、客户端连接和 Pi 会话服务日志。当前版本允许多个客户端附着同一会话，没有客户端独占租约。
 - 已关闭推送，Agent 等待授权：发送 `/status`，在卡片中选择授权或取消；也可 `/stop`。

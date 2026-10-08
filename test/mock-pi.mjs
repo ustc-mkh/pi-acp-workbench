@@ -6,18 +6,19 @@ import { join } from 'node:path';
 const sid = randomUUID(),
   file = join(process.cwd(), sid + '.jsonl');
 const model = {
-  provider: 'anthropic',
+  provider: process.env.PI_TEST_FAST_MODE ? 'openai-codex' : 'anthropic',
   id: 'claude-sonnet-4-6',
   name: 'Claude Sonnet 4.6',
   contextWindow: 200000,
   maxTokens: 8192,
   reasoning: true,
   input: ['text'],
-  api: 'anthropic-messages',
+  api: process.env.PI_TEST_FAST_MODE ? 'openai-codex-responses' : 'anthropic-messages',
   cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 };
 let messages = [],
   thinking = 'off';
+const fastEntries = [];
 writeFileSync(
   file,
   JSON.stringify({
@@ -66,10 +67,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply(model);
       break;
     case 'get_commands':
-      reply({ commands: [] });
+      reply({
+        commands: process.env.PI_TEST_FAST_MODE
+          ? [{ name: 'workbench-fast', source: 'extension' }]
+          : [],
+      });
       break;
     case 'get_entries':
-      reply({ entries: [], leafId: null });
+      reply({ entries: fastEntries, leafId: fastEntries.at(-1)?.id ?? null });
       break;
     case 'get_messages':
       reply({ messages });
@@ -98,6 +103,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({ type: 'agent_settled' });
       break;
     case 'prompt': {
+      if (process.env.PI_TEST_FAST_MODE && cmd.message.startsWith('/workbench-fast ')) {
+        const entry = {
+          type: 'custom',
+          id: randomUUID(),
+          parentId: fastEntries.at(-1)?.id ?? null,
+          customType: 'pi-acp-workbench/fast-mode',
+          data: { version: 1, enabled: cmd.message.endsWith(' on') },
+        };
+        fastEntries.push(entry);
+        appendFileSync(file, JSON.stringify(entry) + '\n');
+        reply({ disposition: 'handled' });
+        break;
+      }
       reply({});
       if (cmd.message === 'MODEL_ERROR') {
         const message = {

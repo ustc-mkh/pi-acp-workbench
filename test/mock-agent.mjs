@@ -92,7 +92,6 @@ if (mode === 'context-codex-options')
       ],
     },
   );
-if (mode === 'context-legacy') configOptions = configOptions.slice(0, 1);
 const reply = (id, result) =>
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
 const update = (update) =>
@@ -142,7 +141,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       ...(mode?.startsWith('context')
         ? {
             configOptions,
-            ...(['context-dependent', 'context-legacy'].includes(mode) ? { modes } : {}),
+            ...(mode === 'context-dependent' ? { modes } : {}),
           }
         : {}),
     });

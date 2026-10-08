@@ -21,6 +21,7 @@ export function createSessionSelector(
   const select = document.createElement('select');
   select.className = 'selector-native';
   select.setAttribute('aria-label', control.label);
+  if (control.description) select.title = control.description;
   select.disabled = disabled;
   for (const option of control.options) {
     const element = document.createElement('option');
@@ -33,7 +34,7 @@ export function createSessionSelector(
     const full =
       control.options.find((option) => option.id === select.value)?.name || control.current;
     label.textContent = control.kind === 'fast' ? `Fast · ${full}` : selectedLabel(control, full);
-    wrapper.dataset.tooltip = full;
+    wrapper.dataset.tooltip = control.description ? `${full} · ${control.description}` : full;
   };
   updateLabel();
   select.onchange = () => {

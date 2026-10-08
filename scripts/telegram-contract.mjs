@@ -75,25 +75,34 @@ async function publishEvent(id, text, extra = {}) {
 function pushUpdate(body) {
   telegram.updates.push({ update_id: ++telegram.updateId, ...body });
 }
-function message(text, { user = USER, thread, chat = CHAT } = {}) {
+function message(text, { user = USER, thread, chat = CHAT, reply } = {}) {
   pushUpdate({
     message: {
       message_id: telegram.messageId++,
       chat: { id: chat, type: 'supergroup' },
       from: { id: user },
       text,
+      ...(reply
+        ? {
+            reply_to_message: {
+              message_id: reply.messageId,
+              text: reply.params.text,
+              from: { id: 123, is_bot: true },
+            },
+          }
+        : {}),
       ...(thread ? { message_thread_id: thread } : {}),
     },
   });
 }
-function callback(data, { user = USER, thread } = {}) {
+function callback(data, { user = USER, thread, messageId = 88 } = {}) {
   pushUpdate({
     callback_query: {
       id: `cb${telegram.updateId}`,
       from: { id: user },
       data,
       message: {
-        message_id: 88,
+        message_id: messageId,
         chat: { id: CHAT, type: 'supergroup' },
         ...(thread ? { message_thread_id: thread } : {}),
       },
@@ -118,6 +127,31 @@ async function waitSent(method, match, timeout = 8000) {
   throw new Error(
     `no ${method} within ${timeout}ms\ninbox: ${JSON.stringify(telegram.inbox.map((i) => [i.method, typeof i.params.text === 'string' ? i.params.text.slice(0, 60) : undefined]))}`,
   );
+}
+
+const panels = () =>
+  telegram.inbox.filter((c) =>
+    c.params.reply_markup?.inline_keyboard?.flat().some((b) => b.callback_data?.startsWith('ui:')),
+  );
+async function panelWith(text) {
+  let panel;
+  await waitUntil(() => {
+    panel = panels().findLast((c) => c.params.text.includes(text));
+    return panel;
+  }, `no panel containing ${text}`);
+  return panel;
+}
+function click(panel, label, options = {}) {
+  const button = panel.params.reply_markup.inline_keyboard
+    .flat()
+    .find((b) => (typeof label === 'string' ? b.text === label : label.test(b.text)));
+  assert(button, `missing button ${label} on ${panel.params.text}`);
+  callback(button.callback_data, {
+    thread: panel.params.message_thread_id,
+    messageId: panel.messageId,
+    ...options,
+  });
+  return button.callback_data;
 }
 
 async function startTelegramMock() {
@@ -152,6 +186,9 @@ async function startTelegramMock() {
           // Hold briefly so the daemon isn't a busy loop when idle.
           const deadline = Date.now() + (params.timeout === 0 ? 0 : 300);
           while (Date.now() < deadline && !telegram.updates.length) await delay(15);
+          // A stopped daemon can leave a mock long poll in flight. It must not
+          // consume updates intended for the replacement daemon after disconnect.
+          if (res.destroyed) return;
           const offset = params.offset || 0;
           const batch = telegram.updates.filter((u) => u.update_id >= offset);
           telegram.updates = telegram.updates.filter((u) => u.update_id < offset);
@@ -164,9 +201,11 @@ async function startTelegramMock() {
           return reply({ message_thread_id: threadId });
         }
         case 'sendMessage':
-        case 'editMessageText':
-          telegram.inbox.push({ method, params });
-          return reply({ message_id: telegram.messageId++ });
+        case 'editMessageText': {
+          const messageId = method === 'editMessageText' ? params.message_id : telegram.messageId++;
+          telegram.inbox.push({ method, params, messageId });
+          return reply({ message_id: messageId });
+        }
         case 'answerCallbackQuery':
           telegram.inbox.push({ method, params });
           return reply(true);
@@ -183,14 +222,42 @@ async function startTelegramMock() {
 // ------------------------------------------------------------ session mock --
 const failedAcks = new Set();
 const sessions = { list: new Map(), next: 0, watchers: new Map(), pending: new Map(), calls: [] };
+const defaultConfigs = () => [
+  {
+    id: 'model',
+    type: 'select',
+    category: 'model',
+    name: 'Model',
+    currentValue: 'm0',
+    options: [
+      {
+        name: 'Provider',
+        options: Array.from({ length: 12 }, (_, i) => ({ value: `m${i}`, name: `Model ${i}` })),
+      },
+    ],
+  },
+  {
+    id: 'effort',
+    type: 'select',
+    category: 'thought_level',
+    name: 'Reasoning',
+    currentValue: 'high',
+    options: [
+      { value: 'low', name: 'Low' },
+      { value: 'high', name: 'High' },
+    ],
+  },
+];
 function snapshot(s) {
   return {
     id: s.id,
-    harness: 'pi',
+    harness: s.harness || 'pi',
+    updated: s.updated ?? s.number,
     cwd: s.cwd,
     title: s.title,
     sessionNumber: s.number,
     entries: s.entries,
+    configs: s.configs || defaultConfigs(),
     stored: true,
   };
 }
@@ -294,6 +361,9 @@ function startSessionMock(socketPath, outboxDir) {
                 number: ++sessions.next,
                 entries: [],
                 busy: false,
+                harness: item.params.harness || 'pi',
+                configs: defaultConfigs(),
+                updated: Date.now(),
               };
               sessions.list.set(s.id, s);
               ok(snapshot(s));
@@ -303,6 +373,22 @@ function startSessionMock(socketPath, outboxDir) {
               const s = sessions.list.get(item.params.sessionId);
               if (!s) return fail('会话不存在');
               ok({ snapshot: snapshot(s), busy: s.busy, permissions: s.permissions || [] });
+              break;
+            }
+            case 'request': {
+              const s = sessions.list.get(item.params.sessionId);
+              if (!s) return fail('会话不存在');
+              assert.equal(item.params.method, 'session/set_config_option');
+              const config = s.configs.find((c) => c.id === item.params.params.configId);
+              const options = config?.options.flatMap((o) => o.options || [o]);
+              if (!options?.some((o) => o.value === item.params.params.value))
+                return fail('无效选项');
+              config.currentValue = item.params.params.value;
+              if (config.id === 'model' && config.currentValue === 'm10') {
+                s.configs[1].options = [{ value: 'low', name: 'Low' }];
+                s.configs[1].currentValue = 'low';
+              }
+              ok({ configOptions: s.configs });
               break;
             }
             case '_watch': {
@@ -507,11 +593,16 @@ test('/new rejects a symlink escape from restricted workspaces', async () => {
 
 test('/new creates a session, a topic and binds them', async () => {
   message('/new main');
+  click(await panelWith('选择 Harness'), /Pi$/);
   await waitSent('createForumTopic');
   state.threadId = telegram.topics.at(-1);
   const reply = await waitSent('sendMessage', { message_thread_id: state.threadId });
-  assert.match(reply[0].params.text, /已连接到此话题/);
+  assert.match(reply[0].params.text, /Harness：pi/);
   assert.equal(sessions.list.size, 1);
+  await waitUntil(
+    async () => ((await savedState()).inbox || []).length === 0,
+    'new-session wizard did not finish',
+  );
 });
 
 test('plain text runs the prompt and the outbox reply lands in the topic', async () => {
@@ -829,11 +920,51 @@ test('/sync creates a topic once and retries failed history without importing it
   assert.equal(sent('sendMessage', { text: 'Pi：\nnew-topic-history' }).length, 1);
 });
 
+test('/sync uses updated order: latest five get ten, older sessions get two, and never backfills on repeat', async () => {
+  const sample = Array.from({ length: 7 }, (_, i) => ({
+    id: `preview-${i}`,
+    cwd: workspace,
+    title: `Preview ${i}`,
+    number: ++sessions.next,
+    updated: 1e15 + i,
+    busy: false,
+    entries: Array.from({ length: 25 }, (_, n) => ({
+      id: `preview-${i}-${n}`,
+      role: n % 2 ? 'assistant' : 'user',
+      text: `preview-entry-${i}-${n}`,
+    })),
+  }));
+  for (const i of [3, 0, 6, 1, 5, 2, 4]) sessions.list.set(sample[i].id, sample[i]);
+  message('/sync');
+  await waitSent('sendMessage', {
+    text: (t) => t.startsWith?.('已同步') && t.includes('最新 5 个会话各取最后 10 条'),
+  });
+  const saved = await savedState();
+  for (let i = 0; i < sample.length; i++) {
+    const count = i >= 2 ? 10 : 2;
+    assert.equal(saved.historySent[sample[i].id].length, count);
+    const output = sent('sendMessage', { text: (t) => t.includes?.(`preview-entry-${i}-`) });
+    assert.deepEqual(
+      output.map((c) => Number(c.params.text.split(`preview-entry-${i}-`)[1])),
+      Array.from({ length: count }, (_, n) => 25 - count + n),
+    );
+  }
+  const before = sent('sendMessage', { text: (t) => t.includes?.('preview-entry-') }).length;
+  message('/sync');
+  await waitSent('sendMessage', { text: (t) => t.startsWith?.('已同步 0 个会话') });
+  assert.equal(sent('sendMessage', { text: (t) => t.includes?.('preview-entry-') }).length, before);
+  message('/syncall');
+  await waitSent('sendMessage', { text: (t) => t.includes?.('/syncall 已移除') });
+  assert(
+    !sessions.calls.some((c) => c.method === 'prompt' && c.params.prompt?.[0]?.text === '/syncall'),
+  );
+});
+
 test('/help and /commands list all relay routes without executing prompts', async () => {
   const count = sessions.calls.filter((c) => c.method === 'prompt').length;
   message('/help', { thread: state.threadId });
   await waitSent('sendMessage', { text: (t) => t.includes?.('/commands') });
-  const help = sent('sendMessage').at(-1).params.text;
+  const help = sent('sendMessage').find((c) => c.params.text.includes('/commands')).params.text;
   message('/commands', { thread: state.threadId });
   await waitUntil(
     () => sent('sendMessage', { text: help }).length === 2,
@@ -844,6 +975,8 @@ test('/help and /commands list all relay routes without executing prompts', asyn
     'sessions',
     'open',
     'sync',
+    'menu',
+    'settings',
     'history',
     'status',
     'stop',
@@ -913,6 +1046,7 @@ test('permission cards reject unauthorized, wrong-topic and invalid-option callb
 test('canonical allowed directory aliases create sessions and repeated /open reuses the binding', async () => {
   const before = sessions.list.size;
   message(`/new ${join(root, 'allowed-alias')}`);
+  click(await panelWith('选择 Harness'), /Pi$/);
   await waitUntil(
     () => sessions.list.size === before + 1,
     'canonical alias did not create a session',
@@ -920,9 +1054,11 @@ test('canonical allowed directory aliases create sessions and repeated /open reu
   const created = [...sessions.list.values()].at(-1);
   assert.equal(created.cwd, workspace);
   const reply = `会话 #${created.number} 已连接到此话题。直接发文字开始；/stop 停止任务。`;
-  await waitSent('sendMessage', { text: reply });
+  await waitSent('sendMessage', {
+    text: (t) => t.includes?.('Harness：pi') && t.includes(`#${created.number}`),
+  });
   const count = telegram.topics.length;
-  for (let i = 2; i <= 3; i++) {
+  for (let i = 1; i <= 2; i++) {
     message(`/open ${created.number}`);
     await waitUntil(
       () => sent('sendMessage', { text: reply }).length === i,
@@ -930,6 +1066,183 @@ test('canonical allowed directory aliases create sessions and repeated /open reu
     );
   }
   assert.equal(telegram.topics.length, count);
+});
+
+test('inline model pagination updates actual settings, refreshes effort, and rejects stale or misplaced buttons', async () => {
+  const session = [...sessions.list.values()][0];
+  const count = sessions.calls.filter((c) => c.method === 'request').length;
+  message('/settings', { thread: state.threadId });
+  const settings = await panelWith('Harness：pi');
+  const original = settings.params.reply_markup.inline_keyboard
+    .flat()
+    .find((b) => b.text === '选择模型').callback_data;
+  callback(original, { thread: state.threadId + 999, messageId: settings.messageId });
+  callback(original, { thread: state.threadId, messageId: settings.messageId + 999 });
+  callback(original, { user: 99, thread: state.threadId, messageId: settings.messageId });
+  await waitSent('answerCallbackQuery', { text: (t) => t.includes?.('按钮已失效') });
+  assert.equal(sessions.calls.filter((c) => c.method === 'request').length, count);
+  click(settings, '选择模型');
+  const first = await panelWith('选择模型 · 第 1/2 页');
+  click(first, '下一页');
+  const second = await panelWith('选择模型 · 第 2/2 页');
+  const stale = second.params.reply_markup.inline_keyboard
+    .flat()
+    .find((b) => b.text.includes('Model 11')).callback_data;
+  click(second, /Model 10$/);
+  await waitUntil(() => session.configs[0].currentValue === 'm10', 'model was not applied');
+  await waitUntil(
+    () =>
+      panels().some(
+        (p) =>
+          p.params.text.includes('模型：Provider · Model 10') &&
+          p.params.text.includes('思考强度：Low'),
+      ),
+    'settings did not reflect dependent effort change',
+  );
+  callback(stale, { thread: state.threadId, messageId: second.messageId });
+  await waitUntil(
+    async () => ((await savedState()).inbox || []).length === 0,
+    'stale callback did not finish',
+  );
+  assert.equal(session.configs[0].currentValue, 'm10');
+  assert.equal(sessions.calls.filter((c) => c.method === 'request').length, count + 1);
+  const refreshed = panels().findLast((p) => p.params.text.includes('设置已更新'));
+  click(refreshed, '选择思考强度');
+  const effort = await panelWith('选择思考强度 ·');
+  assert.equal(
+    effort.params.reply_markup.inline_keyboard.flat().filter((b) => /Low|High/.test(b.text)).length,
+    1,
+  );
+  click(effort, /Low$/);
+  await waitUntil(
+    () => sessions.calls.filter((c) => c.method === 'request').length === count + 2,
+    'effort request did not reach service',
+  );
+});
+
+test('settings buttons reject changes during a task and preserve the active prompt', async () => {
+  const session = [...sessions.list.values()][0];
+  const count = sessions.calls.filter((c) => c.method === 'request').length;
+  message('wait', { thread: state.threadId });
+  await waitUntil(() => session.busy, 'held task was not started');
+  message('/menu', { thread: state.threadId });
+  const settings = await panelWith('Harness：pi');
+  click(settings, '选择模型');
+  const options = await panelWith('选择模型 ·');
+  click(options, /Model 0$/);
+  await waitUntil(
+    () => panels().some((p) => p.params.text.includes('任务正在执行或排队')),
+    'busy settings change did not show a clear message',
+  );
+  assert(session.busy);
+  assert.equal(sessions.calls.filter((c) => c.method === 'request').length, count);
+  message('/stop', { thread: state.threadId });
+  await waitUntil(() => !session.busy, 'held task did not stop');
+});
+
+test('new-session wizard accepts a directory reply, selects Codex, and consumes duplicate create clicks once', async () => {
+  const before = sessions.list.size;
+  const prompts = sessions.calls.filter((c) => c.method === 'prompt').length;
+  message('/new', { thread: state.threadId });
+  const projects = await panelWith('选择项目');
+  click(projects, '输入其他目录');
+  const [prompt] = await waitSent('sendMessage', {
+    text: (t) => t.startsWith?.('请输入服务器上的绝对目录路径'),
+  });
+  assert.equal(prompt.params.reply_markup.force_reply, true);
+  message(workspace, { thread: state.threadId, reply: prompt });
+  const harness = await panelWith('选择 Harness');
+  const data = click(harness, /Codex$/);
+  callback(data, { thread: state.threadId, messageId: harness.messageId });
+  await waitUntil(() => sessions.list.size === before + 1, 'Codex session was not created');
+  await waitUntil(
+    async () => ((await savedState()).inbox || []).length === 0,
+    'wizard callbacks did not finish',
+  );
+  const created = [...sessions.list.values()].at(-1);
+  assert.equal(created.harness, 'codex');
+  assert.equal(created.cwd, workspace);
+  assert.equal(sessions.list.size, before + 1);
+  assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, prompts);
+  await waitSent('sendMessage', { text: (t) => t.includes?.('Harness：codex') });
+  message(workspace, { thread: state.threadId, reply: prompt });
+  await waitSent('sendMessage', { text: (t) => t.includes?.('目录输入已失效') });
+  assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, prompts);
+});
+
+test('a cancelled wizard creates no session', async () => {
+  const before = sessions.list.size;
+  message('/new');
+  click(await panelWith('选择项目'), '取消');
+  await waitUntil(
+    () => sent('editMessageText', { text: (t) => t.startsWith?.('已取消') }).length > 0,
+    'wizard was not cancelled',
+  );
+  assert.equal(sessions.list.size, before);
+});
+
+test('setup uses the same ten/two preview sync and normal restarts do not sync', async () => {
+  await stopDaemon(daemon);
+  const s = {
+    id: 'setup-sync-session',
+    updated: 1e15 + 100,
+    cwd: workspace,
+    title: 'Setup sync',
+    number: ++sessions.next,
+    busy: false,
+    entries: Array.from({ length: 45 }, (_, i) => ({
+      id: `setup-${i}`,
+      role: 'user',
+      text: `setup-sync-entry-${i}`,
+    })),
+  };
+  sessions.list.set(s.id, s);
+  // Exercise the former 20-session cutoff as well as the 20-message window.
+  const extra = Array.from({ length: 21 }, (_, i) => ({
+    id: `setup-empty-${i}`,
+    cwd: workspace,
+    title: `Empty ${i}`,
+    number: ++sessions.next,
+    busy: false,
+    entries: Array.from({ length: 15 }, (_, n) => ({
+      id: `setup-extra-${i}-${n}`,
+      role: 'user',
+      text: `setup-extra-${i}-${n}`,
+    })),
+  }));
+  for (const session of extra) sessions.list.set(session.id, session);
+  await writeFile(configFile + '.sync-request', 'preview\n', { mode: 0o600 });
+  daemon = startDaemon();
+  await ready(daemon);
+  await waitUntil(async () => {
+    try {
+      await stat(configFile + '.sync-request');
+      return false;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return true;
+    }
+  }, 'setup sync request was not consumed');
+  const saved = await savedState();
+  assert.equal(saved.historySent[s.id].length, 10);
+  assert(extra.every((session) => saved.historySent[session.id]?.length === 2));
+  assert(extra.every((session) => saved.topics.some((topic) => topic.sessionId === session.id)));
+  const output = () => sent('sendMessage', { text: (t) => t.includes?.('setup-sync-entry-') });
+  assert.deepEqual(
+    output().map((c) => Number(c.params.text.split('setup-sync-entry-')[1])),
+    Array.from({ length: 10 }, (_, i) => i + 35),
+  );
+  s.entries.push({ id: 'setup-45', role: 'user', text: 'setup-sync-entry-45' });
+  await stopDaemon(daemon);
+  daemon = startDaemon();
+  await ready(daemon);
+  message('/sessions');
+  await waitSent('sendMessage', { text: (t) => t.includes?.('Empty 20') });
+  await waitUntil(
+    async () => ((await savedState()).inbox || []).length === 0,
+    'session list command was not durably completed after restart',
+  );
+  assert.equal(output().length, 10, 'normal restart must not auto-sync new history');
 });
 
 test('a second daemon refuses the same data directory', async () => {
@@ -954,7 +1267,10 @@ test('cursor write failure stops dispatch and restart retains the last durable o
     await waitUntil(
       () => daemon.exitCode !== null,
       'relay did not stop after cursor storage failure',
-    );
+    ).catch((error) => {
+      error.message += `\nlogs: ${daemon.logs}\noffset: ${before.offset}; updateId: ${telegram.updateId}\nlast polls: ${JSON.stringify(telegram.attempts.filter((a) => a.method === 'getUpdates').slice(-5))}`;
+      throw error;
+    });
     assert.notEqual(daemon.exitCode, 0);
     assert(daemon.logs.includes('无法保存 Telegram 游标'));
     assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, calls);

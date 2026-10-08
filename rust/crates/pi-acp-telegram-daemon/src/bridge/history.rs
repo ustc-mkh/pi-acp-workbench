@@ -77,7 +77,8 @@ impl Bridge {
         created.copied()
     }
 
-    pub(super) async fn command_sync(&self, thread_id: Option<i64>) -> Result<(), String> {
+    /// Returns false if another global sync already owns the operation.
+    pub async fn command_sync(&self, thread_id: Option<i64>) -> Result<bool, String> {
         if self.shared.syncing_all.swap(true, Ordering::SeqCst) {
             return self
                 .send(
@@ -86,15 +87,24 @@ impl Bridge {
                     json!({ "disable_notification": true }),
                 )
                 .await
+                .map(|()| false)
                 .map_err(|e| e.message);
         }
         let result = async {
+            self.send(
+                "正在同步：最新 5 个会话各取最后 10 条，其余会话各取最后 2 条文字历史。",
+                thread_id,
+                json!({ "disable_notification": true }),
+            )
+            .await
+            .map_err(|e| e.message)?;
             let sessions = self.shared.host.list().await.map_err(|e| e.to_string())?;
             let mut processed = 0usize;
             let mut created = 0usize;
-            for session in &sessions {
+            for (index, session) in sessions.iter().enumerate() {
+                let limit = if index < 5 { 10 } else { 2 };
                 if self.shared.opts.stop.is_cancelled() {
-                    break;
+                    return Err("历史同步已中断，可重新执行命令继续。".into());
                 }
                 let bound = self
                     .shared
@@ -104,25 +114,23 @@ impl Bridge {
                     .topics
                     .iter()
                     .any(|t| t.session_id == session.id);
-                if bound && self.pending_history(&session.id, true).await?.is_empty() {
+                if bound && self.pending_history(&session.id, Some(limit)).await?.is_empty() {
                     continue;
                 }
                 let topic = self.ensure_topic(session).await.map_err(|e| e.message)?;
                 if !bound {
                     created += 1;
                 }
-                self.sync_history(&session.id, topic, true).await?;
+                self.sync_history(&session.id, topic, Some(limit), true).await?;
                 processed += 1;
-                if processed >= SYNC_BATCH {
-                    break;
-                }
             }
             self.send(
-                &format!("已同步 {processed} 个会话，其中新建 {created} 个话题。每次最多 20 个会话、每个会话 100 条文字消息；再次 /sync 会跳过已同步内容并继续，无需另发 /history。"),
+                &format!("已同步 {processed} 个会话，其中新建 {created} 个话题。最新 5 个会话各取最后 10 条，其余各取最后 2 条；已同步内容自动跳过。在会话话题手动执行 /history 获取更多消息，/history all 分批获取完整历史。"),
                 thread_id,
                 json!({ "disable_notification": true }),
             )
             .await
+            .map(|()| true)
             .map_err(|e| e.message)
         }
         .await;
@@ -135,7 +143,7 @@ impl Bridge {
     pub(super) async fn pending_history(
         &self,
         session_id: &str,
-        all: bool,
+        limit: Option<usize>,
     ) -> Result<Vec<(String, String)>, String> {
         let entries: Vec<Value> = self
             .shared
@@ -161,15 +169,10 @@ impl Bridge {
             .and_then(|h| h.get(session_id))
             .cloned()
             .unwrap_or_default();
-        let sliced = if all {
-            entries
+        let sliced = if let Some(limit) = limit {
+            entries.into_iter().rev().take(limit).rev().collect()
         } else {
             entries
-                .into_iter()
-                .rev()
-                .take(HISTORY_SLICE)
-                .rev()
-                .collect()
         };
         Ok(sliced
             .into_iter()
@@ -201,7 +204,8 @@ impl Bridge {
         &self,
         session_id: &str,
         thread_id: i64,
-        all: bool,
+        limit: Option<usize>,
+        sync_preview: bool,
     ) -> Result<(), String> {
         if !self
             .shared
@@ -213,7 +217,7 @@ impl Bridge {
             return Err("此话题正在同步历史。".into());
         }
         let result = async {
-            let selected = self.pending_history(session_id, all).await?;
+            let selected = self.pending_history(session_id, limit).await?;
             for (key, body) in &selected {
                 self.send(
                     body,
@@ -237,7 +241,9 @@ impl Bridge {
                 &format!(
                     "已同步 {} 条历史消息。{}",
                     selected.len(),
-                    if selected.len() == HISTORY_MAX {
+                    if sync_preview {
+                        "手动执行 /history 获取更多消息，/history all 分批获取完整历史。"
+                    } else if selected.len() == HISTORY_MAX {
                         "可再次 /history all 继续。"
                     } else {
                         ""

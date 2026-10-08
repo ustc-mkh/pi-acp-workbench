@@ -60,13 +60,14 @@ it('fails closed on missing baselines, version gaps and missing order entries', 
     stream.receive({ ...patch(), entries: [{ id: 'new', role: 'assistant', text: 'new' }] }),
   ).toThrow('缺少顺序');
 });
-it('resets baselines on unwatch/reconnect and accepts legacy full state events', () => {
+it('resets baselines on unwatch/reconnect and rejects unversioned states', () => {
   const stream = new ServiceStateStream();
   stream.receive(initial());
   stream.clear('one');
   expect(() => stream.receive(patch())).toThrow();
-  const full = { ...initial(), revision: undefined };
-  expect(stream.receive(full)).toBe(full);
+  // Exercise an old wire payload at the JSON boundary, without weakening current types.
+  const full: ServiceStateEvent = JSON.parse(JSON.stringify({ ...initial(), revision: undefined }));
+  expect(() => stream.receive(full)).toThrow('版本无效');
   stream.receive(initial());
   stream.clear();
   expect(() => stream.receive(patch())).toThrow();

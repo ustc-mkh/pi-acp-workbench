@@ -125,6 +125,8 @@ async fn topic_write_failure_does_not_publish_or_poison_the_topic_cache() {
         cwd: "/work".into(),
         title: "One".into(),
         session_number: Some(1),
+        harness: "pi".into(),
+        updated: 0,
     };
     assert!(f.bridge.ensure_topic(&session).await.is_err());
     assert!(f.bridge.shared.store.read().await.topics.is_empty());

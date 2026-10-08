@@ -53,8 +53,10 @@ app.innerHTML = /* HTML */ `<header>
       >
         ◷</button
       ><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button
-      ><button id="copy-conversation" data-tooltip="复制完整对话原文" aria-label="复制完整对话">
-        ⧉</button
+      ><button id="models-toggle" data-tooltip="选择显示的模型" aria-label="管理模型">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 4h14M3 10h14M3 16h14M7 2v4M13 8v4M7 14v4" />
+        </svg></button
       ><button
         id="statistics-toggle"
         data-tooltip="用量统计"
@@ -167,9 +169,6 @@ app.innerHTML = /* HTML */ `<header>
         <div class="composer-tools">
           <button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button>
           <div id="selectors"></div>
-          <button id="models-toggle" data-tooltip="选择显示的模型" aria-label="管理模型">
-            模型管理
-          </button>
           <span id="hint">Enter 发送 · Shift+Enter 换行</span>
           <div class="composer-actions">
             <div id="usage" role="img" tabindex="0" aria-label="上下文占用">
@@ -307,7 +306,6 @@ el('new').onclick = () => {
 };
 el('attach').onclick = () => send({ type: 'attach' });
 el('export').onclick = () => send({ type: 'export' });
-el('copy-conversation').onclick = () => send({ type: 'copyConversation' });
 el('cancel-context').onclick = () => send({ type: 'cancelContext' });
 let statisticsOpen = false,
   pricesOpen = false,

@@ -16,6 +16,8 @@ pub struct SessionStub {
     pub cwd: String,
     pub title: String,
     pub session_number: Option<u64>,
+    pub harness: String,
+    pub updated: u64,
 }
 
 #[derive(Debug)]
@@ -51,6 +53,12 @@ fn stub(value: &Value) -> Option<SessionStub> {
         cwd: value.get("cwd")?.as_str()?.to_string(),
         title: value.get("title")?.as_str()?.to_string(),
         session_number: value.get("sessionNumber").and_then(Value::as_u64),
+        harness: value
+            .get("harness")
+            .and_then(Value::as_str)
+            .unwrap_or("pi")
+            .into(),
+        updated: value.get("updated").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
@@ -92,6 +100,12 @@ impl Sessions {
                 }
             }
         }
+        sessions.sort_by(|a, b| {
+            b.updated
+                .cmp(&a.updated)
+                .then_with(|| b.session_number.cmp(&a.session_number))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(sessions)
     }
 
@@ -120,6 +134,10 @@ impl Sessions {
         serde_json::from_value(value).map_err(|_| WireError::Protocol("events.ack response"))
     }
     pub async fn create(&self, workspace: Option<&str>) -> Result<SessionStub, WireError> {
+        self.create_with_harness(workspace, "pi").await
+    }
+
+    pub async fn resolve_workspace(&self, workspace: Option<&str>) -> Result<String, WireError> {
         let cwd = workspace
             .filter(|w| w.starts_with('/'))
             .map(str::to_string)
@@ -149,11 +167,64 @@ impl Sessions {
         } else {
             cwd
         };
+        let canonical = tokio::fs::canonicalize(&cwd)
+            .await
+            .map_err(|_| WireError::Service("工作区不是可访问的目录。".into()))?;
+        if !canonical.is_dir() {
+            return Err(WireError::Service("工作区不是目录。".into()));
+        }
+        Ok(canonical.to_string_lossy().into_owned())
+    }
+
+    pub async fn workspace_choices(&self) -> Result<Vec<(String, String)>, WireError> {
+        let mut choices = Vec::new();
+        for (name, path) in &self.workspaces {
+            if let Ok(cwd) = self.resolve_workspace(Some(path)).await {
+                choices.push((name.clone(), cwd));
+            }
+        }
+        for session in self.list().await? {
+            if choices.iter().any(|(_, cwd)| cwd == &session.cwd) {
+                continue;
+            }
+            if let Ok(cwd) = self.resolve_workspace(Some(&session.cwd)).await {
+                choices.push((cwd.clone(), cwd));
+            }
+            if choices.len() >= 12 {
+                break;
+            }
+        }
+        choices.truncate(12);
+        Ok(choices)
+    }
+
+    pub async fn create_with_harness(
+        &self,
+        workspace: Option<&str>,
+        harness: &str,
+    ) -> Result<SessionStub, WireError> {
+        if !matches!(harness, "pi" | "codex" | "claude") {
+            return Err(WireError::Service("未知 Harness。".into()));
+        }
+        let cwd = self.resolve_workspace(workspace).await?;
         let snapshot = self
             .client
-            .call_timeout("create", json!({ "cwd": cwd }), None)
+            .call_timeout("create", json!({ "cwd": cwd, "harness": harness }), None)
             .await?;
         stub(&snapshot).ok_or(WireError::Protocol("create snapshot"))
+    }
+
+    pub async fn set_config(
+        &self,
+        id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), WireError> {
+        self.authorize(id).await?;
+        self.client.call_timeout("request", json!({"sessionId":id,
+            "method":"session/set_config_option","params":{"configId":config_id,"value":value}
+        }), None).await?;
+        Ok(())
     }
 
     pub async fn state(&self, id: &str) -> Result<Value, WireError> {

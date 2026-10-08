@@ -1,8 +1,8 @@
-import { it, expect, beforeAll } from 'vitest';
+import { it, expect, beforeAll, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, delimiter } from 'node:path';
 import { AgentProcess } from './support/acp-client';
 import type { Inspection } from '../src/telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
@@ -16,6 +16,76 @@ beforeAll(() => {
     ],
     { cwd: process.cwd(), stdio: 'pipe' },
   );
+});
+it.each(['user-bin', 'npm-prefix/bin'])(
+  'starts Pi from PATH in %s without an executable override',
+  async (installation) => {
+    const dir = await mkdtemp(join(tmpdir(), 'pi-path-test-'));
+    let agent: AgentProcess | undefined;
+    vi.stubEnv('PI_ACP_PI_COMMAND', undefined);
+    try {
+      const bin = join(dir, installation);
+      await mkdir(bin, { recursive: true });
+      await symlink(resolve('test/mock-pi.mjs'), join(bin, 'pi'));
+      agent = new AgentProcess({
+        command: process.execPath,
+        args: [resolve('dist/pi-adapter.mjs')],
+        cwd: dir,
+        env: {
+          PATH: bin + delimiter + (process.env.PATH || ''),
+          PI_ACP_WORKBENCH_STATE_DIR: join(dir, 'adapter-state'),
+          PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
+          PI_TEST_AUDIT: join(dir, 'audit.jsonl'),
+        },
+        update: () => {},
+        permission: async () => ({ outcome: { outcome: 'cancelled' } }),
+        closed: () => {},
+        log: () => {},
+      });
+      await agent.initialize();
+      const session = await agent.createSession();
+      expect(session.sessionId).toBeTruthy();
+    } finally {
+      await agent?.stop();
+      vi.unstubAllEnvs();
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+it('exposes and toggles Fast mode through the bundled ACP config API', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-fast-adapter-'));
+  let agent: AgentProcess | undefined;
+  try {
+    agent = new AgentProcess({
+      command: process.execPath,
+      args: [resolve('dist/pi-adapter.mjs')],
+      cwd: dir,
+      env: {
+        PI_ACP_PI_COMMAND: resolve('test/mock-pi.mjs'),
+        PI_ACP_WORKBENCH_STATE_DIR: join(dir, 'adapter-state'),
+        PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
+        PI_TEST_FAST_MODE: '1',
+      },
+      update: () => {},
+      permission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      closed: () => {},
+      log: () => {},
+    });
+    await agent.initialize();
+    const session = await agent.createSession();
+    expect(session.configOptions?.find((c) => c.id === 'fast-mode')?.currentValue).toBe('off');
+    for (const value of ['on', 'off']) {
+      const response = await agent.request('session/set_config_option', {
+        sessionId: session.sessionId,
+        configId: 'fast-mode',
+        value,
+      });
+      expect(response.configOptions.find((c) => c.id === 'fast-mode')?.currentValue).toBe(value);
+    }
+  } finally {
+    await agent?.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 it('negotiates real bundled ACP extensions, reads native billing/context and reports model errors', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-adapter-test-'));

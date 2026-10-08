@@ -4,11 +4,11 @@ use super::*;
 impl Bridge {
     pub(super) async fn dispatch_command(
         &self,
+        user_id: i64,
         command: Option<&str>,
         argument: Option<&str>,
         binding: Option<&Topic>,
         thread_id: Option<i64>,
-        parsed: &Option<(String, Option<String>, Option<String>)>,
         text: &str,
     ) -> Result<(), String> {
         // Session-bound commands share one policy gate. Sessions also checks
@@ -23,6 +23,8 @@ impl Bridge {
                     | "open"
                     | "sessions"
                     | "sync"
+                    | "menu"
+                    | "settings"
                     | "silent"
                     | "notifications"
             )
@@ -37,15 +39,18 @@ impl Bridge {
         }
         match command {
             Some("start" | "help" | "commands") => self
-                .send(HELP, thread_id, json!({ "disable_notification": true }))
-                .await
-                .map_err(|e| e.message),
+                .help_panel(user_id, thread_id).await,
+            Some("menu" | "settings") => self.open_panel(user_id, thread_id, self.menu_view(thread_id).await).await,
             Some("silent") => self.silent_menu(thread_id).await.map_err(|e| e.message),
             Some("notifications") => self
                 .notification_menu(thread_id)
                 .await
                 .map_err(|e| e.message),
-            Some("sync") => self.command_sync(thread_id).await,
+            Some("sync") => self
+                .command_sync(thread_id)
+                .await
+                .map(|_| ()),
+            Some("syncall") => self.send_plain("/syncall 已移除。使用 /sync 同步摘要，在会话话题使用 /history 或 /history all 获取更多历史。", thread_id).await.map_err(|e| e.message),
             Some("history") => {
                 let Some(binding) = binding else {
                     return Err("请先用 /open 编号进入会话话题。".into());
@@ -53,7 +58,8 @@ impl Bridge {
                 self.sync_history(
                     &binding.session_id,
                     thread_id.unwrap_or(0),
-                    argument == Some("all"),
+                    if argument == Some("all") { None } else { Some(HISTORY_SLICE) },
+                    false,
                 )
                 .await
             }
@@ -183,6 +189,13 @@ impl Bridge {
                     .map_err(|e| e.message)
             }
             Some("new" | "open") => {
+                if command == Some("new") {
+                    let view = if let Some(workspace) = argument {
+                        let cwd = self.shared.host.resolve_workspace(Some(workspace)).await.map_err(|e| e.to_string())?;
+                        ui::View::Harness { cwd, preferred: "pi".into() }
+                    } else { ui::View::Workspaces };
+                    return self.open_panel(user_id, thread_id, view).await;
+                }
                 let session = if command == Some("new") {
                     self.shared
                         .host
@@ -218,7 +231,8 @@ impl Bridge {
                     Some(topic),
                 )
                 .await
-                .map_err(|e| e.message)
+                .map_err(|e| e.message)?;
+                self.open_panel(user_id, Some(topic), ui::View::Settings(session.id.clone())).await
             }
             _ => {
                 let Some(binding) = binding else {
@@ -226,7 +240,7 @@ impl Bridge {
                         "此话题尚未绑定会话，请先发送 /new 或 /open 编号，再进入新话题。".into(),
                     );
                 };
-                let prompt = if let Some((cmd, _bot, _)) = parsed {
+                let prompt = if let Some((cmd, _bot, _)) = parse_command(text) {
                     format!(
                         "/{cmd}{}",
                         argument.map(|a| format!(" {a}")).unwrap_or_default()
@@ -242,10 +256,11 @@ impl Bridge {
 }
 
 const HELP: &str = "会话与历史
-/new 绝对路径或工作区名 — 新建会话及话题；仅一个别名时可省略参数
+/menu 或 /settings — 打开按钮面板，选择模型和思考强度
+/new [绝对路径或工作区名] — 打开新建向导，选择项目和 Harness
 /sessions — 列出最近 50 个会话
 /open 编号或 Session ID — 打开已有会话话题
-/sync — 自动建立话题并同步未导出的文字历史；大批量时重复执行继续
+/sync — 最新 5 个会话各同步最后 10 条文字消息，其余各同步最后 2 条
 /history — 补充本话题最近 20 条文字历史
 /history all — 补充本话题完整文字历史，每次最多 100 条
 
@@ -263,6 +278,13 @@ const HELP: &str = "会话与历史
 在会话话题直接发文字即可对话。其他命令（如 /compact）原样转交当前 Agent；可用命令取决于 Agent 配置。";
 
 impl Bridge {
+    async fn help_panel(&self, user: i64, thread: Option<i64>) -> Result<(), String> {
+        self.send(HELP, thread, json!({"disable_notification":true}))
+            .await
+            .map_err(|e| e.message)?;
+        self.open_panel(user, thread, self.menu_view(thread).await)
+            .await
+    }
     pub(super) async fn dispatch(&self, update: &Value) -> Result<(), String> {
         if self.shared.opts.stop.is_cancelled() {
             return Ok(());
@@ -284,6 +306,18 @@ impl Bridge {
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            if data.starts_with("ui:") {
+                if let Err(error) = self.panel_callback(callback).await {
+                    self.report(&error).await;
+                    let _ = self
+                        .send_plain(
+                            &format!("面板操作失败：{error}。使用 /menu 重新打开。"),
+                            thread_id,
+                        )
+                        .await;
+                }
+                return Ok(());
+            }
             match data {
                 "notify:on" | "notify:off" => {
                     let on = data == "notify:on";
@@ -340,6 +374,28 @@ impl Bridge {
                 return Ok(());
             }
         }
+        let relay_reply = parsed.as_ref().is_some_and(|(cmd, _, _)| {
+            matches!(
+                cmd.to_ascii_lowercase().as_str(),
+                "menu"
+                    | "settings"
+                    | "new"
+                    | "open"
+                    | "start"
+                    | "help"
+                    | "commands"
+                    | "stop"
+                    | "interrupt"
+                    | "status"
+                    | "sessions"
+                    | "sync"
+                    | "syncall"
+                    | "history"
+            )
+        });
+        if !relay_reply && self.directory_reply(update).await? {
+            return Ok(());
+        }
         let (command, argument) = parsed
             .as_ref()
             .map(|(c, _, a)| {
@@ -395,11 +451,11 @@ impl Bridge {
         }
         match self
             .dispatch_command(
+                message["from"]["id"].as_i64().unwrap_or(0),
                 command.as_deref(),
                 argument.as_deref(),
                 binding.as_ref(),
                 thread_id,
-                &parsed,
                 text,
             )
             .await

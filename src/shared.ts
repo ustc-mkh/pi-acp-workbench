@@ -90,7 +90,6 @@ export type UiMessage =
         | 'export'
         | 'refreshStatistics'
         | 'cancelContext'
-        | 'copyConversation'
         | 'releaseSession'
         | 'refreshHistory';
     }

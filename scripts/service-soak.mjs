@@ -86,10 +86,11 @@ const api = createServer((req, res) => {
       return reply(batch);
     }
     if (method === 'sendMessage' || method === 'editMessageText') {
-      sent.push({ method, params });
+      const responseId = method === 'editMessageText' ? params.message_id : ++messageId;
+      sent.push({ method, params, messageId: responseId });
       if (sent.length > 200) sent.shift();
       if (method === 'sendMessage') counters.deliveries++;
-      return reply({ message_id: ++messageId });
+      return reply({ message_id: responseId });
     }
     if (method === 'createForumTopic') return reply({ message_thread_id: ++topicId });
     return reply(true);
@@ -262,11 +263,37 @@ const prompt = async (id, text, requestId) => {
 };
 const delivered = (text) =>
   sent.some((s) => s.method === 'sendMessage' && s.params.text?.includes(text));
+async function newPhoneSession() {
+  const previous = messageId;
+  message('/new main');
+  const chooser = await until(
+    () =>
+      sent.findLast(
+        (s) =>
+          s.method === 'sendMessage' &&
+          s.messageId > previous &&
+          s.params.text?.includes('选择 Harness'),
+      ),
+    'harness chooser',
+  );
+  const data = chooser.params.reply_markup.inline_keyboard
+    .flat()
+    .find((b) => /Pi$/.test(b.text)).callback_data;
+  updates.push({
+    update_id: ++updateId,
+    callback_query: {
+      id: `cb${updateId}`,
+      from: { id: 42 },
+      data,
+      message: { message_id: chooser.messageId, chat: { id: -1009999, type: 'supergroup' } },
+    },
+  });
+}
 try {
   service = await start(sessionBinary, sessionsConfig, 'sessions');
   relay = await start(relayBinary, telegramConfig, 'telegram', relayEnv);
   client = await ContractWire.open(join(root, 'service', 'sessions.sock'));
-  message('/new main');
+  await newPhoneSession();
   const binding = await until(async () => {
     try {
       return JSON.parse(await readFile(bindingFile, 'utf8')).topics[0];
@@ -344,7 +371,7 @@ try {
       const previousThread = Math.max(
         ...JSON.parse(await readFile(bindingFile, 'utf8')).topics.map((t) => t.threadId),
       );
-      message('/new main');
+      await newPhoneSession();
       phoneId = (
         await until(async () => {
           const topics = JSON.parse(await readFile(bindingFile, 'utf8')).topics;

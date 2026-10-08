@@ -123,6 +123,9 @@ try {
     await page.waitForTimeout(75);
   };
   await emit(state);
+  assert.equal(await page.locator('header .toolbar #models-toggle').count(), 1);
+  assert.equal(await page.locator('footer #models-toggle').count(), 0);
+  assert.equal(await page.locator('#copy-conversation').count(), 0);
   assert(!scripts.some((url) => /mermaid/i.test(url)), 'Mermaid loaded before any diagram');
   const inputHeight = await page
     .locator('#input')
@@ -410,6 +413,7 @@ try {
     {
       id: 'fast-mode',
       name: 'Fast mode',
+      description: '请求优先级服务，可能增加费用；需模型和账户支持。',
       type: 'select',
       currentValue: 'off',
       options: [
@@ -490,6 +494,10 @@ try {
   state.status = 'ready';
   await emit(state);
   await page.locator('#selectors select[aria-label="Fast mode"]').selectOption('on');
+  assert(
+    (await page.locator('.selector-fast').getAttribute('data-tooltip')).includes('可能增加费用'),
+  );
+  await page.screenshot({ path: resolve(artifacts, 'preview-pi-fast.png') });
   assert(
     (await page.evaluate(() => window.messages)).some(
       (m) => m.type === 'config' && m.id === 'fast-mode' && m.value === 'on',

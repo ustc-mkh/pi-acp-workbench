@@ -42,8 +42,10 @@ cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 
 编辑两个文件：
 
-- `sessions.json`：将 `env.PI_ACP_PI_COMMAND` 改为 Pi 可执行文件的绝对路径；Pi 的代理变量也放在 `env` 中。
+- `sessions.json`：默认从服务的 PATH 查找 `pi`，无需填写安装路径；Pi 的代理变量放在 `env` 中。只有需要指定某个 Pi 安装时才设置 `env.PI_ACP_PI_COMMAND`。
 - `pi-sessions.service`：将仓库的占位路径替换为实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。该目录同时包含 JS 适配器；Node 必须在服务的 PATH 中，否则在 `sessions.json` 显式设置 Node `command` 和适配器 `args`。
+
+示例 unit 的 PATH 包含 `%h/.local/bin` 和常用系统安装目录，`%h` 由 systemd 展开为运行账户的 home。使用 nvm、Volta 或自定义 npm prefix 时，将其 Node / Pi 所在目录加入该 unit 的 PATH；systemd 不会读取交互式 shell 的启动文件。不要把某台机器的 Pi 绝对路径复制到其他机器。
 
 ```bash
 chmod 600 ~/.config/pi-acp-workbench/sessions.json
@@ -57,70 +59,53 @@ systemctl --user enable --now pi-sessions
 
 打开并信任项目文件夹，点击活动栏 **π** → **新建会话**。Enter 发送，Shift+Enter 换行；编辑器右键可将选区加入对话。
 
+Telegram 可在仓库执行 `npm run telegram:setup`，按向导输入 token、在话题群发送配对码，即可完成配置和用户级自启动，无需 sudo。详见 [Telegram 配置](docs/telegram.md#一键配置推荐)。
+
+右上角的模型管理按钮可选择输入框模型列表中显示的模型。Pi 使用 OpenAI / Codex Responses 时提供 Fast mode 开关，请求优先级服务，可能增加费用；是否可用取决于模型、账户和 Pi 扩展支持。它与思考级别独立，默认关闭，设置随原生会话分支恢复。
+
 插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，自定义路径使用 VS Code 设置 `piAcp.serviceSocket`。历史记录默认保存在该服务器账户的 `~/.pi/pi-acp-workbench/history/`。
 
 模型与 thinking 组合固定保存在 `~/.pi/pi-acp-workbench/preferences/{pi,codex,claude}.json`，按 harness 隔离、跨工作区共享。成功选择立即保存，新建自动读取；恢复旧会话保留其自身设置，不覆盖默认组合，实际发送或修改设置后才更新。关闭历史保存也不影响偏好。Pi 桌面与 Telegram 共用服务端偏好；自定义 `--data-dir` 时 Pi 使用该目录下的 `preferences/pi.json`。旧工作区偏好不自动迁移。
 
 ## 接入 Telegram
 
-### 1. 创建 Bot 和话题群组
+### 1. 准备 Bot 和话题群组
 
-在 Telegram 的 **@BotFather** 中使用 `/newbot` 创建 Bot。建立私人群组并启用 **Topics / 话题**，将 Bot 加入群组、设为管理员并允许管理话题。
+已有 Bot token 可直接使用。建立私人群组并启用 **Topics / 话题**，将 Bot 加入群组、设为管理员并允许管理话题。服务器需能访问 Telegram API；使用长轮询，无需开放入站端口。
 
-服务器需要能够访问 Telegram API；接入使用长轮询，无需开放入站端口。
+### 2. 运行配置向导
 
-### 2. 配置身份与 Token
-
-创建 `~/.config/pi-acp-workbench/telegram.json`，替换下列数字 ID：
-
-```json
-{
-  "chatId": -1001234567890,
-  "allowedUserIds": [123456789],
-  "workspaces": {
-    "project": "/absolute/path/to/project"
-  },
-  "restrictToWorkspaces": true
-}
-```
-
-只有指定群组中的指定用户可以控制 Pi。`workspaces` 提供快捷别名；当前示例的 `restrictToWorkspaces:true` 仅允许这些目录根。使用绝对路径也须匹配允许目录；需要允许账户可访问的其他目录时设置为 `false`。配置字段的缺省值是 `false`，仓库生产示例显式开启限制。
-
-创建 `~/.config/pi-acp-workbench/telegram.env`：
-
-```text
-PI_TELEGRAM_BOT_TOKEN=替换为BotFather给出的token
-```
+在运行 Pi 的服务器上，以同一用户账户执行：
 
 ```bash
-chmod 600 ~/.config/pi-acp-workbench/telegram.json ~/.config/pi-acp-workbench/telegram.env
-cp examples/pi-telegram.service ~/.config/systemd/user/pi-telegram.service
+# 在本仓库中运行
+npm run telegram:setup
 ```
 
-编辑 `pi-telegram.service` 中的仓库绝对路径，指向 `service-dist/pi-acp-telegram-daemon`，然后启动：
+如果使用包含配置脚本的服务发布包，在解压目录运行 `node scripts/setup-telegram.mjs`，无需安装 npm 依赖。
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now pi-telegram
-loginctl enable-linger "$USER"
-```
+按提示隐藏输入 token，用个人身份在群里发送终端显示的配对码，再确认应用配置。向导自动获取群组和用户 ID、保存配置并启动用户级服务，全程无需 sudo。Node.js 22+、Pi、curl、用户级 systemd 和服务程序需事先安装。
 
-`linger` 让用户服务在退出 SSH 后继续运行。Token 不要提交到仓库；Pi 和 Telegram 服务使用同一账户。获取数字 ID、代理与部署排错见 [Telegram 指南](docs/telegram.md)。
+首次配置无需选择或登记项目目录。完成后用 `/menu` 的按钮向导选择目录和 Harness，或发送 `/new /项目的绝对路径` 直接选择 Harness，可在当前服务账户能访问的任意已有目录创建会话；换项目无需重新配置。路径指的是服务器上的目录。
+
+向导尝试启用 linger，使服务退出登录后继续运行并在开机时启动；若本机策略不允许，会明确提示，目前只保证登录后自启动。手工配置、代理、已有目录限制的取消方式见 [Telegram 指南](docs/telegram.md)。
 
 ### 3. 在手机上使用
 
 在配置的群组中发送命令，进入对应话题后直接发文字即可继续对话。
 
-| 命令                               | 用途                                                           |
-| ---------------------------------- | -------------------------------------------------------------- |
-| `/new project` 或 `/new /绝对路径` | 新建 Pi 会话及独立话题                                         |
-| `/sync`                            | 自动创建话题并同步旧会话消息；大量历史可重复执行继续，自动去重 |
-| `/sessions`、`/open 编号`          | 列出或打开已有会话                                             |
-| `/status`                          | 查看任务状态、当前回复和待授权操作                             |
-| `/stop`、`/interrupt 新消息`       | 停止任务，或停止后发送新指令                                   |
-| `/notifications`                   | 自动投递总开关，默认开启；关闭后暂停自动回复与授权卡片         |
-| `/silent`                          | 静音开关，默认关闭；开启后正常投递但不请求声音提醒             |
-| `/help` 或 `/commands`             | 查看全部命令与说明                                             |
+| 命令                         | 用途                                                           |
+| ---------------------------- | -------------------------------------------------------------- |
+| `/menu`、`/settings`         | 按钮选择模型、思考强度、新建 Harness 和会话                    |
+| `/history`、`/history all`   | 手动补充本话题更多或完整历史                                   |
+| `/new /绝对路径`             | 选择 Harness，在指定服务器目录新建会话及独立话题               |
+| `/sync`                      | 最新 5 个会话各取最后 10 条，其余各取最后 2 条；setup 同样处理 |
+| `/sessions`、`/open 编号`    | 列出或打开已有会话                                             |
+| `/status`                    | 查看任务状态、当前回复和待授权操作                             |
+| `/stop`、`/interrupt 新消息` | 停止任务，或停止后发送新指令                                   |
+| `/notifications`             | 自动投递总开关，默认开启；关闭后暂停自动回复与授权卡片         |
+| `/silent`                    | 静音开关，默认关闭；开启后正常投递但不请求声音提醒             |
+| `/help` 或 `/commands`       | 查看全部命令与说明                                             |
 
 若希望收到回复但不响铃，保持 `/notifications` 开启，再开启 `/silent`。静音仍可能显示手机通知，实际效果受 Telegram 和系统设置影响。两个开关跨服务重启保留。
 

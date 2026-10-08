@@ -19,13 +19,11 @@ export class ServiceStateStream {
     if (event?.type === 'state') {
       const id = event.snapshot?.id;
       const revision = event.revision;
-      if (
-        typeof id === 'string' &&
-        typeof revision === 'number' &&
-        Number.isSafeInteger(revision)
-      ) {
+      if (typeof id === 'string' && Number.isSafeInteger(revision) && revision > 0) {
         if (!this.sessions.has(id) && this.sessions.size >= 32) throw new Error('会话状态订阅过多');
         this.sessions.set(id, { revision, state: event });
+      } else {
+        throw new Error('会话状态版本无效，请更新服务并重新连接');
       }
       return event;
     }

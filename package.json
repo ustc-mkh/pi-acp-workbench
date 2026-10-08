@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -147,13 +147,14 @@
     "test": "npm run check && npm run build:service:test && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && npm run build:service:test && vitest run",
     "test:full": "node scripts/test-full.mjs",
-    "test:runner": "node --test scripts/test-pool.test.mjs scripts/test-reports.test.mjs",
+    "test:runner": "node --test scripts/test-pool.test.mjs scripts/test-reports.test.mjs scripts/telegram-setup.test.mjs",
     "verify": "npm run clippy && npm run test:full && npm run test:browser",
     "package": "vsce package --no-dependencies --allow-missing-repository --out ../pi-acp-workbench-$npm_package_version.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs",
     "test:harness": "node scripts/harness-reconnect-smoke.mjs",
     "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs",
+    "test:pi-fast": "node scripts/pi-fast-smoke.mjs",
     "test:contract": "npm run build:service:test && node scripts/service-contract.mjs",
     "test:contract:telegram": "cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/telegram-contract.mjs",
     "test:integration:rust": "npm run build:service:test && cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/rust-integration.mjs",
@@ -167,7 +168,8 @@
     "test:service:artifact": "node scripts/service-artifact-smoke.mjs",
     "package:services": "node scripts/package-services.mjs",
     "clippy": "cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings",
-    "fixtures": "node scripts/export-fixtures.mjs"
+    "fixtures": "node scripts/export-fixtures.mjs",
+    "telegram:setup": "node scripts/setup-telegram.mjs"
   },
   "overrides": {
     "katex": "$katex"

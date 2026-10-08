@@ -9,7 +9,7 @@ export type {
   ErrorCode,
 } from './session-protocol.generated';
 
-export type ServiceStateEvent = ServiceState & { type: 'state'; revision?: number };
+export type ServiceStateEvent = ServiceState & { type: 'state'; revision: number };
 export type ServiceEvent =
   | ServiceStateEvent
   | { type: 'update'; notification: acp.SessionNotification }

@@ -109,6 +109,8 @@ Rust stream 单测验证预览只保留小容量缓冲，Unicode 和过量容量
 
 ## 发布步骤
 
+Pi Fast mode 修改可执行 `npm run test:pi-fast`：需要 PATH 中已安装 Pi，在隔离设置/原生会话目录使用占位 API key、关闭缓存预热，验证真实 ACP 的 Off / On、空会话重启/load 和离线历史样例的原生设置优先级，不发送模型提示词。请求 payload 的 priority 注入、不支持 provider 的隔离及分支选择由 `test/pi-fast-mode.test.ts` 验证；该 smoke 不验证真实账户是否接受优先级或实际收费。
+
 1. 执行 verify、format:check；涉及上游适配器、宿主或服务包时执行对应按需检查。
 2. 同步 package.json.version、package-lock.json 的根版本和 `rust/crates/pi-acp-session-daemon/src/agent.rs` 中 ACP clientInfo.version，更新 CHANGELOG；VSIX 文件名与服务 manifest 已从包版本生成。
 3. 执行 `npm run package`。VSCE prepublish 会类型检查并构建，输出父目录 `pi-acp-workbench-<version>.vsix`；检查适配器、Webview / 字体、许可证和 README，排除 source map、测试、node_modules、服务二进制与私人配置。
@@ -118,3 +120,5 @@ Rust stream 单测验证预览只保留小容量缓冲，Unicode 和过量容量
 发布流程见 `.github/workflows/ci.yml` 的 release job 与 `scripts/prepare-release.mjs`。发布写权限只授予该 job；分支和 PR 不发布。若上传或下载校验失败，保留草稿供排查，不发布不完整附件；修复前不要复用或移动已发布标签。
 
 使用实际版本替换摘要命令中的占位符：`sha256sum ../pi-acp-workbench-<version>.vsix`。打包本身不运行完整测试；已有历史候选包不能代替当前源码的发布验收。
+
+Telegram 配置向导通过 `npm run test:runner` 和完整测试入口运行隔离测试：模拟 Bot API / systemd，验证配对授权、文件权限、token 不进入 argv、重复配置备份、失败恢复与 linger 被拒绝的提示；不使用真实 Bot 或修改用户服务。

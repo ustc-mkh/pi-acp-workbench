@@ -71,7 +71,6 @@ export class AttachmentCoordinator {
       })),
     ];
     this.host.emit();
-    return;
   }
 
   async onAttachmentError(message: UiMessage & { type: 'attachmentError' }): Promise<void> {
@@ -82,23 +81,19 @@ export class AttachmentCoordinator {
       this.host.state.error = String(message.error).slice(0, 300);
       this.host.emit();
     }
-    return;
   }
 
-  async onAttach(message: UiMessage & { type: 'attach' }): Promise<void> {
+  async onAttach(): Promise<void> {
     await this.host.attach();
-    return;
   }
 
   async onRemoveAttachment(message: UiMessage & { type: 'removeAttachment' }): Promise<void> {
     this.host.state.attachments = this.host.state.attachments.filter((a) => a.id !== message.id);
     this.host.emit();
-    return;
   }
 
   async onOpen(message: UiMessage & { type: 'open' }): Promise<void> {
     await openWorkspaceLink(this.host.cwd, message.url, message.line);
-    return;
   }
 
   async onDiff(message: UiMessage & { type: 'diff' }): Promise<void> {
@@ -107,12 +102,10 @@ export class AttachmentCoordinator {
       this.host.state.entries.find((e) => e.id === message.id),
       message.index,
     );
-    return;
   }
 
-  async onExport(message: UiMessage & { type: 'export' }): Promise<void> {
+  async onExport(): Promise<void> {
     await this.exportChat();
-    return;
   }
 
   conversationText() {
@@ -135,10 +128,5 @@ export class AttachmentCoordinator {
     if (!uri) return;
     const text = this.conversationText();
     await vscode.workspace.fs.writeFile(uri, Buffer.from(text));
-  }
-
-  async onCopyConversation(message: UiMessage & { type: 'copyConversation' }): Promise<void> {
-    await vscode.env.clipboard.writeText(this.conversationText());
-    return;
   }
 }

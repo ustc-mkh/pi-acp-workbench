@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/absolute/path/to/pi-acp-workbench
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/absolute/path/to/pi-acp-workbench/service-dist/pi-acp-session-daemon --config %h/.config/pi-acp-workbench/sessions.json
 Restart=on-failure
 RestartSec=35

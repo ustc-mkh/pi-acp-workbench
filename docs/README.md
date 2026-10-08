@@ -4,13 +4,13 @@
 
 ## 使用与部署
 
-| 文档                           | 内容                                     |
-| ------------------------------ | ---------------------------------------- |
-| [项目 README](../README.md)    | 功能、首次安装、桌面与 Telegram 入门     |
-| [会话服务](session-service.md) | worker 配置、生命周期、恢复和资源限制    |
-| [Telegram](telegram.md)        | Bot / 群组配置、目录限制、命令与消息恢复 |
-| [每轮 Diff](turn-diff.md)      | 采集基线、展示与省略限制                 |
-| [服务发布](service-release.md) | GNU / musl 构建、包校验、升级与回滚      |
+| 文档                           | 内容                                   |
+| ------------------------------ | -------------------------------------- |
+| [项目 README](../README.md)    | 功能、首次安装、桌面与 Telegram 入门   |
+| [会话服务](session-service.md) | worker 配置、生命周期、恢复和资源限制  |
+| [Telegram](telegram.md)        | 一键配置、任意目录会话、命令与消息恢复 |
+| [每轮 Diff](turn-diff.md)      | 采集基线、展示与省略限制               |
+| [服务发布](service-release.md) | GNU / musl 构建、包校验、升级与回滚    |
 
 ## 开发与维护
 

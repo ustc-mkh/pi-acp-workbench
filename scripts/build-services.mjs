@@ -95,6 +95,7 @@ const files = [
   'pi-acp-telegram-daemon',
   'pi-adapter.mjs',
   'pi-native-fork.mjs',
+  'pi-fast-mode.mjs',
 ];
 await mkdir(staging, { mode: 0o755, recursive: true });
 try {

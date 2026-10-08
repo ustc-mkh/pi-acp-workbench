@@ -5,6 +5,7 @@ import type { Price } from './telemetry';
 
 /** Minimal contract for the pinned JS adapter's runtime injection points. */
 export interface PiModel {
+  api?: string;
   provider?: string;
   id?: string;
   contextWindow?: number;
@@ -21,6 +22,11 @@ export interface PiProcess {
   child: ChildProcess;
   dispose(): void;
   prompt(text: string): Promise<void>;
+  request(command: {
+    type: 'get_commands';
+  }): Promise<
+    { success: true; data: { commands: { name: string }[] } } | { success: false; error?: string }
+  >;
   request(command: {
     type: 'get_entries';
   }): Promise<

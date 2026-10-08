@@ -2,6 +2,7 @@ import type { ChatState } from './shared';
 
 export interface SessionSelector {
   label: string;
+  description?: string | null;
   kind: 'model' | 'thinking' | 'mode' | 'fast' | 'other';
   current: string;
   options: { id: string; name: string }[];
@@ -10,7 +11,6 @@ export interface SessionSelector {
 const thinkingName =
   /^(?:thinking(?:[ _-]level)?|thought[ _-]level|reasoning(?:[ _-](?:effort|level))?)$/i;
 const thinkingPrefix = /^(?:thinking|reasoning(?: effort)?)\s*[:：]\s*/i;
-const levelName = /^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabled|on)$/i;
 const compactThinking = (name: string) => name.replace(thinkingPrefix, '').trim();
 
 export const codexFixedConfigs: Readonly<Record<string, string>> = {
@@ -46,6 +46,7 @@ export function sessionSelectors({
         category: config.category,
         kind,
         label: config.name,
+        description: config.description,
         current: config.currentValue,
         options: options.map((option) => ({
           id: option.value,
@@ -55,56 +56,22 @@ export function sessionSelectors({
       },
     ];
   });
-  // Model switches can change supported levels while parallel modes remain stale.
-  // Recognize the purpose of the control instead of requiring identical option sets.
   const thinkingControl =
     controls.find((c) => c.category === 'thought_level') ||
     controls.find((c) => c.kind === 'thinking');
   const unique = controls.filter((c) => c.kind !== 'thinking' || c === thinkingControl);
-  const thinkingModes =
-    !!modes?.availableModes.length &&
-    modes.availableModes.every(
-      (mode) =>
-        thinkingPrefix.test(mode.name) || levelName.test(mode.id) || levelName.test(mode.name),
-    );
-  const sameLevels =
-    !!modes &&
-    !!thinkingControl &&
-    modes.availableModes.length === thinkingControl.options.length &&
-    modes.availableModes.every((mode) =>
-      thinkingControl.options.some((option) => option.id === mode.id),
-    );
-  const modesCovered =
-    unique.some((c) => c.kind === 'mode') || (!!thinkingControl && (thinkingModes || sameLevels));
+  // Pi exposes model/thinking through configOptions; its parallel modes are redundant.
   const modeControls: SessionSelector[] =
-    modes && !modesCovered
+    harness !== 'pi' && modes && !unique.some((c) => c.kind === 'mode')
       ? [
           {
-            label: thinkingModes ? 'Thinking' : '会话模式',
-            kind: thinkingModes ? 'thinking' : 'mode',
+            label: '会话模式',
+            kind: 'mode',
             current: modes.currentModeId,
-            options: modes.availableModes.map((mode) => ({
-              id: mode.id,
-              name: compactThinking(mode.name),
-            })),
+            options: modes.availableModes.map((mode) => ({ id: mode.id, name: mode.name })),
             change: { type: 'mode' },
           },
         ]
       : [];
   return [...modeControls, ...unique];
-}
-
-export interface SessionPreference {
-  kind: SessionSelector['kind'];
-  value: string;
-}
-
-/** Store values, not an old model's option catalogue; never carry duplicate thinking controls. */
-export function sessionPreferences(
-  state: Pick<ChatState, 'modes' | 'configs' | 'harness'>,
-): SessionPreference[] {
-  return sessionSelectors(state)
-    .filter((c) => ['model', 'thinking', 'mode'].includes(c.kind))
-    .map((c) => ({ kind: c.kind, value: c.current }))
-    .sort((a, b) => Number(b.kind === 'model') - Number(a.kind === 'model'));
 }

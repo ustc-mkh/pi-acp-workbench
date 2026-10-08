@@ -83,6 +83,12 @@ impl Bridge {
 
     pub(super) async fn prune(&self) {
         let now = now_ms();
+        self.shared.panels.lock().await.retain(|_, panel| {
+            panel
+                .try_lock()
+                .map(|panel| panel.expires >= now)
+                .unwrap_or(true)
+        });
         let touched = self.shared.touched.lock().await;
         let stale: Vec<String> = touched
             .iter()

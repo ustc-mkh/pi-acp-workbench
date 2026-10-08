@@ -190,7 +190,7 @@ export class SessionClient {
   }
   watch(sessionId: string, enabled = true) {
     this.states.clear(sessionId);
-    return this.call('_watch', { sessionId, enabled, stateDeltas: true });
+    return this.call('_watch', { sessionId, enabled });
   }
   call<Method extends keyof ServiceResponses>(
     method: Method,

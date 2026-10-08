@@ -61,7 +61,6 @@ vi.mock('vscode', () => ({
       toString: () => `${parts.scheme}:${parts.path}`,
     }),
   },
-  env: { clipboard: { writeText: vi.fn(async () => {}) } },
   languages: { setTextDocumentLanguage: vi.fn(async (document) => document) },
   workspace: {
     openTextDocument: vi.fn(async (uri) => ({ uri })),
@@ -902,18 +901,6 @@ it('persists custom prices, rejects invalid numbers and restores defaults', asyn
   await host.provider.perform({ type: 'setPrice', model: 'p/m' });
   expect(host.stored.get('prices')).toEqual({});
 });
-it('copies original full Markdown even when a compacted checkpoint exists', async () => {
-  const vscode = await import('vscode');
-  await contextAgent();
-  await host.provider.perform({ type: 'send', text: 'Original equation $x^2$' });
-  await host.provider.perform({ type: 'copyConversation' });
-  expect(vscode.env.clipboard.writeText).toHaveBeenCalledWith(
-    expect.stringContaining('Original equation $x^2$'),
-  );
-  expect(vscode.env.clipboard.writeText).not.toHaveBeenLastCalledWith(
-    expect.stringContaining('short summary'),
-  );
-});
 const pastedPng = {
   name: 'clipboard.png',
   mimeType: 'image/png',
@@ -1024,13 +1011,6 @@ it('reads the latest account pair instead of the currently displayed conversatio
   );
   await host.provider.perform({ type: 'new' });
   expect(host.provider.snapshot().configs!.map((c) => c.currentValue)).toEqual(['other', 'high']);
-});
-it('inherits ACP reasoning modes when configOptions does not provide thinking', async () => {
-  await contextAgent('context-legacy');
-  await host.provider.perform({ type: 'mode', value: 'high' });
-  await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().modes!.currentModeId).toBe('high');
-  expect(wire().filter((r) => r.method === 'session/set_mode')).toHaveLength(2);
 });
 it('resumes the last active warm conversation after restart, and reconnects it without session/new', async () => {
   await contextAgent();

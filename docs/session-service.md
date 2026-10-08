@@ -15,9 +15,13 @@ cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
 cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 ```
 
-Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。编辑 `sessions.json` 的 Pi 可执行文件路径；编辑 unit 中仓库绝对路径，指向 `service-dist/pi-acp-session-daemon`。凭据继续由 Pi 管理。代理变量、`PI_ACP_PI_COMMAND`、模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。
+Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。默认配置不指定 Pi 路径，由适配器从服务的 PATH 查找 `pi`；编辑 unit 中仓库绝对路径，指向 `service-dist/pi-acp-session-daemon`。凭据继续由 Pi 管理。代理变量和模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。`env.PI_ACP_PI_COMMAND` 仅作为可选的显式覆盖，它优先于 PATH；跨机器复制配置时应删除过期的覆盖，而不是替换为另一台机器的固定路径。
 
-`npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；标准 ACP 适配器即可；原生会话加载、图片、选择器与 Pi 分支按实际能力启用。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
+示例 unit 使用 `Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`，兼容用户目录及常见系统安装；`%h` 按运行账户展开，不绑定用户名。使用 nvm、Volta 或自定义 npm prefix 时，将实际 Node / Pi 所在目录加入 unit 的 PATH。systemd 不读取 `.bashrc` 等交互式 shell 配置；修改后执行 `systemctl --user daemon-reload` 并重启服务。
+
+`npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs`、`pi-fast-mode.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；标准 ACP 适配器即可；原生会话加载、图片、选择器与 Pi 分支按实际能力启用。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
+
+Pi 的 Fast mode 通过随包扩展请求 OpenAI / OpenAI Codex Responses 的 `service_tier: priority`，不是降低思考级别。只在对应 provider/API 显示，默认 Off；扩展未加载或原生节点 RPC 失败时明确报错。是否接受优先级及收费取决于模型和账户。设置保存为原生分支上的 custom entry，恢复与分支沿用该点的设置，新建会话默认 Off；不写入跨会话模型/思考偏好。Pi 尚未写入对话的空会话另在现有适配器索引保存设置，以便 worker 重启后恢复；有对话或 Fast 原生节点时始终以原生分支为准。切到其他 provider 时不注入优先级请求。不要同时安装其他改写 service_tier 的扩展，以免请求 hook 相互覆盖。
 
 ### sessions.json 参数
 
@@ -89,6 +93,8 @@ Rust 是生产服务的唯一实现。终态 outbox 写失败会使请求失败�
 发送消息前另存用户消息，执行中定期保存界面历史。客户端不会因超时或断线自动重发任务。服务重启把未完成收据标记为中断；用原请求 ID 重试不会重跑工具。异常掉电可能丢失最后一次周期保存后的显示内容，应同时检查 Pi 原生记录和工作区文件。
 
 收据位于 `~/.pi/pi-acp-workbench/service/requests/`，历史位于 `history/`；目录/文件使用 0700/0600。Socket 限制为同账户使用，不监听公网端口。备份时保留历史、原生 Pi 会话和任务收据。不要在运行期间手工删除收据或抢锁。
+
+Pi 的模型与思考等级仅使用当前 ACP `configOptions`，不再从旧版 `modes` 推断。普通 Socket 状态订阅统一使用带 revision 的增量协议。
 
 升级旧版本时，先结束任务、关闭旧插件连接并停止旧 Telegram 服务，再启动新会话服务和新客户端。本次 Socket 增加会话订阅和分块响应，插件、会话服务与 Telegram 必须一起更新并重启，不能混用新旧客户端。插件要求 v3 服务，不支持委托写入或直接文件写降级；启动新 daemon 前必须关闭旧版本插件，避免旧客户端写历史。已有当前格式的共享历史可直接继续；缺失必需元数据、完整快照标识或请求指纹的数据不受支持。仅存在于旧插件本地存储的记录不迁移。升级前备份数据；不兼容数据如需归档或改用新数据目录，应由操作者明确处理，不能删除收据后假定仍具备防重放保证。
 

@@ -117,7 +117,13 @@ async function runTests() {
       node('telegram-contract', 'scripts/telegram-contract.mjs'),
       node('rust-integration', 'scripts/rust-integration.mjs'),
       node('rust-memory', 'scripts/memory-smoke.mjs'),
-      node('runner-unit', '--test', 'scripts/test-pool.test.mjs', 'scripts/test-reports.test.mjs'),
+      node(
+        'runner-unit',
+        '--test',
+        'scripts/test-pool.test.mjs',
+        'scripts/test-reports.test.mjs',
+        'scripts/telegram-setup.test.mjs',
+      ),
     ];
     const results = await testPool(suites, jobs);
     for (const r of results) {

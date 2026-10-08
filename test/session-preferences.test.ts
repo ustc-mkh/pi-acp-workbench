@@ -2,9 +2,12 @@ import { afterEach, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { sessionPreferences } from '../src/session-settings';
+import { sessionSelectors } from '../src/session-settings';
 const modelPreferences = (state: Pick<ChatState, 'configs' | 'modes' | 'harness'>) =>
-  sessionPreferences(state).filter((p) => p.kind === 'model' || p.kind === 'thinking');
+  sessionSelectors(state)
+    .filter((c) => c.kind === 'model' || c.kind === 'thinking')
+    .map((c) => ({ kind: c.kind, value: c.current }))
+    .sort((a, b) => Number(b.kind === 'model') - Number(a.kind === 'model'));
 import { startRustService } from './rust-service';
 import type { ChatState, Snapshot } from '../src/shared';
 const cleanups: (() => Promise<unknown>)[] = [];

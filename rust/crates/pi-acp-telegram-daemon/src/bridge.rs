@@ -26,7 +26,6 @@ const TICKET_LIMIT: usize = 128;
 const TICKET_TTL_MS: u64 = 5 * 60 * 1000;
 const STREAM_IDLE_MS: u64 = 5 * 60 * 1000;
 const DELIVERED_KEEP: usize = 2000;
-const SYNC_BATCH: usize = 20;
 const HISTORY_SLICE: usize = 20;
 const HISTORY_MAX: usize = 100;
 
@@ -36,9 +35,11 @@ mod history;
 mod inbox;
 mod permissions;
 mod routing;
+mod settings;
 mod state;
 mod store;
 mod turns;
+mod ui;
 use routing::{parse_command, InputClass};
 pub use state::BridgeState;
 use state::{InboxItem, InboxPhase, Topic};
@@ -94,6 +95,7 @@ struct Shared {
     consuming: Mutex<HashSet<String>>,
     syncing: Mutex<HashSet<String>>,
     syncing_all: AtomicBool,
+    panels: Mutex<indexmap::IndexMap<String, Arc<Mutex<ui::Panel>>>>,
     handlers: Arc<Semaphore>,
     controls: Arc<Semaphore>,
     inbox_wake: Notify,
@@ -131,6 +133,7 @@ impl Bridge {
             consuming: Mutex::new(HashSet::new()),
             syncing: Mutex::new(HashSet::new()),
             syncing_all: AtomicBool::new(false),
+            panels: Mutex::new(indexmap::IndexMap::new()),
             handlers: Arc::new(Semaphore::new(HANDLER_LIMIT)),
             controls: Arc::new(Semaphore::new(CONTROL_LIMIT)),
             inbox_wake: Notify::new(),
@@ -229,6 +232,7 @@ impl Bridge {
         self.shared.streams.lock().await.clear();
         self.shared.touched.lock().await.clear();
         self.shared.tickets.lock().await.clear();
+        self.shared.panels.lock().await.clear();
     }
 }
 

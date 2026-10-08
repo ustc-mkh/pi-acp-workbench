@@ -42,7 +42,7 @@ const message = (text, thread) =>
       ...(thread ? { message_thread_id: thread } : {}),
     },
   });
-const callback = (data, thread) =>
+const callback = (data, thread, panelMessageId = 88) =>
   updates.push({
     update_id: ++updateId,
     callback_query: {
@@ -50,7 +50,7 @@ const callback = (data, thread) =>
       from: { id: user },
       data,
       message: {
-        message_id: 88,
+        message_id: panelMessageId,
         chat: { id: chat, type: 'supergroup' },
         message_thread_id: thread,
       },
@@ -75,10 +75,11 @@ const api = createServer((req, res) => {
       updates = updates.filter((update) => update.update_id < (params.offset || 0));
       return reply(batch);
     }
-    sent.push({ method, params });
+    const responseId = method === 'editMessageText' ? params.message_id : ++messageId;
+    sent.push({ method, params, messageId: responseId });
     if (method === 'createForumTopic') return reply({ message_thread_id: ++topicId });
     if (method === 'sendMessage' || method === 'editMessageText')
-      return reply({ message_id: ++messageId });
+      return reply({ message_id: responseId });
     return reply(true);
   });
 });
@@ -92,6 +93,7 @@ await writeFile(
     args: [resolve('test/contract-agent.mjs')],
     maxWorkers: 2,
     idleMs: 60000,
+    harnesses: { codex: { command: process.execPath, args: [resolve('test/contract-agent.mjs')] } },
   }),
 );
 await writeFile(
@@ -171,6 +173,16 @@ try {
   );
   client = await ContractWire.open(join(root, 'service', 'sessions.sock'));
   message('/new main');
+  const chooser = await until(
+    () => sent.find((item) => item.params.text?.includes('选择 Harness')),
+    'harness chooser',
+  );
+  callback(
+    chooser.params.reply_markup.inline_keyboard.flat().find((b) => /Pi$/.test(b.text))
+      .callback_data,
+    undefined,
+    chooser.messageId,
+  );
   const binding = await until(async () => {
     try {
       return JSON.parse(await readFile(bindingFile, 'utf8')).topics[0];
@@ -182,6 +194,43 @@ try {
     thread = binding.threadId;
   assert.equal((await client.call('state', { sessionId: id })).snapshot.cwd, workspace);
   console.log('ok   Telegram /new creates a real Rust service session');
+  message('/settings', thread);
+  const modelCard = await until(
+    () =>
+      sent.findLast(
+        (s) =>
+          s.params.text?.includes('Harness：pi') &&
+          s.params.reply_markup?.inline_keyboard?.flat().some((b) => b.text === '选择模型'),
+      ),
+    'real model settings card',
+  );
+  callback(
+    modelCard.params.reply_markup.inline_keyboard.flat().find((b) => b.text === '选择模型')
+      .callback_data,
+    thread,
+    modelCard.messageId,
+  );
+  const optionsCard = await until(
+    () => sent.findLast((s) => s.params.text?.includes('选择模型 ·')),
+    'real model options',
+  );
+  callback(
+    optionsCard.params.reply_markup.inline_keyboard.flat().find((b) => b.text === 'Other')
+      .callback_data,
+    thread,
+    optionsCard.messageId,
+  );
+  await until(
+    async () =>
+      (await client.call('state', { sessionId: id })).snapshot.configs.find((c) => c.id === 'model')
+        .currentValue === 'other',
+    'real model setting applied',
+  );
+  const another = await client.call('create', { cwd: workspace });
+  assert.equal(another.configs.find((c) => c.id === 'model').currentValue, 'other');
+  console.log(
+    'ok   Telegram model buttons update real Rust service preferences inherited by new sessions',
+  );
   await client.call('_watch', { sessionId: id, enabled: true });
   message('phone integration', thread);
   await until(() => sentText('echo: phone integration'), 'phone completion delivery');
@@ -247,7 +296,7 @@ try {
   await delay(500);
   assert.equal(delivered(), 1);
   console.log('ok   relay restart preserves bindings and delivers offline desktop output once');
-  console.log('\n5 Rust end-to-end integration checks passed (no real Bot or model)');
+  console.log('\n6 Rust end-to-end integration checks passed (no real Bot or model)');
 } finally {
   client?.close();
   for (const child of children.reverse()) await stop(child);

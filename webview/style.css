@@ -917,7 +917,8 @@ body.vscode-high-contrast-light button {
   min-height: 0;
   overflow: hidden;
 }
-#statistics-toggle svg {
+#statistics-toggle svg,
+#models-toggle svg {
   width: 20px;
   height: 20px;
   fill: none;

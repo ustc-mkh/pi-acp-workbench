@@ -27,6 +27,7 @@ const expected = [
   'pi-acp-telegram-daemon',
   'pi-adapter.mjs',
   'pi-native-fork.mjs',
+  'pi-fast-mode.mjs',
 ];
 assert.deepEqual(Object.keys(manifest.files).sort(), expected.sort());
 for (const file of expected)

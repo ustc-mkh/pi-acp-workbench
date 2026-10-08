@@ -1,4 +1,4 @@
-//! Optional delta subscriptions. A bounded shared baseline avoids one history copy per client.
+//! Delta subscriptions. A bounded shared baseline avoids one history copy per client.
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -7,7 +7,6 @@ const CACHE_SESSIONS: usize = 32;
 
 #[derive(Default)]
 pub struct Subscription {
-    pub delta: bool,
     pub permissions_only: bool,
     pub revision: Option<u64>,
 }

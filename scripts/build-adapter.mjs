@@ -30,7 +30,32 @@ export async function buildAdapter() {
     source,
     args,
     args +
-      '\n    if (params.workbenchFork) args.push("--no-extensions", "--extension", params.workbenchFork, "--session-dir", params.workbenchForkSessionDir);',
+      '\n    args.push("--extension", workbenchFastExtension);\n    if (params.workbenchFork) args.push("--no-extensions", "--extension", params.workbenchFork, "--session-dir", params.workbenchForkSessionDir);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    configOptions: buildConfigOptions({ models, modes }),',
+    '    configOptions: [...buildConfigOptions({ models, modes }), ...await getWorkbenchFastOptions(proc)],',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    if (configId === MODEL_CONFIG_ID) {',
+    '    if (configId === "fast-mode") {\n      await setFastConfig(session.proc, params.value);\n      const record = this.store.get(session.sessionId);\n      if (record) this.store.upsert({...record, workbenchFastMode: params.value});\n    } else if (configId === MODEL_CONFIG_ID) {',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    db.sessions[entry.sessionId] = {\n      sessionId: entry.sessionId,',
+    '    db.sessions[entry.sessionId] = {\n      ...db.sessions[entry.sessionId],\n      ...entry,\n      sessionId: entry.sessionId,',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '      const fileCommands = loadSlashCommands(cwd);',
+    '      try { await restoreEmptyFastConfig(proc, this.store.get(sessionId)?.workbenchFastMode); } catch (error) { proc.dispose(); throw error; }\n      const fileCommands = loadSlashCommands(cwd);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    if (!name) continue;',
+    '    if (!name || name === "workbench-fast") continue;',
   );
   source = replaceExactlyOnce(
     source,
@@ -114,6 +139,13 @@ export async function buildAdapter() {
   source = source.replace(/^#!.*\n/, '');
 
   source =
+    `import {fastConfig, setFastConfig, restoreEmptyFastConfig} from ${JSON.stringify(resolve('src/pi-fast-config.ts'))};
+import {fileURLToPath as workbenchFileURLToPath} from 'node:url';
+const workbenchFastExtension = workbenchFileURLToPath(new URL('./pi-fast-mode.mjs', import.meta.url));
+async function getWorkbenchFastOptions(proc) { const config = await fastConfig(proc); return config ? [config] : []; }
+` + source;
+
+  source =
     `import {enhancePiAgent} from ${JSON.stringify(resolve('src/pi-enhancements.ts'))};\n` + source;
   source =
     `import {mutateAdapterStore} from ${JSON.stringify(resolve('src/adapter-store.ts'))};\n` +
@@ -135,6 +167,15 @@ export async function buildAdapter() {
     banner: {
       js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
     },
+  });
+  await build({
+    entryPoints: ['src/pi-fast-mode.ts'],
+    outfile: 'dist/pi-fast-mode.mjs',
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    sourcemap: true,
   });
   await build({
     entryPoints: ['src/pi-native-fork.ts'],

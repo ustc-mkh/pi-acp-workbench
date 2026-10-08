@@ -1,6 +1,6 @@
 # Linux 服务发布包
 
-会话服务与 Telegram relay 是独立 Rust 二进制；VSIX、扩展宿主和 Pi 适配器仍使用 TS/JS。发布包包含两个 daemon、两个 JS 适配器、许可证说明、`manifest.json` 和 `SHA256SUMS`。Node.js ≥22 与 Pi 命令需在目标服务器另行安装；服务包不包含它们，也不包含配置、token 或用户历史。
+会话服务与 Telegram relay 是独立 Rust 二进制；VSIX、扩展宿主和 Pi 适配器仍使用 TS/JS。发布包包含两个 daemon、三个 JS 运行时资产、许可证说明、`manifest.json` 和 `SHA256SUMS`。Node.js ≥22 与 Pi 命令需在目标服务器另行安装；服务包不包含它们，也不包含配置、token 或用户历史。解压目录包含 Telegram 交互配置向导，可执行 `node scripts/setup-telegram.mjs` 完成用户级配置与自启动，无需 sudo；首次配置不要求项目目录，之后用 `/new /绝对路径` 创建会话；流程见包内 `telegram.md`。
 
 ## 架构与 ABI
 
@@ -8,7 +8,7 @@
 
 默认 `npm run build:services` 仍按本机 Rust host 构建 GNU 产物，输出 `service-dist/`。GNU 产物的实际动态库与最低 glibc 符号版本写入 `manifest.abi`；最低版本由构建环境决定，不能把 Fedora 上的构建当作旧版 Ubuntu 可用包。不要沿用历史构建的 glibc 最低版本；以当前包的 manifest.abi 和 readelf 检查为准。通用发行包使用 musl 避免这项限制。
 
-`manifest` 同时记录 target、arch、libc、Rust 编译器、基线提交/工作区状态、Rust 源码指纹、生产 feature 集合、TLS 实现和四个可执行资产的 SHA-256。构建使用 Cargo.lock 的 `--locked`，不启用 `contract-test`。模拟传输只属于测试构建。
+`manifest` 同时记录 target、arch、libc、Rust 编译器、基线提交/工作区状态、Rust 源码指纹、生产 feature 集合、TLS 实现和五个运行时资产的 SHA-256：两个 daemon、Pi 适配器、原生分支扩展和 Fast mode 扩展。构建使用 Cargo.lock 的 `--locked`，不启用 `contract-test`。模拟传输只属于测试构建。
 
 在同架构 Linux 上构建 musl 包：
 

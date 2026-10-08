@@ -163,7 +163,6 @@ impl Shared {
                 subs.insert(
                     session_id.to_string(),
                     Subscription {
-                        delta: params.get("stateDeltas").and_then(Value::as_bool) == Some(true),
                         permissions_only: params.get("permissionsOnly").and_then(Value::as_bool)
                             == Some(true),
                         revision: None,
@@ -721,7 +720,7 @@ mod resource_tests {
     }
 
     #[tokio::test]
-    async fn delta_permissions_and_legacy_subscriptions_coexist_and_resubscribe_resets() {
+    async fn delta_and_permission_subscriptions_coexist_and_resubscribe_resets() {
         let root = Root::new();
         let path = root.0.join("s");
         let server = SessionServer::new(
@@ -730,15 +729,10 @@ mod resource_tests {
         );
         server.listen().await.unwrap();
         let mut delta = Client::open(&path).await;
-        let mut legacy = Client::open(&path).await;
         let mut permissions = Client::open(&path).await;
-        for (client, extra) in [
-            (&mut delta, "stateDeltas"),
-            (&mut legacy, "legacy"),
-            (&mut permissions, "permissionsOnly"),
-        ] {
-            let mut params = json!({"sessionId":"one","enabled":true});
-            params[extra] = json!(true);
+        for (client, permissions_only) in [(&mut delta, false), (&mut permissions, true)] {
+            let params =
+                json!({"sessionId":"one","enabled":true,"permissionsOnly":permissions_only});
             client.send("watch", "_watch", params).await;
             assert_eq!(client.reply().await["value"], true);
         }
@@ -747,7 +741,6 @@ mod resource_tests {
         server.broadcast(state("中"));
         let first = delta.reply().await;
         assert_eq!(first["event"]["type"], "state");
-        assert!(legacy.reply().await["event"]["snapshot"]["entries"].is_array());
         assert!(permissions.reply().await["event"]["snapshot"]
             .get("entries")
             .is_none());
@@ -759,14 +752,9 @@ mod resource_tests {
             json!([{"id":"live","text":"中文😀"}])
         );
         assert!(serde_json::to_vec(&patch).unwrap().len() < 500);
-        assert_eq!(legacy.reply().await["event"]["type"], "state");
         permissions.reply().await;
         delta
-            .send(
-                "watch",
-                "_watch",
-                json!({"sessionId":"one","enabled":true,"stateDeltas":true}),
-            )
+            .send("watch", "_watch", json!({"sessionId":"one","enabled":true}))
             .await;
         delta.reply().await;
         server.broadcast(state("again"));
@@ -1003,8 +991,7 @@ impl SessionServer {
                 if let Some(state) = &state {
                     let frame = if subscription.permissions_only {
                         &state.permissions
-                    } else if subscription.delta
-                        && subscription.revision.is_some()
+                    } else if subscription.revision.is_some()
                         && subscription.revision == state.previous
                     {
                         state.patch.as_ref().unwrap_or(&state.full)
