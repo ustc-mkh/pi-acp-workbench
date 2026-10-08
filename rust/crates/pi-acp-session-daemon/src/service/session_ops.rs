@@ -1,5 +1,6 @@
 //! Session creation, cold reads, settings and shared history operations.
 use super::*;
+use pi_acp_core::sync::MutexExt;
 
 impl SessionService {
     pub async fn list(&self) -> Result<Vec<Snapshot>, String> {
@@ -16,8 +17,8 @@ impl SessionService {
 
     pub async fn state(&self, id: &str) -> Result<Value, String> {
         let index = self.index(id).await?;
-        if let Some(rt) = self.runtimes.lock().unwrap().get(id).cloned() {
-            return Ok(view_state(&rt.lock().unwrap()));
+        if let Some(rt) = self.runtimes.lock_unpoisoned().get(id).cloned() {
+            return Ok(view_state(&rt.lock_unpoisoned()));
         }
         let mut snapshot = self.store.read(&index).await?;
         snapshot.usage_records.clear();
@@ -52,9 +53,9 @@ impl SessionService {
         } = command
         {
             if matches!(index.harness.as_deref(), Some("codex" | "claude")) {
-                let rt = self.runtimes.lock().unwrap().get(id).cloned();
+                let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
                 let snapshot = if let Some(rt) = rt {
-                    let r = rt.lock().unwrap();
+                    let r = rt.lock_unpoisoned();
                     let mut snapshot = r.snapshot.clone();
                     snapshot.usage = r.state.usage.clone();
                     snapshot.usage_records = r.state.usage_records.clone();
@@ -72,12 +73,12 @@ impl SessionService {
                 option_id,
                 ..
             } => {
-                let rt = self.runtimes.lock().unwrap().get(id).cloned();
+                let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
                 let Some(rt) = rt else {
                     return Ok(Value::Bool(false));
                 };
                 let sender = {
-                    let mut r = rt.lock().unwrap();
+                    let mut r = rt.lock_unpoisoned();
                     let ticket = r.state.permissions.iter().find(|p| &p.id == permission_id);
                     let valid = match (ticket, option_id) {
                         (None, _) => false,
@@ -109,7 +110,7 @@ impl SessionService {
             ServiceCommand::Cancel { .. } => Ok(Value::Bool(self.cancel(id).await)),
             ServiceCommand::Remove { .. } => {
                 self.exclusive(|| async {
-                    let rt = self.runtimes.lock().unwrap().get(id).cloned();
+                    let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
                     if let Some(rt) = rt {
                         self.evict(id, &rt).await;
                     }
@@ -124,10 +125,9 @@ impl SessionService {
             } => {
                 let agent = self
                     .runtimes
-                    .lock()
-                    .unwrap()
+                    .lock_unpoisoned()
                     .get(id)
-                    .and_then(|rt| rt.lock().unwrap().agent.clone());
+                    .and_then(|rt| rt.lock_unpoisoned().agent.clone());
                 match agent {
                     Some(agent) => {
                         if agent
@@ -152,10 +152,9 @@ impl SessionService {
             } => {
                 let has_agent = self
                     .runtimes
-                    .lock()
-                    .unwrap()
+                    .lock_unpoisoned()
                     .get(id)
-                    .is_some_and(|rt| rt.lock().unwrap().agent.is_some());
+                    .is_some_and(|rt| rt.lock_unpoisoned().agent.is_some());
                 if !has_agent {
                     let state = self.state(id).await?;
                     return Ok(json!({
@@ -186,7 +185,7 @@ impl SessionService {
         index: usize,
     ) -> Result<(), String> {
         let mut snapshot = {
-            let r = rt.lock().unwrap();
+            let r = rt.lock_unpoisoned();
             Snapshot {
                 entries: r.state.entries[..=index].to_vec(),
                 native_forks: None,
@@ -198,7 +197,7 @@ impl SessionService {
             }
         };
         agent.stop().await;
-        rt.lock().unwrap().agent = None;
+        rt.lock_unpoisoned().agent = None;
         let transient_state = Arc::new(Mutex::new(initial_state()));
         let fork = self.spawn_transient(
             Harness::parse(snapshot.harness.as_deref().unwrap_or(""))?,
@@ -241,8 +240,7 @@ impl SessionService {
                 self.exclusive(|| async {
                     let runtimes: Vec<(String, Arc<Mutex<Runtime>>)> = self
                         .runtimes
-                        .lock()
-                        .unwrap()
+                        .lock_unpoisoned()
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
@@ -258,7 +256,7 @@ impl SessionService {
                     return Err("会话不存在".into());
                 }
                 self.exclusive(|| async {
-                    let rt = self.runtimes.lock().unwrap().get(id).cloned();
+                    let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
                     if let Some(rt) = rt {
                         self.evict(id, &rt).await;
                     }
@@ -306,7 +304,7 @@ impl SessionService {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let commands_cache = initial.lock().unwrap().commands.clone();
+                let commands_cache = initial.lock_unpoisoned().commands.clone();
                 self.store.claim(&session_id).await?;
                 let written = self
                     .store

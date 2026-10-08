@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { enhancePiAgent } from '../src/pi-enhancements';
+import type { PiState } from '../src/pi-rpc-types';
 import {
   nativePath,
   nativeForkPoints,
@@ -20,8 +21,8 @@ const msg = (role: string, text: string, timestamp = 1) => ({
   message: { role, content: [{ type: 'text', text }], timestamp, stopReason: 'stop' },
 });
 it('reserves native preparation immediately and honors cancellation before worker startup', async () => {
-  let ready!: (value: any) => void;
-  const state = new Promise((resolve) => {
+  let ready!: (value: PiState) => void;
+  const state = new Promise<PiState>((resolve) => {
       ready = resolve;
     }),
     spawn = vi.fn();

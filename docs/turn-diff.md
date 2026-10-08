@@ -28,3 +28,9 @@
 - 服务自身崩溃/断电时，尚未生成的最终 diff 不会事后猜测重建；应检查实际文件与原生历史。
 
 保存的 diff 可能包含源码和敏感内容，与会话历史采用相同存储权限和删除策略。它是审阅记录，不提供文件回滚保证。
+
+## 实现与验证
+
+采集与预算位于 `rust/crates/pi-acp-session-daemon/src/diff.rs`，轮次保存由 `service/turn.rs` 完成。客户端字段定义在 `src/turn-diff.ts`，展示由 `webview/messages.ts` 负责；打开编辑器对比由 `src/conversation-attachments.ts` 与 `src/workspace-documents.ts` 协调。
+
+Rust diff 单测在临时 Git 仓库验证采集，rust-sessions 回归验证正常 / 取消 / 崩溃后持久化，messages 与浏览器冒烟验证展示。统一运行入口见 [测试指南](testing.md)。快照字段及权限见 [磁盘格式](data-formats.md)。

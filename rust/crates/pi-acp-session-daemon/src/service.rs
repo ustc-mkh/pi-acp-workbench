@@ -1,5 +1,6 @@
 //! Session orchestration. Worker allocation, session operations and turns have separate modules.
 //! Runtime mutexes never span an await; queue lanes serialize each session.
+use pi_acp_core::sync::MutexExt;
 mod session_ops;
 mod turn;
 mod worker_pool;
@@ -227,10 +228,10 @@ impl SessionService {
         self.queue.mark_closed();
         let draining = self.queue.close();
         {
-            let runtimes: Vec<Rt> = self.runtimes.lock().unwrap().values().cloned().collect();
+            let runtimes: Vec<Rt> = self.runtimes.lock_unpoisoned().values().cloned().collect();
             for rt in runtimes {
                 let agent = {
-                    let mut r = rt.lock().unwrap();
+                    let mut r = rt.lock_unpoisoned();
                     for (_, settle) in r.permissions.drain() {
                         let _ = settle.send(None);
                     }
@@ -243,12 +244,12 @@ impl SessionService {
         }
         let ((), ()) = tokio::join!(draining, self.journal.drain());
         self.exclusive(|| async {
-            let ids: Vec<String> = self.runtimes.lock().unwrap().keys().cloned().collect();
+            let ids: Vec<String> = self.runtimes.lock_unpoisoned().keys().cloned().collect();
             for id in ids {
                 // `if let` scrutinee temporaries live until the if-let ends —
                 // the map guard would be held across evict().await and evict's
                 // own self.runtimes.lock() would self-deadlock. Bind first.
-                let rt = self.runtimes.lock().unwrap().get(&id).cloned();
+                let rt = self.runtimes.lock_unpoisoned().get(&id).cloned();
                 if let Some(rt) = rt {
                     self.evict(&id, &rt).await;
                 }
@@ -261,7 +262,7 @@ impl SessionService {
 
 async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String> {
     let snapshot = {
-        let r = rt.lock().unwrap();
+        let r = rt.lock_unpoisoned();
         let title = r
             .state
             .entries
@@ -290,7 +291,7 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
         }
     };
     let stub = store.write(&snapshot).await?;
-    rt.lock().unwrap().snapshot = stub;
+    rt.lock_unpoisoned().snapshot = stub;
     Ok(())
 }
 
@@ -366,7 +367,7 @@ async fn service_permission(
     let id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel::<Option<String>>();
     {
-        let mut r = rt.lock().unwrap();
+        let mut r = rt.lock_unpoisoned();
         if closed.load(Ordering::SeqCst)
             || r.phase.at(Step::Replaying)
             || r.permissions.len() >= 32
@@ -381,18 +382,18 @@ async fn service_permission(
         });
     }
     {
-        let r = rt.lock().unwrap();
+        let r = rt.lock_unpoisoned();
         broadcast(view_state_with_type(&r));
     }
     let outcome = tokio::time::timeout(Duration::from_secs(300), rx).await;
     let chosen = outcome.ok().and_then(|r| r.ok()).flatten();
     {
-        let mut r = rt.lock().unwrap();
+        let mut r = rt.lock_unpoisoned();
         r.permissions.remove(&id);
         r.state.permissions.retain(|p| p.id != id);
     }
     {
-        let r = rt.lock().unwrap();
+        let r = rt.lock_unpoisoned();
         broadcast(view_state_with_type(&r));
     }
     match chosen {
@@ -441,7 +442,7 @@ mod recovery_tests {
         let result = service
             .with_worker(id, |rt, _agent| {
                 Box::pin(async move {
-                    let mut r = rt.lock().unwrap();
+                    let mut r = rt.lock_unpoisoned();
                     r.state.entries.clear();
                     panic!("simulated worker logic bug while holding the runtime mutex");
                 })
@@ -552,7 +553,7 @@ mod usage_tests {
             assert_eq!(records["contextWindow"], 200000);
             assert_eq!(records["usage"]["used"], 500);
         }
-        assert!(service.runtimes.lock().unwrap().is_empty());
+        assert!(service.runtimes.lock_unpoisoned().is_empty());
         service.dispose().await;
         std::fs::remove_dir_all(root).unwrap();
     }

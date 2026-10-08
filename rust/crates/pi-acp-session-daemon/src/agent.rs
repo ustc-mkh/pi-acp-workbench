@@ -2,6 +2,7 @@
 //! Requests, permissions and writes are independently tracked; prompts have no timeout.
 //! Shutdown signals the process group, escalating after 1.5s only if the child has not exited.
 use crate::harness::Harness;
+use pi_acp_core::sync::MutexExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
@@ -68,15 +69,14 @@ struct Inner {
 fn send_wire(inner: &Inner, message: Value) -> bool {
     inner
         .write_tx
-        .lock()
-        .unwrap()
+        .lock_unpoisoned()
         .as_ref()
         .is_some_and(|tx| tx.send(message).is_ok())
 }
 
 fn terminate(inner: &Arc<Inner>, pending_reason: &str) {
-    inner.write_tx.lock().unwrap().take();
-    for (_, waiter) in inner.pending.lock().unwrap().drain() {
+    inner.write_tx.lock_unpoisoned().take();
+    for (_, waiter) in inner.pending.lock_unpoisoned().drain() {
         let _ = waiter.send(Err(pending_reason.to_string()));
     }
     if inner.pid == 0 || inner.exited_flag.load(Ordering::SeqCst) {
@@ -218,7 +218,7 @@ fn resolve_response(inner: &Arc<Inner>, obj: &serde_json::Map<String, Value>) {
     let key = obj["id"]
         .as_f64()
         .and_then(|f| (f.fract() == 0.0 && f >= 0.0).then_some(f as u64));
-    let waiter = key.and_then(|k| inner.pending.lock().unwrap().remove(&k));
+    let waiter = key.and_then(|k| inner.pending.lock_unpoisoned().remove(&k));
     let Some(waiter) = waiter else { return };
     // isResponseMessage: jsonrpc=='2.0' envelope, no method, valid id, exactly
     // one of result|error (error shaped {code:int, message:string}).
@@ -598,13 +598,13 @@ impl AgentProcess {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         // Register before writing — a fast reply may beat the send.
-        self.inner.pending.lock().unwrap().insert(id, tx);
+        self.inner.pending.lock_unpoisoned().insert(id, tx);
         let mut frame = json!({"jsonrpc": "2.0", "id": id, "method": method});
         if !params.is_null() {
             frame["params"] = params;
         }
         if !send_wire(&self.inner, frame) {
-            self.inner.pending.lock().unwrap().remove(&id);
+            self.inner.pending.lock_unpoisoned().remove(&id);
             return Err("ACP connection closed".to_string());
         }
         let result = rx
@@ -637,7 +637,7 @@ impl AgentProcess {
                     "initialize",
                     json!({
                         "protocolVersion": 1,
-                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.9.4"},
+                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.10.0"},
                         "clientCapabilities": {},
                     }),
                 ),

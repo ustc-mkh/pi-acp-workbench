@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AgentProcess } from './support/acp-client';
 import type { Inspection } from '../src/telemetry';
+import type * as acp from '@agentclientprotocol/sdk';
 beforeAll(() => {
   execFileSync(
     process.execPath,
@@ -22,7 +23,7 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
   try {
     await mkdir(join(dir, '.pi'));
     await writeFile(join(dir, '.pi/settings.json'), '{"quietStartup":true}');
-    const updates: any[] = [];
+    const updates: acp.SessionNotification['update'][] = [];
     agent = new AgentProcess({
       command: process.execPath,
       args: [resolve('dist/pi-adapter.mjs')],
@@ -63,9 +64,16 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
     expect(
       await agent.prompt(sessionId, [{ type: 'text', text: '/compact keep decisions' }]),
     ).toMatchObject({ stopReason: 'end_turn' });
-    expect(updates.some((update) => update.content?.text?.includes('手动压缩后的上下文'))).toBe(
-      true,
-    );
+    expect(
+      updates.some(
+        (update) =>
+          (update.sessionUpdate === 'agent_message_chunk' ||
+            update.sessionUpdate === 'agent_thought_chunk' ||
+            update.sessionUpdate === 'user_message_chunk') &&
+          update.content.type === 'text' &&
+          update.content.text.includes('手动压缩后的上下文'),
+      ),
+    ).toBe(true);
     await expect(
       agent.prompt(sessionId, [{ type: 'text', text: '/compact fail' }]),
     ).rejects.toThrow('compaction model unavailable');

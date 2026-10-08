@@ -79,11 +79,12 @@ systemctl --user enable --now pi-sessions
   "allowedUserIds": [123456789],
   "workspaces": {
     "project": "/absolute/path/to/project"
-  }
+  },
+  "restrictToWorkspaces": true
 }
 ```
 
-只有指定群组中的指定用户可以控制 Pi。`workspaces` 是可选快捷别名，不限制目录；也可直接用绝对路径创建会话。
+只有指定群组中的指定用户可以控制 Pi。`workspaces` 提供快捷别名；当前示例的 `restrictToWorkspaces:true` 仅允许这些目录根。使用绝对路径也须匹配允许目录；需要允许账户可访问的其他目录时设置为 `false`。配置字段的缺省值是 `false`，仓库生产示例显式开启限制。
 
 创建 `~/.config/pi-acp-workbench/telegram.env`：
 
@@ -136,6 +137,6 @@ npm install -g @agentclientprotocol/claude-agent-acp
 
 三种 Agent 都由 Rust daemon 托管，插件只通过 socket 连接。自定义启动路径、参数和环境变量放在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中；实际功能取决于适配器声明的 ACP 能力。配置示例见 [会话服务](docs/session-service.md#codex--claude-配置)。需要将插件与 v3 daemon 一起更新，没有文件写入降级路径。
 
-详细资料：[架构说明](docs/architecture.md) · [开发与测试](docs/testing.md) · [更新记录](CHANGELOG.md)
+详细资料：[全部文档](docs/README.md) · [架构说明](docs/architecture.md) · [开发与测试](docs/testing.md) · [服务发布与回滚](docs/service-release.md) · [更新记录](CHANGELOG.md)
 
 长任务期间 context 占用会持续刷新并保存在会话快照中；终端工具实时显示输出，“全部修改”展开后显示采集说明。Telegram 通知保留 Markdown 格式。

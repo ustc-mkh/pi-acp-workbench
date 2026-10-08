@@ -1,4 +1,9 @@
-import type { ServiceState } from './session-protocol';
+import type {
+  ServiceState,
+  ServiceEvent,
+  ServiceStateEvent,
+  ServiceStatePatch,
+} from './session-protocol';
 import type { Entry } from './shared';
 
 /** Reconstruct ordered socket deltas without serializing unchanged history entries. */
@@ -8,12 +13,19 @@ export class ServiceStateStream {
     if (id === undefined) this.sessions.clear();
     else this.sessions.delete(id);
   }
-  receive(event: any): any {
+  receive(event: ServiceStateEvent | ServiceStatePatch): ServiceStateEvent;
+  receive(event: ServiceEvent | ServiceStatePatch): ServiceEvent;
+  receive(event: ServiceEvent | ServiceStatePatch): ServiceEvent {
     if (event?.type === 'state') {
       const id = event.snapshot?.id;
-      if (typeof id === 'string' && Number.isSafeInteger(event.revision)) {
+      const revision = event.revision;
+      if (
+        typeof id === 'string' &&
+        typeof revision === 'number' &&
+        Number.isSafeInteger(revision)
+      ) {
         if (!this.sessions.has(id) && this.sessions.size >= 32) throw new Error('会话状态订阅过多');
-        this.sessions.set(id, { revision: event.revision, state: event });
+        this.sessions.set(id, { revision, state: event });
       }
       return event;
     }
@@ -42,7 +54,7 @@ export class ServiceStateStream {
       throw new Error('会话增量顺序无效');
     if (event.order === undefined && entries.size !== order.length)
       throw new Error('会话增量缺少顺序');
-    const state = {
+    const state: ServiceStateEvent = {
       ...event.state,
       snapshot: { ...event.state.snapshot, entries: order.map((id) => entries.get(id)!) },
       type: 'state',

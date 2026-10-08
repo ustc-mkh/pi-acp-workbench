@@ -1,6 +1,6 @@
 # 会话服务 Wire 协议规范
 
-本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端及命令校验已删除，`protocol.rs` 用 serde 校验带类型的请求和状态，用 ts-rs 生成 `src/session-protocol.generated.ts`；`session-protocol.ts` 只重导出契约并保留启动配置。`npm run generate:protocol` 更新，`npm run check:protocol` 检查漂移。
+本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端及命令校验已删除，`protocol.rs` 用 serde 校验带类型的请求和状态，用 ts-rs 生成 `src/session-protocol.generated.ts`；`session-protocol.ts` 重导出契约，并补充客户端事件、增量、方法返回值映射和启动配置。`npm run generate:protocol` 更新，`npm run check:protocol` 检查漂移。
 
 黑盒验证入口：`npm run test:contract`（`scripts/service-contract.mjs`，只依赖 socket，不 import 服务实现）。
 
@@ -21,36 +21,37 @@
   - 事件推送 `{"event": <object>}`（无 `id`，不对应任何请求）
   - 分块帧 `{"fragment": "<string>", "last": <boolean>}`（见 §5）
 
-统一服务扩展版本为 v3，通过 `_meta['session-service'].version` 协商；`hello.protocolVersion:1` 仍指 ACP v1。不存在共享历史委托写入能力。
+统一服务扩展版本为 v3，通过 `agentCapabilities._meta['session-service'].version` 协商；`hello.protocolVersion:1` 仍指 ACP v1。不存在共享历史委托写入能力。
 
 ## 3. 客户端约束（服务端强制执行）
 
-| 约束               | 值                             | 违反时行为                   |
-| ------------------ | ------------------------------ | ---------------------------- |
-| `id`               | string，≤200 字符              | 销毁 socket                  |
-| `method`           | string                         | 销毁 socket                  |
-| `params`           | 必须是 object（非数组/null）   | 销毁 socket                  |
-| 单连接入站缓冲     | 16 MiB                         | 销毁 socket                  |
-| 不完整帧超时       | 10 s（无 `\n` 收尾的残留缓冲） | 销毁 socket                  |
-| 全局并发连接       | 32                             | 新连接立即销毁               |
-| 全局 pending 请求  | 128 个 / 32 MiB                | 响应 `{id, error: 队列已满}` |
-| 每 socket 会话订阅 | ≤32 个 sessionId               | 响应 `{id, error: 订阅已满}` |
-| 每请求 sessionId   | ≤1000 字符非空 string          | 响应 `{id, error}`           |
+| 约束                      | 值                                            | 违反时行为                                                    |
+| ------------------------- | --------------------------------------------- | ------------------------------------------------------------- |
+| `id`                      | string，≤200 UTF-16 code unit                 | 销毁 socket                                                   |
+| `method`                  | string                                        | 销毁 socket                                                   |
+| `params`                  | 传输层接受 object / array；业务按方法结构校验 | 缺失 / null / 基本值关闭连接；业务结构错误返回 invalid_params |
+| 单连接入站缓冲            | 16 MiB                                        | 销毁 socket                                                   |
+| 不完整帧超时              | 10 s（无 `\n` 收尾的残留缓冲）                | 销毁 socket                                                   |
+| 全局并发连接              | 32                                            | 有界读取首帧，返回 busy 后关闭；未收到有效首帧则直接关闭      |
+| 全局 pending 请求         | 128 个 / 32 MiB                               | 响应 `{id, error: 队列已满}`                                  |
+| 每 socket 会话订阅        | ≤32 个 sessionId                              | 响应 `{id, error: 订阅已满}`                                  |
+| `_watch.sessionId`        | ≤1000 UTF-16 code unit                        | 响应 `{id, error}`                                            |
+| 业务 sessionId 等必需文本 | 非空，≤10000 UTF-16 code unit                 | 响应 invalid_params                                           |
 
-非法 JSON、上述字段校验失败 → 服务端直接销毁该连接，**不回错误响应**。
+非法 JSON 或帧字段类型 / 大小违规直接关闭连接；订阅、容量和方法参数等业务校验失败按表返回错误。阈值中的 MiB 为 1024² 字节，字符串长度单独标明 UTF-16 code unit。
 
 客户端实现约定（`SessionClient`，Rust 侧可简化但需兼容服务端）：连接超时 5 s；默认请求超时 30 s（长任务类调用传 0 表示不设超时）；socket 断开时所有 pending 请求 reject。
 
 ## 4. 方法清单
 
-入参校验逻辑对应 `serviceCommand()`。所有 `text` 参数规则：非空 string、≤10000 字符，违反返回 `{id,error:"无效参数：<name>"}`。
+入参校验逻辑对应 Rust `protocol.rs` 的 `service_command()` 与 serde 请求类型。必需文本参数要求非空 string、≤10000 UTF-16 code unit，违反返回带 `code: "invalid_params"` 的错误。
 
 | method          | params                                                              | 返回值                                                                                                                              | 持久化         |
 | --------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | `hello`         | `{harness?}`                                                        | 实际 ACP initialize 结果及 v3 session-service 标识                                                                                  | 否             |
 | `list`          | `{}`                                                                | `Snapshot[]`（全部 harness，按 `updated` 降序；快照的 `entries` 为空数组）                                                          | 否             |
 | `create`        | `{cwd,harness?}`                                                    | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`） | **是**         |
-| `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, error?}`；`snapshot` 含完整 `entries`                                       | 否             |
+| `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, plan, error?}`；`snapshot` 含完整 `entries`                                 | 否             |
 | `cancel`        | `{sessionId}`                                                       | `boolean`（无可取消任务返回 `false`）                                                                                               | 否             |
 | `remove`        | `{sessionId}`                                                       | `undefined`（响应帧为 `{"id":…}`，无 `value` 键）                                                                                   | 否（排队执行） |
 | `permission`    | `{sessionId, permissionId, optionId?}`                              | `boolean`（票据不存在/选项非法返回 `false`）                                                                                        | 否             |
@@ -63,44 +64,46 @@
 
 `events.ack` 参数为 `{id:string,token:string}`，返回 boolean；仅删除与 token 匹配的版本，并同步目录。不存在或版本已更新返回 false。relay 先 durable 保存投递记录再确认，连接失败后重试，不重新执行模型任务。该队列当前供单个 Telegram relay 消费，不提供多个独立订阅者的投递保证；socket 权限边界与其他方法相同。
 
-v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。缺省 harness 为 Pi。`list` 返回所有 harness；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
+v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`；usageInspection 对 Codex / Claude 为 true，对 Pi 为 false，Pi 使用其增强适配器的 inspect 能力。缺省 harness 为 Pi。`list` 返回所有 harness；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
 
 `historyRemove` 带 sessionId 删除单个会话，不带则清空全部 harness；先处置运行时，再提交 tombstone。多个客户端可同时订阅/提交同一会话，服务按会话串行化，无客户端文件租约。
 
-`request.method` 白名单（`AGENT_METHODS`）：`_pi_workbench/inspect`、`_pi_workbench/fork`、`_pi_workbench/cancel_fork`、`session/set_mode`、`session/set_config_option`。其中 `fork`、`set_mode`、`set_config_option` 走持久化队列（journal）；`inspect` 走会话队列；`cancel_fork` 直接执行。
+`request.method` 白名单（Rust `AgentRequest` 枚举）：`_pi_workbench/inspect`、`_pi_workbench/fork`、`_pi_workbench/cancel_fork`、`session/set_mode`、`session/set_config_option`。其中 `fork`、`set_mode`、`set_config_option` 走持久化队列（journal）；`inspect` 走会话队列；`cancel_fork` 直接执行。
 
-`request.params` 附加校验：`set_mode` 要求 `modeId`；`set_config_option` 要求 `configId`+`value`；`fork` 要求 `entryId`+`hash`。`_pi_workbench/inspect` 在 `params.force` 非真且会话无活动 worker 时短路返回 `{records:[], contextWindow:<快照缓存值>}`。
+`request.params` 附加校验：`set_mode` 要求 `modeId`；`set_config_option` 要求 `configId`+`value`；`fork` 要求 `entryId`+`hash`。Pi 的 `_pi_workbench/inspect` 在 force=false 且无活动 worker 时返回空 records 与快照缓存的 contextWindow；force=true 时按需加载 worker。Codex / Claude 通过 `session-service.usageInspection` 协商，在服务端直接分页读取持久化用量（每页最多 500 条），查询冷会话也不启动 worker。cursor 必须为非负整数。
 
-`prompt.prompt` 必须是非空数组，每个元素是含 `type` string 的 object；整体 JSON 序列化 ≤12 MiB（`checkPromptSize`）。
+`prompt.prompt` 必须是非空数组，每个元素是含 `type` string 的 object；Rust `service_command()` 将数组序列化为 JSON 字节并检查大小 ≤12 MiB。
 
 **持久化（durable）方法**在执行前写请求收据，见 data-formats.md §requests。同 id 同指纹直接返回原结果；同 id 不同指纹/会话拒绝；中断收据同 id 重试拒绝（不自动重放）。
 
-**排队模型**：同 sessionId 的命令串行执行；全局工作进程上限 `maxWorkers`（配置 1–8，默认 3）；队列上限 100/会话；`cancel` 使该会话当时已排队的请求失效（epoch 失效），不影响执行中请求的结果写回。
+**排队模型**：同 sessionId 的命令串行执行；全局工作进程上限 `maxWorkers`（配置 1–8，默认 3）。加载新 worker 时优先回收空闲 worker，全部忙碌则返回忙碌错误，不等待其他会话释放容量。队列上限 100/会话；`cancel` 使该会话当时已排队的请求失效（epoch 失效），不影响执行中请求的结果写回。
 
 ## 5. 大响应分块（关键兼容点）
 
-- 响应帧编码后（`JSON.stringify(value)+'\n'`）按 **JS string 的 UTF-16 code unit** 计量。
-- body ≤512 KiB：整帧一次写入。
-- body >512 KiB：按每片 **128 KiB UTF-16 code unit** 切片，逐片发送 `{"fragment": "<切片文本>", "last": bool}`。
+- 服务端完整 JSON 响应帧（含结尾换行）的大小与队列预算按 **UTF-8 字节** 计量；分块内部文本按 UTF-16 code unit 切分。
+- body ≤512 KiB（UTF-8）：整帧写入。
+- body >512 KiB（UTF-8）：按每片 **128 Ki 个 UTF-16 code unit** 切片，逐片发送 `{"fragment": "<切片文本>", "last": bool}`。
 - **切片点可以落在 UTF-16 代理对中间**。此时切片含孤立代理项，`JSON.stringify` 会将其转义为 `\uXXXX`——合法的 JSON 字符串。接收端必须先把各 `fragment` 的**解码后字符串**按顺序拼接还原，再对完整 body 做 `JSON.parse`（body 末尾的 `\n` 由 parser 容忍）。
 - **Rust 实现注意**：Rust `String` 无法表示孤立代理项。正确做法是将要发送的 body 编码为 UTF-16 `Vec<u16>`，按 128 Ki code unit 边界切片，序列化 fragment 时对落在切片边界的孤立代理项输出 `\uXXXX` 转义（serde_json 拒绝孤立代理，需手写该转义）。接收端同样：拼接 fragment 的 UTF-16 序列后再转 UTF-8。
 - 分块传输期间同 socket 不得交错其他消息；接收端发现交错应销毁连接。
 - 每 socket 待写出响应 ≤64 MiB，全局 ≤128 MiB；超限销毁该 socket。
-- 分块序列若 10 s 内未续传，接收方销毁连接（partialMs 同样约束分块间隔）。
+- 分块序列若 10 s 内未续传，接收方销毁连接（partialMs 同样约束分块间隔）；客户端最多接收 2048 个分块。TS 客户端按片段解码文本的 UTF-8 字节累计限制 64 MiB；Rust WireClient 对待拼接的 UTF-16 缓冲限制 64 MiB（32 Mi code unit），因此两者在部分字符组成下可接收的最大正文长度不同。
 
 ## 6. 事件推送
 
 `_watch` 建立会话级订阅。事件帧为 `{"event": <object>}`，只投递给订阅了该 sessionId 的连接：
 
-| event.type     | 载荷                                                            | 触发                                            |
-| -------------- | --------------------------------------------------------------- | ----------------------------------------------- |
-| `state`        | `{type:'state', snapshot, busy, permissions, commands, error?}` | 会话运行时状态变化（含 prompt 生命周期结束）    |
-| `update`       | `{type:'update', notification:<ACP SessionNotification>}`       | worker 发出 `session/update`（replay 阶段除外） |
-| `serviceError` | `{type:'serviceError', sessionId, error}`                       | 状态超过 64 MiB 等无法传输的错误                |
+| event.type     | 载荷                                                                  | 触发                                            |
+| -------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+| `state`        | `{type:'state', snapshot, busy, permissions, commands, plan, error?}` | 会话运行时状态变化（含 prompt 生命周期结束）    |
+| `update`       | `{type:'update', notification:<ACP SessionNotification>}`             | worker 发出 `session/update`（replay 阶段除外） |
+| `serviceError` | `{type:'serviceError', sessionId, error}`                             | 状态超过 64 MiB 等无法传输的错误                |
 
 路由依据：`event.snapshot.id` 或 `event.notification.sessionId`。事件帧同样受 64 MiB 编码上限约束；超限降级为 `serviceError` 帧。
 
 ## 7. 生命周期与错误语义
+
+Unix socket 达到 32 个连接时，服务记录日志，并在 100 ms 内尝试读取新连接的首个请求（上限 64 KiB），返回同 ID 的 `error` / `code: "busy"` 后关闭；未及时发送首帧或超出此限的连接直接关闭。连接拒绝与 accept 系统错误均等待 100 ms 再尝试，关闭信号可打断等待。
 
 - 客户端断线**不取消**已提交任务；客户端不得自动重发（防重放由收据保证）。
 - 服务关闭时销毁所有连接；客户端把 pending 全部 reject。

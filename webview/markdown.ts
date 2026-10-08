@@ -4,7 +4,7 @@ import 'katex/contrib/mhchem';
 import hljs from 'highlight.js/lib/common';
 import taskLists from 'markdown-it-task-lists';
 import footnotes from 'markdown-it-footnote';
-import createDOMPurify from 'dompurify';
+import createDOMPurify, { type WindowLike } from 'dompurify';
 
 const escaped = (s: string, i: number) => {
   let n = 0;
@@ -27,7 +27,7 @@ function mathHtml(source: string, displayMode: boolean): string {
     return `<code class="math-fallback" title="公式尚未完整或包含不支持的 LaTeX 命令">${md.utils.escapeHtml(source)}</code>`;
   }
 }
-export const md: ReturnType<typeof MarkdownIt> = new MarkdownIt({
+const md: ReturnType<typeof MarkdownIt> = new MarkdownIt({
   html: false,
   linkify: true,
   typographer: false,
@@ -155,7 +155,7 @@ md.renderer.rules.image = (tokens, i) =>
   `<span class="image-placeholder">[图片: ${md.utils.escapeHtml(tokens[i].content || 'image')}]</span>`;
 
 export function createRenderer(window: Window) {
-  const purify = createDOMPurify(window as any);
+  const purify = createDOMPurify(window as Window & WindowLike);
   return (source: string) =>
     purify.sanitize(md.render(source, { source }), {
       USE_PROFILES: { html: true, mathMl: true, svg: true },

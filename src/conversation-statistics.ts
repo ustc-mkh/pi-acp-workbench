@@ -15,7 +15,7 @@ import {
 } from './telemetry';
 
 interface StatisticsContext {
-  agent?: Agent;
+  agent?: Pick<Agent, 'harness' | 'info' | 'request'>;
   state: ChatState;
   harness: HarnessId;
   conversationId?: string;

@@ -3,11 +3,28 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ServiceStateStream } from './service-state-stream';
+import type {
+  ErrorCode,
+  ServiceEvent,
+  ServiceStatePatch,
+  ServiceResponses,
+} from './session-protocol';
+interface WireResponse {
+  id?: string;
+  value?: unknown;
+  error?: string;
+  code?: ErrorCode;
+  event?: ServiceEvent | ServiceStatePatch;
+}
+interface WireFrame extends WireResponse {
+  fragment?: string;
+  last?: boolean;
+}
 const sessionSocket = () => join(homedir(), '.pi', 'pi-acp-workbench', 'service', 'sessions.sock');
 const LIMIT = 16 * 1024 * 1024;
 /** Client-side bounds only. The Rust service owns server limits and accounting. */
 export const WIRE_LIMITS = { pending: 128, partialMs: 10000, responseBytes: 64 * 1024 * 1024 };
-function reader(socket: Socket, receive: (value: any) => void) {
+function reader(socket: Socket, receive: (value: WireFrame) => void) {
   socket.setEncoding('utf8');
   let buffer = '',
     bytes = 0,
@@ -33,7 +50,8 @@ function reader(socket: Socket, receive: (value: any) => void) {
       buffer = buffer.slice(end + 1);
       bytes -= Buffer.byteLength(line) + 1;
       try {
-        receive(JSON.parse(line));
+        // The daemon owns the wire schema; keep deserialization at this boundary.
+        receive(JSON.parse(line) as WireFrame);
       } catch {
         socket.destroy(new Error('会话协议无效'));
         release();
@@ -60,7 +78,7 @@ function reader(socket: Socket, receive: (value: any) => void) {
   });
 }
 /** Responses are fragmented, requests remain single bounded frames. */
-function responseReader(socket: Socket, receive: (value: any) => void) {
+function responseReader(socket: Socket, receive: (value: WireResponse) => void) {
   let parts: string[] = [],
     bytes = 0,
     timer: NodeJS.Timeout | undefined;
@@ -87,7 +105,7 @@ function responseReader(socket: Socket, receive: (value: any) => void) {
       if (item.last) {
         const text = parts.join('');
         reset();
-        receive(JSON.parse(text));
+        receive(JSON.parse(text) as WireResponse);
       } else {
         timer = setTimeout(
           () => socket.destroy(new Error('会话响应未完整发送')),
@@ -121,11 +139,11 @@ export class SessionClient {
   private states = new ServiceStateStream();
   private pending = new Map<
     string,
-    { resolve: (value: any) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout }
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout }
   >();
   constructor(
     private path = sessionSocket(),
-    private event: (value: any) => void = () => {},
+    private event: (value: ServiceEvent) => void = () => {},
     private lost: (error: string) => void = () => {},
   ) {}
   private connect() {
@@ -159,6 +177,7 @@ export class SessionClient {
           this.event(this.states.receive(item.event));
           return;
         }
+        if (typeof item.id !== 'string') return;
         const pending = this.pending.get(item.id);
         if (!pending) return;
         this.pending.delete(item.id);
@@ -173,7 +192,14 @@ export class SessionClient {
     this.states.clear(sessionId);
     return this.call('_watch', { sessionId, enabled, stateDeltas: true });
   }
-  async call<T = any>(
+  call<Method extends keyof ServiceResponses>(
+    method: Method,
+    params?: unknown,
+    id?: string,
+    timeout?: number,
+  ): Promise<ServiceResponses[Method]>;
+  call<T = unknown>(method: string, params?: unknown, id?: string, timeout?: number): Promise<T>;
+  async call<T = unknown>(
     method: string,
     params: unknown = {},
     id: string = randomUUID(),
@@ -198,7 +224,7 @@ export class SessionClient {
             );
           }, timeout)
         : undefined;
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
       sendBody(this.socket!, body);
     });
   }

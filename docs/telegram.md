@@ -2,7 +2,7 @@
 
 Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话和执行任务。生产入口为 `service-dist/pi-acp-telegram-daemon`，通过 `npm run build:services` 构建；不再发布 Node relay。接受 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，继续读写 `~/.pi/pi-acp-workbench/telegram/` 的既有格式。契约验证为 `npm run test:contract:telegram`，真实 Rust 会话服务与 relay 集成为 `npm run test:integration:rust`。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
 
-本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复使用纯文本，避免不完整 Markdown 导致 Telegram 拒绝流式更新。
+本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复将 Markdown 转成 Telegram 原生 entities；流式不完整片段按安全文本处理，长代码与中文 / emoji 分块保留格式。
 
 ## 配置与部署
 
@@ -30,7 +30,7 @@ chmod 700 ~/.config/pi-acp-workbench
 cp examples/telegram.json ~/.config/pi-acp-workbench/telegram.json
 ```
 
-编辑配置，填入真实的群组 ID、自己的 Telegram 用户数字 ID 和允许使用的项目绝对路径：
+编辑配置，填入真实的群组 ID、自己的 Telegram 用户数字 ID 和工作区别名对应的项目绝对路径：
 
 ```json
 {
@@ -39,7 +39,8 @@ cp examples/telegram.json ~/.config/pi-acp-workbench/telegram.json
   "workspaces": {
     "workbench": "/absolute/path/to/pi-acp-workbench",
     "another": "/absolute/path/to/another-project"
-  }
+  },
+  "restrictToWorkspaces": true
 }
 ```
 
@@ -61,7 +62,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置包含群组、用户、可选工作区别名及 `serviceSocket`。该开关缺省为 `false`。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。`/sessions` 和 `/open` 同样只显示或连接这些目录中的会话；已有话题中的状态、历史、任务、停止和授权请求也会重新检查工作区范围。无法解析的目录会被拒绝。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置包含群组、用户、可选工作区别名、`serviceSocket` 及 `restrictToWorkspaces`。目录限制开关缺省为 `false`。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。`/sessions` 和 `/open` 同样只显示或连接这些目录中的会话；已有话题中的状态、历史、任务、停止和授权请求也会重新检查工作区范围。无法解析的目录会被拒绝。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
 
 ### 3. 作为用户服务常驻
 
@@ -80,7 +81,7 @@ journalctl --user -u pi-telegram -f
 
 如果需要退出 SSH 后用户服务仍常驻，服务器还需为此账户启用 linger：`loginctl enable-linger "$USER"`（是否需要管理员权限取决于服务器配置）。关闭 VS Code 不影响这个独立服务；关闭服务器会停止任务。
 
-升级代码前先等任务结束并停止两个服务，重新执行 `npm run build:services`，然后依次启动会话服务与 Telegram。只重启 Telegram 不会停止已提交到 Pi 服务的任务；尚未提交的内存排队消息不会重放。升级 Pi 服务前先等待任务完成。停止服务用 `systemctl --user stop pi-telegram`。
+升级代码前先等任务结束并停止两个服务，重新执行 `npm run build:services`，然后依次启动会话服务与 Telegram。只重启 Telegram 不会停止已提交到 Pi 服务的任务；durable 入队但尚未开始的消息会在重启后继续；已开始而没有完成记录的消息不会自动重放。升级 Pi 服务前先等待任务完成。停止服务用 `systemctl --user stop pi-telegram`。
 
 ### 4. 桌面与手机共享会话
 
@@ -93,7 +94,7 @@ journalctl --user -u pi-telegram -f
 - `~/.pi/pi-acp-workbench/telegram/` 保存话题绑定、处理游标和完成通知记录，不保存 Bot token。新目录/文件权限为 0700/0600。
 - outbox 由会话服务持久化，relay 通过 `events.next` 逐项读取、在保存投递记录后通过 `events.ack` 确认。队列可能含完整回复；服务删除确认过的对应版本，并清理超过 7 天的记录。relay 不访问队列目录，离线后重新连接可继续投递。
 - 同一服务器上的同一 Bot 只有一个服务能持有轮询锁；Telegram 返回其他轮询器冲突时停止服务并报告。
-- 任务游标在执行前落盘，优先避免重复运行工具。进程若恰好在落盘后、执行前崩溃，该条任务不会自动重放，请检查历史后手动重发。
+- 接收 update 与游标同一事务落盘；pending 消息可在重启后继续，执行前标记 started。重启发现 started 时标记 interrupted 并提示结果未确认，不自动重复运行工具，请先检查历史和工作区。
 - 完成通知在发送前落盘，网络恢复后重试。发送已成功但确认落盘前崩溃时可能重复通知，不会重跑 Pi 任务。
 - 强制杀进程不会自动继续中断的模型请求；原生历史和本地记录保留。需要继续时在原话题发新消息。
 
@@ -111,7 +112,7 @@ journalctl --user -u pi-telegram -f
 
 ### 创建和继续会话
 
-发送 `/new /ssddata/miaokehao/LLMRouterBench` 可在任意有效绝对目录新建会话，无需预先配置。也可发送 `/new workbench` 创建会话及独立话题；仅配置一个工作区时可以省略名称。在话题中直接发文字即可与对应 Pi session 对话，`/compact` 等未被服务占用的命令转交 Pi。当前仅支持文字输入，回复为纯文本。
+发送 `/new /absolute/path/to/project` 可按绝对路径创建会话；开启 restrictToWorkspaces 时必须匹配配置目录根，未开启时可使用当前账户能够访问的有效目录。也可发送 `/new workbench` 创建会话及独立话题；仅配置一个工作区时可以省略名称。在话题中直接发文字即可与对应 Pi session 对话，`/compact` 等未被服务占用的命令转交 Pi。当前仅支持文字输入，回复支持 Markdown entities。
 
 `/sessions` 列出最近 50 个各 harness 的会话（开启工作区限制时仅显示允许目录），`/open 12` 为已有编号会话创建或打开话题。也可以使用完整 Session ID。
 
@@ -157,7 +158,7 @@ Telegram Bot API 的 [`sendMessage.disable_notification`](https://core.telegram.
 
 ### 常见情况
 
-- 一直提示会话占用：确认旧版插件/旧 Telegram 已退出，不要抢锁；检查 Pi 会话服务日志。
+- 提示忙碌或连接已满：同会话任务会串行执行；检查正在运行的任务、客户端连接和 Pi 会话服务日志。当前版本允许多个客户端附着同一会话，没有客户端独占租约。
 - 已关闭推送，Agent 等待授权：发送 `/status`，在卡片中选择授权或取消；也可 `/stop`。
 - 模型请求失败或重试耗尽：按错误提示检查 Pi 凭据和服务代理配置。systemd 不继承交互式终端环境，参见配置文档。
 - `/stop` 对工具的取消能力取决于 Pi；取消不撤销工具已经完成的文件修改。
@@ -171,3 +172,5 @@ Telegram Bot API 的 [`sendMessage.disable_notification`](https://core.telegram.
 消息和接收游标一起持久化后才开始处理。未开始的消息可在重启后继续；已开始但没有完成记录的消息会提示“结果未确认”，不会自动重放，请先用 `/status` 检查。普通处理槽为 64，停止/中断及按钮回调另有 8 个槽；持久化接收队列最多 128 条，控制消息额外预留 8 条。队列满时先发送明确的拒绝通知，再推进游标；通知失败则停止接收并保留原游标。
 
 同话题的提示词按接收顺序执行，状态查询和控制操作不等待当前任务结束。`/stop` 同时取消尚未执行的旧提示词；`/interrupt` 完成取消后把替代提示词放回普通队列，避免长任务占用控制槽。通知总开关不隐藏队列拒绝和重启结果未确认的提示。
+
+部署包、TLS / 代理和升级回滚见 [服务发布](service-release.md)；测试入口与已经执行的范围见 [测试](testing.md) 和 [验收记录](rust-acceptance.md)。

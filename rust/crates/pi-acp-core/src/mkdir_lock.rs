@@ -1,6 +1,7 @@
 //! proper-lockfile-compatible mkdir lock (docs/data-formats.md §3):
 //! `${path}.lock` directory, mtime heartbeat every `update`, stale after `stale`.
 //! Never replace with flock: the TypeScript side may hold or inspect the same lock.
+use crate::sync::MutexExt;
 use std::fs::FileTimes;
 use std::io;
 use std::path::PathBuf;
@@ -98,7 +99,7 @@ impl Ownership {
                 return false;
             }
         }
-        meta.is_dir() && meta.modified().ok() == Some(*self.modified.lock().unwrap())
+        meta.is_dir() && meta.modified().ok() == Some(*self.modified.lock_unpoisoned())
     }
     fn owns(&self, dir: &std::path::Path) -> bool {
         std::fs::symlink_metadata(dir).is_ok_and(|meta| self.matches(&meta))
@@ -170,7 +171,7 @@ impl MkdirLock {
                         return Err(io::Error::other("lock ownership changed"));
                     }
                     handle.set_times(FileTimes::new().set_modified(SystemTime::now()))?;
-                    *owner.modified.lock().unwrap() = handle.metadata()?.modified()?;
+                    *owner.modified.lock_unpoisoned() = handle.metadata()?.modified()?;
                     Ok(())
                 };
                 if refresh().is_err() {

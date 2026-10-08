@@ -56,8 +56,6 @@ try {
   await cp('docs/service-release.md', join(staging, 'README.md'));
   await cp('docs/service-release.md', join(staging, 'service-release.md'));
   await cp('docs/rust-acceptance.md', join(staging, 'rust-acceptance.md'));
-  await mkdir(join(staging, 'archive'));
-  await cp('docs/archive/rust-migration.md', join(staging, 'archive', 'rust-migration.md'));
   await cp('THIRD_PARTY_NOTICES.txt', join(staging, 'THIRD_PARTY_NOTICES.txt'));
   await writeRustNotices(manifest.target, staging);
   await mkdir(join(staging, 'examples'));

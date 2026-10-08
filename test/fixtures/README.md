@@ -7,7 +7,7 @@
 
 每个文件是一个独立用例：
 
-- `kind: "points"`：输入 `entries`（原生历史节点，已按 leaf→root 排好），期望
+- `kind: "points"`：输入 `entries`（原生历史节点，已按 root→leaf 排好），期望
   `expected.forkPoints`（`entryId`/`hash`/`role`/`key`/`timestamp`/`safe`）与
   `expected.prefixHash`（全链 `nativePrefixHash`）；`expected.error` 表示必须拒绝。
 - `kind: "bind"`：额外含 `uiEntries`（界面条目）与可选 `previous`，期望
@@ -19,6 +19,11 @@ SHA-256。key 排序/字符串化必须与 JS `JSON.stringify` 一致（键按�
 
 ## `formats/`（手工维护的规范样例）
 
-每份文件对应 data-formats.md 的一个磁盘格式；实现必须能读取这些样例，且写出的文件
-在字段集合上不得比样例更少（未知字段可容忍，必需字段不可缺）。样例中的哈希为占位值，
+每份文件对应 data-formats.md 的一个磁盘格式；实现必须能读取这些样例，读写必须满足规范中的必需 / 可选字段与类型约束；未知字段是否容忍由相应格式定义决定。样例中的哈希为占位值，
 不表示真实内容摘要。
+
+## 更新与验证
+
+只有有意修改原生分支算法时才运行 `npm run fixtures`，并审查每个 JSON diff。执行 `npx vitest run test/native-branch.test.ts test/native-fixtures.test.ts` 验证树安全语义与冻结输出；服务端切点绑定由 Rust native 单测验证。
+
+`formats/` 样例由人工维护，`npm run fixtures` 不生成这些文件。磁盘格式变化须同步规范、读写实现与黑盒契约，不将新增字段的存在误当作所有历史样例都必须包含它。完整测试入口见 [测试指南](../../docs/testing.md)。

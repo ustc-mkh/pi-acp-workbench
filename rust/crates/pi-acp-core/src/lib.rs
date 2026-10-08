@@ -9,3 +9,4 @@ pub mod utf16;
 pub mod wire;
 
 pub mod panic_guard;
+pub mod sync;

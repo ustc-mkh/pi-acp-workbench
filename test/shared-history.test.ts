@@ -58,13 +58,13 @@ it('owns every harness through the same socket, namespaces IDs, and persists set
     expect(state.snapshot.entries).toContainEqual(
       expect.objectContaining({ role: 'user', text: `${harness} prompt` }),
     );
-    expect(state.snapshot.entries.at(-1).role).toBe('diff');
+    expect(state.snapshot.entries.at(-1)!.role).toBe('diff');
     expect(
       JSON.parse(await readFile(join(root, 'preferences', `${harness}.json`), 'utf8')).preferences,
     ).toContainEqual(expect.objectContaining({ kind: 'model', value: 'other' }));
   }
   expect(new Set(ids).size).toBe(3);
-  expect((await service.call('list')).map((s: any) => s.harness).sort()).toEqual([
+  expect((await service.call('list')).map((s) => s.harness).sort()).toEqual([
     'claude',
     'codex',
     'pi',

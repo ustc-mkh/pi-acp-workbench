@@ -16,8 +16,11 @@ Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff
 
 ## 职责
 
+Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位于 `src/`；Telegram 模块位于 `rust/crates/pi-acp-telegram-daemon/src/`。
+
 | 模块                                                                               | 职责                                                           |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `server.rs`                                                                        | Unix socket 接入、帧限制、背压、订阅与连接回收                 |
 | `protocol.rs` / `session-protocol.generated.ts`                                    | serde 边界与 ts-rs 生成的客户端协议                            |
 | `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收           |
 | `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                         |
@@ -56,7 +59,7 @@ Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff
 
 worker 配置统一放在 `sessions.json`，可用 `harnesses.pi/codex/claude` 分别覆盖 command/args/env。顶层 command/args/env 为 Pi 配置；未配置的 Codex/Claude 分别从服务 PATH 启动 `codex-acp` / `claude-agent-acp`。不自动安装适配器，也不继承 Pi 专属环境覆盖。凭据归上游工具管理，登录按钮仅打开登录终端。
 
-每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 原生扩展能力；服务通过 `session-service.usageInspection` 单独声明用量查询支持。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
+每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 原生扩展能力；服务通过 `session-service.usageInspection` 单独声明 Codex / Claude 用量查询支持。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
 
 Codex/Claude 每轮 `session/prompt` 返回的用量由 `usage.rs` 规范化并随完整历史快照持久化。优先读取 `_meta.quota.model_usage`，否则读取 `usage` 或 `_meta.quota.token_count`，两者不累加；输入已排除缓存读取，推理 token 已包含在输出中。Claude 按模型明细可包含子任务，统计范围可能大于主会话汇总。按服务请求 ID 生成稳定记录 ID，重复刷新不重复计数。未知模型标为 `unknown`，非法计数不转为零记录。
 
@@ -72,7 +75,7 @@ Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURICompon
 
 客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。桌面通过可选增量订阅复用未变化条目；Telegram 权限订阅只传授权信息。增量基线失效时重新订阅获得全量状态，不重放任务。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
 
-selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ConversationLifecycle` 管理 idle/transition/turn/disposed 和取消状态。
+selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ConversationLifecycle` 管理 idle/transition/turn/disposed 和取消状态。`ChatProvider.perform` 在等待历史初始化前同步保留互斥标记，覆盖发送、创建 / 恢复 / 分支、设置和 harness 切换；finally 释放。取消、授权和状态查询不受此互斥标记阻挡。
 
 ## 持久化与偏好
 
@@ -84,10 +87,18 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 ## 异常隔离
 
-release 使用 panic unwind。worker 更新、授权回调和会话操作边界捕获 panic，关闭对应 worker，不自动重放任务；持锁异常恢复该会话最近已提交快照。ACP 响应进入可变状态前检查结构，配置、历史索引、偏好与 Telegram 状态使用 serde 类型校验。此保护针对 worker 操作，不保证任意进程级故障都可恢复。
+release 使用 `panic = "unwind"`。同步短临界区通过 `pi-acp-core::sync::MutexExt::lock_unpoisoned()` 取得锁，锁中毒不会让后续访问再次 panic；Tokio 异步锁沿用其自身语义。取回锁不等于修复状态，恢复由相应操作边界负责。worker 更新、授权回调和会话操作边界捕获 panic，关闭对应 worker，不自动重放任务；持锁异常恢复该会话最近已提交快照。ACP 响应进入可变状态前检查结构，配置、历史索引、偏好与 Telegram 状态使用 serde 类型校验。此保护针对 worker 操作，不保证任意进程级故障都可恢复。
 
 ## 其他边界
 
 socket 不监听公网，只允许同服务器账户使用；当前部署支持 Linux x86_64，需要单独部署 daemon，插件不自动启动或安装服务。Telegram 可打开三种 harness 的已有会话，`/new` 默认创建 Pi。Telegram 通过 `events.next` / `events.ack` 消费持久化 outbox，不读取或删除会话服务的文件。relay 可使用独立数据目录，通过 `serviceSocket` 指向服务 socket。
 
 协议分块、请求 fingerprint 与原生分支哈希仍遵守 UTF-16/canonical JSON 契约，详见 [service-protocol.md](service-protocol.md) 和 [data-formats.md](data-formats.md)。适配器自身的 native fork 锁与 daemon 单实例锁各有独立职责，不应因删除客户端历史锁而移除。
+
+## 接入退避与构建边界
+
+socket 最多 32 个连接；满额时记录日志，在有界时间内读取首个请求并返回关联 ID 的 busy 错误，然后关闭连接。accept 系统错误与满额拒绝都退避 100 ms，关闭信号可打断等待；正常连接按原有 reader / writer / emit 任务处理。具体帧及大小限制见 [Wire 协议](service-protocol.md)。
+
+增强适配器在 `scripts/build-adapter.mjs` 对固定版本 pi-acp 的 bundle 应用严格断言补丁，运行逻辑保存在 adapter-store、pi-enhancements、pi-native-fork 等 TS 模块。`pi-rpc-types.ts` 描述注入边界消费的最小 RPC 字段，不替代运行时校验。升级流程见 [贡献指南](../CONTRIBUTING.md#升级内置-pi-acp)。
+
+Tokio 按 crate 显式声明所需 feature，release 保持 unwind。JS / Rust 的生产产物与 contract-test 构建分离；入口、缓存、CI 及验证命令见 [测试](testing.md) 和 [发布](service-release.md)。

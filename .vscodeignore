@@ -13,10 +13,10 @@
 dist/**/*.map
 !media/pi.svg
 !THIRD_PARTY_NOTICES.txt
-!docs/telegram.md
+!docs/*.md
+!CONTRIBUTING.md
 !examples/telegram.json
 !examples/pi-telegram.service
 
-!docs/session-service.md
 !examples/sessions.json
 !examples/pi-sessions.service

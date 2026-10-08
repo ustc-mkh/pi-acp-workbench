@@ -3,6 +3,7 @@ import { ConversationHistory } from '../src/conversation-history';
 import { ConversationStatistics } from '../src/conversation-statistics';
 import { ClientOperations } from '../src/conversation-history';
 import { initialState } from '../src/state';
+import type { Agent } from '../src/remote-agent';
 import type { Snapshot } from '../src/shared';
 const storage = () => {
   const values = new Map<string, unknown>();
@@ -114,11 +115,11 @@ it('statistics coalesces paginated inspection and attributes usage to the conver
     .fn()
     .mockResolvedValueOnce({ records: [record], cursor: 1, contextWindow: 1000 })
     .mockResolvedValueOnce({ records: [record] });
-  const agent: any = {
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
     harness: 'pi',
-    info: { agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
     request,
-  };
+  } satisfies Pick<Agent, 'harness' | 'info' | 'request'>;
   const store = storage(),
     window = vi.fn(),
     stats = new ConversationStatistics(
@@ -141,14 +142,14 @@ it('statistics coalesces paginated inspection and attributes usage to the conver
 it('statistics discards late responses and errors from detached sessions', async () => {
   let state = { ...initialState(), sessionId: 'old', status: 'ready' as const },
     reject!: (error: Error) => void;
-  const agent: any = {
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
     harness: 'pi',
-    info: { agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
     request: () =>
-      new Promise((_, fail) => {
+      new Promise<never>((_, fail) => {
         reject = fail;
       }),
-  };
+  } satisfies Pick<Agent, 'harness' | 'info' | 'request'>;
   const stats = new ConversationStatistics(
     storage(),
     new ClientOperations(),
@@ -266,13 +267,14 @@ it.each(['codex', 'claude'] as const)(
     const request = vi
       .fn()
       .mockResolvedValue({ records: [record], contextWindow: 200000, note: '仅包含上报的轮次' });
-    const agent: any = {
+    const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
       harness,
       info: {
+        protocolVersion: 1,
         agentCapabilities: { _meta: { 'session-service': { version: 3, usageInspection: true } } },
       },
       request,
-    };
+    } satisfies Pick<Agent, 'harness' | 'info' | 'request'>;
     const window = vi.fn();
     const stats = new ConversationStatistics(
       storage(),
@@ -287,7 +289,7 @@ it.each(['codex', 'claude'] as const)(
     expect(stats.value.records).toEqual([record]);
     expect(stats.value.note).toBe('仅包含上报的轮次');
     expect(window).toHaveBeenCalledWith(200000);
-    agent.info.agentCapabilities._meta = {};
+    agent.info!.agentCapabilities!._meta = {};
     request.mockClear();
     await stats.refresh();
     expect(stats.value.available).toBe(false);

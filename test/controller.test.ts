@@ -2,17 +2,55 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-const host = vi.hoisted(() => ({
-  provider: undefined as any,
-  config: {} as Record<string, unknown>,
-  stored: new Map<string, unknown>(),
-  commands: new Map<string, Function>(),
-  updates: [] as unknown[],
-  configurationChanged: undefined as undefined | ((event: any) => void),
-  home: undefined as string | undefined,
-  cwd: undefined as string | undefined,
-  terminals: [] as any[],
-}));
+import type * as vscode from 'vscode';
+import type { ChatProvider } from '../src/extension';
+import type { RemoteAgentOptions } from '../src/remote-agent';
+import type { DiffDocuments } from '../src/workspace-documents';
+import type { Statistics, UsageRecord } from '../src/telemetry';
+import type { Entry } from '../src/shared';
+const required = <T>(value: T | undefined): T => {
+  if (value === undefined) throw new Error('Expected fixture value is missing');
+  return value;
+};
+const userEntry = (entries: Entry[]) =>
+  required(
+    entries.find(
+      (entry): entry is Extract<Entry, { role: 'user' | 'assistant' | 'thought' | 'notice' }> =>
+        entry.role === 'user',
+    ),
+  );
+// Private state is inspected only at this fixture boundary; public members keep their production types.
+type TestProvider = Omit<ChatProvider, 'documents'> & {
+  documents: Pick<DiffDocuments, 'open' | 'dispose'> & {
+    previews: Map<string, { documents: Map<string, string>; bytes: number }>;
+  };
+  historyReady: Promise<void>;
+  statistics: Statistics;
+  recordUsage(records: UsageRecord[]): Promise<void>;
+};
+type TestContext = Pick<vscode.ExtensionContext, 'subscriptions' | 'workspaceState'>;
+const host = vi.hoisted(() => {
+  let provider: TestProvider | undefined;
+  return {
+    get provider() {
+      if (!provider) throw new Error('Extension provider has not been registered');
+      return provider;
+    },
+    set provider(value: TestProvider) {
+      provider = value;
+    },
+    config: {} as Record<string, unknown>,
+    stored: new Map<string, unknown>(),
+    commands: new Map<string, () => unknown>(),
+    updates: [] as unknown[],
+    configurationChanged: undefined as
+      | undefined
+      | ((event: vscode.ConfigurationChangeEvent) => void),
+    home: undefined as string | undefined,
+    cwd: undefined as string | undefined,
+    terminals: [] as vscode.TerminalOptions[],
+  };
+});
 vi.mock('node:os', async (importOriginal) => {
   const os = await importOriginal<typeof import('node:os')>();
   return { ...os, homedir: () => host.home || os.homedir() };
@@ -35,7 +73,7 @@ vi.mock('vscode', () => ({
       get: (key: string, fallback: unknown) => host.config[key] ?? fallback,
     }),
     registerTextDocumentContentProvider: () => ({ dispose() {} }),
-    onDidChangeConfiguration: (callback: (event: any) => void) => {
+    onDidChangeConfiguration: (callback: (event: vscode.ConfigurationChangeEvent) => void) => {
       host.configurationChanged = callback;
       return { dispose() {} };
     },
@@ -43,19 +81,19 @@ vi.mock('vscode', () => ({
   window: {
     showInformationMessage: vi.fn(async () => undefined),
     showTextDocument: vi.fn(async () => {}),
-    createTerminal: (options: any) => {
+    createTerminal: (options: vscode.TerminalOptions) => {
       host.terminals.push(options);
       return { show() {} };
     },
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
     showWarningMessage: vi.fn(async () => '删除'),
     registerWebviewViewProvider: (_: string, provider: unknown) => {
-      host.provider = provider;
+      host.provider = provider as TestProvider;
       return { dispose() {} };
     },
   },
   commands: {
-    registerCommand: (name: string, fn: Function) => {
+    registerCommand: (name: string, fn: () => unknown) => {
       host.commands.set(name, fn);
       return { dispose() {} };
     },
@@ -67,15 +105,15 @@ import { startRustService } from './rust-service';
 let service: Awaited<ReturnType<typeof startRustService>>;
 let launchFile: string;
 // UI tests use the production socket path. Only the upstream ACP worker is mocked.
-const activate = (context: any) => {
-  activateExtension(context);
+const activate = (context: TestContext) => {
+  activateExtension(context as vscode.ExtensionContext);
   const create = host.provider.createAgent.bind(host.provider);
-  vi.spyOn(host.provider, 'createAgent').mockImplementation((...args: any[]) => {
+  vi.spyOn(host.provider, 'createAgent').mockImplementation((...args) => {
     writeFileSync(launchFile, JSON.stringify(host.config));
     return create(...args);
   });
 };
-let context: any;
+let context: TestContext;
 let preferencesHome: string;
 beforeEach(async () => {
   preferencesHome = mkdtempSync(resolve(tmpdir(), 'pi-controller-home-'));
@@ -90,9 +128,12 @@ beforeEach(async () => {
   context = {
     subscriptions: [],
     workspaceState: {
-      get: (key: string, fallback: unknown) =>
-        host.stored.has(key) ? host.stored.get(key) : fallback,
-      update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)),
+      keys: () => [...host.stored.keys()],
+      get: <T>(key: string, fallback?: T) =>
+        (host.stored.has(key) ? host.stored.get(key) : fallback) as T,
+      update: async (key: string, value: unknown) => {
+        host.stored.set(key, structuredClone(value));
+      },
     },
   };
   launchFile = resolve(preferencesHome, 'launch.json');
@@ -154,13 +195,9 @@ it('switches harness without auto-creating a session and isolates identical IDs,
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'Claude only' });
   expect(host.provider.snapshot().sessionId).toBe('workbench:claude:test-session');
-  expect(new Set(host.provider.history.map((s: any) => s.id)).size).toBe(3);
-  expect(host.provider.history.map((s: any) => s.harness).sort()).toEqual([
-    'claude',
-    'codex',
-    'pi',
-  ]);
-  await host.provider.perform({ type: 'resume', id: pi.sessionId });
+  expect(new Set(host.provider.history.map((s) => s.id)).size).toBe(3);
+  expect(host.provider.history.map((s) => s.harness).sort()).toEqual(['claude', 'codex', 'pi']);
+  await host.provider.perform({ type: 'resume', id: required(pi.sessionId) });
   expect(host.provider.snapshot()).toMatchObject({
     harness: 'pi',
     sessionId: pi.sessionId,
@@ -169,7 +206,9 @@ it('switches harness without auto-creating a session and isolates identical IDs,
   expect(host.provider.snapshot().attachments).toEqual([
     { id: 'private', name: 'Pi context', uri: 'file:///private', text: 'do not transfer' },
   ]);
-  expect(host.provider.snapshot().entries.some((e: any) => e.text === 'Codex only')).toBe(false);
+  expect(host.provider.snapshot().entries.some((e) => 'text' in e && e.text === 'Codex only')).toBe(
+    false,
+  );
   expect(host.stored.get('activeSession')).toBe(pi.sessionId);
   expect(host.stored.get('harness.codex.activeSession')).toBe(codex.sessionId);
 });
@@ -179,7 +218,7 @@ it('keeps model preferences separate and rejects switching during an active prom
   mockHarness('codex', 'context');
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().configs.find((c: any) => c.id === 'model').currentValue).toBe(
+  expect(host.provider.snapshot().configs!.find((c) => c.id === 'model')!.currentValue).toBe(
     'default',
   );
   await host.provider.perform({ type: 'config', id: 'thinking', value: 'high' });
@@ -193,7 +232,7 @@ it('keeps model preferences separate and rejects switching during an active prom
   const id = host.provider.snapshot().sessionId;
   await host.provider.perform({
     type: 'branchMessage',
-    sessionId: id,
+    sessionId: required(id),
     id: host.provider.snapshot().entries[0].id,
   });
   expect(host.provider.snapshot().error).toContain('暂不支持');
@@ -251,15 +290,15 @@ it('allows Codex fast mode and keeps collaboration default on creation and load'
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   await host.provider.perform({ type: 'new' });
   expect(
-    host.provider.snapshot().configs.find((c: any) => c.id === 'collaboration_mode').currentValue,
+    host.provider.snapshot().configs!.find((c) => c.id === 'collaboration_mode')!.currentValue,
   ).toBe('default');
   await host.provider.perform({ type: 'config', id: 'fast-mode', value: 'off' });
-  expect(host.provider.snapshot().configs.find((c: any) => c.id === 'fast-mode').currentValue).toBe(
+  expect(host.provider.snapshot().configs!.find((c) => c.id === 'fast-mode')!.currentValue).toBe(
     'off',
   );
   await host.provider.perform({ type: 'config', id: 'fast-mode', value: 'on' });
   expect(host.provider.snapshot().error).toBeUndefined();
-  expect(host.provider.snapshot().configs.find((c: any) => c.id === 'fast-mode').currentValue).toBe(
+  expect(host.provider.snapshot().configs!.find((c) => c.id === 'fast-mode')!.currentValue).toBe(
     'on',
   );
   await host.provider.perform({ type: 'config', id: 'collaboration_mode', value: 'plan' });
@@ -326,9 +365,10 @@ it.each(['codex', 'claude'] as const)(
       await host.provider.perform({ type: 'new' });
       await host.provider.perform({ type: 'send', text: 'edit-workspace' });
       const state = host.provider.snapshot(),
-        summary = state.entries.at(-1);
+        summary = required(state.entries.at(-1));
       expect(state.status).toBe('ready');
       expect(summary.role).toBe('diff');
+      if (summary.role !== 'diff') throw new Error('Expected turn diff');
       expect(summary.diff.files[0]).toMatchObject({
         path: 'change.txt',
         before: 'dirty before\n',
@@ -350,8 +390,8 @@ it.each(['codex', 'claude'] as const)(
       expect(host.provider.snapshot().error).toBeUndefined();
       expect(
         (
-          await service.call('state', { sessionId: host.provider.snapshot().sessionId })
-        ).snapshot.entries.at(-1).role,
+          await service.call('state', { sessionId: required(host.provider.snapshot().sessionId) })
+        ).snapshot.entries.at(-1)!.role,
       ).toBe('diff');
     } finally {
       host.provider.dispose();
@@ -364,10 +404,10 @@ it.each(['codex', 'claude'] as const)(
 it('opens saved snapshots for added/deleted files with distinct paths and reports missing text', async () => {
   const vscode = await import('vscode');
   const files = [
-    { path: '目录一/公式.md', status: 'added', before: '', after: '新增公式' },
-    { path: '目录二/公式.md', status: 'deleted', before: '删除公式', after: '' },
-    { path: '目录三/公式.md', status: 'modified', before: '旧公式', after: '新公式' },
-    { path: 'binary.png', status: 'modified', omitted: '二进制文件' },
+    { path: '目录一/公式.md', status: 'added' as const, before: '', after: '新增公式' },
+    { path: '目录二/公式.md', status: 'deleted' as const, before: '删除公式', after: '' },
+    { path: '目录三/公式.md', status: 'modified' as const, before: '旧公式', after: '新公式' },
+    { path: 'binary.png', status: 'modified' as const, omitted: '二进制文件' },
   ].map((file) => ({ ...file, added: 1, removed: 1 }));
   await host.provider.documents.open(
     'test',
@@ -376,7 +416,11 @@ it('opens saved snapshots for added/deleted files with distinct paths and report
   );
   const [command, title, resources] = vi
     .mocked(vscode.commands.executeCommand)
-    .mock.calls.at(-1)! as any[];
+    .mock.calls.at(-1)! as [
+    string,
+    string,
+    [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][],
+  ];
   expect(command).toBe('vscode.changes');
   expect(title).toBe('本轮修改');
   expect(resources).toHaveLength(3);
@@ -384,12 +428,12 @@ it('opens saved snapshots for added/deleted files with distinct paths and report
     documents: Map<string, string>;
   };
   expect(resources[0][1]).toBeUndefined();
-  expect(docs.documents.get(resources[0][2].toString())).toBe('新增公式');
+  expect(docs.documents.get(resources[0][2]!.toString())).toBe('新增公式');
   expect(resources[1][2]).toBeUndefined();
-  expect(docs.documents.get(resources[1][1].toString())).toBe('删除公式');
-  expect(docs.documents.get(resources[2][1].toString())).toBe('旧公式');
-  expect(docs.documents.get(resources[2][2].toString())).toBe('新公式');
-  expect(resources.map(([label]: any[]) => label.toString())).toEqual([
+  expect(docs.documents.get(resources[1][1]!.toString())).toBe('删除公式');
+  expect(docs.documents.get(resources[2][1]!.toString())).toBe('旧公式');
+  expect(docs.documents.get(resources[2][2]!.toString())).toBe('新公式');
+  expect(resources.map(([label]) => label.toString())).toEqual([
     expect.stringContaining('/目录一/公式.md'),
     expect.stringContaining('/目录二/公式.md'),
     expect.stringContaining('/目录三/公式.md'),
@@ -413,7 +457,7 @@ it('opens saved snapshots for added/deleted files with distinct paths and report
 it('bounds diff document storage and reuses repeated previews', async () => {
   await host.provider.perform({ type: 'new' });
   for (let i = 0; i < 25; i++) {
-    const entry = {
+    const entry: Entry = {
       id: `tool-${i}`,
       role: 'tool',
       tool: {
@@ -429,7 +473,7 @@ it('bounds diff document storage and reuses repeated previews', async () => {
   const keys = [...host.provider.documents.previews.keys()];
   await host.provider.perform({ type: 'diff', id: 'tool-24', index: 0 });
   expect([...host.provider.documents.previews.keys()]).toEqual(keys);
-  expect(keys.some((key: any) => key.includes('tool-0-'))).toBe(false);
+  expect(keys.some((key) => key.includes('tool-0-'))).toBe(false);
 });
 it('clears usage titles while preserving billed records and prices', async () => {
   await host.provider.perform({ type: 'new' });
@@ -478,7 +522,7 @@ it('allows error dismissal during a turn without dismissing a newer error', asyn
   expect(error).toBeTruthy();
   await host.provider.perform({ type: 'dismissError', error: 'an older error' });
   expect(host.provider.snapshot().error).toBe(error);
-  await host.provider.perform({ type: 'dismissError', error });
+  await host.provider.perform({ type: 'dismissError', error: required(error) });
   expect(host.provider.snapshot()).toMatchObject({ status: 'busy', error: undefined });
   await host.provider.perform({ type: 'attach' });
   expect(host.provider.snapshot().error).toBeTruthy();
@@ -501,7 +545,8 @@ it('runs a complete turn through the controller, saves history, and loads it', a
     expect.objectContaining({ role: 'assistant', text: '数学 $x^2$' }),
   );
   expect(
-    (await service.call('state', { sessionId: host.provider.snapshot().sessionId })).snapshot.title,
+    (await service.call('state', { sessionId: required(host.provider.snapshot().sessionId) }))
+      .snapshot.title,
   ).toBe('hello');
   await host.provider.perform({ type: 'resume', id: 'test-session' });
   expect(host.provider.snapshot().entries[0]).toMatchObject({ role: 'user', text: 'hello' });
@@ -514,6 +559,44 @@ it('serializes concurrent new requests without orphaning a process', async () =>
   expect(host.provider.snapshot().status).toBe('ready');
   expect(host.provider.snapshot().error).toBeUndefined();
 });
+it('reserves guarded requests before history loads, rejects overlapping sends, and releases after failure', async () => {
+  await host.provider.perform({ type: 'new' });
+  let release!: () => void;
+  const history = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const ready = vi.spyOn(host.provider, 'historyReady', 'get').mockReturnValue(history);
+  const send = vi
+    .spyOn(host.provider.turnCoordinator, 'onSend')
+    .mockRejectedValueOnce(new Error('submission failed'));
+  const first = host.provider.perform({ type: 'send', text: 'first' });
+  const second = host.provider.perform({ type: 'send', text: 'second' });
+  release();
+  await Promise.all([first, second]);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(host.provider.snapshot().error).toBe('submission failed');
+  ready.mockRestore();
+  send.mockRestore();
+  await host.provider.perform({ type: 'send', text: 'after failure' });
+  expect(host.provider.snapshot().error).toBeUndefined();
+  expect(host.provider.snapshot().entries).toContainEqual(
+    expect.objectContaining({ role: 'user', text: 'after failure' }),
+  );
+});
+it('submits only one of two simultaneous prompts', async () => {
+  await host.provider.perform({ type: 'new' });
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await host.provider.perform({ type: 'send', text: 'second' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  await vi.waitFor(() =>
+    expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1),
+  );
+  await host.provider.perform({ type: 'cancel' });
+  await turn;
+  expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toEqual([
+    expect.objectContaining({ text: 'wait' }),
+  ]);
+});
 it('cancels pending permission requests when the user stops', async () => {
   await host.provider.perform({ type: 'new' });
   const turn = host.provider.perform({ type: 'send', text: 'permission' });
@@ -525,9 +608,9 @@ it('cancels pending permission requests when the user stops', async () => {
   expect(
     host.provider
       .snapshot()
-      .entries.some((entry: any) => entry.role === 'notice' && entry.text.includes('cancelled')),
+      .entries.some((entry) => entry.role === 'notice' && entry.text.includes('cancelled')),
   ).toBe(true);
-  expect(host.provider.snapshot().entries.at(-1).role).toBe('diff');
+  expect(host.provider.snapshot().entries.at(-1)!.role).toBe('diff');
 });
 it('rejects forged permission option IDs and accepts the displayed option', async () => {
   await host.provider.perform({ type: 'new' });
@@ -548,7 +631,7 @@ it('blocks concurrent prompts and new sessions during an active turn', async () 
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'second' });
   await vi.waitFor(() =>
-    expect(host.provider.snapshot().entries.filter((e: any) => e.role === 'user')).toHaveLength(1),
+    expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1),
   );
   await host.provider.perform({ type: 'cancel' });
   await turn;
@@ -592,12 +675,12 @@ it('assigns distinct native branch numbers without replacing the source backend'
   expect(original.sessionNumber).toBe(1);
   await host.provider.perform({
     type: 'branchMessage',
-    sessionId: original.sessionId,
+    sessionId: required(original.sessionId),
     id: original.entries[0].id,
   });
   const branch = host.provider.snapshot();
   expect(branch.sessionNumber).toBe(2);
-  expect(host.provider.history.map((s: any) => s.title)).toEqual(['same title', 'same title']);
+  expect(host.provider.history.map((s) => s.title)).toEqual(['same title', 'same title']);
 });
 function wire() {
   return readFileSync(resolve(auditDir!, 'wire.jsonl'), 'utf8')
@@ -606,13 +689,17 @@ function wire() {
     .map((line) => JSON.parse(line));
 }
 async function edit(type: 'branchMessage', id: string) {
-  await host.provider.perform({ type, id, sessionId: host.provider.snapshot().sessionId });
+  await host.provider.perform({
+    type,
+    id,
+    sessionId: required(host.provider.snapshot().sessionId),
+  });
 }
 it('branches at the native node, keeps historical settings, and never sends a textual seed or summary request', async () => {
   await contextAgent('context-native');
   await host.provider.perform({ type: 'send', text: 'retained-first' });
   const old = host.provider.snapshot(),
-    selected = old.entries.find((e: any) => e.role === 'assistant');
+    selected = required(old.entries.find((e) => e.role === 'assistant'));
   await host.provider.perform({ type: 'send', text: 'excluded-later' });
   await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
   await host.provider.perform({ type: 'config', id: 'thinking', value: 'high' });
@@ -622,10 +709,10 @@ it('branches at the native node, keeps historical settings, and never sends a te
   expect(branch.sessionId).not.toBe(old.sessionId);
   expect(branch.entries).toEqual(old.entries.slice(0, 2));
   expect(branch.usage).toBeUndefined();
-  expect(branch.configs.map((c: any) => c.currentValue)).toEqual(['default', 'low']);
+  expect(branch.configs!.map((c) => c.currentValue)).toEqual(['default', 'low']);
   expect(
     (await service.call('state', { sessionId: old.sessionId })).snapshot.entries.some(
-      (e: any) => e.text === 'excluded-later',
+      (e) => 'text' in e && e.text === 'excluded-later',
     ),
   ).toBe(true);
   expect(wire().filter((r) => r.method === 'session/prompt')).toHaveLength(2);
@@ -651,7 +738,7 @@ it('preserves the visible transcript across native load and never re-injects it 
   const original = host.provider.snapshot();
   host.provider.disconnect();
   host.provider.state.status = 'disconnected';
-  await host.provider.perform({ type: 'resume', id: original.sessionId });
+  await host.provider.perform({ type: 'resume', id: required(original.sessionId) });
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   await edit('branchMessage', original.entries[1].id);
   await host.provider.perform({ type: 'send', text: 'continue' });
@@ -713,7 +800,7 @@ it('deduplicates billed requests and keeps native branch spending separate', asy
   const original = host.provider.snapshot().sessionId;
   const record = {
     id: 'native-request',
-    sessionId: original,
+    sessionId: required(original),
     model: 'p/m',
     timestamp: Date.now(),
     kind: 'inference',
@@ -726,28 +813,29 @@ it('deduplicates billed requests and keeps native branch spending separate', asy
   await host.provider.recordUsage([record]);
   expect(host.stored.get('usageRecords')).toHaveLength(1);
   await host.provider.recordUsage([
-    { ...record, id: 'next-request', sessionId: host.provider.snapshot().sessionId },
+    { ...record, id: 'next-request', sessionId: required(host.provider.snapshot().sessionId) },
   ]);
-  expect((host.stored.get('usageRecords') as any[]).map((r) => r.sessionId)).toEqual([
+  expect((host.stored.get('usageRecords') as UsageRecord[]).map((r) => r.sessionId)).toEqual([
     original,
     original,
   ]);
   await edit('branchMessage', host.provider.snapshot().entries[0].id);
   await host.provider.recordUsage([
-    { ...record, id: 'branch-request', sessionId: host.provider.snapshot().sessionId },
+    { ...record, id: 'branch-request', sessionId: required(host.provider.snapshot().sessionId) },
   ]);
   expect(
-    (host.stored.get('usageRecords') as any[]).find((r) => r.id === 'branch-request').sessionId,
+    (host.stored.get('usageRecords') as UsageRecord[]).find((r) => r.id === 'branch-request')!
+      .sessionId,
   ).not.toBe(original);
 });
 it('cancels native branch preparation without discarding the original connection', async () => {
   await contextAgent('context-native');
   await host.provider.perform({ type: 'send', text: 'original' });
   const before = host.provider.snapshot(),
-    agent = host.provider.agent,
+    agent = required(host.provider.agent),
     request = agent.request.bind(agent);
   let rejectFork: ((e: Error) => void) | undefined;
-  vi.spyOn(agent, 'request').mockImplementation((method: any, params: any) => {
+  vi.spyOn(agent, 'request').mockImplementation((method, params) => {
     if (method === '_pi_workbench/fork')
       return new Promise((_, reject) => {
         rejectFork = reject;
@@ -777,12 +865,14 @@ it('keeps a source disconnect during native branching disconnected and reconnect
   await host.provider.perform({ type: 'send', text: 'original' });
   const provider = host.provider,
     before = provider.snapshot(),
-    agent = provider.agent;
+    agent = required(provider.agent);
   const request = agent.request.bind(agent);
-  vi.spyOn(agent, 'request').mockImplementation((method: any, params: any) => {
+  vi.spyOn(agent, 'request').mockImplementation((method, params) => {
     if (method !== '_pi_workbench/fork') return request(method, params);
     agent.dispose();
-    agent.options.closed('source disconnected during fork');
+    (agent as unknown as { options: RemoteAgentOptions }).options.closed(
+      'source disconnected during fork',
+    );
     return Promise.reject(new Error('ACP connection closed'));
   });
   await edit('branchMessage', before.entries[1].id);
@@ -840,13 +930,9 @@ it('sends image-only messages as ACP image blocks and preserves the original ima
     .at(-1).params.prompt;
   expect(prompt).toEqual([{ type: 'image', mimeType: pastedPng.mimeType, data: pastedPng.data }]);
   expect(host.provider.snapshot().attachments).toEqual([]);
+  expect(userEntry(host.provider.snapshot().entries).contextBlocks).toEqual(prompt);
   expect(
-    host.provider.snapshot().entries.find((e: any) => e.role === 'user').contextBlocks,
-  ).toEqual(prompt);
-  expect(
-    (await service.call('state', { sessionId })).snapshot.entries.find(
-      (e: any) => e.role === 'user',
-    ).contextBlocks,
+    userEntry((await service.call('state', { sessionId })).snapshot.entries).contextBlocks,
   ).toEqual(prompt);
 });
 it('retains image drafts when the agent lacks image support and permits removal', async () => {
@@ -882,18 +968,19 @@ it('inherits model then thinking after model-dependent options change, without s
   await host.provider.perform({ type: 'new' });
   expect(host.provider.snapshot().error).toBeUndefined();
   expect(host.provider.snapshot().sessionId).not.toBe(old);
-  expect(host.provider.snapshot().configs.map((c: any) => c.currentValue)).toEqual([
-    'other',
-    'high',
-  ]);
+  expect(host.provider.snapshot().configs!.map((c) => c.currentValue)).toEqual(['other', 'high']);
   expect(
     wire()
       .slice(before)
       .filter((r) => r.method.startsWith('session/set_'))
       .map((r) => r.params),
   ).toEqual([
-    { sessionId: host.provider.snapshot().sessionId, configId: 'model', value: 'other' },
-    { sessionId: host.provider.snapshot().sessionId, configId: 'thinking', value: 'high' },
+    { sessionId: required(host.provider.snapshot().sessionId), configId: 'model', value: 'other' },
+    {
+      sessionId: required(host.provider.snapshot().sessionId),
+      configId: 'thinking',
+      value: 'high',
+    },
   ]);
 });
 it('persists successful selections immediately and inherits them after restart even without history', async () => {
@@ -913,10 +1000,7 @@ it('persists successful selections immediately and inherits them after restart e
   await host.provider.perform({ type: 'ready' });
   expect(wire().length).toBe(before);
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().configs.map((c: any) => c.currentValue)).toEqual([
-    'other',
-    'high',
-  ]);
+  expect(host.provider.snapshot().configs!.map((c) => c.currentValue)).toEqual(['other', 'high']);
 });
 it('does not save a rejected model selection as the account default', async () => {
   await contextAgent('context-config-fail');
@@ -927,7 +1011,7 @@ it('does not save a rejected model selection as the account default', async () =
 });
 it('reads the latest account pair instead of the currently displayed conversation when creating', async () => {
   await contextAgent();
-  expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
+  expect(host.provider.snapshot().configs![0].currentValue).toBe('default');
   writeFileSync(
     resolve(preferencesHome, 'preferences', 'pi.json'),
     JSON.stringify({
@@ -939,16 +1023,13 @@ it('reads the latest account pair instead of the currently displayed conversatio
     }),
   );
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().configs.map((c: any) => c.currentValue)).toEqual([
-    'other',
-    'high',
-  ]);
+  expect(host.provider.snapshot().configs!.map((c) => c.currentValue)).toEqual(['other', 'high']);
 });
 it('inherits ACP reasoning modes when configOptions does not provide thinking', async () => {
   await contextAgent('context-legacy');
   await host.provider.perform({ type: 'mode', value: 'high' });
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().modes.currentModeId).toBe('high');
+  expect(host.provider.snapshot().modes!.currentModeId).toBe('high');
   expect(wire().filter((r) => r.method === 'session/set_mode')).toHaveLength(2);
 });
 it('resumes the last active warm conversation after restart, and reconnects it without session/new', async () => {
@@ -956,7 +1037,7 @@ it('resumes the last active warm conversation after restart, and reconnects it w
   const first = host.provider.snapshot().sessionId;
   await host.provider.perform({ type: 'send', text: 'first' });
   await host.provider.perform({ type: 'new' });
-  await host.provider.perform({ type: 'resume', id: first });
+  await host.provider.perform({ type: 'resume', id: required(first) });
   expect(host.stored.get('activeSession')).toBe(first);
   host.provider.dispose();
   await host.provider.persistence.pending;
@@ -984,15 +1065,18 @@ it('does not overwrite account preferences by merely reopening an older conversa
   const first = host.provider.snapshot().sessionId;
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
-  await host.provider.perform({ type: 'resume', id: first });
-  expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
+  await host.provider.perform({ type: 'resume', id: required(first) });
+  expect(host.provider.snapshot().configs![0].currentValue).toBe('default');
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().configs[0].currentValue).toBe('other');
+  expect(host.provider.snapshot().configs![0].currentValue).toBe('other');
 });
 it('does not auto-open a different history after deleting the last active record', async () => {
   await contextAgent();
   await host.provider.perform({ type: 'new' });
-  await host.provider.perform({ type: 'deleteHistory', id: host.provider.snapshot().sessionId });
+  await host.provider.perform({
+    type: 'deleteHistory',
+    id: required(host.provider.snapshot().sessionId),
+  });
   host.provider.dispose();
   await host.provider.persistence.pending;
   activate(context);
@@ -1052,7 +1136,7 @@ it('uses the production remote Pi client and receives phone turns without owning
       idleMs: 900000,
     });
     expect(service.socket).toBe(socket);
-    activateExtension(context);
+    activateExtension(context as vscode.ExtensionContext);
     await host.provider.historyReady;
     await host.provider.perform({ type: 'new' });
     expect(host.provider.snapshot().status).toBe('ready');
@@ -1066,7 +1150,7 @@ it('uses the production remote Pi client and receives phone turns without owning
     });
     host.provider.view = {
       webview: {
-        postMessage: async (message: any) => {
+        postMessage: async (message: { type: string }) => {
           if (message.type === 'sent') {
             submitted();
             await gate;
@@ -1074,7 +1158,7 @@ it('uses the production remote Pi client and receives phone turns without owning
           return true;
         },
       },
-    };
+    } as unknown as vscode.WebviewView;
     const sending = host.provider.perform({ type: 'send', text: 'cancel before submission' });
     await sent;
     await host.provider.perform({ type: 'cancel' });
@@ -1082,11 +1166,11 @@ it('uses the production remote Pi client and receives phone turns without owning
     await sending;
     host.provider.view = undefined;
     expect(host.provider.snapshot().status).toBe('ready');
-    expect((await phone.call<any>('state', { sessionId: id })).snapshot.entries).toHaveLength(0);
+    expect((await phone.call('state', { sessionId: id })).snapshot.entries).toHaveLength(0);
     await host.provider.perform({ type: 'send', text: 'desktop-owned' });
-    const serverState = await phone.call<any>('state', { sessionId: id });
-    expect(host.provider.snapshot().entries.map((entry: any) => entry.id)).toEqual(
-      serverState.snapshot.entries.map((entry: any) => entry.id),
+    const serverState = await phone.call('state', { sessionId: id });
+    expect(host.provider.snapshot().entries.map((entry) => entry.id)).toEqual(
+      serverState.snapshot.entries.map((entry) => entry.id),
     );
 
     await phone.call(
@@ -1096,7 +1180,9 @@ it('uses the production remote Pi client and receives phone turns without owning
       0,
     );
     await vi.waitFor(() =>
-      expect(host.provider.snapshot().entries.some((e: any) => e.text === 'from phone')).toBe(true),
+      expect(
+        host.provider.snapshot().entries.some((e) => 'text' in e && e.text === 'from phone'),
+      ).toBe(true),
     );
     expect(host.provider.snapshot().status).toBe('ready');
     const turn = phone.call(
@@ -1108,7 +1194,7 @@ it('uses the production remote Pi client and receives phone turns without owning
     await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
     await host.provider.perform({ type: 'cancel' });
     expect((await turn).stopReason).toBe('cancelled');
-    expect(host.provider.agent.child).toBeUndefined();
+    expect('child' in host.provider.agent!).toBe(false);
   } finally {
     host.provider.dispose();
     phone.dispose();

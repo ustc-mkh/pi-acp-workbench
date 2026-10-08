@@ -1,5 +1,6 @@
 //! Worker allocation, replay, eviction and notification delivery.
 use super::*;
+use pi_acp_core::sync::MutexExt;
 
 impl SessionService {
     pub(super) fn spawn_idle_sweep(self: &Arc<Self>) {
@@ -17,10 +18,10 @@ impl SessionService {
                     continue;
                 }
                 let idle: Vec<(String, Rt)> = {
-                    let map = service.runtimes.lock().unwrap();
+                    let map = service.runtimes.lock_unpoisoned();
                     map.iter()
                         .filter(|(_, r)| {
-                            let r = r.lock().unwrap();
+                            let r = r.lock_unpoisoned();
                             !r.phase.busy()
                                 && now_ms().saturating_sub(r.used) >= service.config.idle_ms
                         })
@@ -30,7 +31,7 @@ impl SessionService {
                 {
                     let _guard = service.allocation.lock().await;
                     for (id, rt) in idle {
-                        if !rt.lock().unwrap().phase.busy() {
+                        if !rt.lock_unpoisoned().phase.busy() {
                             service.evict(&id, &rt).await;
                         }
                     }
@@ -50,23 +51,23 @@ impl SessionService {
     }
 
     pub(super) async fn evict(&self, id: &str, rt: &Rt) {
-        let agent = rt.lock().unwrap().agent.take();
+        let agent = rt.lock_unpoisoned().agent.take();
         if let Some(agent) = agent {
             agent.stop().await;
         }
-        self.runtimes.lock().unwrap().remove(id);
+        self.runtimes.lock_unpoisoned().remove(id);
         self.store.release(id).await;
     }
 
     pub(super) async fn make_room(&self) -> Result<(), String> {
-        if self.runtimes.lock().unwrap().len() < self.config.max_workers {
+        if self.runtimes.lock_unpoisoned().len() < self.config.max_workers {
             return Ok(());
         }
         let idle = {
-            let map = self.runtimes.lock().unwrap();
+            let map = self.runtimes.lock_unpoisoned();
             map.iter()
-                .filter(|(_, r)| !r.lock().unwrap().phase.busy())
-                .min_by_key(|(_, r)| r.lock().unwrap().used)
+                .filter(|(_, r)| !r.lock_unpoisoned().phase.busy())
+                .min_by_key(|(_, r)| r.lock_unpoisoned().used)
                 .map(|(id, rt)| (id.clone(), rt.clone()))
         };
         let Some((id, rt)) = idle else {
@@ -105,12 +106,12 @@ impl SessionService {
         env
     }
     pub(super) async fn hello(&self, harness: Harness) -> Result<Value, String> {
-        if let Some(info) = self.capabilities.lock().unwrap().get(&harness).cloned() {
+        if let Some(info) = self.capabilities.lock_unpoisoned().get(&harness).cloned() {
             return Ok(info);
         }
         // Negotiate real upstream capabilities; do not advertise Pi extensions for other agents.
         self.exclusive(|| async {
-            if let Some(info) = self.capabilities.lock().unwrap().get(&harness).cloned() {
+            if let Some(info) = self.capabilities.lock_unpoisoned().get(&harness).cloned() {
                 return Ok(info);
             }
             self.make_room().await?;
@@ -122,8 +123,7 @@ impl SessionService {
             info["agentCapabilities"]["_meta"]["session-service"] =
                 json!({ "version": 3, "authoritative": true, "usageInspection": harness != Harness::Pi });
             self.capabilities
-                .lock()
-                .unwrap()
+                .lock_unpoisoned()
                 .insert(harness, info.clone());
             Ok(info)
         })
@@ -135,7 +135,7 @@ impl SessionService {
         let weak = Arc::downgrade(rt);
         let broadcast = self.broadcast.clone();
         let report = self.report.clone();
-        let snapshot = rt.lock().unwrap().snapshot.clone();
+        let snapshot = rt.lock_unpoisoned().snapshot.clone();
         let harness = Harness::parse(snapshot.harness.as_deref().unwrap_or(""))?;
         let launch = self.launch(harness);
         let cwd = snapshot.cwd;
@@ -151,7 +151,7 @@ impl SessionService {
                 Arc::new(move |notification: Value| {
                     let Some(rt) = rt.upgrade() else { return };
                     let event = {
-                        let mut r = rt.lock().unwrap();
+                        let mut r = rt.lock_unpoisoned();
                         if notification.get("sessionId").and_then(Value::as_str)
                             != Some(r.snapshot.id.as_str())
                         {
@@ -189,7 +189,7 @@ impl SessionService {
                     // available to protocol consumers, while desktop clients
                     // never need to regenerate entry IDs or reduce Pi events.
                     let schedule = {
-                        let mut r = rt.lock().unwrap();
+                        let mut r = rt.lock_unpoisoned();
                         if r.snapshot_pending {
                             false
                         } else {
@@ -237,7 +237,7 @@ impl SessionService {
                 Arc::new(move |error: String| {
                     let Some(rt) = weak.upgrade() else { return };
                     let event = {
-                        let mut r = rt.lock().unwrap_or_else(|p| p.into_inner());
+                        let mut r = rt.lock_unpoisoned();
                         r.error = Some(error);
                         view_state_with_type(&r)
                     };
@@ -267,7 +267,7 @@ impl SessionService {
             env: self.worker_env(&launch),
             update: Arc::new(move |n| {
                 apply_update(
-                    &mut state.lock().unwrap(),
+                    &mut state.lock_unpoisoned(),
                     &n.get("update").cloned().unwrap_or(Value::Null),
                     true,
                 )
@@ -281,9 +281,9 @@ impl SessionService {
 
     pub(super) async fn runtime(&self, id: &str) -> Result<Rt, String> {
         let _guard = self.allocation.lock().await;
-        if let Some(rt) = self.runtimes.lock().unwrap().get(id).cloned() {
+        if let Some(rt) = self.runtimes.lock_unpoisoned().get(id).cloned() {
             {
-                let mut r = rt.lock().unwrap();
+                let mut r = rt.lock_unpoisoned();
                 r.phase = Phase::begin();
             }
             return Ok(rt);
@@ -315,8 +315,7 @@ impl SessionService {
                     error: None,
                 }));
                 self.runtimes
-                    .lock()
-                    .unwrap()
+                    .lock_unpoisoned()
                     .insert(id.to_string(), rt.clone());
                 Ok(rt)
             }
@@ -328,32 +327,32 @@ impl SessionService {
     }
 
     pub(super) async fn worker(&self, rt: &Rt) -> Result<Arc<AgentProcess>, String> {
-        if let Some(agent) = rt.lock().unwrap().agent.clone() {
+        if let Some(agent) = rt.lock_unpoisoned().agent.clone() {
             if !agent.is_closed() {
                 return Ok(agent);
             }
         }
         {
-            let old = rt.lock().unwrap().agent.take();
+            let old = rt.lock_unpoisoned().agent.take();
             if let Some(old) = old {
                 old.stop().await;
             }
-            if let Some(active) = rt.lock().unwrap().phase.active_mut() {
+            if let Some(active) = rt.lock_unpoisoned().phase.active_mut() {
                 active.step = Step::Replaying;
             } else {
                 return Err("会话操作已结束。".into());
             }
         }
-        let session_id = rt.lock().unwrap().snapshot.id.clone();
+        let session_id = rt.lock_unpoisoned().snapshot.id.clone();
         let agent = self.spawn_agent(rt)?;
-        rt.lock().unwrap().agent = Some(agent.clone());
+        rt.lock_unpoisoned().agent = Some(agent.clone());
         let started = async {
             agent.initialize().await?;
             let mut session = agent.create_session(Some(&session_id)).await?;
             // ACP load responses may omit selectors; retain the persisted selector
             // catalogue so successful settings can be restored through standard RPC.
             {
-                let r = rt.lock().unwrap();
+                let r = rt.lock_unpoisoned();
                 if session.get("configOptions").is_none() {
                     if let Some(configs) = &r.state.configs {
                         session["configOptions"] = json!(configs);
@@ -366,15 +365,15 @@ impl SessionService {
                 }
             }
             agent.configure_session(&mut session).await?;
-            let prefs = model_preferences(&rt.lock().unwrap().state);
+            let prefs = model_preferences(&rt.lock_unpoisoned().state);
             if let Some(warning) = apply_preferences(agent.as_ref(), &mut session, &prefs).await? {
-                rt.lock().unwrap().state.entries.push(Entry::text_entry(
+                rt.lock_unpoisoned().state.entries.push(Entry::text_entry(
                     next_id(),
                     "notice",
                     warning,
                 ));
             }
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             if let Some(configs) = session
                 .get("configOptions")
                 .and_then(Value::as_array)

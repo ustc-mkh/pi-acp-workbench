@@ -3,6 +3,9 @@ import { mkdtemp, rm, readFile, mkdir, symlink, writeFile, rename } from 'node:f
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionClient } from '../src/session-wire';
+import type { ServiceEvent } from '../src/session-protocol';
+import type { ChatState, Entry } from '../src/shared';
+import type { Inspection } from '../src/telemetry';
 import { SharedHistoryStore } from './support/history-fixture';
 import { startRustService } from './rust-service';
 import { requestFingerprint, workerPids, readOutbox } from './rust-utils';
@@ -138,7 +141,7 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
 it('shares permission tickets and accepts only the first valid response', async () => {
   const { host, client } = await fixture();
   const session = await host.create();
-  let permission: any;
+  let permission!: ChatState['permissions'][number];
   const turn = host.run(session.id, 'permission', {
     permission: (p) => {
       permission = p;
@@ -193,7 +196,7 @@ it('loads native fork settings, preserves source history and leaves separate dur
   const { host, client, service, audit } = await fixture(1, 900000, 'context-native');
   const session = await host.create();
   await host.run(session.id, 'first', { permission: () => {} });
-  const inspection: any = await client.call(
+  const inspection = await client.call<Inspection>(
     'request',
     { sessionId: session.id, method: '_pi_workbench/inspect', params: { force: true } },
     undefined,
@@ -209,9 +212,9 @@ it('loads native fork settings, preserves source history and leaves separate dur
     undefined,
     0,
   );
-  const point = inspection.forkPoints.find((p: any) => p.role === 'assistant');
+  const point = inspection.forkPoints!.find((p) => p.role === 'assistant');
   const params = { sessionId: session.id, method: '_pi_workbench/fork', params: point };
-  const fork: any = await client.call('request', params, 'fork-once', 0);
+  const fork = await client.call<{ sessionId: string }>('request', params, 'fork-once', 0);
   const before = await readFile(audit, 'utf8');
   expect(
     await service.call(
@@ -228,8 +231,8 @@ it('loads native fork settings, preserves source history and leaves separate dur
       'fork-once',
     ),
   ).rejects.toThrow('请求 ID');
-  const state: any = await client.call('state', { sessionId: fork.sessionId });
-  expect(state.snapshot.configs[0].currentValue).toBe('default');
+  const state = await client.call('state', { sessionId: fork.sessionId });
+  expect(state.snapshot.configs![0].currentValue).toBe('default');
   expect(await host.list()).toHaveLength(2);
   expect((await host.history(session.id)).some((e) => 'text' in e && e.text === 'first')).toBe(
     true,
@@ -371,7 +374,7 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
   await mkdir(directory);
   await symlink(directory, alias);
   await writeFile(file, 'not a directory');
-  const desktop: any = await client.call('create', { cwd: alias });
+  const desktop = await client.call('create', { cwd: alias });
   expect(desktop.cwd).toBe(directory);
   expect((await host.list()).some((s) => s.id === desktop.id)).toBe(true);
   expect((await host.run(desktop.id, 'hello', { permission: () => {} })).status).toBe('completed');
@@ -394,7 +397,7 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
 it('publishes live context and terminal output, and retains them after a cold restart', async () => {
   const { host, client, restart, socket } = await fixture(1, 900000, 'context-live');
   const session = await host.create(process.cwd());
-  const events: any[] = [];
+  const events: ServiceEvent[] = [];
   const watcher = new SessionClient(socket, (event) => events.push(event));
   cleanup.push(() => watcher.dispose());
   await watcher.watch(session.id);
@@ -411,17 +414,20 @@ it('publishes live context and terminal output, and retains them after a cold re
       ),
     ).toBe(true),
   );
-  const live: any = await client.call('state', { sessionId: session.id });
-  expect(live.snapshot.entries.find((entry: any) => entry.terminal).terminal.output).toBe(
-    'first\nsecond',
-  );
+  const live = await client.call('state', { sessionId: session.id });
+  expect(
+    live.snapshot.entries.find(
+      (entry): entry is Extract<Entry, { role: 'tool' }> =>
+        entry.role === 'tool' && !!entry.terminal,
+    )!.terminal!.output,
+  ).toBe('first\nsecond');
   await client.call('cancel', { sessionId: session.id });
   await turn;
-  const before: any = await client.call('state', { sessionId: session.id });
+  const before = await client.call('state', { sessionId: session.id });
   await restart();
   const cold = new SessionClient(socket);
   cleanup.push(() => cold.dispose());
-  const after: any = await cold.call('state', { sessionId: session.id });
+  const after = await cold.call('state', { sessionId: session.id });
   expect(after.snapshot.usage).toEqual({ used: 1234, size: 200000 });
   expect(after.snapshot.entries).toEqual(before.snapshot.entries);
   expect(after.busy).toBe(false);

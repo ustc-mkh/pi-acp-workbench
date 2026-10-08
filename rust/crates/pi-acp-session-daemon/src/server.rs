@@ -2,6 +2,7 @@
 //! Per-socket writers serialize output; malformed input closes only its connection.
 //! Allocation limits and frame deadlines are specified in docs/service-protocol.md.
 use crate::state_stream::{StateStreams, Subscription};
+use pi_acp_core::sync::MutexExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -20,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 const LINE_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_PENDING: usize = 128;
 const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
@@ -87,7 +89,7 @@ impl Shared {
 
     fn close_conn(&self, conn: &Arc<Conn>) {
         conn.cancel.cancel();
-        self.conns.lock().unwrap().remove(&conn.id);
+        self.conns.lock_unpoisoned().remove(&conn.id);
     }
 
     fn enqueue(&self, conn: &Arc<Conn>, body: String) {
@@ -150,7 +152,7 @@ impl Shared {
                 }
             };
             let enabled = enabled.unwrap();
-            let mut subs = conn.subscriptions.lock().unwrap();
+            let mut subs = conn.subscriptions.lock_unpoisoned();
             if enabled && subs.len() >= MAX_SUBSCRIPTIONS && !subs.contains_key(session_id) {
                 drop(subs);
                 self.send(conn, json!({ "id": id, "error": "订阅已满" }));
@@ -220,13 +222,24 @@ impl Shared {
 
     async fn accept_loop(self: &Arc<Self>, listener: UnixListener) {
         loop {
-            let stream = tokio::select! {
-                _ = self.shutdown.cancelled() => break,
-                result = listener.accept() => match result {
-                    Ok((stream, _)) => stream,
-                    Err(_) => continue,
-                },
+            let Some((mut stream, _)) =
+                accept_with_retry(|| listener.accept(), &self.shutdown).await
+            else {
+                break;
             };
+            if self.conns.lock_unpoisoned().len() >= MAX_CONNECTIONS {
+                eprintln!("[sessions] connection limit reached ({MAX_CONNECTIONS})");
+                // Read just the first bounded request to return a correlated error.
+                // Keep rejection on this loop so overload cannot spawn unbounded tasks.
+                tokio::select! {
+                    _ = self.shutdown.cancelled() => break,
+                    _ = tokio::time::timeout(ACCEPT_RETRY_DELAY, reject_connection(&mut stream)) => {}
+                }
+                if !accept_retry_delay(&self.shutdown).await {
+                    break;
+                }
+                continue;
+            }
             let (outbox_tx, outbox_rx) = mpsc::unbounded_channel::<String>();
             let (emit_tx, emit_rx) = mpsc::unbounded_channel::<Value>();
             let conn = Arc::new(Conn {
@@ -238,16 +251,65 @@ impl Shared {
                 cancel: CancellationToken::new(),
             });
             {
-                let mut conns = self.conns.lock().unwrap();
-                if conns.len() >= MAX_CONNECTIONS {
-                    continue;
-                }
+                let mut conns = self.conns.lock_unpoisoned();
                 conns.insert(conn.id, conn.clone());
             }
             let (read, write) = stream.into_split();
             tokio::spawn(writer_loop(self.clone(), conn.clone(), write, outbox_rx));
             tokio::spawn(emit_loop(self.clone(), conn.clone(), emit_rx));
             tokio::spawn(reader_loop(self.clone(), conn, read));
+        }
+    }
+}
+
+async fn accept_retry_delay(shutdown: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = tokio::time::sleep(ACCEPT_RETRY_DELAY) => true,
+    }
+}
+
+async fn accept_with_retry<T, F, A>(mut accept: F, shutdown: &CancellationToken) -> Option<T>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<T>>,
+{
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            result = accept() => result,
+        };
+        match result {
+            Ok(stream) => return Some(stream),
+            Err(error) => {
+                eprintln!("[sessions] accept failed: {error}; retrying in 100 ms");
+                if !accept_retry_delay(shutdown).await {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+async fn reject_connection(stream: &mut tokio::net::UnixStream) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut line = Vec::new();
+    let mut reader = BufReader::new((&mut *stream).take(64 * 1024));
+    if reader.read_until(b'\n', &mut line).await.is_err() || line.last() != Some(&b'\n') {
+        return;
+    }
+    drop(reader);
+    if let Ok(item) = serde_json::from_slice::<Value>(&line) {
+        if let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| id.encode_utf16().count() <= MAX_REQUEST_ID)
+        {
+            let frame =
+                json!({"id": id, "error": "会话服务连接已满，请稍后重试。", "code": "busy"});
+            let _ = stream.write_all(format!("{frame}\n").as_bytes()).await;
         }
     }
 }
@@ -653,7 +715,7 @@ mod resource_tests {
         client.send("hello", "hello", json!({})).await;
         assert_eq!(client.reply().await["value"], "ok");
         drop((client, other));
-        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        until(|| server.shared.conns.lock_unpoisoned().is_empty()).await;
         until(|| server.shared.outgoing_bytes.load(Ordering::SeqCst) == 0).await;
         server.dispose().await;
     }
@@ -743,7 +805,7 @@ mod resource_tests {
             assert_eq!(client.reply().await["value"], "ok");
         }
         drop(client);
-        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        until(|| server.shared.conns.lock_unpoisoned().is_empty()).await;
         until(|| {
             server.shared.pending.load(Ordering::SeqCst) == 0
                 && server.shared.outgoing_bytes.load(Ordering::SeqCst) == 0
@@ -755,23 +817,95 @@ mod resource_tests {
         for _ in 0..MAX_CONNECTIONS {
             clients.push(Client::open(&path).await);
         }
-        until(|| server.shared.conns.lock().unwrap().len() == MAX_CONNECTIONS).await;
-        let mut extra = UnixStream::connect(&path).await.unwrap();
-        assert!(timeout(Duration::from_secs(5), extra.read_u8())
+        until(|| server.shared.conns.lock_unpoisoned().len() == MAX_CONNECTIONS).await;
+        let mut extra = Client::open(&path).await;
+        extra.send("overflow", "hello", json!({})).await;
+        let rejected = extra.reply().await;
+        assert_eq!(rejected["id"], "overflow");
+        assert_eq!(rejected["code"], "busy");
+        assert!(rejected["error"].as_str().unwrap().contains("连接已满"));
+        assert!(timeout(Duration::from_secs(5), extra.reader.read_u8())
             .await
             .unwrap()
             .is_err());
         drop(clients);
-        until(|| server.shared.conns.lock().unwrap().is_empty()).await;
+        until(|| server.shared.conns.lock_unpoisoned().is_empty()).await;
         let mut partial = UnixStream::connect(&path).await.unwrap();
         partial.write_all(b"{\"id\":").await.unwrap();
         until(|| server.shared.buffered_bytes.load(Ordering::SeqCst) == 6).await;
         drop(partial);
         until(|| {
             server.shared.buffered_bytes.load(Ordering::SeqCst) == 0
-                && server.shared.conns.lock().unwrap().is_empty()
+                && server.shared.conns.lock_unpoisoned().is_empty()
         })
         .await;
+        server.dispose().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_errors_back_off_and_shutdown_interrupts_retry() {
+        let shutdown = CancellationToken::new();
+        let mut attempts = Vec::new();
+        let start = tokio::time::Instant::now();
+        let result = accept_with_retry(
+            || {
+                attempts.push(tokio::time::Instant::now() - start);
+                std::future::ready(if attempts.len() < 3 {
+                    Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+                } else {
+                    Ok(42)
+                })
+            },
+            &shutdown,
+        )
+        .await;
+        assert_eq!(result, Some(42));
+        assert_eq!(
+            attempts,
+            vec![Duration::ZERO, ACCEPT_RETRY_DELAY, ACCEPT_RETRY_DELAY * 2]
+        );
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel.cancel();
+        });
+        let start = tokio::time::Instant::now();
+        let result = accept_with_retry(
+            || {
+                std::future::ready(Err::<(), _>(std::io::Error::from_raw_os_error(
+                    libc::ENFILE,
+                )))
+            },
+            &shutdown,
+        )
+        .await;
+        assert_eq!(result, None);
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(10)
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_global_connections_lock_does_not_stop_accepting() {
+        let root = Root::new();
+        let path = root.0.join("s");
+        let server = SessionServer::new(
+            path.clone(),
+            Arc::new(|_, _, _, _| Box::pin(async { Ok(json!(true)) })),
+        );
+        assert!(pi_acp_core::panic_guard::run(async {
+            let _guard = server.shared.conns.lock_unpoisoned();
+            panic!("connection task bug");
+        })
+        .await
+        .is_err());
+        server.listen().await.unwrap();
+        let mut client = Client::open(&path).await;
+        client.send("hello", "hello", json!({})).await;
+        assert_eq!(client.reply().await["value"], true);
+        drop(client);
+        until(|| server.shared.conns.lock_unpoisoned().is_empty()).await;
         server.dispose().await;
     }
 }
@@ -823,8 +957,7 @@ impl SessionServer {
         let task = self
             .shared
             .accept_task
-            .lock()
-            .unwrap()
+            .lock_unpoisoned()
             .replace(tokio::spawn(
                 async move { shared.accept_loop(listener).await },
             ));
@@ -843,14 +976,17 @@ impl SessionServer {
             return;
         };
         // Serialize state revisions and writes so concurrent emitters cannot reorder patches.
-        let mut states = self.shared.states.lock().unwrap();
+        let mut states = self.shared.states.lock_unpoisoned();
         let targets: Vec<Arc<Conn>> = self
             .shared
             .conns
-            .lock()
-            .unwrap()
+            .lock_unpoisoned()
             .values()
-            .filter(|conn| conn.subscriptions.lock().unwrap().contains_key(session_id))
+            .filter(|conn| {
+                conn.subscriptions
+                    .lock_unpoisoned()
+                    .contains_key(session_id)
+            })
             .cloned()
             .collect();
         if targets.is_empty() {
@@ -860,7 +996,7 @@ impl SessionServer {
             .then(|| states.next(session_id, event.clone()));
         for conn in targets {
             let frame = {
-                let mut subscriptions = conn.subscriptions.lock().unwrap();
+                let mut subscriptions = conn.subscriptions.lock_unpoisoned();
                 let Some(subscription) = subscriptions.get_mut(session_id) else {
                     continue;
                 };
@@ -901,12 +1037,12 @@ impl SessionServer {
 
     pub async fn dispose(&self) {
         self.shared.shutdown.cancel();
-        let task = self.shared.accept_task.lock().unwrap().take();
+        let task = self.shared.accept_task.lock_unpoisoned().take();
         if let Some(task) = task {
             task.abort();
             let _ = task.await;
         }
-        for (_, conn) in self.shared.conns.lock().unwrap().drain() {
+        for (_, conn) in self.shared.conns.lock_unpoisoned().drain() {
             conn.cancel.cancel(); // writer drains queued bytes on the way out
         }
         let _ = tokio::fs::remove_file(&self.path).await;

@@ -1,5 +1,4 @@
 import type * as acp from '@agentclientprotocol/sdk';
-export const byteSize = (text: string) => Buffer.byteLength(text, 'utf8');
 
 export function checkPromptSize(prompt: acp.ContentBlock[]) {
   // Leave room for JSON-RPC framing below the SDK's 16 MiB limit, including escaping.

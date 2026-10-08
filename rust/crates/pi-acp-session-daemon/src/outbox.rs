@@ -2,6 +2,7 @@
 //! The existing telegram/events directory is retained for disk compatibility.
 //! Final writes are durable and their failures propagate to the task receipt.
 use crate::types::Entry;
+use pi_acp_core::sync::MutexExt;
 use pi_acp_core::utf16::utf16_head;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -189,7 +190,7 @@ impl TurnPublication {
         let Some((session_id, session_number, entries, _)) = (shared.accessor)() else {
             return;
         };
-        let mut s = shared.state.lock().unwrap();
+        let mut s = shared.state.lock_unpoisoned();
         s.needs_init = false;
         s.event.session_id = session_id;
         s.event.session_number = session_number;
@@ -229,7 +230,7 @@ impl TurnPublication {
 
     fn publish_shared(shared: &Arc<Shared>) {
         {
-            let mut s = shared.state.lock().unwrap();
+            let mut s = shared.state.lock_unpoisoned();
             s.pending = Some(s.event.clone());
             if s.writer_active {
                 return;
@@ -239,7 +240,7 @@ impl TurnPublication {
         let shared = shared.clone();
         tokio::spawn(async move {
             {
-                let s = shared.state.lock().unwrap();
+                let s = shared.state.lock_unpoisoned();
                 if s.needs_init {
                     drop(s);
                     Self::init_capture(&shared);
@@ -247,7 +248,7 @@ impl TurnPublication {
             }
             loop {
                 let event = {
-                    let mut s = shared.state.lock().unwrap();
+                    let mut s = shared.state.lock_unpoisoned();
                     match s.pending.take() {
                         Some(e) => e,
                         None => {
@@ -257,7 +258,7 @@ impl TurnPublication {
                     }
                 };
                 let result = shared.events.write(&event).await;
-                shared.state.lock().unwrap().last_write_error = result.as_ref().err().cloned();
+                shared.state.lock_unpoisoned().last_write_error = result.as_ref().err().cloned();
                 if let Err(error) = result {
                     (shared.report)(&error);
                 }
@@ -273,7 +274,7 @@ impl TurnPublication {
         let mut rx = self.inner.drained.subscribe();
         loop {
             {
-                let s = self.inner.state.lock().unwrap();
+                let s = self.inner.state.lock_unpoisoned();
                 if !s.writer_active && s.pending.is_none() {
                     return;
                 }
@@ -286,7 +287,7 @@ impl TurnPublication {
 
     fn capture_shared(shared: &Shared) {
         let (_, _, entries, permissions) = (shared.accessor)().unwrap_or_default();
-        let mut s = shared.state.lock().unwrap();
+        let mut s = shared.state.lock_unpoisoned();
         s.event.text = entries
             .iter()
             .skip(shared.start)
@@ -301,7 +302,7 @@ impl TurnPublication {
     pub fn update(&self) {
         let shared = self.inner.clone();
         {
-            let mut s = shared.state.lock().unwrap();
+            let mut s = shared.state.lock_unpoisoned();
             if s.ended || s.debounce_scheduled {
                 return;
             }
@@ -314,7 +315,7 @@ impl TurnPublication {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(2500)).await;
             let fire = {
-                let mut s = shared.state.lock().unwrap();
+                let mut s = shared.state.lock_unpoisoned();
                 s.debounce_scheduled = false;
                 !s.ended
             };
@@ -330,12 +331,12 @@ impl TurnPublication {
         error: Option<String>,
         stop_reason: Option<&str>,
     ) -> Result<(), String> {
-        if self.inner.state.lock().unwrap().ended {
+        if self.inner.state.lock_unpoisoned().ended {
             return Ok(());
         }
         Self::capture_shared(&self.inner);
         {
-            let mut s = self.inner.state.lock().unwrap();
+            let mut s = self.inner.state.lock_unpoisoned();
             s.ended = true;
             s.debounce_scheduled = false;
             s.event.status = if error.is_some() {
@@ -354,8 +355,7 @@ impl TurnPublication {
         self.wait_writes().await;
         self.inner
             .state
-            .lock()
-            .unwrap()
+            .lock_unpoisoned()
             .last_write_error
             .clone()
             .map_or(Ok(()), Err)
@@ -379,7 +379,7 @@ mod tests {
             Some((
                 "session-1".into(),
                 Some(7),
-                current.lock().unwrap().clone(),
+                current.lock_unpoisoned().clone(),
                 0,
             ))
         });
@@ -404,7 +404,7 @@ mod tests {
         .await
         .unwrap();
         for i in 0..50 {
-            *entries.lock().unwrap() = vec![entry("assistant", &format!("version {i}"))];
+            *entries.lock_unpoisoned() = vec![entry("assistant", &format!("version {i}"))];
             TurnPublication::capture_shared(&turn.inner);
             turn.publish();
         }
@@ -415,7 +415,7 @@ mod tests {
             turn
         });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !shared.state.lock().unwrap().ended {
+            while !shared.state.lock_unpoisoned().ended {
                 tokio::task::yield_now().await;
             }
         })
@@ -427,14 +427,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(events.write_attempts.load(Ordering::SeqCst), 2);
-        assert!(errors.lock().unwrap().is_empty());
+        assert!(errors.lock_unpoisoned().is_empty());
         let event: Value =
             serde_json::from_slice(&tokio::fs::read(events.file("coalesced")).await.unwrap())
                 .unwrap();
         assert_eq!(event["text"], "version 49");
         assert_eq!(event["status"], "completed");
-        assert!(!turn.inner.state.lock().unwrap().writer_active);
-        assert!(turn.inner.state.lock().unwrap().pending.is_none());
+        assert!(!turn.inner.state.lock_unpoisoned().writer_active);
+        assert!(turn.inner.state.lock_unpoisoned().pending.is_none());
         tokio::fs::remove_dir_all(dir).await.unwrap();
     }
 
@@ -460,9 +460,9 @@ mod tests {
         tokio::fs::rename(&dir, &backup).await.unwrap();
         tokio::fs::write(&dir, "not a directory").await.unwrap();
         assert!(turn.finish(None, Some("end_turn")).await.is_err());
-        assert_eq!(errors.lock().unwrap().len(), 1);
-        assert!(!turn.inner.state.lock().unwrap().writer_active);
-        assert!(turn.inner.state.lock().unwrap().pending.is_none());
+        assert_eq!(errors.lock_unpoisoned().len(), 1);
+        assert!(!turn.inner.state.lock_unpoisoned().writer_active);
+        assert!(turn.inner.state.lock_unpoisoned().pending.is_none());
         let old: Value = serde_json::from_slice(
             &tokio::fs::read(backup.join(events.file("failure").file_name().unwrap()))
                 .await
@@ -497,7 +497,7 @@ mod tests {
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = errors.clone();
         (
-            Arc::new(move |e: &str| sink.lock().unwrap().push(e.to_string())),
+            Arc::new(move |e: &str| sink.lock_unpoisoned().push(e.to_string())),
             errors,
         )
     }
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(raw["status"], "completed");
         assert_eq!(raw["title"], "hello world");
         assert_eq!(raw["inputText"], "hello world");
-        assert!(errors.lock().unwrap().is_empty());
+        assert!(errors.lock_unpoisoned().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -645,7 +645,7 @@ mod tests {
             source_desktop: true,
         };
         TurnPublication::capture_shared(&shared);
-        let s = shared.state.lock().unwrap();
+        let s = shared.state.lock_unpoisoned();
         assert!(s.event.text.starts_with("a1\n\nd1"));
         assert_eq!(s.event.pending_permissions, 1);
         assert!(!s.event.text.contains("等待工具授权"));

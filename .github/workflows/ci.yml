@@ -4,62 +4,106 @@ permissions:
   contents: read
 jobs:
   rust-audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit --locked --version 0.22.2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-audit@0.22.2
+          fallback: none
       - run: cargo audit --file rust/Cargo.lock
-  services:
-    runs-on: ubuntu-latest
+  javascript:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - run: npm ci
+      - run: npm run check && npm run build
+      - run: npm audit --omit=dev
+      # Tar preserves executable bits for esbuild and test runners in downstream jobs.
+      - run: tar -czf /tmp/workbench-js.tgz node_modules dist THIRD_PARTY_NOTICES.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workbench-js
+          path: /tmp/workbench-js.tgz
+          compression-level: 0
+          retention-days: 1
+  services:
+    needs: javascript
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: workbench-js
+          path: /tmp
+      - run: tar -xzf /tmp/workbench-js.tgz
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (2026-10-08)
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            rust -> target
+            rust -> target/contract
+          key: services
       - run: npm run format:check
+      - run: npm run clippy
       # One preparation per target; independent suites overlap, not stateful cases.
-      - run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
       - run: npm run test:full
         env:
           TEST_JOBS: 2
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: service-test-logs
           path: .test-results/
           include-hidden-files: true
-      - run: npm audit --omit=dev
   browser:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
-  production:
+    needs: javascript
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          name: workbench-js
+          path: /tmp
+      - run: tar -xzf /tmp/workbench-js.tgz
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/browser-smoke.mjs
+  production:
+    needs: javascript
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: workbench-js
+          path: /tmp
+      - run: tar -xzf /tmp/workbench-js.tgz
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (2026-10-08)
+        with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
-      - run: npm ci
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: rust -> target
+          key: production-musl
       - run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
-      - run: npm run build:services -- --target x86_64-unknown-linux-musl
+      - run: node scripts/build-services.mjs --target x86_64-unknown-linux-musl
         env:
           CC: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
@@ -68,9 +112,40 @@ jobs:
         env:
           PI_CONTRACT_DAEMON: service-dist/pi-acp-session-daemon
       - run: npm run package:services
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-services-x86_64-unknown-linux-musl
           path: |
             service-artifacts/
             test-results/production-*.json
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust-audit, services, browser, production]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: workbench-js
+          path: /tmp
+      - run: tar -xzf /tmp/workbench-js.tgz
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-services-x86_64-unknown-linux-musl
+      - run: npx vsce package --no-dependencies --out service-artifacts/pi-acp-workbench-$(node -p "require('./package.json').version").vsix
+      - run: node scripts/prepare-release.mjs
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Pi ACP Workbench $RELEASE_TAG" --notes-file service-artifacts/release-notes.md service-artifacts/*.vsix service-artifacts/*.tar.gz service-artifacts/*.tar.gz.sha256 service-artifacts/SHA256SUMS
+          mkdir /tmp/release-download
+          gh release download "$RELEASE_TAG" --dir /tmp/release-download
+          (cd /tmp/release-download && sha256sum -c SHA256SUMS)
+          gh release edit "$RELEASE_TAG" --draft=false --latest

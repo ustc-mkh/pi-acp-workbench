@@ -1,53 +1,39 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-10-08
 
-- Codex / Claude 接入详细用量统计：服务持久化每轮 token 与多模型明细，分页查询、重启后保留，并区分累计消耗与上下文占用；旧适配器缺失数据时显示说明，不回填原生历史。
+### 服务与兼容边界
 
-- Telegram 中继按接收、命令、轮次、投递、历史和授权拆分；Bridge 保留组装与生命周期，持久化模型与事务存储独立。
-- 将状态修改统一收口到 StateStore，提取纯命令分类与队列顺序策略；增加不依赖网络的调度回归。
-- 本地监听使用 OwnedTask，消息处理任务由 TaskScope 跟踪；关闭时拒绝新任务、等待已有任务并有界回收，避免后台任务脱离生命周期。
+- 会话服务和 Telegram relay 收敛为 Rust 单一生产实现。VS Code / 手机统一经 v3 socket 操作 Pi、Codex 和 Claude，会话队列、worker、历史、偏好、授权和每轮 Diff 均由 daemon 管理；移除 TS 服务入口、委托快照写入、客户端文件租约及直接写入降级。
+- 升级须配套更新插件、会话 daemon 与 Telegram。只接受完整快照和带请求指纹的收据；不兼容数据报错保留，不推断、自动迁移或静默清除。旧实现从历史 release / commit 及备份回滚。
+- worker 池、会话操作、轮次与 phase 拆分职责；Telegram 接收、命令、投递、历史与授权独立模块，状态写入收口至 StateStore。OwnedTask / TaskScope 跟踪本地任务，关闭时拒绝新任务并有界回收。
+- Codex / Claude 用量按模型规范化并持久化，分页、重启后可查询，累计消费与上下文占用分离；缺失数据不回填原生历史，不将费用估算当成最终账单。
 
-- Telegram 接收消息与游标原子落盘，未开始的消息重启后继续；结果不确定的已开始消息明确提示并禁止自动重放。停止/授权预留处理容量，队列溢出先告知用户再确认游标，停止会取消持久化队列中的旧提示词。
-- 权限订阅在轮次结束、失败或取消时释放；Rust socket 客户端读取过程中执行大小限制，并限制未完成帧的读取时间。
-- 桌面订阅支持带版本的条目增量，保留未变化条目的引用；Telegram 权限订阅不再接收完整历史。旧客户端保留全量状态兼容路径。
-- CI 增加固定版本 cargo-audit，对 Rust 锁文件执行漏洞审计；修正开发指南中的旧适配器配置和代码路径。
+### 稳定性与持久化
 
-- 完成 Telegram 源码收敛：补 Rust 100 次增量合并、话题/确认/开关写失败调用路径、过期票据响应及目录 alias/open 复用覆盖，删除全部 TS relay 内部实现与旧参考测试；保留独立的纯 socket 测试客户端。
-- 修复 Rust 终态 outbox 写失败仅记录日志却仍返回成功的问题：向调用方传播错误，真实 socket 回归验证 interrupted 收据和同 ID 不重放。
-- 新增 `test:full`：测试产物构建一次，套件有界并行、独立日志、汇总失败；TEST_JOBS=1 可顺序排障。CI 服务、浏览器、生产打包拆分并行 job，附 runner 调度单测。
+- accept 系统错误记录日志并退避 100 ms；连接满额尝试返回关联请求的 busy 错误，关闭信号可中断等待。同步短临界区统一使用 lock_unpoisoned，worker / 操作边界捕获 panic，恢复已提交会话快照并关闭对应 worker，避免连锁失败。
+- UI 操作在首次等待前同步保留门控，阻止并发发送、会话操作及设置 / harness 切换；取消与授权继续可用，失败后释放门控。
+- socket 在私有目录绑定、设置 0600 后原子发布；显式订阅、UTF-16 分块、背压和资源预算隔离违规连接。超大响应或广播返回局部错误，半帧与分块停顿有界超时。
+- 新建、提示词、原生分支与设置持久化去重，请求 ID 绑定方法 / 参数指纹；收据、历史、偏好、Telegram 游标与最终 outbox 同步文件和父目录。初始写失败不执行，终态 outbox 写失败传播为 interrupted，不自动重放。
+- 收据到期清理、逐文件 outbox 读取、预览独立缓冲和周期写入合并控制资源增长；超时释放客户端 pending 槽位，worker 退出与闲置回收等待进程组结束。
+- Telegram update 和游标原子入队，pending 重启后可继续，started 未完成记录提示结果不确认并禁止自动重放；控制操作预留容量，停止丢弃旧排队提示词。话题绑定、投递确认和通知开关经 durable 事务提交。
+- Telegram 支持安全 Markdown entities、长代码 / emoji 分块、实时静音与显式目录限制；生产固定官方 API，模拟传输只在隔离 contract-test 构建中启用。过期授权、重复投递 / 确认、历史分批及重启均有回归。
 
-- Rust relay 覆盖迁移：Telegram 黑盒契约扩展至 23 项，覆盖磁盘游标失败、投递/history 重试、真实排队取消、静音切换、权限隔离、Unicode/429 和 webhook 边界；新增事务/清理/队列与慢盘 outbox Rust 单测，删除已迁移的两个 TS 长运行参考用例。
-- Rust relay outbox 改为惰性逐条读取，避免一次性加载整个积压；在实际读取阶段强制文件大小上限，而不只检查 metadata。
+### 桌面、适配器与构建
 
-- Rust 收敛第二阶段：删除 TS 会话服务、队列、收据、socket 服务端和服务端命令校验；TS 只保留协议客户端/DTO。会话、原生分支、偏好、Diff 和存储失败回归直接启动 Rust 服务，不再依赖 TS 内嵌实现。
-- 补 Rust 收据落盘后取消、写失败不执行、队列溢出、响应隔离及连接/请求资源回收测试；故障注入仅 cfg(test)。内存检查改为真实 Rust RSS/FD/worker 浸泡，CI 执行；Rust 预览缓冲测试覆盖大源文本、Unicode 和过量容量小字符串。
+- Mermaid 使用本地 ESM 按需分块，构建清理旧分块，保留净化、错误源码回退和 CSP；VSIX 明确排除 source map 与原生服务。
+- 原生历史与 Pi RPC 消费字段补最小类型，清理未使用导出、无用参数和直接 @types 依赖；补严格断言补丁的上游升级流程。许可证固定遍历顺序、统一换行、内容变化才写入。
+- socket 客户端、状态增量和 RemoteAgent 使用明确的帧 / 事件 / 响应类型，未声明的扩展结果默认为 unknown；清理源码和测试中的其余显式 any，测试模拟对象沿用生产契约。
+- Tokio 按 crate 收窄 features，服务构建 / 打包只支持 Linux x86_64 GNU / musl，记录真实 ABI、源码指纹、生产 features 和 SHA-256；生产 smoke 与回滚使用隔离数据目录。
+- npm overrides 统一 mermaid 传递的 KaTeX 到 0.19.0，包含 GHSA-238p-pmpm-9mq7 修复。
 
-- 开始 Rust 契约单实现迁移：删除 TS daemon 入口及生产构建，npm/systemd 默认只运行 Rust；新增独立 `build:services` 产物与 SHA-256 清单，旧 TS 内部故障测试暂留待覆盖迁移，不宣称已完成源码淘汰。
-- 桌面真实 RemoteAgent 测试改接 Rust；新增两个真实 Rust daemon 的授权/取消/离线 outbox 集成及 queue/journal 故障回归。
-- 修复 Rust Telegram 重启时错误要求可选 `historySent` 存在，保留非法类型拒绝和游标防重放校验。
+### 验证与文档
 
-- Mermaid 改为本地 ESM 分块按需加载；首次出现流程图才加载渲染引擎，保留 SVG 净化与错误源码回退。构建前清理旧分块，浏览器冒烟覆盖模块加载与 CSP；VSIX 改为显式产物白名单，避免 `!dist/**` 覆盖 source map 排除规则。
-- TS / Rust 会话 socket 在私有目录中绑定并设置 0600 后原子发布，消除 bind 与 chmod 间的公开权限窗口；失败清理临时 socket，不修改全进程 umask。
-- 全库采用 Prettier + rustfmt，新增格式化命令、编辑器约定和 CI 检查；字节级 fixtures、锁文件及生成产物不格式化。
-
-- 修复协议 v2 委托历史写入的版本基线：只用本窗口读写的 revision，轮询不推进；远程写成功同步版本，降级文件写不再误报冲突。
-- 未知服务方法增加稳定错误码 `unknown_method`；启动 hello 失败后自动重试。清空共享历史确认明确提示会停止 Telegram 在内的所有任务。
-- Telegram 新增可选 `restrictToWorkspaces`（真实路径匹配工作区根）；生产构建移除传输环境变量钩子，测试通过显式注入或隔离 Rust feature 使用模拟 API。
-- 压缩 Webview bundle，VSIX 排除 source map；根忽略列表显式排除 `rust/target/`；新增 TS/Rust 单元和双实现契约 CI。
-
-- 依赖安全修复：通过 npm overrides 将 mermaid 传递依赖的 katex 统一为 0.19.0，消除原型链污染漏洞（GHSA-238p-pmpm-9mq7）。
-- 工作进程退出后 `stop()` 立即返回，不再固定等待 1.5 秒 SIGKILL 兜底计时器；空闲回收、原生分支与批量关闭更快。
-- 会话 Socket 按行解析不再对剩余缓冲做逐行 Buffer 往返，单数据块多行时从 O(n²) 降为 O(n)，同时保留残留字符串对源数据块的释放。
-- `RemoteAgent` 超时操作现在释放服务请求槽位，避免服务长期运行时 pending 上限（128）被耗尽的慢泄漏。
-- 会话服务启动时清理超过 30 天的已完成/中断任务收据与会话标记，避免收据目录无限增长拖慢恢复扫描。
-- Telegram 绑定文件在守护进程启动时移除已删除会话的话题绑定，避免 topics 列表只增不减；会话服务暂不可用时跳过清理保留绑定。
-- 打包脚本版本号改由 `npm_package_version` 注入，不再随版本升级过时。
-- 会话服务 wire 协议与磁盘格式固化为规范文档（docs/service-protocol.md、docs/data-formats.md）；新增 `npm run test:contract` 黑盒契约测试（19 项），只通过 socket 验证实现，可用于未来的替代实现。
-- `scripts/export-fixtures.mjs` 导出 native-branch 哈希/绑定 fixtures 与磁盘格式 golden 样例（test/fixtures/），为替代实现提供逐比特断言目标；Rust 双实现见 docs/architecture.md。
-- 新增 Rust 版 Telegram relay（`rust/` workspace，Phase 1）：`pi-acp-core` 共享库（socket wire client、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16 切分）+ `pi-acp-telegram-daemon` 单二进制，与 Node 实现参数/格式完全兼容，systemd 改 `ExecStart` 即切换；空闲 RSS ~5 MB。`npm run test:contract:telegram` 用模拟 Bot API 与模拟会话服务验证 9 项 contract，同一套件对 Rust 与 TS 实现均通过（`PI_TG_DAEMON` 切换）。模拟 API 钩子现已移至独立测试入口 / Rust `contract-test` feature，不影响生产构建。
-- 会话服务协议升至 v2（Phase 3）：新增 `historyWrite`/`historyRemove` 命令，扩展端共享历史写路径可委托给 daemon（`hello` 宣告 `history` 能力时启用，旧版 daemon 透明回退文件写）；租约语义见 docs/service-protocol.md §4。契约测试增至 22 项，对 TS 与 Rust 双实现全过。
-- 新增 Rust 版会话服务 daemon（Phase 2）：`pi-acp-session-daemon` 单二进制（release ~3.2 MB，空闲 RSS ~9 MB vs Node ~79 MB），实现 wire 服务端（分块/背压/订阅路由/全部限制）、serviceCommand 校验、TaskQueue、RequestJournal（幂等/中断恢复/30 天清理）、SharedHistoryStore（乐观锁/租约/编号分配）、SessionPreferences、Telegram outbox 发布、workspace-diff/turn-diff、native-branch 哈希、ACP v1 客户端子集与进程组管理（setsid+killpg）。`PI_CONTRACT_DAEMON` 对同一 19 项 contract 全过；`sessions.json` 缺省 `command` 时按 `PI_ADAPTER` 环境变量或可执行文件旁边的 `pi-adapter.mjs` 解析 worker（Node 版默认 `process.execPath`）。部署与已知差异见 docs/session-service.md「Rust daemon」小节。
+- verify 包含 clippy、完整服务 test:full 和浏览器冒烟。test:full 一次准备 debug / contract 产物、有界并行、独立日志与失败汇总；日志默认保留最近 5 次，保护活动运行。
+- CI Actions 固定 commit SHA，增加 Rust 缓存，下载固定版本 cargo-audit，共享一次 npm 安装 / JS 构建给服务、浏览器和生产 job；Rust 与生产 npm 锁文件审计失败即阻止流程。
+- 标签 CI 自动发布配套 VSIX / musl 服务包，核对版本、生产源码提交和包内容，上传草稿后下载复核 SHA-256 再发布。
+- 冻结 Wire / 磁盘规范、协议类型漂移检查与原生分支样例；Rust 单测、黑盒契约、双服务集成、内存及浏览器覆盖当前单一实现。
+- 删除已完成的迁移计划归档及打包依赖，新增文档索引，更新部署、架构、协议、数据格式、测试与发布指南。验收记录区分当前回归、历史产物和未完成的长时间 / 外部发布范围。
 
 ## 0.9.4 — 2026-10-05
 

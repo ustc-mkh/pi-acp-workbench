@@ -1,5 +1,6 @@
 //! Turn execution, cancellation, publications and workspace diff.
 use super::*;
+use pi_acp_core::sync::MutexExt;
 
 impl SessionService {
     pub(super) async fn with_worker<'a, F>(
@@ -13,8 +14,8 @@ impl SessionService {
         let rt = self.runtime(id).await?;
         let guarded = pi_acp_core::panic_guard::run(async {
             let agent = self.worker(&rt).await?;
-            rt.lock().unwrap().error = None;
-            if rt.lock().unwrap().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
+            rt.lock_unpoisoned().error = None;
+            if rt.lock_unpoisoned().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
                 return Ok(json!({ "stopReason": "cancelled" }));
             }
             operation(rt.clone(), agent).await
@@ -27,7 +28,7 @@ impl SessionService {
             // Restore only this runtime from its last committed snapshot. Do not
             // continue with partially mutated state after an unwound callback.
             let (agent, committed) = {
-                let mut r = rt.lock().unwrap_or_else(|p| p.into_inner());
+                let mut r = rt.lock_unpoisoned();
                 r.snapshot_pending = false;
                 (r.agent.take(), r.snapshot.clone())
             };
@@ -44,7 +45,7 @@ impl SessionService {
                     return Err(error);
                 }
             };
-            rt.lock().unwrap().state = ChatState {
+            rt.lock_unpoisoned().state = ChatState {
                 entries: restored.entries,
                 configs: restored.configs,
                 modes: restored.modes,
@@ -57,7 +58,7 @@ impl SessionService {
         }
         if let Err(error) = &result {
             let publication = {
-                let mut r = rt.lock().unwrap();
+                let mut r = rt.lock_unpoisoned();
                 r.error = Some(error.clone());
                 r.phase.take_publication()
             };
@@ -66,7 +67,7 @@ impl SessionService {
             }
         }
         {
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             if let Some(active) = r.phase.active_mut() {
                 active.step = Step::Finishing;
             }
@@ -118,8 +119,7 @@ impl SessionService {
             return Err("无效 ACP 操作".into());
         };
         let harness = rt
-            .lock()
-            .unwrap()
+            .lock_unpoisoned()
             .snapshot
             .harness
             .clone()
@@ -156,7 +156,7 @@ impl SessionService {
             let wanted_entry = params.get("entryId").and_then(Value::as_str);
             let wanted_hash = params.get("hash").and_then(Value::as_str);
             let index = {
-                let r = rt.lock().unwrap();
+                let r = rt.lock_unpoisoned();
                 r.state.entries.iter().position(|entry| {
                     r.state
                         .native_forks
@@ -190,7 +190,7 @@ impl SessionService {
             let points: Vec<crate::native::NativeForkPoint> =
                 serde_json::from_value(result.get("forkPoints").cloned().unwrap_or(json!([])))
                     .unwrap_or_default();
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             r.state.native_forks = Some(bind_native_forks(
                 &r.state.entries,
                 &points,
@@ -201,13 +201,13 @@ impl SessionService {
             }
         }
         if method == "session/set_config_option" {
-            rt.lock().unwrap().state.configs = result
+            rt.lock_unpoisoned().state.configs = result
                 .get("configOptions")
                 .and_then(Value::as_array)
                 .cloned();
         }
         if method == "session/set_mode" {
-            if let Some(Value::Object(modes)) = &mut rt.lock().unwrap().state.modes {
+            if let Some(Value::Object(modes)) = &mut rt.lock_unpoisoned().state.modes {
                 if let Some(mode_id) = params.get("modeId").cloned() {
                     modes.insert("currentModeId".into(), mode_id);
                 }
@@ -215,7 +215,7 @@ impl SessionService {
         }
         self.save(rt).await?;
         if matches!(method, "session/set_config_option" | "session/set_mode") {
-            let state = rt.lock().unwrap().state.clone();
+            let state = rt.lock_unpoisoned().state.clone();
             self.preferences.save(&harness, &state).await?;
         }
         Ok(result)
@@ -231,8 +231,7 @@ impl SessionService {
         request_id: &str,
     ) -> Result<Value, String> {
         let harness = rt
-            .lock()
-            .unwrap()
+            .lock_unpoisoned()
             .snapshot
             .harness
             .clone()
@@ -252,10 +251,10 @@ impl SessionService {
         {
             return Err("当前 ACP 适配器不支持图片".into());
         }
-        let prefs_state = rt.lock().unwrap().state.clone();
+        let prefs_state = rt.lock_unpoisoned().state.clone();
         self.preferences.save(&harness, &prefs_state).await?;
         let settings_before = {
-            let r = rt.lock().unwrap();
+            let r = rt.lock_unpoisoned();
             serde_json::to_string(
                 &model_preferences(&r.state)
                     .iter()
@@ -265,7 +264,7 @@ impl SessionService {
             .unwrap_or_default()
         };
         {
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             let text = prompt
                 .iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
@@ -277,15 +276,15 @@ impl SessionService {
             r.state.entries.push(entry);
         }
         self.save(rt).await?;
-        let start = rt.lock().unwrap().state.entries.len();
+        let start = rt.lock_unpoisoned().state.entries.len();
         self.emit(rt);
-        let cwd = rt.lock().unwrap().snapshot.cwd.clone();
+        let cwd = rt.lock_unpoisoned().snapshot.cwd.clone();
         {
             let accessor: StateAccessor = {
                 let weak = Arc::downgrade(rt);
                 Arc::new(move || {
                     weak.upgrade().map(|rt| {
-                        let r = rt.lock().unwrap();
+                        let r = rt.lock_unpoisoned();
                         (
                             r.snapshot.id.clone(),
                             None,
@@ -307,7 +306,7 @@ impl SessionService {
                     closed: self.closed.clone(),
                 },
             );
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             let Some(active) = r.phase.active_mut() else {
                 return Err("会话操作已结束，未启动本轮任务。".into());
             };
@@ -325,7 +324,7 @@ impl SessionService {
                         _ = cancel.cancelled() => break,
                         _ = tokio::time::sleep(Duration::from_secs(2)) => {
                             if let Err(error) = save_snapshot(&store_ref, &service_rt).await {
-                                let mut r = service_rt.lock().unwrap();
+                                let mut r = service_rt.lock_unpoisoned();
                                 r.error = Some(error.clone());
                                 if let Some(agent) = r.agent.clone() {
                                     drop(r);
@@ -340,13 +339,13 @@ impl SessionService {
         };
         let mut changes = WorkspaceDiff::begin(&cwd).await;
         let mut result: Result<Value, String> = async {
-            if let Some(active) = rt.lock().unwrap().phase.active_mut() {
+            if let Some(active) = rt.lock_unpoisoned().phase.active_mut() {
                 active.step = Step::Prompting;
             } else {
                 return Err("会话操作已结束。".into());
             }
             let outcome =
-                if rt.lock().unwrap().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
+                if rt.lock_unpoisoned().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
                     Ok(json!({ "stopReason": "cancelled" }))
                 } else {
                     agent.prompt(session_id, prompt.to_vec()).await
@@ -354,7 +353,7 @@ impl SessionService {
             match outcome {
                 Ok(result) => {
                     {
-                        let mut r = rt.lock().unwrap();
+                        let mut r = rt.lock_unpoisoned();
                         let snapshot = r.snapshot.clone();
                         crate::usage::capture(
                             &snapshot,
@@ -370,7 +369,7 @@ impl SessionService {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string();
-                        rt.lock().unwrap().state.entries.push(Entry::text_entry(
+                        rt.lock_unpoisoned().state.entries.push(Entry::text_entry(
                             next_id(),
                             "notice",
                             format!("本轮结束：{reason}"),
@@ -379,8 +378,8 @@ impl SessionService {
                     Ok(result)
                 }
                 Err(error) => {
-                    let cancelled = rt.lock().unwrap().phase.cancelled();
-                    let mut r = rt.lock().unwrap();
+                    let cancelled = rt.lock_unpoisoned().phase.cancelled();
+                    let mut r = rt.lock_unpoisoned();
                     if cancelled {
                         r.error = None;
                     } else {
@@ -401,7 +400,7 @@ impl SessionService {
         }
         .await;
         {
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             if let Some(active) = r.phase.active_mut() {
                 active.step = Step::Finishing;
             }
@@ -411,15 +410,15 @@ impl SessionService {
             agent.stop().await;
         }
         let diff_entry = changes.finish().await;
-        rt.lock().unwrap().state.entries.push(diff_entry);
+        rt.lock_unpoisoned().state.entries.push(diff_entry);
         ckpt_cancel.cancel();
         let _ = checkpoint.await;
-        if let Some(error) = rt.lock().unwrap().error.clone() {
+        if let Some(error) = rt.lock_unpoisoned().error.clone() {
             result = Err(error);
         }
         self.save(rt).await?;
         let settings_after = {
-            let r = rt.lock().unwrap();
+            let r = rt.lock_unpoisoned();
             serde_json::to_string(
                 &model_preferences(&r.state)
                     .iter()
@@ -429,13 +428,13 @@ impl SessionService {
             .unwrap_or_default()
         };
         if settings_before != settings_after {
-            let state = rt.lock().unwrap().state.clone();
+            let state = rt.lock_unpoisoned().state.clone();
             self.preferences.save(&harness, &state).await?;
         }
-        let publication = rt.lock().unwrap().phase.take_publication();
+        let publication = rt.lock_unpoisoned().phase.take_publication();
         if let Some(publication) = publication {
             let (error, stop_reason) = {
-                let r = rt.lock().unwrap();
+                let r = rt.lock_unpoisoned();
                 (
                     r.error.clone(),
                     result
@@ -453,10 +452,10 @@ impl SessionService {
 
     pub(super) async fn cancel(&self, id: &str) -> bool {
         self.queue.cancel(id).await;
-        let rt = self.runtimes.lock().unwrap().get(id).cloned();
+        let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
         let Some(rt) = rt else { return false };
         let (token, prompting, agent) = {
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             if !r.phase.busy() {
                 return false;
             }
@@ -482,7 +481,7 @@ impl SessionService {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let Some(rt) = weak.upgrade() else { return };
             let kill = {
-                let r = rt.lock().unwrap();
+                let r = rt.lock_unpoisoned();
                 r.phase.token() == token
                     && reference.is_some()
                     && r.agent
@@ -492,13 +491,13 @@ impl SessionService {
                         .unwrap_or(false)
             };
             if kill {
-                if let Some(agent) = rt.lock().unwrap().agent.take() {
+                if let Some(agent) = rt.lock_unpoisoned().agent.take() {
                     agent.dispose();
                 }
             }
         });
         {
-            let mut r = rt.lock().unwrap();
+            let mut r = rt.lock_unpoisoned();
             if r.phase.token() == token {
                 if let Some(active) = r.phase.active_mut() {
                     active.cancel_task = Some(task);
@@ -522,7 +521,7 @@ impl SessionService {
     }
 
     pub(super) fn emit(&self, rt: &Rt) {
-        let event = view_state_with_type(&rt.lock().unwrap());
+        let event = view_state_with_type(&rt.lock_unpoisoned());
         (self.broadcast)(event);
     }
 }

@@ -46,7 +46,9 @@ it('reads and broadcasts >16 MiB Unicode history from the real Rust service only
   cleanup.push(() => other.dispose());
   await client.watch('large');
   await other.watch('other');
-  expect((await client.call('state', { sessionId: 'large' })).snapshot.entries[0].text).toBe(text);
+  expect((await client.call('state', { sessionId: 'large' })).snapshot.entries[0]).toMatchObject({
+    text,
+  });
   const change = (modeId: string) =>
     client.call(
       'request',

@@ -1,4 +1,13 @@
 import { RequestError } from '@agentclientprotocol/sdk';
+import type * as acp from '@agentclientprotocol/sdk';
+import type { NativeEntry, NativeMessage } from './native-branch';
+import type {
+  PiAgent,
+  PiProcess,
+  PiProcessFactory,
+  PiSession,
+  WorkbenchParams,
+} from './pi-rpc-types';
 import { providerError } from './adapter-errors';
 import { createReadStream } from 'node:fs';
 import { stat, mkdtemp, copyFile, readFile, rm } from 'node:fs/promises';
@@ -13,7 +22,7 @@ import { validRecord, validPrice } from './telemetry';
 export function usageRecord(
   id: string,
   sessionId: string,
-  message: any,
+  message: NativeMessage,
   fallbackModel: string,
   kind: string,
   timestamp: unknown,
@@ -35,30 +44,34 @@ export function usageRecord(
   };
   return validRecord(record) ? record : undefined;
 }
-function historicalMessages(messages: any[]) {
+function historicalMessages(messages: NativeMessage[]) {
   return messages
     .filter((m) => m?.role && m.role !== 'system')
     .map((m) => {
       const { usage, provider, model, api, timestamp, ...data } = m;
       if (Array.isArray(data.content))
-        data.content = data.content.filter((b: any) => b.type !== 'thinking');
+        data.content = data.content.filter((b) => b.type !== 'thinking');
       return data;
     });
 }
 /** Add negotiated ACP extension methods to the pinned upstream adapter. Prompts remain standard ACP. */
-export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestError) {
-  return class extends Base {
+export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = RequestError) {
+  // Upstream ships bundled JS without declarations. Keep the cast at this boundary.
+  const Agent = Base as new (...args: unknown[]) => PiAgent;
+  const Process = PiRpcProcess as PiProcessFactory;
+  return class extends Agent {
     private forkWorkers = new Map<string, { dispose: () => void }>();
     private usageCache?: { key: string; records: UsageRecord[] };
-    async initialize(params: any) {
+    async initialize(params: acp.InitializeRequest) {
       const result = await super.initialize(params);
+      result.agentCapabilities ??= {};
       result.agentCapabilities._meta = {
         ...result.agentCapabilities._meta,
         'pi-workbench': { version: 1, inspect: true, nativeFork: true },
       };
       return result;
     }
-    async prompt(params: any) {
+    async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
       const session = await this.restoreSession(params.sessionId);
       session.cancelRequested = false;
       let refreshing: Promise<void> | undefined;
@@ -87,7 +100,15 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
       for (const worker of this.forkWorkers.values()) worker.dispose();
       super.dispose();
     }
-    async extMethod(method: string, params: any): Promise<any> {
+    async extMethod(method: '_pi_workbench/inspect', params: WorkbenchParams): Promise<Inspection>;
+    async extMethod(
+      method: string,
+      params: WorkbenchParams,
+    ): Promise<Inspection | { sessionId?: string }>;
+    async extMethod(
+      method: string,
+      params: WorkbenchParams,
+    ): Promise<Inspection | { sessionId?: string }> {
       if (!method.startsWith('_pi_workbench/'))
         throw new Error(`Unsupported extension method: ${method}`);
       const session = this.sessions.get(params.sessionId);
@@ -98,14 +119,18 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
       if (!session) throw new Error('Unknown session');
       if (session.pendingTurn)
         throw new Error('Wait for the current turn to finish before inspecting or branching.');
-      if (method === '_pi_workbench/fork') return this.forkNative(session, params, PiRpcProcess);
+      if (method === '_pi_workbench/fork') return this.forkNative(session, params, Process);
       if (method === '_pi_workbench/inspect') return this.inspect(session, params);
       throw new Error('Unknown workbench method');
     }
-    private async forkNative(session: any, params: any, Process: any) {
+    private async forkNative(
+      session: PiSession,
+      params: WorkbenchParams,
+      Process: PiProcessFactory,
+    ) {
       if (this.forkWorkers.has(session.sessionId))
         throw new Error('Native fork already in progress');
-      let worker: any,
+      let worker: PiProcess | undefined,
         cancelled = false,
         stage: string | undefined;
       this.forkWorkers.set(session.sessionId, {
@@ -158,7 +183,7 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         if (
           !check.success ||
           !check.data.entries.some(
-            (e: any) =>
+            (e) =>
               e.type === 'custom' &&
               e.customType === NATIVE_FORK_MARKER &&
               e.data?.sourceSessionId === session.sessionId,
@@ -166,16 +191,17 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         )
           throw new Error('原生分支校验未完成，未切换会话。');
         worker.dispose();
+        const child = worker.child;
         await new Promise<void>((resolve, reject) => {
-          if (worker.child.exitCode !== null || worker.child.signalCode !== null) {
+          if (child.exitCode !== null || child.signalCode !== null) {
             resolve();
             return;
           }
           const timer = setTimeout(() => {
-            worker.child.kill('SIGKILL');
+            child.kill('SIGKILL');
             reject(new Error('原生分支进程未退出，未切换会话。'));
           }, 5000);
-          worker.child.once('exit', () => {
+          child.once('exit', () => {
             clearTimeout(timer);
             resolve();
           });
@@ -206,7 +232,7 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         if (stage) await rm(stage, { recursive: true, force: true });
       }
     }
-    private async inspect(session: any, params: any): Promise<Inspection> {
+    private async inspect(session: PiSession, params: WorkbenchParams): Promise<Inspection> {
       const state = await session.proc.getState();
       const model = state.model,
         modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : 'unknown';
@@ -232,7 +258,7 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
           const lines = createInterface({ input, crlfDelay: Infinity });
           try {
             for await (const line of lines) {
-              let e: any;
+              let e: NativeEntry & NativeMessage;
               try {
                 e = JSON.parse(line);
               } catch {
@@ -253,8 +279,8 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
               );
               if (record) records.push(record);
             }
-          } catch (e: any) {
-            if (e.code !== 'ENOENT') throw e;
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
           } finally {
             lines.close();
             input.destroy();
@@ -275,7 +301,12 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
             this.usageCache = { key, records: [...records] };
         }
       }
-      const cursor = Number.isSafeInteger(params.cursor) && params.cursor >= 0 ? params.cursor : 0;
+      const cursor =
+        typeof params.cursor === 'number' &&
+        Number.isSafeInteger(params.cursor) &&
+        params.cursor >= 0
+          ? params.cursor
+          : 0;
       const result: Inspection = {
         records: records.slice(cursor, cursor + 500),
         model: modelKey,
@@ -289,7 +320,7 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         const data = await session.proc.getMessages(),
           messages = Array.isArray(data?.messages) ? data.messages : [];
         const summaries = messages.filter(
-          (m: any) => m.role === 'compactionSummary' || m.role === 'branchSummary',
+          (m) => m.role === 'compactionSummary' || m.role === 'branchSummary',
         );
         if (summaries.length) {
           const text = JSON.stringify(historicalMessages(messages));
@@ -300,8 +331,10 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         const available = await session.proc.getAvailableModels();
         result.prices = Object.fromEntries(
           (available?.models || [])
-            .filter((m: any) => m.provider && m.id && validPrice(m.cost))
-            .map((m: any) => [
+            .filter(
+              (m): m is typeof m & { cost: Price } => !!(m.provider && m.id && validPrice(m.cost)),
+            )
+            .map((m) => [
               `${m.provider}/${m.id}`,
               { ...m.cost, source: 'Pi 模型配置', updated: new Date().toISOString().slice(0, 10) },
             ]),

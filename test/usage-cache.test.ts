@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { enhancePiAgent } from '../src/pi-enhancements';
+import type { UsageRecord } from '../src/telemetry';
 
 it('paginates cached usage and invalidates it on append and truncation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-usage-cache-'));
@@ -34,13 +35,14 @@ it('paginates cached usage and invalidates it on append and truncation', async (
       agent.extMethod('_pi_workbench/inspect', { sessionId: 'one', cursor });
     expect((await inspect()).records).toHaveLength(500);
     expect((await inspect(500)).records).toHaveLength(1);
-    const cached = (agent as any).usageCache;
+    const cache = agent as unknown as { usageCache?: { key: string; records: UsageRecord[] } };
+    const cached = cache.usageCache;
     await inspect(500);
-    expect((agent as any).usageCache).toBe(cached);
+    expect(cache.usageCache).toBe(cached);
     await appendFile(sessionFile, line(501));
     expect((await inspect(500)).records).toHaveLength(2);
     await writeFile(sessionFile, line(999));
-    expect((await inspect()).records.map((r: any) => r.id)).toEqual(['one:999']);
+    expect((await inspect()).records.map((r) => r.id)).toEqual(['one:999']);
     await expect(
       agent.extMethod('_pi_workbench/inspect', { sessionId: 'missing' }),
     ).rejects.toThrow('Unknown session');

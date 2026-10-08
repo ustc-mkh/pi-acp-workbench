@@ -17,6 +17,7 @@
 //! reading a shared epochs map under the inner mutex. Removal: under the inner
 //! mutex, drop the lane entry only when its queued count hits zero and it is
 //! still the same Arc (see bridge.rs enqueue for the proven pattern).
+use pi_acp_core::sync::MutexExt;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -63,7 +64,7 @@ impl TaskQueue {
     }
 
     pub async fn cancel(&self, id: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_unpoisoned();
         if inner.lanes.contains_key(id) {
             *inner.epochs.entry(id.to_string()).or_insert(0) += 1;
         }
@@ -81,7 +82,7 @@ impl TaskQueue {
             return Err("会话服务正在停止".into());
         }
         let (lane, epoch) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_unpoisoned();
             if self.queued.load(Ordering::SeqCst) >= self.limit {
                 return Err("服务排队已满".into());
             }
@@ -105,7 +106,7 @@ impl TaskQueue {
             let closed = Arc::clone(&self.closed);
             let key = id.to_string();
             Arc::new(move || {
-                let inner = inner.lock().unwrap();
+                let inner = inner.lock_unpoisoned();
                 if closed.load(Ordering::SeqCst) || epoch != *inner.epochs.get(&key).unwrap_or(&0) {
                     Err("排队请求已取消".into())
                 } else {
@@ -127,7 +128,7 @@ impl TaskQueue {
         if self.queued.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.drained.notify_waiters();
         }
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_unpoisoned();
         if lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
             && inner
                 .lanes
@@ -189,7 +190,7 @@ mod tests {
         let events = ran.clone();
         let first = tokio::spawn(async move {
             q.run("one", |_| async move {
-                events.lock().unwrap().push("first");
+                events.lock_unpoisoned().push("first");
                 entered.send(()).unwrap();
                 held.await.unwrap();
                 Ok(())
@@ -201,7 +202,7 @@ mod tests {
         let events = ran.clone();
         let second = tokio::spawn(async move {
             q.run("one", |_| async move {
-                events.lock().unwrap().push("second");
+                events.lock_unpoisoned().push("second");
                 Ok(())
             })
             .await
@@ -212,7 +213,7 @@ mod tests {
         let events = ran.clone();
         let third = tokio::spawn(async move {
             q.run("one", |_| async move {
-                events.lock().unwrap().push("third");
+                events.lock_unpoisoned().push("third");
                 Ok(())
             })
             .await
@@ -222,10 +223,10 @@ mod tests {
         first.await.unwrap().unwrap();
         assert_eq!(second.await.unwrap().unwrap_err(), "排队请求已取消");
         third.await.unwrap().unwrap();
-        assert_eq!(*ran.lock().unwrap(), vec!["first", "third"]);
+        assert_eq!(*ran.lock_unpoisoned(), vec!["first", "third"]);
         assert_eq!(queue.pending_count(), 0);
         {
-            let inner = queue.inner.lock().unwrap();
+            let inner = queue.inner.lock_unpoisoned();
             assert!(inner.lanes.is_empty());
             assert!(inner.epochs.is_empty());
         }
@@ -255,7 +256,7 @@ mod tests {
         first.await.unwrap().unwrap();
         queue.run("b", |_| async { Ok(()) }).await.unwrap();
         assert_eq!(queue.pending_count(), 0);
-        assert!(queue.inner.lock().unwrap().lanes.is_empty());
+        assert!(queue.inner.lock_unpoisoned().lanes.is_empty());
         queue.close().await;
     }
 

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { SessionClient } from '../src/session-wire';
-import type { ServiceConfig } from '../src/session-protocol';
+import type { ServiceConfig, ServiceResponses } from '../src/session-protocol';
 
 /** Real production daemon with an explicitly configured mock ACP worker. */
 export async function startRustService(root: string, config: ServiceConfig) {
@@ -21,7 +21,13 @@ export async function startRustService(root: string, config: ServiceConfig) {
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
   const socket = join(root, 'service', 'sessions.sock');
   const clients = new Set<SessionClient>();
-  const call = async <T = any>(method: string, params: unknown = {}, id?: string): Promise<T> => {
+  function call<Method extends keyof ServiceResponses>(
+    method: Method,
+    params?: unknown,
+    id?: string,
+  ): Promise<ServiceResponses[Method]>;
+  function call<T = unknown>(method: string, params?: unknown, id?: string): Promise<T>;
+  async function call<T = unknown>(method: string, params: unknown = {}, id?: string): Promise<T> {
     // Separate connections allow testing concurrent requests with the same id.
     const client = new SessionClient(socket);
     clients.add(client);
@@ -31,7 +37,7 @@ export async function startRustService(root: string, config: ServiceConfig) {
       client.dispose();
       clients.delete(client);
     }
-  };
+  }
   const stop = async () => {
     for (const client of clients) client.dispose();
     if (child.exitCode !== null || child.signalCode !== null) return;

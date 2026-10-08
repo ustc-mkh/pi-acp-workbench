@@ -58,6 +58,7 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
   }
   generation = 0;
   private timer?: NodeJS.Timeout;
+  private requestInFlight = false;
   get stopping() {
     return this.lifecycle.cancelled;
   }
@@ -304,17 +305,17 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
   private handlers = {
     switchHarness: (message) => this.sessionCoordinator.onSwitchHarness(message),
     setVisibleModels: (message) => this.onSetVisibleModels(message),
-    refreshHistory: (message) => this.onRefreshHistory(message),
+    refreshHistory: () => this.onRefreshHistory(),
     releaseSession: (message) => this.sessionCoordinator.onReleaseSession(message),
     ready: (message) => this.sessionCoordinator.onReady(message),
     dismissError: (message) => this.onDismissError(message),
     deleteHistory: (message) => this.onDeleteHistory(message),
     clearHistory: (message) => this.onDeleteHistory(message),
     copyConversation: (message) => this.attachmentCoordinator.onCopyConversation(message),
-    cancelContext: (message) => this.onCancelContext(message),
-    refreshStatistics: (message) => this.onRefreshStatistics(message),
+    cancelContext: () => this.onCancelContext(),
+    refreshStatistics: () => this.onRefreshStatistics(),
     setPrice: (message) => this.onSetPrice(message),
-    logs: (message) => this.onLogs(message),
+    logs: () => this.onLogs(),
     login: (message) => this.sessionCoordinator.onLogin(message),
     cancel: (message) => this.turnCoordinator.onCancel(message),
     permission: (message) => this.turnCoordinator.onPermission(message),
@@ -357,18 +358,15 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     else saved[this.harness] = [...new Set(message.models)].filter((id) => catalog.has(id));
     await this.modelStorage.update('visibleModels', saved);
     this.emit();
-    return;
   }
-  private async onRefreshHistory(message: UiMessage & { type: 'refreshHistory' }): Promise<void> {
+  private async onRefreshHistory(): Promise<void> {
     await this.refreshSharedHistory();
     this.emit();
-    return;
   }
   private async onDismissError(message: UiMessage & { type: 'dismissError' }): Promise<void> {
     // A click on an older banner must not dismiss a newer error in flight.
     if (this.state.error === message.error) this.state.error = undefined;
     this.emit();
-    return;
   }
   private async onDeleteHistory(
     message: UiMessage & { type: 'deleteHistory' | 'clearHistory' },
@@ -417,29 +415,23 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
       this.autoConnectHandled = true;
     }
     this.emit();
-    return;
   }
-  private async onCancelContext(message: UiMessage & { type: 'cancelContext' }): Promise<void> {
+  private async onCancelContext(): Promise<void> {
     this.contextAbort?.abort(new Error('已取消操作，原会话保留。'));
-    return;
   }
-  private async onRefreshStatistics(
-    message: UiMessage & { type: 'refreshStatistics' },
-  ): Promise<void> {
+  private async onRefreshStatistics(): Promise<void> {
     await this.refreshTelemetry();
     this.emit();
-    return;
   }
   private async onSetPrice(message: UiMessage & { type: 'setPrice' }): Promise<void> {
     await this.telemetry.setPrice(message.model, message.price);
     this.emit();
-    return;
   }
-  private async onLogs(message: UiMessage & { type: 'logs' }): Promise<void> {
+  private async onLogs(): Promise<void> {
     this.log.show();
-    return;
   }
   async perform(message: UiMessage): Promise<void> {
+    let ownsGate = false;
     try {
       if (
         !message ||
@@ -448,13 +440,26 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
         !Object.hasOwn(this.handlers, message.type)
       )
         return;
+      const gated = [
+        'new',
+        'connect',
+        'branchMessage',
+        'resume',
+        'preview',
+        'send',
+        'mode',
+        'config',
+        'switchHarness',
+        'releaseSession',
+      ].includes(message.type);
+      if (gated) {
+        if (this.requestInFlight) return;
+        this.requestInFlight = true;
+        ownsGate = true;
+      }
       await this.historyReady;
       if (this.disposed) return;
-      if (
-        ['new', 'connect', 'branchMessage', 'resume', 'preview', 'send', 'mode', 'config'].includes(
-          message.type,
-        )
-      ) {
+      if (gated) {
         if (
           this.transitioning ||
           this.state.status === 'busy' ||
@@ -471,6 +476,8 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
         detail === 'ACP connection closed' && this.state.error ? this.state.error : detail;
       this.log.appendLine(this.state.error);
       this.emit();
+    } finally {
+      if (ownsGate) this.requestInFlight = false;
     }
   }
   dispose() {

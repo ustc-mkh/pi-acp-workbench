@@ -15,7 +15,11 @@ export interface Agent {
   isClosed: boolean;
   initialize(): Promise<acp.InitializeResponse>;
   createSession(id?: string): Promise<acp.NewSessionResponse>;
-  request<Response = any>(method: string, params?: any): Promise<Response>;
+  request<Method extends acp.AgentRequestMethod>(
+    method: Method,
+    params: acp.AgentRequestParamsByMethod[Method],
+  ): Promise<acp.AgentRequestResponsesByMethod[Method]>;
+  request<Response = unknown, Params = unknown>(method: string, params?: Params): Promise<Response>;
   withTimeout<T>(request: Promise<T>, ms?: number): Promise<T>;
   prompt(sessionId: string, prompt: acp.ContentBlock[]): Promise<acp.PromptResponse>;
   cancel(sessionId: string): Promise<void>;
@@ -97,9 +101,11 @@ export class RemoteAgent implements Agent {
     params: acp.AgentRequestParamsByMethod[Method],
   ): Promise<acp.AgentRequestResponsesByMethod[Method]>;
   request<Response = unknown, Params = unknown>(method: string, params?: Params): Promise<Response>;
-  request(method: string, params: any = {}): Promise<any> {
+  request(method: string, params: unknown = {}): Promise<unknown> {
+    const sessionId =
+      params && typeof params === 'object' && 'sessionId' in params ? params.sessionId : undefined;
     const id = randomUUID(),
-      result = this.client.call('request', { sessionId: params.sessionId, method, params }, id, 0);
+      result = this.client.call('request', { sessionId, method, params }, id, 0);
     this.pendingIds.set(result, id);
     return result;
   }

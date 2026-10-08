@@ -1,12 +1,44 @@
 import { createHash } from 'node:crypto';
 import type { Entry } from './shared';
 export const NATIVE_FORK_MARKER = 'pi-acp-workbench/native-fork';
+/** Fields consumed from Pi RPC/native history; preserve unknown fields when hashing. */
+export interface NativeContent {
+  type: string;
+  id?: string;
+  text?: string;
+  [key: string]: unknown;
+}
+export interface NativeMessage {
+  role?: string;
+  content?: string | NativeContent[];
+  toolCallId?: string;
+  stopReason?: string;
+  timestamp?: number;
+  provider?: string;
+  model?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    cost?: { total?: number };
+  };
+  [key: string]: unknown;
+}
 export interface NativeEntry {
   id: string;
   parentId: string | null;
   type: string;
-  message?: any;
-  [key: string]: any;
+  message?: NativeMessage;
+  firstKeptEntryId?: string;
+  targetId?: string;
+  replacement?: string | NativeContent[] | null;
+  provider?: string;
+  modelId?: string;
+  customType?: string;
+  timestamp?: number;
+  data?: { sourceSessionId?: string; [key: string]: unknown };
+  [key: string]: unknown;
 }
 export interface NativeBranchTarget {
   entryId: string;
@@ -47,7 +79,11 @@ function canonicalEntries(path: NativeEntry[]) {
   return path.map((e) => {
     if (e.type === 'label') return undefined;
     const { parentId, ...data } = e;
-    if (data.type === 'compaction' && next.has(data.firstKeptEntryId))
+    if (
+      data.type === 'compaction' &&
+      data.firstKeptEntryId !== undefined &&
+      next.has(data.firstKeptEntryId)
+    )
       data.firstKeptEntryId = next.get(data.firstKeptEntryId);
     return data;
   });
@@ -55,7 +91,7 @@ function canonicalEntries(path: NativeEntry[]) {
 export function nativePrefixHash(path: NativeEntry[]) {
   return digest(JSON.stringify(canonicalEntries(path).filter(Boolean)));
 }
-const textOf = (content: any) =>
+const textOf = (content: NativeMessage['content']) =>
   typeof content === 'string'
     ? content
     : Array.isArray(content)
@@ -67,9 +103,9 @@ const textOf = (content: any) =>
 export const nativeTextKey = (role: string, text: string) => `${role}:${digest(text)}`;
 export function nativeForkPoints(path: NativeEntry[]): NativeForkPoint[] {
   const points: NativeForkPoint[] = [],
-    messages = new Map<string, any>(),
-    calls = new Set<string>(),
-    results = new Set<string>();
+    messages = new Map<string, NativeMessage>(),
+    calls = new Set<string | undefined>(),
+    results = new Set<string | undefined>();
   const canonical = canonicalEntries(path),
     prefix = createHash('sha256').update('[');
   let comma = false,
@@ -99,7 +135,8 @@ export function nativeForkPoints(path: NativeEntry[]): NativeForkPoint[] {
       if (m.role === 'toolResult') results.add(m.toolCallId);
     }
     if (e.type === 'compaction') {
-      const boundary = positions.get(e.firstKeptEntryId);
+      const boundary =
+        e.firstKeptEntryId !== undefined ? positions.get(e.firstKeptEntryId) : undefined;
       if (boundary === undefined || boundary > i)
         throw new Error('原生压缩边界无效，无法安全分支。');
       contextStart = boundary;
@@ -107,19 +144,19 @@ export function nativeForkPoints(path: NativeEntry[]): NativeForkPoint[] {
       rebuild();
     }
     if (e.type === 'context_edit') {
-      const position = positions.get(e.targetId),
+      const position = e.targetId !== undefined ? positions.get(e.targetId) : undefined,
         old = position === undefined ? undefined : path[position].message;
       if (position !== undefined && position >= contextStart) {
-        if (e.replacement === null) messages.delete(e.targetId);
-        else if (old) messages.set(e.targetId, { ...old, content: e.replacement });
+        if (e.replacement === null) messages.delete(e.targetId!);
+        else if (old) messages.set(e.targetId!, { ...old, content: e.replacement });
         rebuild();
       }
     }
-    if (e.type !== 'message' || !['user', 'assistant'].includes(m?.role)) continue;
+    if (e.type !== 'message' || !m || (m.role !== 'user' && m.role !== 'assistant')) continue;
     const safe =
       [...calls].every((id) => results.has(id)) &&
       [...results].every((id) => calls.has(id)) &&
-      !['error', 'aborted', 'pending'].includes(m.stopReason);
+      !['error', 'aborted', 'pending'].includes(m.stopReason ?? '');
     points.push({
       entryId: e.id,
       hash: safe ? prefix.copy().update(']').digest('hex') : '',

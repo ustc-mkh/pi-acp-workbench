@@ -5,12 +5,19 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionClient, WIRE_LIMITS } from '../src/session-wire';
 const cleanup: Array<() => Promise<unknown> | void> = [];
+interface TestRequest {
+  id: string;
+  method: string;
+  params: unknown;
+}
+const pendingCount = (client: SessionClient) =>
+  (client as unknown as { pending: ReadonlyMap<string, unknown> }).pending.size;
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
 // Transport-only fixture. No sessions, persistence, worker execution or service implementation.
-async function fixture(handle: (request: any, socket: Socket) => Promise<unknown>) {
+async function fixture(handle: (request: TestRequest, socket: Socket) => Promise<unknown>) {
   const root = await mkdtemp(join(tmpdir(), 'pi-client-'));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const sockets = new Set<Socket>(),
@@ -25,7 +32,7 @@ async function fixture(handle: (request: any, socket: Socket) => Promise<unknown
       buffer += data;
       let end;
       while ((end = buffer.indexOf('\n')) >= 0) {
-        const request = JSON.parse(buffer.slice(0, end));
+        const request: TestRequest = JSON.parse(buffer.slice(0, end));
         buffer = buffer.slice(end + 1);
         void handle(request, socket).then((value) => {
           if (value !== undefined && !socket.destroyed)
@@ -57,19 +64,19 @@ it('bounds pending requests and releases slots after replies and serialization e
     ),
   );
   try {
-    await vi.waitFor(() => expect((client as any).pending.size).toBe(WIRE_LIMITS.pending));
+    await vi.waitFor(() => expect(pendingCount(client)).toBe(WIRE_LIMITS.pending));
   } finally {
     release();
   }
   expect((await Promise.all(sends)).filter(Boolean)).toHaveLength(WIRE_LIMITS.pending);
-  const circular: any = {};
+  const circular: { self?: unknown } = {};
   circular.self = circular;
   await expect(client.call('bad', circular)).rejects.toThrow();
-  expect((client as any).pending.size).toBe(0);
+  expect(pendingCount(client)).toBe(0);
 });
 it('times out without replaying or breaking later calls, and ignores the late reply', async () => {
   let release!: (value: string) => void;
-  const handle = vi.fn(async (request: any) =>
+  const handle = vi.fn(async (request: TestRequest) =>
     request.method === 'slow' ? new Promise<string>((resolve) => (release = resolve)) : 'ok',
   );
   const client = await fixture(handle);
@@ -89,5 +96,5 @@ it('rejects a fragmented reply cut off by disconnect and releases the pending sl
     );
   });
   await expect(client.call('state')).rejects.toThrow('连接已断开');
-  expect((client as any).pending.size).toBe(0);
+  expect(pendingCount(client)).toBe(0);
 });

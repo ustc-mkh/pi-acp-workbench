@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 pi-acp-core = { path = "../pi-acp-core" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: Value::Object must keep document key order for native-branch
@@ -21,3 +21,6 @@ regex = "1"
 libc = "0.2"
 ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
 thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
