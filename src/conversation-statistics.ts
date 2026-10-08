@@ -136,9 +136,13 @@ export class ConversationStatistics {
     const meta = agent?.info?.agentCapabilities?._meta?.['pi-workbench'] as
       | { version?: number }
       | undefined;
+    const service = agent?.info?.agentCapabilities?._meta?.['session-service'] as
+      | { usageInspection?: boolean }
+      | undefined;
     this.value = {
       ...this.value,
-      available: agent?.harness === 'pi' && meta?.version === 1,
+      available:
+        (agent?.harness === 'pi' && meta?.version === 1) || service?.usageInspection === true,
       note: harness !== 'pi' ? HARNESSES[harness].note : this.value.note,
     };
     if (!agent || !sessionId || !this.value.available || (state.status === 'busy' && !settledTurn))
@@ -151,6 +155,7 @@ export class ConversationStatistics {
       try {
         let cursor: number | undefined;
         const records: UsageRecord[] = [];
+        let note: string | undefined;
         do {
           const data = await metadataDeadline(
             agent.request<Inspection>('_pi_workbench/inspect', {
@@ -162,6 +167,7 @@ export class ConversationStatistics {
           if (!current()) return;
           records.push(...(data.records || []));
           if (!cursor) {
+            note = data.note;
             if (data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow > 0)
               this.contextWindow(data.contextWindow);
             for (const [key, value] of Object.entries(data.prices || {}))
@@ -184,7 +190,7 @@ export class ConversationStatistics {
           cursor = data.cursor;
         } while (cursor !== undefined);
         await this.record(records);
-        if (current()) this.value = { ...this.value, note: undefined };
+        if (current()) this.value = { ...this.value, note };
       } catch (error) {
         if (current())
           this.value = {

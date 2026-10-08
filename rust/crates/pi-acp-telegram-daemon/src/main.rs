@@ -8,6 +8,7 @@ mod config;
 mod markdown;
 mod sessions;
 mod stream;
+mod task_scope;
 #[cfg(test)]
 mod test_support;
 
@@ -52,7 +53,8 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeState, String> {
     let invalid = || "Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。".to_string();
     let state: BridgeState = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-    if state.version != 1
+    if !state.valid_inbox()
+        || state.version != 1
         || state.bot_id != bot_id
         || state.chat_id != chat_id
         || state.topics.iter().any(|topic| topic.thread_id <= 0)
@@ -194,6 +196,7 @@ async fn run() -> Result<(), String> {
         notifications: None,
         silent: None,
         history_sent: None,
+        inbox: vec![],
     };
     match std::fs::read_to_string(&state_file) {
         Ok(body) => {

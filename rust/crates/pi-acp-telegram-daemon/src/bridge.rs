@@ -4,10 +4,9 @@ use crate::api::{ApiError, TelegramApi};
 use crate::markdown::chunks;
 use crate::sessions::{SessionStub, Sessions};
 use crate::stream::TelegramStream;
-use pi_acp_core::atomic::write_atomic_json;
+use crate::task_scope::{OwnedTask, TaskScope};
 use pi_acp_core::turn_event::TurnEvent;
 use pi_acp_core::utf16::{utf16_head, utf16_tail};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -15,10 +14,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, Notify, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 const HANDLER_LIMIT: usize = 64;
+const CONTROL_LIMIT: usize = 8;
+const INBOX_LIMIT: usize = 128;
 const QUEUE_LIMIT: usize = 20;
 const STREAM_LIMIT: usize = 32;
 const TICKET_LIMIT: usize = 128;
@@ -30,7 +31,18 @@ const HISTORY_SLICE: usize = 20;
 const HISTORY_MAX: usize = 100;
 
 mod commands;
-use commands::parse_command;
+mod delivery;
+mod history;
+mod inbox;
+mod permissions;
+mod routing;
+mod state;
+mod store;
+mod turns;
+use routing::{parse_command, InputClass};
+pub use state::BridgeState;
+use state::{InboxItem, InboxPhase, Topic};
+use store::StateStore;
 
 #[cfg(test)]
 mod tests;
@@ -43,55 +55,6 @@ fn now_ms() -> u64 {
 }
 
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
-
-fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(d).map(Some)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Topic {
-    pub session_id: String,
-    pub thread_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BridgeState {
-    pub version: u32,
-    pub bot_id: i64,
-    pub chat_id: i64,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present"
-    )]
-    pub offset: Option<i64>,
-    pub topics: Vec<Topic>,
-    pub delivered: Vec<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present"
-    )]
-    pub notifications: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present"
-    )]
-    pub silent: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present"
-    )]
-    pub history_sent: Option<HashMap<String, Vec<String>>>,
-}
 
 struct Ticket {
     session_id: String,
@@ -119,8 +82,8 @@ struct Shared {
     api: Arc<TelegramApi>,
     host: Sessions,
     opts: Options,
-    data: tokio::sync::RwLock<BridgeState>,
-    save_lock: Mutex<()>,
+    store: StateStore,
+    tasks: TaskScope,
     topics: Mutex<HashMap<String, Arc<OnceCell<i64>>>>,
     streams: Mutex<HashMap<String, Arc<TelegramStream>>>,
     touched: Mutex<HashMap<String, u64>>,
@@ -131,10 +94,10 @@ struct Shared {
     consuming: Mutex<HashSet<String>>,
     syncing: Mutex<HashSet<String>>,
     syncing_all: AtomicBool,
-    handling: AtomicUsize,
-    /// Mirrored into every live TelegramStream; updated by persist().
-    notifications_on: Arc<AtomicBool>,
-    silent_on: Arc<AtomicBool>,
+    handlers: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
+    inbox_wake: Notify,
+    fatal_error: Mutex<Option<String>>,
     username: tokio::sync::RwLock<String>,
 }
 
@@ -155,11 +118,9 @@ impl Bridge {
         let shared = Arc::new(Shared {
             api,
             host,
-            notifications_on: Arc::new(AtomicBool::new(data.notifications != Some(false))),
-            silent_on: Arc::new(AtomicBool::new(data.silent == Some(true))),
             username: tokio::sync::RwLock::new(String::new()),
-            data: tokio::sync::RwLock::new(data),
-            save_lock: Mutex::new(()),
+            store: StateStore::new(opts.state_file.clone(), data),
+            tasks: TaskScope::new(opts.stop.clone()),
             topics: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
             touched: Mutex::new(HashMap::new()),
@@ -170,59 +131,21 @@ impl Bridge {
             consuming: Mutex::new(HashSet::new()),
             syncing: Mutex::new(HashSet::new()),
             syncing_all: AtomicBool::new(false),
-            handling: AtomicUsize::new(0),
+            handlers: Arc::new(Semaphore::new(HANDLER_LIMIT)),
+            controls: Arc::new(Semaphore::new(CONTROL_LIMIT)),
+            inbox_wake: Notify::new(),
+            fatal_error: Mutex::new(None),
             opts,
         });
         Bridge { shared }
     }
-
     async fn report(&self, error: &str) {
         (self.shared.opts.report)(error);
     }
-
     /// Serialized durable state writes: publish only after the write succeeds.
     async fn persist<F: FnOnce(&mut BridgeState)>(&self, update: F) -> Result<(), String> {
-        let _guard = self.shared.save_lock.lock().await;
-        let mut snapshot = self.shared.data.read().await.clone();
-        update(&mut snapshot);
-        write_atomic_json(&self.shared.opts.state_file, &snapshot, true)
-            .await
-            .map_err(|e| format!("无法保存 Telegram 状态：{e}"))?;
-        self.shared
-            .notifications_on
-            .store(snapshot.notifications != Some(false), Ordering::SeqCst);
-        self.shared
-            .silent_on
-            .store(snapshot.silent == Some(true), Ordering::SeqCst);
-        *self.shared.data.write().await = snapshot;
-        Ok(())
+        self.shared.store.update(update).await
     }
-
-    async fn send(&self, text: &str, thread_id: Option<i64>, extra: Value) -> Result<(), ApiError> {
-        for chunk in chunks(text) {
-            let mut params = json!({
-                "chat_id": self.shared.opts.chat_id,
-                "text": chunk.text,
-                "disable_notification": self.shared.silent_on.load(Ordering::SeqCst),
-            });
-            params["entities"] = serde_json::to_value(chunk.entities).unwrap();
-            if let Some(t) = thread_id {
-                params["message_thread_id"] = json!(t);
-            }
-            if let Value::Object(extra) = &extra {
-                for (k, v) in extra {
-                    params[k] = v.clone();
-                }
-            }
-            self.shared.api.call("sendMessage", params).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_plain(&self, text: &str, thread_id: Option<i64>) -> Result<(), ApiError> {
-        self.send(text, thread_id, json!({})).await
-    }
-
     pub async fn initialize(&self, username: &str) -> Result<(), String> {
         *self.shared.username.write().await = username.to_string();
         let webhook = self
@@ -252,7 +175,7 @@ impl Bridge {
         {
             return Err("请使用已启用 Topics 的私人超级群组，并授予 Bot 管理话题权限。".into());
         }
-        if self.shared.data.read().await.offset.is_none() {
+        if self.shared.store.read().await.offset.is_none() {
             let updates = self
                 .shared
                 .api
@@ -274,7 +197,7 @@ impl Bridge {
             let known: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
             if self
                 .shared
-                .data
+                .store
                 .read()
                 .await
                 .topics
@@ -288,971 +211,6 @@ impl Bridge {
         }
         Ok(())
     }
-
-    async fn offset(&self) -> i64 {
-        self.shared.data.read().await.offset.unwrap_or(0)
-    }
-
-    pub async fn poll(&self) -> Result<(), String> {
-        let mut failures = 0u32;
-        while !self.shared.opts.stop.is_cancelled() {
-            let updates = self
-                .shared
-                .api
-                .call(
-                    "getUpdates",
-                    json!({ "offset": self.offset().await, "timeout": 25, "allowed_updates": ["message", "callback_query"] }),
-                )
-                .await;
-            match updates {
-                Err(error) => {
-                    if self.shared.opts.stop.is_cancelled() {
-                        return Ok(());
-                    }
-                    self.report(&error.message).await;
-                    if matches!(error.code, 401 | 403 | 409) {
-                        return Err(error.message);
-                    }
-                    failures += 1;
-                    let backoff = Duration::from_millis(1000 * 2u64.pow(failures.min(5)))
-                        .min(Duration::from_secs(30));
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = self.shared.opts.stop.cancelled() => return Ok(()),
-                    }
-                }
-                Ok(list) => {
-                    failures = 0;
-                    for update in list.as_array().cloned().unwrap_or_default() {
-                        if self.shared.opts.stop.is_cancelled() {
-                            return Ok(());
-                        }
-                        let update_id = update.get("update_id").and_then(Value::as_i64);
-                        let Some(update_id) = update_id else { continue };
-                        if update_id < self.offset().await {
-                            continue;
-                        }
-                        if let Err(e) = self.persist(|s| s.offset = Some(update_id + 1)).await {
-                            return Err(format!(
-                                "无法保存 Telegram 游标，已停止接收，避免重复执行任务。{e}"
-                            ));
-                        }
-                        if self.shared.handling.fetch_add(1, Ordering::SeqCst) >= HANDLER_LIMIT {
-                            self.shared.handling.fetch_sub(1, Ordering::SeqCst);
-                            self.report("Telegram 处理队列已满，请稍后重试。").await;
-                            continue;
-                        }
-                        let bridge = self.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = bridge.dispatch(&update).await {
-                                bridge.report(&error).await;
-                            }
-                            bridge.shared.handling.fetch_sub(1, Ordering::SeqCst);
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn ensure_topic(&self, session: &SessionStub) -> Result<i64, ApiError> {
-        if let Some(saved) = self
-            .shared
-            .data
-            .read()
-            .await
-            .topics
-            .iter()
-            .find(|t| t.session_id == session.id)
-            .map(|t| t.thread_id)
-        {
-            return Ok(saved);
-        }
-        let cell = {
-            let mut topics = self.shared.topics.lock().await;
-            topics
-                .entry(session.id.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
-        };
-        let session_id = session.id.clone();
-        let created = cell
-            .get_or_try_init(|| async {
-                let number = session
-                    .session_number
-                    .map(|n| format!("#{n}"))
-                    .unwrap_or_else(|| "Pi".into());
-                let name = utf16_head(
-                    &format!(
-                        "{number} · {}",
-                        if session.title.is_empty() {
-                            "新对话"
-                        } else {
-                            &session.title
-                        }
-                    ),
-                    128,
-                );
-                let topic = self
-                    .shared
-                    .api
-                    .call(
-                        "createForumTopic",
-                        json!({ "chat_id": self.shared.opts.chat_id, "name": name }),
-                    )
-                    .await?;
-                let thread_id = topic
-                    .get("message_thread_id")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                self.persist(|s| {
-                    s.topics.push(Topic {
-                        session_id,
-                        thread_id,
-                    })
-                })
-                .await
-                .map_err(|e| ApiError {
-                    code: 0,
-                    message: e,
-                })?;
-                Ok(thread_id)
-            })
-            .await;
-        let mut topics = self.shared.topics.lock().await;
-        if topics
-            .get(&session.id)
-            .map(|c| Arc::ptr_eq(c, &cell))
-            .unwrap_or(false)
-        {
-            topics.remove(&session.id);
-        }
-        created.copied()
-    }
-
-    async fn stream(&self, id: &str, thread_id: i64) -> Arc<TelegramStream> {
-        self.prune().await;
-        self.shared
-            .touched
-            .lock()
-            .await
-            .insert(id.to_string(), now_ms());
-        let mut streams = self.shared.streams.lock().await;
-        if let Some(stream) = streams.get(id) {
-            return stream.clone();
-        }
-        if streams.len() >= STREAM_LIMIT {
-            // Evict the least-recently-touched stream; HashMap has no insertion order.
-            let touched = self.shared.touched.lock().await;
-            if let Some(oldest) = streams
-                .keys()
-                .min_by_key(|id| touched.get(*id).copied().unwrap_or(0))
-                .cloned()
-            {
-                drop(touched);
-                streams.remove(&oldest);
-                self.shared.touched.lock().await.remove(&oldest);
-            }
-        }
-        let stream = Arc::new(TelegramStream::new(
-            self.shared.api.clone(),
-            self.shared.opts.chat_id,
-            thread_id,
-            self.shared.opts.stream_interval,
-            self.shared.notifications_on.clone(),
-            self.shared.silent_on.clone(),
-            {
-                let report = self.shared.opts.report.clone();
-                Arc::new(move |e: &ApiError| report(&e.message))
-            },
-        ));
-        streams.insert(id.to_string(), stream.clone());
-        stream
-    }
-
-    async fn drop_stream(&self, id: &str) {
-        self.shared.streams.lock().await.remove(id);
-        self.shared.touched.lock().await.remove(id);
-    }
-
-    async fn prune(&self) {
-        let now = now_ms();
-        let touched = self.shared.touched.lock().await;
-        let stale: Vec<String> = touched
-            .iter()
-            .filter(|(_, t)| now - **t > STREAM_IDLE_MS)
-            .map(|(id, _)| id.clone())
-            .collect();
-        drop(touched);
-        for id in stale {
-            self.drop_stream(&id).await;
-        }
-        let mut tickets = self.shared.tickets.lock().await;
-        tickets.retain(|_, t| t.expires > now);
-    }
-
-    /// Consume one cursor pass; failed delivery remains available on the next pass.
-    pub async fn consume_outbox(&self) -> Result<(), String> {
-        let mut cursor = None;
-        while !self.shared.opts.stop.is_cancelled() {
-            let next = tokio::select! {
-                result = self.shared.host.next_event(cursor.as_deref()) => result.map_err(|e| e.to_string())?,
-                _ = self.shared.opts.stop.cancelled() => return Ok(()),
-            };
-            let Some(delivery) = next else {
-                break;
-            };
-            if cursor.as_ref() == Some(&delivery.cursor) {
-                return Err("outbox cursor 未前进".into());
-            }
-            cursor = Some(delivery.cursor);
-            if let (Some(event), Some(token)) = (delivery.event, delivery.token) {
-                if self.consume(&event).await {
-                    self.shared
-                        .host
-                        .ack_event(&event.id, &token)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Returns true when this event revision may be acknowledged through the service.
-    pub async fn consume(&self, event: &TurnEvent) -> bool {
-        if self
-            .shared
-            .data
-            .read()
-            .await
-            .delivered
-            .iter()
-            .any(|d| d == &event.id)
-        {
-            return true;
-        }
-        if self.shared.opts.stop.is_cancelled()
-            || !self.shared.consuming.lock().await.insert(event.id.clone())
-        {
-            return false;
-        }
-        let result = self.consume_inner(event).await;
-        self.shared.consuming.lock().await.remove(&event.id);
-        result
-    }
-
-    async fn consume_inner(&self, event: &TurnEvent) -> bool {
-        let sessions = match self.shared.host.list().await {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let Some(session) = sessions
-            .iter()
-            .find(|s| s.id == event.session_id && s.cwd == event.cwd)
-            .cloned()
-        else {
-            self.drop_stream(&event.id).await;
-            return false;
-        };
-        if !self.shared.notifications_on.load(Ordering::SeqCst) {
-            self.drop_stream(&event.id).await;
-            if event.status != "running" {
-                let id = event.id.clone();
-                if self
-                    .persist(|s| {
-                        s.delivered.push(id);
-                        trim(&mut s.delivered, DELIVERED_KEEP);
-                    })
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-        let thread_id = match self.ensure_topic(&session).await {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-        let stream = self.stream(&event.id, thread_id).await;
-        let mut body = event.text.clone();
-        if event.pending_permissions > 0 {
-            body.push_str("\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。");
-        }
-        let text = if let Some(input) = &event.input_text {
-            let attachments = if event.non_text_blocks > 0 {
-                format!(
-                    "\n[附带 {} 个非文本内容，请在 VS Code 查看]",
-                    event.non_text_blocks
-                )
-            } else {
-                String::new()
-            };
-            let body = if body.is_empty() {
-                if event.status == "running" {
-                    "正在处理…"
-                } else {
-                    "本轮没有文本回复。"
-                }
-            } else {
-                &body
-            };
-            format!("你（VS Code）：\n{input}{attachments}\n\nPi：\n{body}")
-        } else {
-            body
-        };
-        if event.status == "running" {
-            stream
-                .update(if text.is_empty() {
-                    "正在处理…".into()
-                } else {
-                    text
-                })
-                .await;
-            return false;
-        }
-        let label = match event.status.as_str() {
-            "completed" => "✅ 任务完成",
-            "cancelled" => "⏹ 任务已停止",
-            _ => "❌ 任务失败",
-        };
-        let number = session
-            .session_number
-            .map(|n| format!(" · #{n}"))
-            .unwrap_or_default();
-        let suffix = event
-            .error
-            .as_ref()
-            .map(|e| format!("\n{}", utf16_head(e, 700)))
-            .unwrap_or_default();
-        if let Err(error) = stream
-            .finish(text, format!("{label}{number}{suffix}"))
-            .await
-        {
-            self.drop_stream(&event.id).await;
-            self.report(&error.message).await;
-            return false; // durable event remains for retry
-        }
-        let id = event.id.clone();
-        if self
-            .persist(|s| {
-                s.delivered.push(id);
-                trim(&mut s.delivered, DELIVERED_KEEP);
-            })
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        self.drop_stream(&event.id).await;
-        true
-    }
-
-    async fn dispatch(&self, update: &Value) -> Result<(), String> {
-        if self.shared.opts.stop.is_cancelled() {
-            return Ok(());
-        }
-        let callback = update.get("callback_query");
-        let message = callback
-            .and_then(|c| c.get("message"))
-            .or_else(|| update.get("message"));
-        let sender = callback
-            .and_then(|c| c.get("from"))
-            .or_else(|| message.and_then(|m| m.get("from")));
-        let Some(message) = message else {
-            return Ok(());
-        };
-        if message.pointer("/chat/id").and_then(Value::as_i64) != Some(self.shared.opts.chat_id) {
-            return Ok(());
-        }
-        let Some(sender) = sender else { return Ok(()) };
-        if sender.get("is_bot").and_then(Value::as_bool) == Some(true)
-            || message.get("sender_chat").is_some()
-            || !self
-                .shared
-                .opts
-                .allowed_user_ids
-                .contains(&sender.get("id").and_then(Value::as_i64).unwrap_or(0))
-        {
-            return Ok(());
-        }
-        let thread_id = thread_of(update);
-        if let Some(callback) = callback {
-            let data = callback.get("data").and_then(Value::as_str).unwrap_or("");
-            let callback_id = callback
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match data {
-                "notify:on" | "notify:off" => {
-                    let on = data == "notify:on";
-                    self.persist(|s| s.notifications = Some(on)).await?;
-                    if !on {
-                        self.shared.streams.lock().await.clear();
-                        self.shared.touched.lock().await.clear();
-                    }
-                    self.answer_callback(
-                        callback_id,
-                        if on {
-                            "已开启全部会话推送"
-                        } else {
-                            "已暂停全部会话推送"
-                        },
-                    )
-                    .await;
-                    return self
-                        .notification_menu(thread_id)
-                        .await
-                        .map_err(|e| e.message);
-                }
-                "silent:on" | "silent:off" => {
-                    let on = data == "silent:on";
-                    self.persist(|s| s.silent = Some(on)).await?;
-                    self.answer_callback(
-                        callback_id,
-                        if on {
-                            "已开启静音发送"
-                        } else {
-                            "已关闭静音发送"
-                        },
-                    )
-                    .await;
-                    return self.silent_menu(thread_id).await.map_err(|e| e.message);
-                }
-                _ => {
-                    self.answer_permission(callback_id, data, thread_id).await;
-                    return Ok(());
-                }
-            }
-        }
-        let text = message
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if text.is_empty() {
-            return Ok(());
-        }
-        let parsed = parse_command(text);
-        if let Some((_, Some(bot), _)) = &parsed {
-            let mine = self.shared.username.read().await.clone();
-            if !bot.eq_ignore_ascii_case(&mine) {
-                return Ok(());
-            }
-        }
-        let (command, argument) = parsed
-            .as_ref()
-            .map(|(c, _, a)| {
-                (
-                    Some(c.to_lowercase()),
-                    a.clone()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                )
-            })
-            .unwrap_or((None, None));
-        let binding = self
-            .shared
-            .data
-            .read()
-            .await
-            .topics
-            .iter()
-            .find(|t| Some(t.thread_id) == thread_id)
-            .cloned();
-        match self
-            .dispatch_command(
-                command.as_deref(),
-                argument.as_deref(),
-                binding.as_ref(),
-                thread_id,
-                &parsed,
-                text,
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.report(&error).await;
-                if command.is_some() || self.shared.notifications_on.load(Ordering::SeqCst) {
-                    let _ = self.send_plain(&error, thread_id).await;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    async fn bump_generation(&self, session_id: &str) {
-        if self.shared.lanes.lock().await.contains_key(session_id) {
-            *self
-                .shared
-                .generations
-                .lock()
-                .await
-                .entry(session_id.to_string())
-                .or_insert(0) += 1;
-        }
-    }
-
-    /// Per-session lane: queued callers run the prompt one at a time; /stop and
-    /// /interrupt bump the generation so waiters drop out before starting. The
-    /// lane stays mapped while the guard is held so a second prompt can never
-    /// run concurrently — removal happens only under the lanes mutex when the
-    /// queued count reaches zero.
-    async fn enqueue(
-        &self,
-        session_id: &str,
-        thread_id: i64,
-        prompt: String,
-    ) -> Result<(), String> {
-        let lane = {
-            let mut lanes = self.shared.lanes.lock().await;
-            let lane = lanes
-                .entry(session_id.to_string())
-                .or_insert_with(|| {
-                    Arc::new(Lane {
-                        lock: Mutex::new(()),
-                        queued: AtomicUsize::new(0),
-                    })
-                })
-                .clone();
-            if lane.queued.load(Ordering::SeqCst) >= QUEUE_LIMIT {
-                return Err("排队消息已满，请稍后重试。".into());
-            }
-            lane.queued.fetch_add(1, Ordering::SeqCst);
-            lane
-        };
-        let generation = *self
-            .shared
-            .generations
-            .lock()
-            .await
-            .get(session_id)
-            .unwrap_or(&0);
-        let guard = lane.lock.lock().await;
-        self.shared
-            .active
-            .lock()
-            .await
-            .insert(session_id.to_string());
-        let result = async {
-            if self.shared.opts.stop.is_cancelled()
-                || generation
-                    != *self
-                        .shared
-                        .generations
-                        .lock()
-                        .await
-                        .get(session_id)
-                        .unwrap_or(&0)
-            {
-                return Ok(());
-            }
-            let run = self.shared.host.run(session_id, prompt);
-            let session = session_id.to_string();
-            let thread = thread_id;
-            let bridge = self.clone();
-            let mut permissions = run.permissions;
-            let forward = tokio::spawn(async move {
-                while let Some(p) = permissions.recv().await {
-                    if bridge.shared.notifications_on.load(Ordering::SeqCst) {
-                        bridge.show_permission(&session, thread, p).await;
-                    }
-                }
-            });
-            let outcome = run
-                .result
-                .await
-                .map_err(|_| "会话任务异常结束".to_string())?;
-            forward.abort();
-            outcome.map(|_| ()).map_err(|e| e.to_string())
-        }
-        .await;
-        self.shared.active.lock().await.remove(session_id);
-        {
-            let mut tickets = self.shared.tickets.lock().await;
-            tickets.retain(|_, t| t.session_id != session_id);
-        }
-        {
-            let mut lanes = self.shared.lanes.lock().await;
-            if lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
-                && lanes
-                    .get(session_id)
-                    .map(|l| Arc::ptr_eq(l, &lane))
-                    .unwrap_or(false)
-            {
-                lanes.remove(session_id);
-                self.shared.generations.lock().await.remove(session_id);
-            }
-        }
-        drop(guard);
-        result
-    }
-
-    async fn command_sync(&self, thread_id: Option<i64>) -> Result<(), String> {
-        if self.shared.syncing_all.swap(true, Ordering::SeqCst) {
-            return self
-                .send(
-                    "历史同步正在进行，请稍候。",
-                    thread_id,
-                    json!({ "disable_notification": true }),
-                )
-                .await
-                .map_err(|e| e.message);
-        }
-        let result = async {
-            let sessions = self.shared.host.list().await.map_err(|e| e.to_string())?;
-            let mut processed = 0usize;
-            let mut created = 0usize;
-            for session in &sessions {
-                if self.shared.opts.stop.is_cancelled() {
-                    break;
-                }
-                let bound = self
-                    .shared
-                    .data
-                    .read()
-                    .await
-                    .topics
-                    .iter()
-                    .any(|t| t.session_id == session.id);
-                if bound && self.pending_history(&session.id, true).await?.is_empty() {
-                    continue;
-                }
-                let topic = self.ensure_topic(session).await.map_err(|e| e.message)?;
-                if !bound {
-                    created += 1;
-                }
-                self.sync_history(&session.id, topic, true).await?;
-                processed += 1;
-                if processed >= SYNC_BATCH {
-                    break;
-                }
-            }
-            self.send(
-                &format!("已同步 {processed} 个会话，其中新建 {created} 个话题。每次最多 20 个会话、每个会话 100 条文字消息；再次 /sync 会跳过已同步内容并继续，无需另发 /history。"),
-                thread_id,
-                json!({ "disable_notification": true }),
-            )
-            .await
-            .map_err(|e| e.message)
-        }
-        .await;
-        self.shared.syncing_all.store(false, Ordering::SeqCst);
-        result
-    }
-
-    /// History entries not yet sent, oldest first: user/assistant/diff roles with
-    /// a sha256 dedup key over `entry.id + '\0' + entry.text`.
-    async fn pending_history(
-        &self,
-        session_id: &str,
-        all: bool,
-    ) -> Result<Vec<(String, String)>, String> {
-        let entries: Vec<Value> = self
-            .shared
-            .host
-            .history(session_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|e| {
-                matches!(
-                    e.get("role").and_then(Value::as_str),
-                    Some("user" | "assistant" | "diff")
-                )
-            })
-            .collect();
-        let sent: Vec<String> = self
-            .shared
-            .data
-            .read()
-            .await
-            .history_sent
-            .as_ref()
-            .and_then(|h| h.get(session_id))
-            .cloned()
-            .unwrap_or_default();
-        let sliced = if all {
-            entries
-        } else {
-            entries
-                .into_iter()
-                .rev()
-                .take(HISTORY_SLICE)
-                .rev()
-                .collect()
-        };
-        Ok(sliced
-            .into_iter()
-            .filter_map(|e| {
-                let role = e.get("role").and_then(Value::as_str)?;
-                let text = e.get("text").and_then(Value::as_str).unwrap_or_default();
-                let key = hex::encode(Sha256::digest(
-                    format!(
-                        "{}\0{text}",
-                        e.get("id").and_then(Value::as_str).unwrap_or_default()
-                    )
-                    .as_bytes(),
-                ));
-                let who = if role == "user" {
-                    "你"
-                } else if role == "diff" {
-                    "修改汇总"
-                } else {
-                    "Pi"
-                };
-                Some((key, format!("{who}：\n{text}")))
-            })
-            .filter(|(key, _)| !sent.contains(key))
-            .take(HISTORY_MAX)
-            .collect())
-    }
-
-    async fn sync_history(
-        &self,
-        session_id: &str,
-        thread_id: i64,
-        all: bool,
-    ) -> Result<(), String> {
-        if !self
-            .shared
-            .syncing
-            .lock()
-            .await
-            .insert(session_id.to_string())
-        {
-            return Err("此话题正在同步历史。".into());
-        }
-        let result = async {
-            let selected = self.pending_history(session_id, all).await?;
-            for (key, body) in &selected {
-                self.send(
-                    body,
-                    Some(thread_id),
-                    json!({ "disable_notification": true }),
-                )
-                .await
-                .map_err(|e| e.message)?;
-                let key = key.clone();
-                let sid = session_id.to_string();
-                self.persist(|s| {
-                    s.history_sent
-                        .get_or_insert_with(HashMap::new)
-                        .entry(sid)
-                        .or_default()
-                        .push(key);
-                })
-                .await?;
-            }
-            self.send(
-                &format!(
-                    "已同步 {} 条历史消息。{}",
-                    selected.len(),
-                    if selected.len() == HISTORY_MAX {
-                        "可再次 /history all 继续。"
-                    } else {
-                        ""
-                    }
-                ),
-                Some(thread_id),
-                json!({ "disable_notification": true }),
-            )
-            .await
-            .map_err(|e| e.message)
-        }
-        .await;
-        self.shared.syncing.lock().await.remove(session_id);
-        result
-    }
-
-    async fn show_permission(&self, session_id: &str, thread_id: i64, permission: Value) {
-        let permission_id = permission
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let options: Vec<Value> = permission
-            .pointer("/request/options")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let key = {
-            let mut tickets = self.shared.tickets.lock().await;
-            let now = now_ms();
-            tickets.retain(|_, t| t.expires > now);
-            let mut opts: Vec<Option<String>> = options
-                .iter()
-                .filter_map(|o| {
-                    o.get("optionId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .map(Some)
-                .collect();
-            opts.push(None);
-            let existing = tickets
-                .iter()
-                .find(|(_, t)| {
-                    t.session_id == session_id
-                        && t.permission_id == permission_id
-                        && t.thread_id == thread_id
-                })
-                .map(|(k, _)| k.clone());
-            if let Some(k) = existing {
-                // Refresh the option list on the same ticket, keeping its expiry.
-                if let Some(ticket) = tickets.get_mut(&k) {
-                    ticket.options = opts;
-                }
-                k
-            } else {
-                let key = hex::encode(&uuid::Uuid::new_v4().as_bytes()[..10]);
-                if tickets.len() >= TICKET_LIMIT {
-                    tickets.shift_remove_index(0);
-                }
-                tickets.insert(
-                    key.clone(),
-                    Ticket {
-                        session_id: session_id.to_string(),
-                        permission_id,
-                        thread_id,
-                        options: opts,
-                        expires: now + TICKET_TTL_MS,
-                    },
-                );
-                key
-            }
-        };
-        let mut keyboard: Vec<Value> = options
-            .iter()
-            .enumerate()
-            .map(|(i, o)| {
-                json!([{ "text": utf16_head(o.get("name").and_then(Value::as_str).unwrap_or("允许"), 60), "callback_data": format!("p:{key}:{i}") }])
-            })
-            .collect();
-        let cancel_index = options.len();
-        keyboard
-            .push(json!([{ "text": "取消", "callback_data": format!("p:{key}:{cancel_index}") }]));
-        let title = permission
-            .pointer("/request/toolCall/title")
-            .and_then(Value::as_str)
-            .unwrap_or("工具操作");
-        let detail = utf16_head(
-            &serde_json::to_string_pretty(
-                permission
-                    .pointer("/request/toolCall")
-                    .unwrap_or(&Value::Null),
-            )
-            .unwrap_or_default(),
-            2600,
-        );
-        if let Err(e) = self
-            .send(
-                &format!("需要授权：{title}\n{detail}"),
-                Some(thread_id),
-                json!({ "reply_markup": { "inline_keyboard": keyboard } }),
-            )
-            .await
-        {
-            self.report(&e.message).await;
-        }
-    }
-
-    async fn answer_permission(&self, callback_id: &str, data: &str, thread_id: Option<i64>) {
-        let accepted = async {
-            let parts: Vec<&str> = data.split(':').collect();
-            if parts.len() != 3 || parts[0] != "p" || parts[1].len() != 20 {
-                return false;
-            }
-            let index: usize = match parts[2].parse() {
-                Ok(i) => i,
-                Err(_) => return false,
-            };
-            let ticket = {
-                let tickets = self.shared.tickets.lock().await;
-                tickets.get(parts[1]).and_then(|t| {
-                    (Some(t.thread_id) == thread_id
-                        && t.expires > now_ms()
-                        && index < t.options.len())
-                    .then(|| {
-                        (
-                            t.session_id.clone(),
-                            t.permission_id.clone(),
-                            t.options[index].clone(),
-                        )
-                    })
-                })
-            };
-            let Some((session_id, permission_id, option)) = ticket else {
-                return false;
-            };
-            match self
-                .shared
-                .host
-                .permission(&session_id, &permission_id, option.as_deref())
-                .await
-            {
-                Ok(true) => {
-                    self.shared.tickets.lock().await.shift_remove(parts[1]);
-                    true
-                }
-                _ => false,
-            }
-        }
-        .await;
-        self.answer_callback(
-            callback_id,
-            if accepted {
-                "已提交"
-            } else {
-                "授权已失效或不属于此话题。"
-            },
-        )
-        .await;
-    }
-
-    async fn answer_callback(&self, callback_id: &str, text: &str) {
-        let _ = self
-            .shared
-            .api
-            .call(
-                "answerCallbackQuery",
-                json!({ "callback_query_id": callback_id, "text": text }),
-            )
-            .await;
-    }
-
-    async fn notification_menu(&self, thread_id: Option<i64>) -> Result<(), ApiError> {
-        let on = self.shared.notifications_on.load(Ordering::SeqCst);
-        self.send(
-            &format!(
-                "全部会话自动推送（默认开启）：{}。关闭时不发送自动回复、完成通知或授权卡片；可用 /history、/status 主动查看。",
-                if on { "开启" } else { "关闭" }
-            ),
-            thread_id,
-            json!({
-                "disable_notification": true,
-                "reply_markup": { "inline_keyboard": [[{ "text": if on { "暂停全部推送" } else { "开启全部推送" }, "callback_data": if on { "notify:off" } else { "notify:on" } }]] },
-            }),
-        )
-        .await
-    }
-
-    async fn silent_menu(&self, thread_id: Option<i64>) -> Result<(), ApiError> {
-        let on = self.shared.silent_on.load(Ordering::SeqCst);
-        self.send(
-            &format!("静音发送：{}（默认关闭）。静音不阻止消息投递，仅关闭通知声音；手机仍可能显示无声通知。自动投递总开关由 /notifications 控制。", if on { "开启" } else { "关闭" }),
-            thread_id,
-            json!({
-                "disable_notification": true,
-                "reply_markup": { "inline_keyboard": [[{ "text": if on { "关闭静音" } else { "开启静音" }, "callback_data": if on { "silent:off" } else { "silent:on" } }]] },
-            }),
-        )
-        .await
-    }
-
     /// Periodic cleanup equivalent to the 30s maintenance timer.
     pub async fn maintenance(&self) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -1264,13 +222,13 @@ impl Bridge {
             }
         }
     }
-
     pub async fn dispose(&self) {
         self.shared.opts.stop.cancel();
+        self.shared.host.dispose().await;
+        self.shared.tasks.shutdown().await;
         self.shared.streams.lock().await.clear();
         self.shared.touched.lock().await.clear();
         self.shared.tickets.lock().await.clear();
-        self.shared.host.dispose().await;
     }
 }
 

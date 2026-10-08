@@ -277,6 +277,7 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
             commands: Some(r.state.commands.clone()),
             native_forks: r.state.native_forks.clone(),
             usage: r.state.usage.clone(),
+            usage_records: r.state.usage_records.clone(),
             context_window: r
                 .state
                 .usage
@@ -325,6 +326,7 @@ fn view_state(r: &Runtime) -> Value {
         modes: r.state.modes.clone(),
         native_forks: r.state.native_forks.clone(),
         usage: r.state.usage.clone(),
+        usage_records: Vec::new(), // Detailed billing is paginated via inspect.
         ..r.snapshot.clone()
     };
     serde_json::to_value(ServiceState {
@@ -458,6 +460,99 @@ mod recovery_tests {
             )
             .await
             .unwrap();
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[tokio::test]
+    async fn usage_survives_eviction_and_restart_without_loading_a_worker() {
+        let root = std::env::temp_dir().join(format!("pi-usage-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/contract-agent.mjs");
+        let launch = WorkerLaunch {
+            command: "node".into(),
+            args: vec![worker.to_string_lossy().into_owned()],
+            env: HashMap::new(),
+        };
+        let config = ServiceConfig {
+            command: launch.command.clone(),
+            args: launch.args.clone(),
+            env: HashMap::new(),
+            max_workers: 2,
+            idle_ms: 900000,
+            harnesses: HashMap::from([
+                (String::from("codex"), launch.clone()),
+                (String::from("claude"), launch),
+            ]),
+        };
+        let service =
+            SessionService::new(&root, config.clone(), Arc::new(|_| {}), Arc::new(|_| {}));
+        service.initialize().await.unwrap();
+        let mut ids = Vec::new();
+        for harness in [Harness::Codex, Harness::Claude] {
+            let hello = service.hello(harness).await.unwrap();
+            assert_eq!(
+                hello["agentCapabilities"]["_meta"]["session-service"]["usageInspection"],
+                true
+            );
+            let snapshot = service
+                .create(root.to_str().unwrap(), harness)
+                .await
+                .unwrap();
+            let id = snapshot["id"].as_str().unwrap().to_string();
+            for turn in ["one", "two"] {
+                service
+                    .handle(
+                        "prompt",
+                        json!({"sessionId":id,"prompt":[{"type":"text","text":"usage-report"}]}),
+                        &format!("{id}-{turn}"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let records = service
+                .handle(
+                    "request",
+                    json!({"sessionId":id,"method":"_pi_workbench/inspect","params":{}}),
+                    "inspect-live",
+                )
+                .await
+                .unwrap();
+            assert_eq!(records["records"].as_array().unwrap().len(), 2);
+            assert!(service.state(&id).await.unwrap()["snapshot"]
+                .get("usageRecords")
+                .is_none());
+            ids.push(id);
+        }
+        assert!(service
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.usage_records.is_empty()));
+        service.dispose().await;
+        let service = SessionService::new(&root, config, Arc::new(|_| {}), Arc::new(|_| {}));
+        service.initialize().await.unwrap();
+        for id in ids {
+            let records = service
+                .handle(
+                    "request",
+                    json!({"sessionId":id,"method":"_pi_workbench/inspect","params":{}}),
+                    "inspect-cold",
+                )
+                .await
+                .unwrap();
+            assert_eq!(records["records"].as_array().unwrap().len(), 2);
+            assert_eq!(records["records"][0]["input"], 100);
+            assert_eq!(records["contextWindow"], 200000);
+            assert_eq!(records["usage"]["used"], 500);
+        }
+        assert!(service.runtimes.lock().unwrap().is_empty());
         service.dispose().await;
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -102,3 +102,13 @@ systemctl --user show pi-sessions.service -p MemoryCurrent -p TasksCurrent
 ```
 
 暂未设置自动杀进程的内存硬上限，避免大任务因达到阈值突然中断。任务收据和原生历史的磁盘空间需要正常备份和容量规划；不能随意删除收据后假定仍能防重放。
+
+## Codex / Claude 用量与上下文
+
+升级并重启会话 daemon 后，桌面的用量统计页可以读取 Codex / Claude ACP 返回的 token 明细，按模型、日期、会话汇总并沿用费用估算。需要上游适配器实际返回 `PromptResponse.usage` 或 `_meta.quota`。服务使用独立的 `usageInspection` 能力协商，旧 daemon 不会被误认为支持。
+
+统计从启用后的新轮次开始，服务重启或 worker 回收后仍可查询；不回填此前的原生历史。模型明细优先，避免与汇总重复计数。缺失数据、未知模型会明确提示；费用估算不是订阅额度或最终账单。
+
+上下文条使用适配器上报的当前占用与窗口大小，不用累计消耗推算。此支持不包含逐项列出隐藏提示词、工具定义、文件的 token 占比，也不包含原生会话分支。
+
+字段语义依据上游实现：[Codex TokenCount](https://github.com/agentclientprotocol/codex-acp/blob/main/src/TokenCount.ts)、[Claude ACP 用量处理](https://github.com/agentclientprotocol/claude-agent-acp/blob/main/src/acp-agent.ts)。

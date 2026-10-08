@@ -51,10 +51,8 @@ pub fn response(method: &str, value: &Value) -> Result<(), String> {
                 return Err(invalid(method));
             }
         }
-        "session/prompt" => {
-            if !value.get("stopReason").and_then(Value::as_str).is_some() {
-                return Err(invalid(method));
-            }
+        "session/prompt" if value.get("stopReason").and_then(Value::as_str).is_none() => {
+            return Err(invalid(method));
         }
         _ => {}
     }

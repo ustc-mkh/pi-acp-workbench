@@ -51,6 +51,7 @@ impl SessionService {
                 commands: restored.commands.unwrap_or_default(),
                 native_forks: restored.native_forks,
                 usage: restored.usage,
+                usage_records: restored.usage_records,
                 ..Default::default()
             };
         }
@@ -352,6 +353,17 @@ impl SessionService {
                 };
             match outcome {
                 Ok(result) => {
+                    {
+                        let mut r = rt.lock().unwrap();
+                        let snapshot = r.snapshot.clone();
+                        crate::usage::capture(
+                            &snapshot,
+                            &mut r.state,
+                            &result,
+                            request_id,
+                            now_ms(),
+                        );
+                    }
                     if result.get("stopReason").and_then(Value::as_str) != Some("end_turn") {
                         let reason = result
                             .get("stopReason")

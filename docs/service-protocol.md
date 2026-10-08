@@ -112,3 +112,13 @@ v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `_me
 - 不监听 TCP/公网端口，不做 TLS、认证、多用户。
 - 不提供批量原子操作、事务、消息重放或客户端断线重传。
 - 不保证恰好一次执行：收据在 Linux 文件系统正确 fsync 的前提下提供"中断不重放"保证，不是分布式事务。
+
+## 可选增量状态订阅
+
+`_watch` 支持可选 `stateDeltas:true`：首次广播返回带 `revision` 的完整 `state`，随后返回 `{type:"statePatch",sessionId,baseRevision,revision,state,entries,order?}`。`state` 是本次完整元数据（含不带 entries 的 snapshot），`entries` 只含新增或变化条目；`order` 在新增、删除、重排时给出完整 ID 顺序。省略 order 时沿用旧顺序。版本号是连接期间使用的不透明递增序号，不是磁盘 revision。
+
+客户端必须核对 baseRevision；不匹配时关闭连接并重新订阅，不能继续应用不完整状态或重发任务。取消订阅、重新订阅、连接关闭均清除客户端基线。服务的共享基线缓存限制为 32 个会话 / 64 MiB 序列化大小，淘汰或新订阅时自动发送全量。该内存预算不代表 Rust JSON 对象的实际堆占用。
+
+`permissionsOnly:true` 用于只消费授权的订阅者：state 只含 `{type:"state",snapshot:{id},permissions}`，不发送 update；优先于 stateDeltas。未指定两项的旧订阅者仍收到完整 state/update。所有模式沿用原有分块与连接大小限制。
+
+Rust 客户端在追加字节前检查每行 16 MiB 上限；从普通帧首字节开始设置固定 10 秒截止时间，分块续传从上一帧结束计时。空闲、无半帧连接不会因该截止时间关闭。

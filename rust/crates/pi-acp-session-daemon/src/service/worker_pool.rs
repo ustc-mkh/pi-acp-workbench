@@ -120,7 +120,7 @@ impl SessionService {
             worker.stop().await;
             let mut info = result?;
             info["agentCapabilities"]["_meta"]["session-service"] =
-                json!({ "version": 3, "authoritative": true });
+                json!({ "version": 3, "authoritative": true, "usageInspection": harness != Harness::Pi });
             self.capabilities
                 .lock()
                 .unwrap()
@@ -300,6 +300,7 @@ impl SessionService {
                 state.native_forks = snapshot.native_forks.clone();
                 state.commands = snapshot.commands.clone().unwrap_or_default();
                 state.usage = snapshot.usage.clone();
+                state.usage_records = snapshot.usage_records.clone();
                 let rt = Arc::new(Mutex::new(Runtime {
                     snapshot: Snapshot {
                         entries: vec![],

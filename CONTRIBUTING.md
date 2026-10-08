@@ -6,6 +6,7 @@
 
 - Node.js 22+、npm、Git；VS Code 1.96+。
 - 构建服务和运行完整测试需要 Rust 工具链（cargo）；只构建 VSIX 不需要 Rust。
+- 使用 rust-analyzer 编辑 Rust 时，还需要与编译器匹配的标准库源码 `rust-src`：rustup 用户运行 `rustup component add rust-src`；Fedora 系统工具链用户运行 `sudo dnf install rust-src`。安装后执行 VS Code 的 **rust-analyzer: Restart server**。缺失源码可能导致 `!bool` 等合法表达式出现分析误报，即使 `cargo check` 通过。仓库的 VS Code 配置已将 Rust 工作区指向 `rust/Cargo.toml`。
 - 浏览器冒烟测试需要本地 Chrome / Chromium。
 - 单元与协议测试不需要 Pi、模型账户或 API key。真实模型调试才需要安装、配置 Pi。
 
@@ -31,7 +32,7 @@ npm run build        # 启动调试前构建
 
 仓库提供模拟 ACP 进程 `test/mock-agent.mjs`。输入 `wait` 模拟长时间运行，`permission` 模拟授权，`crash` 模拟进程退出；`context-images` 模式声明图片能力，`context-legacy` 使用旧版 modes 思考选项。两种接入方式：
 
-- Codex / Claude：在 Development Host 的用户设置中把 `piAcp.codex.command`（或 `claude`）指向 Node 可执行文件，对应 `.args` 设为 `["/absolute/path/to/test/mock-agent.mjs", "<mode>"]`。
+- Codex / Claude：在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中将 `command` 设为 Node 可执行文件，`args` 设为 `["/absolute/path/to/test/mock-agent.mjs", "<mode>"]`，重启 `pi-sessions`。
 - Pi：临时修改会话服务 `sessions.json` 的 `command` / `args` 为同样的 Node + 脚本路径，重启 `pi-sessions`。
 
 点击新建后可验证模型/thinking 切换和流式输出。模拟 Agent 不保存真实原生上下文，不能代替 Pi 持久化或供应商兼容性测试。
@@ -50,8 +51,8 @@ npm run build        # 启动调试前构建
 | 需求                      | 主要入口                                                                  | 对应验证                             |
 | ------------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
 | 会话创建、重连、切换      | `src/extension.ts`                                                        | `test/controller.test.ts`            |
-| 模型与思考选项            | `src/session-settings.ts`、`webview/selectors.ts`                         | selectors / controller 测试          |
-| ACP 传输与进程管理        | `src/agent.ts`                                                            | agent 测试、NDJSON mock              |
+| 模型与思考选项            | `rust/crates/pi-acp-session-daemon/src/prefs.rs`、`webview/selectors.ts`  | selectors / controller 测试          |
+| ACP 传输与进程管理        | `rust/crates/pi-acp-session-daemon/src/agent.rs`                          | agent 测试、NDJSON mock              |
 | Markdown / 数学 / Mermaid | `webview/markdown.ts`、`webview/diagrams.ts`                              | markdown / diagrams 测试、浏览器冒烟 |
 | 原生会话分支              | `src/native-branch.ts`、`src/pi-native-fork.ts`、`src/pi-enhancements.ts` | native-branch / bundled-adapter 测试 |
 | 消费统计与价格            | telemetry / prices、Webview statistics 模块                               | telemetry / statistics / prices 测试 |
@@ -59,6 +60,8 @@ npm run build        # 启动调试前构建
 ## Rust 单实现迁移
 
 生产 TS daemon 入口已删除，不要重新增加 TS 服务构建或隐式回退。完整服务验收使用 `npm run test:full`；`TEST_JOBS=1` 顺序排障，默认有界并行，日志在 `.test-results/`。服务修改应首先补 Rust 单测或黑盒契约；`npm run test:integration:rust` 使用两个真实 Rust daemon 与模拟 Bot API/ACP worker。TS 会话服务、队列/收据/socket 服务端及 Telegram 内部实现已删除；迁移覆盖映射见 [迁移进度](docs/archive/rust-migration.md)。
+
+Telegram 修改按 `bridge/` 职责定位：接收与恢复走 `inbox.rs`，命令走 `commands.rs`，同步走 `history.rs`，投递走 `delivery.rs`，授权走 `permissions.rs`。持久化字段放在 `state.rs`，所有修改通过 `StateStore::update`；不要重新暴露可写的共享状态锁。命令分类/排队规则集中在 `routing.rs`，可用纯单测验证。新增后台消息处理任务应交给 `TaskScope`，轮次内监听应由 `OwnedTask` 持有。
 
 ## 提交与评审
 
@@ -76,3 +79,5 @@ npm run build        # 启动调试前构建
 使用 `npm ci` 保持 lockfile 可复现。更改依赖时提交 package.json 和 package-lock.json。内置适配器固定 pi-acp 版本，升级前阅读 `scripts/build-adapter.mjs` 的源码替换断言并运行 bundled-adapter 测试；不能只更新版本号。
 
 构建生成 `THIRD_PARTY_NOTICES.txt` 并收集实际随包分发的许可证。发布前检查该文件的变更。项目采用 MIT 许可证，贡献内容应允许按项目许可证分发。
+
+Rust 依赖漏洞检查：安装 `cargo install cargo-audit --locked --version 0.22.2` 后执行 `cargo audit --file rust/Cargo.lock`。CI 使用相同命令审计锁文件，发现漏洞时失败，不默认忽略通告。

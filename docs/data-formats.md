@@ -85,6 +85,8 @@ Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`
  "historySent":{"<sessionId>":[<sha256 hex>…]}}
 ```
 
+新增可选 `inbox:[{id,update,phase,prompt?}]`，为空时省略，旧文件缺省为空。`phase` 为 `pending|started|interrupted`；`prompt` 仅保存 `/interrupt` 取消完成后的替代提示词。接收 update 与 offset 同一原子事务提交；id 必须唯一、等于 update.update_id 且小于 offset，最多 136 条。执行前 durable 标记 started，成功处理后移除。重启将 started 转为 interrupted 并告知结果未确认，不重放；pending 才可继续执行。
+
 校验失败即拒绝启动（不重放旧任务）。`topics` 在 daemon 启动时剔除已不存在会话的绑定（会话服务不可用时跳过，保留绑定）。
 
 ### `events/<sha256(eventId)>.json`（outbox）
@@ -115,3 +117,7 @@ Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`
 `_pi_workbench/inspect` 返回的 `forkPoints` 与 `_pi_workbench/fork` 的 `hash` 校验依赖 `native-branch.ts` 的确定性计算：按 leaf→root 取原生历史链 → `canonicalEntries`（剔除 `label` 节点、label→下一节点 id 映射、剥离 `parentId`、compaction 的 `firstKeptEntryId` 重映射）→ 逐节点 `JSON.stringify` 连接（`,` 分隔）做流式 SHA-256 得前缀 hash。Rust 移植时必须对同一组 fixtures 得到逐比特一致的 hash——把 `test/native-branch.test.ts` 的用例导出为 JSON fixtures 供 Rust 侧断言。
 
 通用任务事件由 `pi-acp-core::TurnEvent` 同时供 outbox 写入与 socket 消费，磁盘格式仅由会话服务管理。可选 `pendingPermissions` 和 `nonTextBlocks` 均为非负计数，缺省为 0，服务不拼接通知呈现文案。工具条目可附 `terminal`（id/output/cwd/exitCode/signal/truncated），用于流式输出与恢复查看。
+
+### Codex / Claude 用量记录
+
+完整会话快照可包含 `usageRecords`（旧快照缺省为空），每条包含 `id/sessionId/model/timestamp/kind/input/output/cacheRead/cacheWrite`。`kind` 为 `acp-turn`；输入、缓存读写和输出分别计数，推理不重复加入输出。记录仅保存适配器返回的数据，缺少可选缓存字段时按协议缺省值 0 汇总，不代表供应商账单完整。记录不写入索引，也不随状态广播发送，通过 `_pi_workbench/inspect` 分页读取。上下文占用仍在独立 `usage.used/size` 中。

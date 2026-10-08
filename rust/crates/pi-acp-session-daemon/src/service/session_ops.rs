@@ -19,7 +19,8 @@ impl SessionService {
         if let Some(rt) = self.runtimes.lock().unwrap().get(id).cloned() {
             return Ok(view_state(&rt.lock().unwrap()));
         }
-        let snapshot = self.store.read(&index).await?;
+        let mut snapshot = self.store.read(&index).await?;
+        snapshot.usage_records.clear();
         let interrupted = self
             .journal
             .last(id)
@@ -44,7 +45,26 @@ impl SessionService {
         request_id: &str,
     ) -> Result<Value, String> {
         let id = command_session_id(command);
-        self.index(id).await?;
+        let index = self.index(id).await?;
+        if let ServiceCommand::Request {
+            request: AgentRequest::Inspect { cursor, .. },
+            ..
+        } = command
+        {
+            if matches!(index.harness.as_deref(), Some("codex" | "claude")) {
+                let rt = self.runtimes.lock().unwrap().get(id).cloned();
+                let snapshot = if let Some(rt) = rt {
+                    let r = rt.lock().unwrap();
+                    let mut snapshot = r.snapshot.clone();
+                    snapshot.usage = r.state.usage.clone();
+                    snapshot.usage_records = r.state.usage_records.clone();
+                    snapshot
+                } else {
+                    self.store.read(&index).await?
+                };
+                return crate::usage::inspect(&snapshot, *cursor);
+            }
+        }
         match command {
             ServiceCommand::State { .. } => self.state(id).await,
             ServiceCommand::Permission {

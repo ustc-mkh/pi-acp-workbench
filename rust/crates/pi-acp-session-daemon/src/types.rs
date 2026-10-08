@@ -86,6 +86,8 @@ pub struct Snapshot {
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_records: Vec<crate::usage::UsageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +119,7 @@ pub struct ChatState {
     pub native_forks: Option<BTreeMap<String, NativeBranchTarget>>,
     pub usage: Option<Value>,
     pub plan: Vec<Value>,
+    pub usage_records: Vec<crate::usage::UsageRecord>,
 }
 
 impl Entry {

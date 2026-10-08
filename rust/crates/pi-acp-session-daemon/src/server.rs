@@ -1,8 +1,9 @@
 //! Bounded newline-delimited service transport with fragmented responses.
 //! Per-socket writers serialize output; malformed input closes only its connection.
 //! Allocation limits and frame deadlines are specified in docs/service-protocol.md.
+use crate::state_stream::{StateStreams, Subscription};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -39,7 +40,7 @@ pub type HandlerFuture =
 struct Conn {
     id: u64,
     queued_bytes: AtomicUsize,
-    subscriptions: Mutex<HashSet<String>>,
+    subscriptions: Mutex<HashMap<String, Subscription>>,
     outbox: mpsc::UnboundedSender<String>,
     /// handler `emit` endpoint → emit_loop wraps each item as {event} → send().
     emit: mpsc::UnboundedSender<Value>,
@@ -49,6 +50,7 @@ struct Conn {
 
 struct Shared {
     handle: Handler,
+    states: Mutex<StateStreams>,
     conns: Mutex<HashMap<u64, Arc<Conn>>>,
     next_conn: AtomicU64,
     pending: AtomicUsize,
@@ -149,13 +151,22 @@ impl Shared {
             };
             let enabled = enabled.unwrap();
             let mut subs = conn.subscriptions.lock().unwrap();
-            if enabled && subs.len() >= MAX_SUBSCRIPTIONS && !subs.contains(session_id) {
+            if enabled && subs.len() >= MAX_SUBSCRIPTIONS && !subs.contains_key(session_id) {
                 drop(subs);
                 self.send(conn, json!({ "id": id, "error": "订阅已满" }));
                 return Ok(());
             }
             if enabled {
-                subs.insert(session_id.to_string());
+                // Re-subscribing explicitly resets the baseline, including resync after a gap.
+                subs.insert(
+                    session_id.to_string(),
+                    Subscription {
+                        delta: params.get("stateDeltas").and_then(Value::as_bool) == Some(true),
+                        permissions_only: params.get("permissionsOnly").and_then(Value::as_bool)
+                            == Some(true),
+                        revision: None,
+                    },
+                );
             } else {
                 subs.remove(session_id);
             }
@@ -221,7 +232,7 @@ impl Shared {
             let conn = Arc::new(Conn {
                 id: self.next_conn.fetch_add(1, Ordering::SeqCst),
                 queued_bytes: AtomicUsize::new(0),
-                subscriptions: Mutex::new(HashSet::new()),
+                subscriptions: Mutex::new(HashMap::new()),
                 outbox: outbox_tx,
                 emit: emit_tx,
                 cancel: CancellationToken::new(),
@@ -648,6 +659,60 @@ mod resource_tests {
     }
 
     #[tokio::test]
+    async fn delta_permissions_and_legacy_subscriptions_coexist_and_resubscribe_resets() {
+        let root = Root::new();
+        let path = root.0.join("s");
+        let server = SessionServer::new(
+            path.clone(),
+            Arc::new(|_, _, _, _| Box::pin(async { Ok(json!(true)) })),
+        );
+        server.listen().await.unwrap();
+        let mut delta = Client::open(&path).await;
+        let mut legacy = Client::open(&path).await;
+        let mut permissions = Client::open(&path).await;
+        for (client, extra) in [
+            (&mut delta, "stateDeltas"),
+            (&mut legacy, "legacy"),
+            (&mut permissions, "permissionsOnly"),
+        ] {
+            let mut params = json!({"sessionId":"one","enabled":true});
+            params[extra] = json!(true);
+            client.send("watch", "_watch", params).await;
+            assert_eq!(client.reply().await["value"], true);
+        }
+        let old = json!({"id":"old","text":"x".repeat(10000)});
+        let state = |text: &str| json!({"type":"state","snapshot":{"id":"one","entries":[old,{"id":"live","text":text}]},"permissions":[],"busy":true});
+        server.broadcast(state("中"));
+        let first = delta.reply().await;
+        assert_eq!(first["event"]["type"], "state");
+        assert!(legacy.reply().await["event"]["snapshot"]["entries"].is_array());
+        assert!(permissions.reply().await["event"]["snapshot"]
+            .get("entries")
+            .is_none());
+        server.broadcast(state("中文😀"));
+        let patch = delta.reply().await;
+        assert_eq!(patch["event"]["baseRevision"], first["event"]["revision"]);
+        assert_eq!(
+            patch["event"]["entries"],
+            json!([{"id":"live","text":"中文😀"}])
+        );
+        assert!(serde_json::to_vec(&patch).unwrap().len() < 500);
+        assert_eq!(legacy.reply().await["event"]["type"], "state");
+        permissions.reply().await;
+        delta
+            .send(
+                "watch",
+                "_watch",
+                json!({"sessionId":"one","enabled":true,"stateDeltas":true}),
+            )
+            .await;
+        delta.reply().await;
+        server.broadcast(state("again"));
+        assert_eq!(delta.reply().await["event"]["type"], "state");
+        server.dispose().await;
+    }
+
+    #[tokio::test]
     async fn bounds_requests_and_connections_and_releases_all_accounting() {
         let root = Root::new();
         let path = root.0.join("s");
@@ -724,6 +789,7 @@ impl SessionServer {
             path,
             shared: Arc::new(Shared {
                 handle,
+                states: Mutex::new(StateStreams::default()),
                 conns: Mutex::new(HashMap::new()),
                 next_conn: AtomicU64::new(1),
                 pending: AtomicUsize::new(0),
@@ -776,36 +842,60 @@ impl SessionServer {
         let Some(session_id) = session_id.and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             return;
         };
+        // Serialize state revisions and writes so concurrent emitters cannot reorder patches.
+        let mut states = self.shared.states.lock().unwrap();
         let targets: Vec<Arc<Conn>> = self
             .shared
             .conns
             .lock()
             .unwrap()
             .values()
-            .filter(|conn| conn.subscriptions.lock().unwrap().contains(session_id))
+            .filter(|conn| conn.subscriptions.lock().unwrap().contains_key(session_id))
             .cloned()
             .collect();
         if targets.is_empty() {
             return;
         }
-        let body = match encode(&json!({ "event": event }), self.shared.response_limit()) {
-            Some(body) => body,
-            None => match encode(
-                &json!({
-                    "event": {
-                        "type": "serviceError",
-                        "sessionId": session_id,
-                        "error": "会话状态超过 64 MiB，请创建新会话。",
-                    }
-                }),
-                LINE_LIMIT,
-            ) {
-                Some(body) => body,
-                None => return,
-            },
-        };
+        let state = (event.get("type").and_then(Value::as_str) == Some("state"))
+            .then(|| states.next(session_id, event.clone()));
         for conn in targets {
-            self.shared.enqueue(&conn, body.clone());
+            let frame = {
+                let mut subscriptions = conn.subscriptions.lock().unwrap();
+                let Some(subscription) = subscriptions.get_mut(session_id) else {
+                    continue;
+                };
+                if let Some(state) = &state {
+                    let frame = if subscription.permissions_only {
+                        &state.permissions
+                    } else if subscription.delta
+                        && subscription.revision.is_some()
+                        && subscription.revision == state.previous
+                    {
+                        state.patch.as_ref().unwrap_or(&state.full)
+                    } else {
+                        &state.full
+                    };
+                    subscription.revision = Some(state.revision);
+                    frame
+                } else {
+                    if subscription.permissions_only {
+                        continue;
+                    }
+                    &event
+                }
+                .clone()
+            };
+            let body =
+                encode(&json!({"event":frame}), self.shared.response_limit()).or_else(|| {
+                    encode(
+                        &json!({"event":{"type":"serviceError","sessionId":session_id,
+                    "error":"会话状态超过 64 MiB，请创建新会话。"}}),
+                        LINE_LIMIT,
+                    )
+                });
+            if let Some(body) = body {
+                self.shared.enqueue(&conn, body);
+            }
         }
     }
 

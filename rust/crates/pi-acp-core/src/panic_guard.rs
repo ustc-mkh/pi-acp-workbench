@@ -2,13 +2,16 @@
 use std::future::{poll_fn, Future};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::task::Poll;
-pub async fn run<F: Future>(future: F) -> Result<F::Output, ()> {
+#[derive(Debug, PartialEq, Eq)]
+pub struct CaughtPanic;
+
+pub async fn run<F: Future>(future: F) -> Result<F::Output, CaughtPanic> {
     let mut future = std::pin::pin!(future);
     poll_fn(
         |cx| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
             Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
             Ok(Poll::Pending) => Poll::Pending,
-            Err(_) => Poll::Ready(Err(())),
+            Err(_) => Poll::Ready(Err(CaughtPanic)),
         },
     )
     .await

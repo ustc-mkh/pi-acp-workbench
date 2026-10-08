@@ -29,6 +29,8 @@ export interface Statistics {
   note?: string;
 }
 export interface Inspection {
+  note?: string;
+  usage?: import('./shared').ContextUsage;
   forkPoints?: import('./native-branch').NativeForkPoint[];
   records: UsageRecord[];
   cursor?: number;

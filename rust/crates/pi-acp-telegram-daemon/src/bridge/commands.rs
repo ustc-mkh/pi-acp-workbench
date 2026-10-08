@@ -61,14 +61,14 @@ impl Bridge {
                 let (Some(binding), Some(argument)) = (binding, argument) else {
                     return Err("用法：/interrupt 要发送的新消息".into());
                 };
-                self.bump_generation(&binding.session_id).await;
+                self.bump_generation(&binding.session_id).await?;
                 let _ = self.shared.host.cancel(&binding.session_id).await;
                 self.enqueue(&binding.session_id, binding.thread_id, argument.to_string())
                     .await
             }
             Some("stop") => {
                 let stopped = if let Some(binding) = binding {
-                    self.bump_generation(&binding.session_id).await;
+                    self.bump_generation(&binding.session_id).await?;
                     self.shared
                         .host
                         .cancel(&binding.session_id)
@@ -125,7 +125,20 @@ impl Bridge {
                     .await
                     .get(&binding.session_id)
                     .map(|l| l.queued.load(Ordering::SeqCst))
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    + self
+                        .shared
+                        .store
+                        .read()
+                        .await
+                        .inbox
+                        .iter()
+                        .filter(|item| {
+                            item.phase == InboxPhase::Pending
+                                && item.ordered()
+                                && thread_of(&item.update) == Some(binding.thread_id)
+                        })
+                        .count();
                 let body = utf16_tail(
                     status
                         .get("text")
@@ -228,32 +241,6 @@ impl Bridge {
     }
 }
 
-/// `/cmd@bot args` — same shape as the TS regex `^\/(\w+)(?:@([\w]+))?(?:\s+([\s\S]*))?$`.
-pub(super) fn parse_command(text: &str) -> Option<(String, Option<String>, Option<String>)> {
-    let body = text.strip_prefix('/')?;
-    let (head, argument) = match body.find(char::is_whitespace) {
-        Some(i) => (&body[..i], Some(body[i..].trim_start().to_string())),
-        None => (body, None),
-    };
-    let (command, bot) = match head.find('@') {
-        Some(i) => (&head[..i], Some(head[i + 1..].to_string())),
-        None => (head, None),
-    };
-    if command.is_empty()
-        || !command
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return None;
-    }
-    if let Some(b) = &bot {
-        if b.is_empty() || !b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return None;
-        }
-    }
-    Some((command.to_string(), bot, argument))
-}
-
 const HELP: &str = "会话与历史
 /new 绝对路径或工作区名 — 新建会话及话题；仅一个别名时可省略参数
 /sessions — 列出最近 50 个会话
@@ -274,3 +261,157 @@ const HELP: &str = "会话与历史
 /start — 显示本帮助
 
 在会话话题直接发文字即可对话。其他命令（如 /compact）原样转交当前 Agent；可用命令取决于 Agent 配置。";
+
+impl Bridge {
+    pub(super) async fn dispatch(&self, update: &Value) -> Result<(), String> {
+        if self.shared.opts.stop.is_cancelled() {
+            return Ok(());
+        }
+        let callback = update.get("callback_query");
+        let message = callback
+            .and_then(|c| c.get("message"))
+            .or_else(|| update.get("message"));
+        let Some(message) = message else {
+            return Ok(());
+        };
+        if !self.authorized(update) {
+            return Ok(());
+        }
+        let thread_id = thread_of(update);
+        if let Some(callback) = callback {
+            let data = callback.get("data").and_then(Value::as_str).unwrap_or("");
+            let callback_id = callback
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match data {
+                "notify:on" | "notify:off" => {
+                    let on = data == "notify:on";
+                    self.persist(|s| s.notifications = Some(on)).await?;
+                    if !on {
+                        self.shared.streams.lock().await.clear();
+                        self.shared.touched.lock().await.clear();
+                    }
+                    self.answer_callback(
+                        callback_id,
+                        if on {
+                            "已开启全部会话推送"
+                        } else {
+                            "已暂停全部会话推送"
+                        },
+                    )
+                    .await;
+                    return self
+                        .notification_menu(thread_id)
+                        .await
+                        .map_err(|e| e.message);
+                }
+                "silent:on" | "silent:off" => {
+                    let on = data == "silent:on";
+                    self.persist(|s| s.silent = Some(on)).await?;
+                    self.answer_callback(
+                        callback_id,
+                        if on {
+                            "已开启静音发送"
+                        } else {
+                            "已关闭静音发送"
+                        },
+                    )
+                    .await;
+                    return self.silent_menu(thread_id).await.map_err(|e| e.message);
+                }
+                _ => {
+                    self.answer_permission(callback_id, data, thread_id).await;
+                    return Ok(());
+                }
+            }
+        }
+        let text = message
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let parsed = parse_command(text);
+        if let Some((_, Some(bot), _)) = &parsed {
+            let mine = self.shared.username.read().await.clone();
+            if !bot.eq_ignore_ascii_case(&mine) {
+                return Ok(());
+            }
+        }
+        let (command, argument) = parsed
+            .as_ref()
+            .map(|(c, _, a)| {
+                (
+                    Some(c.to_lowercase()),
+                    a.clone()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                )
+            })
+            .unwrap_or((None, None));
+        let binding = self
+            .shared
+            .store
+            .read()
+            .await
+            .topics
+            .iter()
+            .find(|t| Some(t.thread_id) == thread_id)
+            .cloned();
+        // Release the control slot after cancellation; the replacement prompt waits durably
+        // in the ordinary lane instead of occupying a control slot for the whole model turn.
+        if command.as_deref() == Some("interrupt") {
+            if let (Some(binding), Some(argument), Some(id)) = (
+                binding.as_ref(),
+                argument.as_ref(),
+                update.get("update_id").and_then(Value::as_i64),
+            ) {
+                self.shared
+                    .host
+                    .authorize(&binding.session_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.bump_generation(&binding.session_id).await?;
+                self.shared
+                    .host
+                    .cancel(&binding.session_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut deferred = false;
+                self.persist(|s| {
+                    if let Some(item) = s.inbox.iter_mut().find(|i| i.id == id) {
+                        item.prompt = Some(argument.clone());
+                        item.phase = InboxPhase::Pending;
+                        deferred = true;
+                    }
+                })
+                .await?;
+                if deferred {
+                    return Ok(());
+                }
+            }
+        }
+        match self
+            .dispatch_command(
+                command.as_deref(),
+                argument.as_deref(),
+                binding.as_ref(),
+                thread_id,
+                &parsed,
+                text,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.report(&error).await;
+                if command.is_some() || self.shared.store.notifications.load(Ordering::SeqCst) {
+                    let _ = self.send_plain(&error, thread_id).await;
+                }
+                Ok(())
+            }
+        }
+    }
+}

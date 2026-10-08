@@ -258,23 +258,19 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
             };
             ServiceError::InvalidParams(message)
         })?;
-    match &command {
-        ServiceCommand::Prompt { prompt, .. } => {
-            if prompt.is_empty()
-                || !prompt
-                    .iter()
-                    .all(|b| b.is_object() && b["type"].is_string())
-            {
-                return Err(ServiceError::InvalidParams("消息格式无效".into()));
-            }
-            if serde_json::to_vec(prompt).map_or(usize::MAX, |bytes| bytes.len()) > 12 * 1024 * 1024
-            {
-                return Err(ServiceError::InvalidParams(
-                    "消息和附件超过 12 MiB，未发送。请减少输入内容。".into(),
-                ));
-            }
+    if let ServiceCommand::Prompt { prompt, .. } = &command {
+        if prompt.is_empty()
+            || !prompt
+                .iter()
+                .all(|b| b.is_object() && b["type"].is_string())
+        {
+            return Err(ServiceError::InvalidParams("消息格式无效".into()));
         }
-        _ => {}
+        if serde_json::to_vec(prompt).map_or(usize::MAX, |bytes| bytes.len()) > 12 * 1024 * 1024 {
+            return Err(ServiceError::InvalidParams(
+                "消息和附件超过 12 MiB，未发送。请减少输入内容。".into(),
+            ));
+        }
     }
     Ok(command)
 }

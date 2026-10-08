@@ -112,11 +112,8 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     if (value.snapshot.harness !== this.harness || this.state.sessionId !== value.snapshot.id)
       return;
     const s = value.snapshot;
-    const previous = new Map(this.state.entries.map((entry) => [entry.id, entry]));
-    this.state.entries = s.entries.map((entry) => {
-      const old = previous.get(entry.id);
-      return old && JSON.stringify(old) === JSON.stringify(entry) ? old : entry;
-    });
+    // The socket decoder preserves unchanged entry identities across state deltas.
+    this.state.entries = s.entries;
     this.state.usage = s.usage;
     this.contextWindow = s.contextWindow ?? s.usage?.size;
     this.state.plan = value.plan || [];

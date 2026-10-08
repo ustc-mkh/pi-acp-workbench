@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -223,23 +223,62 @@ fn parse_fragment_frame(text: &str) -> Option<(Vec<u16>, bool)> {
     Some((units, last))
 }
 
+/// Idle sockets may wait indefinitely, but a partial frame has one fixed deadline.
+/// Check before extending the buffer; never allocate an unbounded read_until buffer.
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    continuing_fragment: bool,
+    timeout: Duration,
+) -> io::Result<usize> {
+    let mut deadline = continuing_fragment.then(|| tokio::time::Instant::now() + timeout);
+    loop {
+        let available = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, reader.fill_buf())
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "partial frame"))??,
+            None => reader.fill_buf().await?,
+        };
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(0)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partial frame",
+                ))
+            };
+        }
+        deadline.get_or_insert_with(|| tokio::time::Instant::now() + timeout);
+        let end = available.iter().position(|&b| b == b'\n');
+        let count = end.map_or(available.len(), |end| end + 1);
+        if line.len() + count > LINE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
+        }
+        line.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if end.is_some() {
+            return Ok(line.len());
+        }
+    }
+}
+
 impl Inner {
     async fn read_loop(&self, read: tokio::net::unix::OwnedReadHalf) {
         let mut reader = BufReader::new(read);
         let mut line: Vec<u8> = Vec::new();
         loop {
             line.clear();
-            // Mid-fragment streams must continue within 10 s (spec §5).
-            let incoming = if self.fragments.lock().await.is_some() {
-                match tokio::time::timeout(FRAGMENT_TIMEOUT, reader.read_until(b'\n', &mut line))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => break,
-                }
-            } else {
-                reader.read_until(b'\n', &mut line).await
-            };
+            let incoming = read_bounded_line(
+                &mut reader,
+                &mut line,
+                self.fragments.lock().await.is_some(),
+                FRAGMENT_TIMEOUT,
+            )
+            .await;
             let frame = match incoming {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
@@ -270,6 +309,7 @@ impl Inner {
             }
         }
         self.closed.store(true, Ordering::SeqCst);
+        let _ = self.writer.lock().await.shutdown().await;
         self.fail_pending().await;
     }
 
@@ -366,5 +406,68 @@ mod tests {
     #[test]
     fn fragment_frame_ignores_non_fragment() {
         assert!(parse_fragment_frame("{\"id\":\"x\"}").is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    #[tokio::test]
+    async fn rejects_oversized_unterminated_frame_before_extending_past_limit() {
+        let bytes = vec![b'x'; LINE_LIMIT + 1024 * 1024];
+        let mut reader = BufReader::new(bytes.as_slice());
+        let mut line = Vec::new();
+        let error = read_bounded_line(&mut reader, &mut line, false, FRAGMENT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(line.len() <= LINE_LIMIT);
+    }
+    #[tokio::test]
+    async fn idle_is_allowed_but_partial_and_fragment_frames_expire() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        let timeout = Duration::from_millis(30);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(60),
+            read_bounded_line(&mut reader, &mut line, false, timeout)
+        )
+        .await
+        .is_err());
+        writer.write_all(b"{").await.unwrap();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, false, timeout)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        line.clear();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, true, timeout)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+    #[tokio::test]
+    async fn preserves_coalesced_frames_and_utf8_split_across_reads() {
+        let bytes = "{\"text\":\"中文😀\"}\n{\"id\":1}\n".as_bytes();
+        let mut reader = BufReader::with_capacity(1, bytes);
+        let mut line = Vec::new();
+        read_bounded_line(&mut reader, &mut line, false, FRAGMENT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&line).unwrap()["text"],
+            "中文😀"
+        );
+        line.clear();
+        read_bounded_line(&mut reader, &mut line, false, FRAGMENT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&line).unwrap()["id"], 1);
     }
 }

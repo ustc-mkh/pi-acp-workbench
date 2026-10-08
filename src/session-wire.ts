@@ -2,6 +2,7 @@ import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { ServiceStateStream } from './service-state-stream';
 const sessionSocket = () => join(homedir(), '.pi', 'pi-acp-workbench', 'service', 'sessions.sock');
 const LIMIT = 16 * 1024 * 1024;
 /** Client-side bounds only. The Rust service owns server limits and accounting. */
@@ -117,6 +118,7 @@ export class SessionClient {
   private socket?: Socket;
   private connecting?: Promise<void>;
   private closed = false;
+  private states = new ServiceStateStream();
   private pending = new Map<
     string,
     { resolve: (value: any) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout }
@@ -142,6 +144,7 @@ export class SessionClient {
           'Pi 会话服务连接已断开。请检查 pi-sessions.service；任务不会自动重发。',
         );
         reject(error);
+        this.states.clear();
         this.connecting = undefined;
         this.socket = undefined;
         for (const pending of this.pending.values()) {
@@ -153,7 +156,7 @@ export class SessionClient {
       });
       responseReader(socket, (item) => {
         if (item.event) {
-          this.event(item.event);
+          this.event(this.states.receive(item.event));
           return;
         }
         const pending = this.pending.get(item.id);
@@ -167,7 +170,8 @@ export class SessionClient {
     }));
   }
   watch(sessionId: string, enabled = true) {
-    return this.call('_watch', { sessionId, enabled });
+    this.states.clear(sessionId);
+    return this.call('_watch', { sessionId, enabled, stateDeltas: true });
   }
   async call<T = any>(
     method: string,
@@ -208,6 +212,7 @@ export class SessionClient {
   }
   dispose() {
     this.closed = true;
+    this.states.clear();
     this.socket?.destroy();
   }
 }

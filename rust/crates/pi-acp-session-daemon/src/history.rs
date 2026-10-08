@@ -118,6 +118,7 @@ impl SharedHistoryStore {
         let mut stub = snapshot.clone();
         stub.entries = Vec::new();
         stub.native_forks = None;
+        stub.usage_records.clear();
         stub.stored = Some(true);
         Ok(stub)
     }

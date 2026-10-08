@@ -31,11 +31,36 @@ Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff
 | `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                       |
 | `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                          |
 
+## Telegram 中继的内部边界
+
+`bridge.rs` 是组装入口：持有运行时资源、启动检查、持久化入口和关闭顺序。业务操作按职责放在 `bridge/` 下，仍共用一个 Bridge，不增加进程或服务之间的网络调用。
+
+| 模块             | 职责                                                               |
+| ---------------- | ------------------------------------------------------------------ |
+| `state.rs`       | 磁盘 DTO 和格式校验；不包含网络、文件读写或任务调度                |
+| `store.rs`       | 唯一状态写入入口；串行事务、durable 写入后才发布内存快照和通知开关 |
+| `routing.rs`     | 纯命令分类及排队策略；普通提示词和控制操作各自保持话题内顺序       |
+| `inbox.rs`       | 接收游标、持久化入队、恢复和有界调度                               |
+| `commands.rs`    | 消息/按钮分发与命令处理                                            |
+| `turns.rs`       | 提示词执行、会话队列与取消代际                                     |
+| `delivery.rs`    | 消息投递、预览缓存、outbox 消费和确认                              |
+| `history.rs`     | 话题绑定和显式历史同步                                             |
+| `permissions.rs` | 授权票据及通知菜单                                                 |
+| `task_scope.rs`  | 本地观察任务和消息处理任务的所有权与关闭                           |
+
+状态读取只取得不可变视图；业务模块不能直接写入底层 RwLock。修改经 `StateStore::update` 完成，磁盘写失败时内存快照和通知开关保持原值。持久化模型和线协议沿用已有格式。
+
+`OwnedTask` 在所有者释放时取消本地监听；`TaskScope` 跟踪已接收的处理任务，关闭后拒绝新任务。关闭顺序为停止接收 → 断开会话客户端以唤醒等待 → 等待处理任务退出（最多 5 秒，超时回收本地任务）→ 清理缓存。服务端已经提交的模型任务仍由会话 daemon 持有；接收记录继续遵守“未完成记录不自动重放”的规则。
+
 ## Harness 与能力边界
 
 worker 配置统一放在 `sessions.json`，可用 `harnesses.pi/codex/claude` 分别覆盖 command/args/env。顶层 command/args/env 为 Pi 配置；未配置的 Codex/Claude 分别从服务 PATH 启动 `codex-acp` / `claude-agent-acp`。不自动安装适配器，也不继承 Pi 专属环境覆盖。凭据归上游工具管理，登录按钮仅打开登录终端。
 
-每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 专用统计或分支能力。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
+每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 原生扩展能力；服务通过 `session-service.usageInspection` 单独声明用量查询支持。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
+
+Codex/Claude 每轮 `session/prompt` 返回的用量由 `usage.rs` 规范化并随完整历史快照持久化。优先读取 `_meta.quota.model_usage`，否则读取 `usage` 或 `_meta.quota.token_count`，两者不累加；输入已排除缓存读取，推理 token 已包含在输出中。Claude 按模型明细可包含子任务，统计范围可能大于主会话汇总。按服务请求 ID 生成稳定记录 ID，重复刷新不重复计数。未知模型标为 `unknown`，非法计数不转为零记录。
+
+用量记录不进入历史索引和高频状态广播。Codex/Claude 的 `_pi_workbench/inspect` 在服务端读取已保存记录，每页最多 500 条，不调用上游 Pi 扩展，不为冷会话启动 worker；兼容既有查询路径。Pi 仍由原有增强适配器提供统计。上下文占用来自 `usage_update.used/size`，与累计 token 消耗分开，不能据此还原系统提示词、工具定义或完整模型上下文。旧适配器不返回用量时显示缺失说明，不自动扫描供应商的私有历史文件。
 
 Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURIComponent(nativeId)>`。Rust ACP 请求边界统一还原出站 ID、为通知和授权加入命名空间。快照必须显式记录匹配的 harness，不通过 ID 推断缺失元数据。编号、队列、删除和收据使用本地 ID。
 
@@ -45,7 +70,7 @@ Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURICompon
 
 多个桌面/Telegram 客户端可以附着同一个会话，没有客户端独占文件租约。服务队列按会话串行执行，授权可在任一端处理。关闭窗口、断开连接或切换 harness 只移除客户端连接，已经提交的任务继续运行。服务空闲回收 worker，下一次操作原生加载。
 
-客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
+客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。桌面通过可选增量订阅复用未变化条目；Telegram 权限订阅只传授权信息。增量基线失效时重新订阅获得全量状态，不重放任务。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
 
 selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ConversationLifecycle` 管理 idle/transition/turn/disposed 和取消状态。
 

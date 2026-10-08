@@ -243,3 +243,54 @@ it('discards a failed poll after disposal', async () => {
   await history.ready;
   expect(error).not.toHaveBeenCalled();
 });
+
+it.each(['codex', 'claude'] as const)(
+  'reads %s service usage without Pi capabilities and preserves coverage notes',
+  async (harness) => {
+    const state = {
+      ...initialState(),
+      sessionId: `workbench:${harness}:one`,
+      status: 'ready' as const,
+    };
+    const record = {
+      id: `acp:${harness}:one`,
+      sessionId: state.sessionId,
+      model: 'model',
+      timestamp: 1,
+      kind: 'acp-turn',
+      input: 5,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 0,
+    };
+    const request = vi
+      .fn()
+      .mockResolvedValue({ records: [record], contextWindow: 200000, note: '仅包含上报的轮次' });
+    const agent: any = {
+      harness,
+      info: {
+        agentCapabilities: { _meta: { 'session-service': { version: 3, usageInspection: true } } },
+      },
+      request,
+    };
+    const window = vi.fn();
+    const stats = new ConversationStatistics(
+      storage(),
+      new ClientOperations(),
+      () => ({ state, agent, harness, retained: true }),
+      window,
+      () => {},
+    );
+    await stats.refresh();
+    await stats.refresh();
+    expect(stats.value.available).toBe(true);
+    expect(stats.value.records).toEqual([record]);
+    expect(stats.value.note).toBe('仅包含上报的轮次');
+    expect(window).toHaveBeenCalledWith(200000);
+    agent.info.agentCapabilities._meta = {};
+    request.mockClear();
+    await stats.refresh();
+    expect(stats.value.available).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+  },
+);

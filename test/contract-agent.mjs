@@ -74,6 +74,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       .filter((b) => b.type === 'text')
       .map((b) => b.text)
       .join('\n');
+    if (text === 'usage-report') {
+      update({ sessionUpdate: 'usage_update', used: 500, size: 200000 });
+      reply(r.id, {
+        stopReason: 'end_turn',
+        usage: { inputTokens: 100, outputTokens: 20, cachedReadTokens: 50, totalTokens: 170 },
+      });
+      return;
+    }
     if (text === 'wait') {
       pending = r.id;
       return;

@@ -2,13 +2,13 @@
 //! session service — list/create/run/cancel/permission/history/status over the
 //! shared wire client. Telegram turns are the ONLY callers that subscribe to
 //! `state` events for permission prompts.
+use crate::task_scope::OwnedTask;
 use pi_acp_core::wire::{WireClient, WireError};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct SessionStub {
@@ -27,7 +27,7 @@ pub enum TurnStatus {
 
 pub struct RunHandle {
     /// Resolves when the prompt returns; the permission stream then closes.
-    pub result: JoinHandle<Result<TurnStatus, WireError>>,
+    pub result: OwnedTask<Result<TurnStatus, WireError>>,
     pub permissions: mpsc::Receiver<Value>,
 }
 
@@ -207,9 +207,17 @@ impl Sessions {
         let (tx, rx) = mpsc::channel::<Value>(32);
         let session = id.to_string();
         let events_inner = self.client.events();
-        tokio::spawn(async move {
+        let forwarding = OwnedTask::spawn(async move {
             let mut events = events_inner;
-            while let Ok(event) = events.recv().await {
+            loop {
+                let event = tokio::select! {
+                    _ = tx.closed() => return,
+                    event = events.recv() => match event {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                };
                 if event.get("type").and_then(Value::as_str) != Some("state")
                     || event.pointer("/snapshot/id").and_then(Value::as_str)
                         != Some(session.as_str())
@@ -229,14 +237,20 @@ impl Sessions {
         let workspaces = self.workspaces.clone();
         let restricted = self.restrict_to_workspaces;
         let id = id.to_string();
-        let result = tokio::spawn(async move {
+        let result = OwnedTask::spawn(async move {
+            let _forwarding = forwarding;
             let host = Sessions {
                 client: client.clone(),
                 workspaces,
                 restrict_to_workspaces: restricted,
             };
             host.authorize(&id).await?;
-            client.watch(&id, true).await?;
+            client
+                .call(
+                    "_watch",
+                    json!({"sessionId":id,"enabled":true,"permissionsOnly":true}),
+                )
+                .await?;
             let outcome = client
                 .call_timeout(
                     "prompt",
@@ -367,5 +381,54 @@ mod tests {
         host.dispose().await;
         server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[tokio::test]
+    async fn completed_turn_closes_permission_sender() {
+        let dir = std::env::temp_dir().join(format!("pi-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (peer, _) = listener.accept().await.unwrap();
+            let (read, mut write) = peer.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let value = if req["method"] == "prompt" {
+                    json!({"stopReason":"end_turn"})
+                } else {
+                    json!(true)
+                };
+                write
+                    .write_all(format!("{}\n", json!({"id":req["id"],"value":value})).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let host = Sessions::connect(BTreeMap::new(), &socket, false)
+            .await
+            .unwrap();
+        let run = host.run("test", "hello".into());
+        let mut permissions = run.permissions;
+        assert!(matches!(
+            run.result.await.unwrap().unwrap(),
+            TurnStatus::Completed
+        ));
+        // Completing a turn releases the broadcast subscriber even without another event.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), permissions.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.dispose().await;
+        server.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

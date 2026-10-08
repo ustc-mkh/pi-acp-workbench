@@ -20,7 +20,7 @@ export const HARNESSES: Record<
     install: 'npm install -g @agentclientprotocol/codex-acp',
     loginHint:
       'ChatGPT 登录需远端可用的 codex CLI（codex login）。API key 模式需设置 CODEX_API_KEY 或 OPENAI_API_KEY，并配置 DEFAULT_AUTH_REQUEST={"methodId":"api-key"}。SSH 登录方式取决于 Codex CLI 支持。',
-    note: '标准 ACP（部分支持）：聊天、工具授权、图片及选择器按 Agent 能力提供；Fast mode 固定 Off、协作模式固定 Default；暂不支持 Pi 专用统计与原生分支。',
+    note: '标准 ACP（部分支持）：聊天、工具授权、图片及选择器按 Agent 能力提供；Fast mode 按适配器能力提供、协作模式固定 Default；支持上报用量与上下文占用，暂不支持原生分支。',
   },
   claude: {
     name: 'Claude Code',
@@ -28,7 +28,7 @@ export const HARNESSES: Record<
     install: 'npm install -g @agentclientprotocol/claude-agent-acp',
     loginHint:
       '登录终端通过适配器的 --cli /login 打开 Claude Code；也可使用已有凭据或 ANTHROPIC_API_KEY。',
-    note: '标准 ACP（部分支持）：聊天、工具授权、图片及选择器按 Agent 能力提供；暂不支持 Pi 专用统计与原生分支。',
+    note: '标准 ACP（部分支持）：聊天、工具授权、图片及选择器按 Agent 能力提供；支持上报用量与上下文占用，暂不支持原生分支。',
   },
 };
 export function snapshotHarness(snapshot: { harness?: unknown; id?: string }): HarnessId {

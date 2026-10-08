@@ -20,8 +20,10 @@ mod protocol;
 mod queue;
 mod server;
 mod service;
+mod state_stream;
 mod types;
 mod updates;
+mod usage;
 
 use pi_acp_core::mkdir_lock::MkdirLock;
 use serde::Deserialize;
@@ -106,7 +108,7 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
                 .filter(|p| p.exists());
             let adapter = adapter.unwrap_or_else(|| PathBuf::from("pi-acp"));
             // A Codex/Claude-only installation need not ship the Pi adapter.
-            if adapter == PathBuf::from("pi-acp") {
+            if adapter == std::path::Path::new("pi-acp") {
                 return Ok(ServiceConfig {
                     command: "pi-acp".into(),
                     args,

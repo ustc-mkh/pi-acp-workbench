@@ -8,7 +8,7 @@
 - **桌面编码助手**：侧栏对话、模型可见性管理、思考强度与适配器支持的 Fast 选择、代码选区和文件上下文、粘贴图片、工具调用与 diff 查看。
 - **每轮总 Diff**：输出末尾展示该轮工作区的文件和增删行数汇总，可展开补丁或打开编辑器对比；支持 Pi / Codex / Claude。[采集范围与限制](docs/turn-diff.md)。
 - **会话管理**：保存与恢复历史、跨端继续对话、Pi 原生会话分支、Markdown 导出。
-- **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。
+- **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。Codex / Claude 可统计适配器上报的输入、输出和缓存用量，显示上下文占用；只记录启用后经本服务执行的轮次，不回填原生历史。
 - **其他 Agent**：可选接入 Codex / Claude Code 的 ACP 适配器；三种 Agent 共用独立会话服务，Telegram 可打开已有会话。
 
 ## 配置 Pi 与 VS Code
