@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { SessionClient } from '../src/session-wire';
-import { SharedHistoryStore } from '../src/shared-history';
+import { SharedHistoryStore } from './support/history-fixture';
 import { startRustService } from './rust-service';
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => {

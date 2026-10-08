@@ -5,7 +5,6 @@
 mod api;
 mod bridge;
 mod config;
-mod events;
 mod markdown;
 mod sessions;
 mod stream;
@@ -52,46 +51,16 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 
 fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeState, String> {
     let invalid = || "Telegram 绑定文件无效，请从备份恢复；不会自动重新执行旧任务。".to_string();
-    let v = value.as_object().ok_or_else(invalid)?;
-    if v.get("version").and_then(Value::as_u64) != Some(1)
-        || v.get("botId").and_then(Value::as_i64) != Some(bot_id)
-        || v.get("chatId").and_then(Value::as_i64) != Some(chat_id)
-        || !v.get("topics").and_then(Value::as_array).is_some_and(|a| {
-            a.iter().all(|t| {
-                t.get("sessionId").and_then(Value::as_str).is_some()
-                    && t.get("threadId")
-                        .and_then(Value::as_i64)
-                        .is_some_and(|id| id > 0)
-            })
-        })
-        || !v
-            .get("delivered")
-            .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().all(|d| d.is_string()))
-        || !v
-            .get("offset")
-            .map(|o| o.as_i64().is_some_and(|i| i >= 0))
-            .unwrap_or(true)
-        || !v.get("silent").map(|s| s.is_boolean()).unwrap_or(true)
-        || !v
-            .get("notifications")
-            .map(|s| s.is_boolean())
-            .unwrap_or(true)
-        || !v
-            .get("historySent")
-            .map(|h| {
-                h.as_object().is_some_and(|m| {
-                    m.values().all(|v| {
-                        v.as_array()
-                            .is_some_and(|a| a.iter().all(|k| k.is_string()))
-                    })
-                })
-            })
-            .unwrap_or(true)
+    let state: BridgeState = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+    if state.version != 1
+        || state.bot_id != bot_id
+        || state.chat_id != chat_id
+        || state.topics.iter().any(|topic| topic.thread_id <= 0)
+        || state.offset.is_some_and(|offset| offset < 0)
     {
         return Err(invalid());
     }
-    serde_json::from_value(value.clone()).map_err(|_| invalid())
+    Ok(state)
 }
 
 fn report_fn(token: String) -> impl Fn(&str) + Send + Sync + 'static {
@@ -239,7 +208,10 @@ async fn run() -> Result<(), String> {
 
     let host = Sessions::connect(
         cfg.workspaces.clone(),
-        &root.join("service/sessions.sock"),
+        cfg.service_socket
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(&root.join("service/sessions.sock")),
         cfg.restrict_to_workspaces,
     )
     .await
@@ -284,30 +256,13 @@ async fn run() -> Result<(), String> {
         });
     }
 
-    let events_dir = directory.join("events");
     let sweep = {
         let bridge = bridge.clone();
         let stop = stop.clone();
         tokio::spawn(async move {
             while !stop.is_cancelled() {
-                match events::Scanner::open(&events_dir).await {
-                    Ok(mut scanner) => {
-                        while !stop.is_cancelled() {
-                            match scanner.next().await {
-                                Ok(Some(event)) => {
-                                    if bridge.consume(&event).await {
-                                        let _ = events::remove(&events_dir, &event.id).await;
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(error) => {
-                                    eprintln!("[telegram] outbox 扫描失败：{error}");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("[telegram] outbox 扫描失败：{e}"),
+                if let Err(error) = bridge.consume_outbox().await {
+                    eprintln!("[telegram] outbox 消费失败：{error}");
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(2500)) => {}

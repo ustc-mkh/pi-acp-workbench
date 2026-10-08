@@ -18,6 +18,8 @@ async function until(check, label) {
   throw new Error(`integration timeout: ${label}`);
 }
 const root = await mkdtemp(join(tmpdir(), 'pi-rust-integration-'));
+const relayRoot = join(root, 'relay-data');
+await mkdir(relayRoot);
 const workspace = join(root, 'workspace');
 await mkdir(workspace);
 execFileSync('git', ['init', '-q', workspace]);
@@ -96,6 +98,7 @@ await writeFile(
   telegramConfig,
   JSON.stringify({
     chatId: chat,
+    serviceSocket: join(root, 'service', 'sessions.sock'),
     allowedUserIds: [user],
     workspaces: { main: workspace },
     restrictToWorkspaces: true,
@@ -109,7 +112,7 @@ async function start(binary, config, env = {}) {
       ? process.env.PI_INTEGRATION_RELAY_DAEMON || binary
       : process.env.PI_INTEGRATION_SESSION_DAEMON || binary,
   );
-  const args = ['--config', config, '--data-dir', root];
+  const args = ['--config', config, '--data-dir', isRelay ? relayRoot : root];
   const child = spawn(selected, args, {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -155,7 +158,7 @@ const relayEnv = {
   PI_TELEGRAM_API_BASE: `http://127.0.0.1:${api.address().port}`,
   PI_TELEGRAM_PACE_MS: '1',
 };
-const bindingFile = join(root, 'telegram', `bot-123-chat-${chat}.json`);
+const bindingFile = join(relayRoot, 'telegram', `bot-123-chat-${chat}.json`);
 const sentText = (text) =>
   sent.some((item) => item.method === 'sendMessage' && item.params.text?.includes(text));
 let client;

@@ -12,7 +12,7 @@ const root = await mkdtemp(join(tmpdir(), 'pi-native-fork-')),
 try {
   const agentModule = join(root, 'agent.cjs');
   await build({
-    entryPoints: ['src/agent.ts'],
+    entryPoints: ['test/support/acp-client.ts'],
     outfile: agentModule,
     platform: 'node',
     format: 'cjs',

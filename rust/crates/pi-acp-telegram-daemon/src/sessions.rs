@@ -31,6 +31,14 @@ pub struct RunHandle {
     pub permissions: mpsc::Receiver<Value>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventDelivery {
+    pub cursor: String,
+    pub event: Option<pi_acp_core::turn_event::TurnEvent>,
+    pub token: Option<String>,
+}
+
 pub struct Sessions {
     client: Arc<WireClient>,
     workspaces: BTreeMap<String, String>,
@@ -44,6 +52,17 @@ fn stub(value: &Value) -> Option<SessionStub> {
         title: value.get("title")?.as_str()?.to_string(),
         session_number: value.get("sessionNumber").and_then(Value::as_u64),
     })
+}
+
+/// Exact canonical roots only: subdirectories and symlink escapes are excluded.
+async fn allowed_workspace(workspaces: &BTreeMap<String, String>, cwd: &str) -> Option<String> {
+    let canonical = tokio::fs::canonicalize(cwd).await.ok()?;
+    for path in workspaces.values() {
+        if tokio::fs::canonicalize(path).await.ok().as_ref() == Some(&canonical) {
+            return Some(canonical.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 impl Sessions {
@@ -61,12 +80,45 @@ impl Sessions {
 
     pub async fn list(&self) -> Result<Vec<SessionStub>, WireError> {
         let snapshots = self.client.call("list", json!({})).await?;
-        Ok(snapshots
-            .as_array()
-            .map(|a| a.iter().filter_map(stub).collect())
-            .unwrap_or_default())
+        let mut sessions = Vec::new();
+        if let Some(snapshots) = snapshots.as_array() {
+            for session in snapshots.iter().filter_map(stub) {
+                if !self.restrict_to_workspaces
+                    || allowed_workspace(&self.workspaces, &session.cwd)
+                        .await
+                        .is_some()
+                {
+                    sessions.push(session);
+                }
+            }
+        }
+        Ok(sessions)
     }
 
+    pub(crate) async fn authorize(&self, id: &str) -> Result<(), WireError> {
+        if self.restrict_to_workspaces && !self.list().await?.iter().any(|s| s.id == id) {
+            return Err(WireError::Service("会话不在允许的 workspaces 中。".into()));
+        }
+        Ok(())
+    }
+
+    pub async fn next_event(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<Option<EventDelivery>, WireError> {
+        let params = cursor
+            .map(|c| json!({ "cursor": c }))
+            .unwrap_or_else(|| json!({}));
+        let value = self.client.call("events.next", params).await?;
+        serde_json::from_value(value).map_err(|_| WireError::Protocol("events.next response"))
+    }
+    pub async fn ack_event(&self, id: &str, token: &str) -> Result<bool, WireError> {
+        let value = self
+            .client
+            .call("events.ack", json!({ "id": id, "token": token }))
+            .await?;
+        serde_json::from_value(value).map_err(|_| WireError::Protocol("events.ack response"))
+    }
     pub async fn create(&self, workspace: Option<&str>) -> Result<SessionStub, WireError> {
         let cwd = workspace
             .filter(|w| w.starts_with('/'))
@@ -91,20 +143,9 @@ impl Sessions {
             )));
         };
         let cwd = if self.restrict_to_workspaces {
-            let canonical = tokio::fs::canonicalize(&cwd)
+            allowed_workspace(&self.workspaces, &cwd)
                 .await
-                .map_err(|_| WireError::Service("目录不在允许的 workspaces 中。".into()))?;
-            let mut allowed = false;
-            for path in self.workspaces.values() {
-                if tokio::fs::canonicalize(path).await.ok().as_ref() == Some(&canonical) {
-                    allowed = true;
-                    break;
-                }
-            }
-            if !allowed {
-                return Err(WireError::Service("目录不在允许的 workspaces 中。".into()));
-            }
-            canonical.to_string_lossy().into_owned()
+                .ok_or_else(|| WireError::Service("目录不在允许的 workspaces 中。".into()))?
         } else {
             cwd
         };
@@ -116,6 +157,7 @@ impl Sessions {
     }
 
     pub async fn state(&self, id: &str) -> Result<Value, WireError> {
+        self.authorize(id).await?;
         self.client.call("state", json!({ "sessionId": id })).await
     }
 
@@ -184,8 +226,16 @@ impl Sessions {
             }
         });
         let client = self.client.clone();
+        let workspaces = self.workspaces.clone();
+        let restricted = self.restrict_to_workspaces;
         let id = id.to_string();
         let result = tokio::spawn(async move {
+            let host = Sessions {
+                client: client.clone(),
+                workspaces,
+                restrict_to_workspaces: restricted,
+            };
+            host.authorize(&id).await?;
             client.watch(&id, true).await?;
             let outcome = client
                 .call_timeout(
@@ -211,6 +261,7 @@ impl Sessions {
     }
 
     pub async fn cancel(&self, id: &str) -> Result<bool, WireError> {
+        self.authorize(id).await?;
         Ok(self
             .client
             .call("cancel", json!({ "sessionId": id }))
@@ -225,6 +276,7 @@ impl Sessions {
         permission_id: &str,
         option_id: Option<&str>,
     ) -> Result<bool, WireError> {
+        self.authorize(id).await?;
         let option = option_id.map(Value::from).unwrap_or(Value::Null);
         Ok(self
             .client
@@ -239,5 +291,81 @@ impl Sessions {
 
     pub async fn dispose(&self) {
         self.client.dispose().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn restriction_filters_sessions_and_rejects_existing_topic_operations() {
+        let root = std::env::temp_dir().join(format!("pi-workspace-{}", uuid::Uuid::new_v4()));
+        let allowed = root.join("allowed");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(allowed.join("child")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&allowed, root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&outside, allowed.join("escape")).unwrap();
+        let workspaces = BTreeMap::from([("work".into(), allowed.to_string_lossy().into_owned())]);
+        assert!(
+            allowed_workspace(&workspaces, root.join("alias").to_str().unwrap())
+                .await
+                .is_some()
+        );
+        for path in [
+            allowed.join("child"),
+            allowed.join("escape"),
+            root.join("missing"),
+        ] {
+            assert!(allowed_workspace(&workspaces, path.to_str().unwrap())
+                .await
+                .is_none());
+        }
+        let socket = root.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let snapshots = json!([
+            {"id":"allowed","cwd":allowed,"title":"Allowed","sessionNumber":1},
+            {"id":"outside","cwd":outside,"title":"Secret","sessionNumber":2},
+            {"id":"child","cwd":allowed.join("child"),"title":"Child","sessionNumber":3},
+            {"id":"missing","cwd":root.join("missing"),"title":"Missing","sessionNumber":4}
+        ]);
+        let server = tokio::spawn(async move {
+            let (peer, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = peer.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                // Forbidden operations must never reach the session service.
+                assert_eq!(request["method"], "list");
+                writer
+                    .write_all(
+                        format!("{}\n", json!({"id":request["id"],"value":snapshots})).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let host = Sessions::connect(workspaces.clone(), &socket, true)
+            .await
+            .unwrap();
+        let sessions = host.list().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "allowed");
+        assert!(host.create(outside.to_str()).await.is_err());
+        assert!(host.state("outside").await.is_err());
+        assert!(host.cancel("outside").await.is_err());
+        assert!(host.permission("outside", "p", Some("yes")).await.is_err());
+        assert!(host
+            .run("outside", "prompt".into())
+            .result
+            .await
+            .unwrap()
+            .is_err());
+        host.dispose().await;
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

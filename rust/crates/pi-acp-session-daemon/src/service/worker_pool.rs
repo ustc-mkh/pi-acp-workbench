@@ -76,10 +76,58 @@ impl SessionService {
         Ok(())
     }
 
-    pub(super) fn agent_env(&self) -> HashMap<String, String> {
-        let mut env = self.config.env.clone();
+    fn launch(&self, harness: Harness) -> WorkerLaunch {
+        if let Some(worker) = self.config.harnesses.get(harness.name()) {
+            return worker.clone();
+        }
+        match harness {
+            Harness::Pi => WorkerLaunch {
+                command: self.config.command.clone(),
+                args: self.config.args.clone(),
+                env: self.config.env.clone(),
+            },
+            Harness::Codex => WorkerLaunch {
+                command: "codex-acp".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            Harness::Claude => WorkerLaunch {
+                command: "claude-agent-acp".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+        }
+    }
+    fn worker_env(&self, worker: &WorkerLaunch) -> HashMap<String, String> {
+        let mut env = worker.env.clone();
         env.insert("PI_TELEGRAM_BOT_TOKEN".into(), String::new());
+        env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
         env
+    }
+    pub(super) async fn hello(&self, harness: Harness) -> Result<Value, String> {
+        if let Some(info) = self.capabilities.lock().unwrap().get(&harness).cloned() {
+            return Ok(info);
+        }
+        // Negotiate real upstream capabilities; do not advertise Pi extensions for other agents.
+        self.exclusive(|| async {
+            if let Some(info) = self.capabilities.lock().unwrap().get(&harness).cloned() {
+                return Ok(info);
+            }
+            self.make_room().await?;
+            let worker =
+                self.spawn_transient(harness, "/", Arc::new(Mutex::new(initial_state())))?;
+            let result = worker.initialize().await;
+            worker.stop().await;
+            let mut info = result?;
+            info["agentCapabilities"]["_meta"]["session-service"] =
+                json!({ "version": 3, "authoritative": true });
+            self.capabilities
+                .lock()
+                .unwrap()
+                .insert(harness, info.clone());
+            Ok(info)
+        })
+        .await
     }
 
     /// spawn() for a live runtime — update/permission/closed callbacks wired to it.
@@ -87,12 +135,16 @@ impl SessionService {
         let weak = Arc::downgrade(rt);
         let broadcast = self.broadcast.clone();
         let report = self.report.clone();
-        let cwd = rt.lock().unwrap().snapshot.cwd.clone();
+        let snapshot = rt.lock().unwrap().snapshot.clone();
+        let harness = Harness::parse(snapshot.harness.as_deref().unwrap_or(""))?;
+        let launch = self.launch(harness);
+        let cwd = snapshot.cwd;
         let options = AgentOptions {
+            harness,
             cwd,
-            command: self.config.command.clone(),
-            args: self.config.args.clone(),
-            env: self.agent_env(),
+            command: launch.command.clone(),
+            args: launch.args.clone(),
+            env: self.worker_env(&launch),
             update: {
                 let rt = weak.clone();
                 let broadcast = broadcast.clone();
@@ -152,7 +204,7 @@ impl SessionService {
                             tokio::time::sleep(Duration::from_millis(40)).await;
                             if let Some(rt) = rt.upgrade() {
                                 let event = {
-                                    let mut r = rt.lock().unwrap();
+                                    let Ok(mut r) = rt.lock() else { return };
                                     r.snapshot_pending = false;
                                     view_state_with_type(&r)
                                 };
@@ -185,7 +237,7 @@ impl SessionService {
                 Arc::new(move |error: String| {
                     let Some(rt) = weak.upgrade() else { return };
                     let event = {
-                        let mut r = rt.lock().unwrap();
+                        let mut r = rt.lock().unwrap_or_else(|p| p.into_inner());
                         r.error = Some(error);
                         view_state_with_type(&r)
                     };
@@ -201,15 +253,18 @@ impl SessionService {
     /// owned initial state; permissions auto-cancelled.
     pub(super) fn spawn_transient(
         &self,
+        harness: Harness,
         cwd: &str,
         state: Arc<Mutex<ChatState>>,
     ) -> Result<Arc<AgentProcess>, String> {
         let report = self.report.clone();
+        let launch = self.launch(harness);
         Ok(Arc::new(AgentProcess::spawn(AgentOptions {
+            harness,
             cwd: cwd.to_string(),
-            command: self.config.command.clone(),
-            args: self.config.args.clone(),
-            env: self.agent_env(),
+            command: launch.command.clone(),
+            args: launch.args.clone(),
+            env: self.worker_env(&launch),
             update: Arc::new(move |n| {
                 apply_update(
                     &mut state.lock().unwrap(),
@@ -282,7 +337,11 @@ impl SessionService {
             if let Some(old) = old {
                 old.stop().await;
             }
-            rt.lock().unwrap().phase.active_mut().step = Step::Replaying;
+            if let Some(active) = rt.lock().unwrap().phase.active_mut() {
+                active.step = Step::Replaying;
+            } else {
+                return Err("会话操作已结束。".into());
+            }
         }
         let session_id = rt.lock().unwrap().snapshot.id.clone();
         let agent = self.spawn_agent(rt)?;
@@ -290,6 +349,22 @@ impl SessionService {
         let started = async {
             agent.initialize().await?;
             let mut session = agent.create_session(Some(&session_id)).await?;
+            // ACP load responses may omit selectors; retain the persisted selector
+            // catalogue so successful settings can be restored through standard RPC.
+            {
+                let r = rt.lock().unwrap();
+                if session.get("configOptions").is_none() {
+                    if let Some(configs) = &r.state.configs {
+                        session["configOptions"] = json!(configs);
+                    }
+                }
+                if session.get("modes").is_none() {
+                    if let Some(modes) = &r.state.modes {
+                        session["modes"] = modes.clone();
+                    }
+                }
+            }
+            agent.configure_session(&mut session).await?;
             let prefs = model_preferences(&rt.lock().unwrap().state);
             if let Some(warning) = apply_preferences(agent.as_ref(), &mut session, &prefs).await? {
                 rt.lock().unwrap().state.entries.push(Entry::text_entry(
@@ -309,7 +384,11 @@ impl SessionService {
             if session.get("modes").is_some_and(js_truthy_value) {
                 r.state.modes = session.get("modes").cloned();
             }
-            r.phase.active_mut().step = Step::Preparing;
+            if let Some(active) = r.phase.active_mut() {
+                active.step = Step::Preparing;
+            } else {
+                return Err("会话操作已结束。".into());
+            }
             Ok(())
         }
         .await;

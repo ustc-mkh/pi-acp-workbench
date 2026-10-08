@@ -28,6 +28,7 @@ fn now_ms() -> u64 {
 
 pub struct TaskOutbox {
     directory: PathBuf,
+    storage: tokio::sync::Mutex<()>,
     #[cfg(test)]
     write_gate: Option<Arc<tokio::sync::Semaphore>>,
     #[cfg(test)]
@@ -38,6 +39,7 @@ impl TaskOutbox {
     pub fn new(directory: PathBuf) -> Self {
         TaskOutbox {
             directory,
+            storage: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             write_gate: None,
             #[cfg(test)]
@@ -53,7 +55,21 @@ impl TaskOutbox {
         ))
     }
 
+    pub async fn next(&self, cursor: Option<&str>) -> Result<Value, String> {
+        let _guard = self.storage.lock().await;
+        crate::outbox_reader::next(&self.directory, cursor)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+    }
+    pub async fn ack(&self, id: &str, token: &str) -> Result<bool, String> {
+        let _guard = self.storage.lock().await;
+        crate::outbox_reader::ack(&self.directory, id, token)
+            .await
+            .map_err(|e| e.to_string())
+    }
     pub async fn write(&self, event: &TurnEvent) -> Result<(), String> {
+        let _guard = self.storage.lock().await;
         #[cfg(test)]
         {
             self.write_attempts.fetch_add(1, Ordering::SeqCst);

@@ -1,83 +1,48 @@
 //! Telegram relay configuration validation.
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub chat_id: i64,
     pub allowed_user_ids: Vec<i64>,
+    #[serde(default)]
     pub workspaces: BTreeMap<String, String>,
+    #[serde(default)]
     pub restrict_to_workspaces: bool,
+    #[serde(default)]
+    pub service_socket: Option<String>,
 }
 
 pub fn parse(value: &Value) -> Result<Config, String> {
-    let v = value.as_object().ok_or("Telegram 配置必须为 JSON 对象。")?;
-    let chat_id = v
-        .get("chatId")
-        .and_then(Value::as_i64)
-        .filter(|id| *id < 0)
-        .ok_or("chatId 必须是私人 Topics 超级群组的负整数 ID。")?;
-    let users = v
-        .get("allowedUserIds")
-        .and_then(Value::as_array)
-        .filter(|a| !a.is_empty())
-        .ok_or("allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。")?;
-    let mut allowed = Vec::new();
-    for id in users {
-        allowed.push(
-            id.as_i64()
-                .filter(|id| *id > 0)
-                .ok_or("allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。")?,
-        );
+    let config: Config =
+        serde_json::from_value(value.clone()).map_err(|e| format!("Telegram 配置无效：{e}"))?;
+    if config
+        .service_socket
+        .as_ref()
+        .is_some_and(|path| !std::path::Path::new(path).is_absolute())
+    {
+        return Err("serviceSocket 必须为绝对路径。".into());
     }
-    let mut workspaces = BTreeMap::new();
-    if let Some(map) = v.get("workspaces") {
-        let map = map
-            .as_object()
-            .ok_or("workspaces 必须是工作区名称到本机目录的映射。")?;
-        for (name, path) in map {
-            let valid_name = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                && !["__proto__", "constructor", "prototype"].contains(&name.as_str());
-            let path = path.as_str().filter(|p| !p.trim().is_empty());
-            if !valid_name || path.is_none() {
-                return Err("workspaces 必须是工作区名称到本机目录的映射。".into());
-            }
-            workspaces.insert(name.clone(), path.unwrap().to_string());
+    if config.chat_id >= 0 {
+        return Err("chatId 必须是私人 Topics 超级群组的负整数 ID。".into());
+    }
+    if config.allowed_user_ids.is_empty() || config.allowed_user_ids.iter().any(|id| *id <= 0) {
+        return Err("allowedUserIds 必须包含至少一个明确允许的 Telegram 用户数字 ID。".into());
+    }
+    for (name, path) in &config.workspaces {
+        let valid_name = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !["__proto__", "constructor", "prototype"].contains(&name.as_str());
+        if !valid_name || path.trim().is_empty() {
+            return Err("workspaces 必须是工作区名称到本机目录的映射。".into());
         }
     }
-    let restrict_to_workspaces = match v.get("restrictToWorkspaces") {
-        None => false,
-        Some(value) => value
-            .as_bool()
-            .ok_or("restrictToWorkspaces 必须是布尔值。")?,
-    };
-    let unknown: Vec<&str> = v
-        .keys()
-        .map(String::as_str)
-        .filter(|k| {
-            ![
-                "chatId",
-                "allowedUserIds",
-                "workspaces",
-                "restrictToWorkspaces",
-            ]
-            .contains(k)
-        })
-        .collect();
-    if !unknown.is_empty() {
-        return Err(format!(
-            "不支持的 Telegram 配置字段：{}",
-            unknown.join(", ")
-        ));
-    }
-    Ok(Config {
-        chat_id,
-        allowed_user_ids: allowed,
-        workspaces,
-        restrict_to_workspaces,
-    })
+    Ok(config)
 }
 
 #[cfg(test)]

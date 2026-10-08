@@ -1,9 +1,8 @@
 import type { Memento } from 'vscode';
 import type { Agent } from './remote-agent';
 import type { ChatState } from './shared';
-import type { HistoryPersistence } from './history-persistence';
+import type { ClientOperations } from './conversation-history';
 import { HARNESSES, type HarnessId } from './harness';
-import { bindNativeForks } from './native-branch';
 import { presetPrices } from './prices';
 import {
   mergeUsage,
@@ -21,7 +20,6 @@ interface StatisticsContext {
   harness: HarnessId;
   conversationId?: string;
   retained: boolean;
-  authoritative?: boolean;
 }
 function metadataDeadline<T>(request: Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -46,7 +44,7 @@ export class ConversationStatistics {
   private modelPrices: Record<string, Price> = {};
   constructor(
     private storage: Memento,
-    private persistence: HistoryPersistence,
+    private persistence: ClientOperations,
     private current: () => StatisticsContext,
     private contextWindow: (value: number) => void,
     private changed: () => void,
@@ -133,7 +131,7 @@ export class ConversationStatistics {
   }
   async refresh(settledTurn = false) {
     if (this.pending) return this.pending;
-    const { agent, state, harness, authoritative } = this.current(),
+    const { agent, state, harness } = this.current(),
       sessionId = state.sessionId;
     const meta = agent?.info?.agentCapabilities?._meta?.['pi-workbench'] as
       | { version?: number }
@@ -145,7 +143,6 @@ export class ConversationStatistics {
     };
     if (!agent || !sessionId || !this.value.available || (state.status === 'busy' && !settledTurn))
       return;
-    const entries = state.entries.slice();
     const current = () => {
       const now = this.current();
       return now.agent === agent && now.state === state && now.state.sessionId === sessionId;
@@ -165,16 +162,6 @@ export class ConversationStatistics {
           if (!current()) return;
           records.push(...(data.records || []));
           if (!cursor) {
-            if (
-              !authoritative &&
-              entries.length === state.entries.length &&
-              entries.every((entry, i) => entry === state.entries[i])
-            )
-              state.nativeForks = bindNativeForks(
-                entries,
-                data.forkPoints || [],
-                state.nativeForks,
-              );
             if (data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow > 0)
               this.contextWindow(data.contextWindow);
             for (const [key, value] of Object.entries(data.prices || {}))

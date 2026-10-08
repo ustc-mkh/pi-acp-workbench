@@ -36,7 +36,9 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
                 || last.message_id == message_id.cloned())
     });
     if mergeable {
-        let last = state.entries.last_mut().unwrap();
+        let Some(last) = state.entries.last_mut() else {
+            return;
+        };
         let mut text_owned = last.text.take().unwrap_or_default();
         text_owned.push_str(text);
         last.text = Some(text_owned);
@@ -263,4 +265,106 @@ fn merge_terminal(previous: Option<Value>, meta: Option<&Value>) -> Option<Value
         }
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn chunks_respect_message_ids_roles_and_tool_boundaries() {
+        let mut state = initial_state();
+        for (text, id) in [("hello", "a"), (" world", "a"), ("new", "b")] {
+            apply_update(
+                &mut state,
+                &json!({"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}}),
+                false,
+            );
+        }
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.entries[0].text(), "hello world");
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}),
+            false,
+        );
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"tool_call","toolCallId":"t","title":"Read"}),
+            false,
+        );
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"agent_message_chunk","messageId":"b","content":{"type":"text","text":"after"}}),
+            false,
+        );
+        assert_eq!(state.entries.len(), 5);
+        let ids: std::collections::HashSet<_> = state.entries.iter().map(|e| &e.id).collect();
+        assert_eq!(ids.len(), 5);
+    }
+    #[test]
+    fn user_echoes_are_ignored_live_and_images_preserved_in_replay() {
+        let mut state = initial_state();
+        let image = json!({"type":"image","data":"AAAA","mimeType":"image/png"});
+        let update = json!({"sessionUpdate":"user_message_chunk","content":image});
+        apply_update(&mut state, &update, false);
+        assert!(state.entries.is_empty());
+        apply_update(&mut state, &update, true);
+        assert_eq!(state.entries[0].context_blocks, Some(vec![image]));
+    }
+    #[test]
+    fn partial_tool_updates_keep_title_input_and_terminal_output() {
+        let mut state = initial_state();
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"early","status":"completed"}),
+            false,
+        );
+        assert_eq!(state.entries[0].tool.as_ref().unwrap()["title"], "工具调用");
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"tool_call","toolCallId":"bash","title":"Read file","rawInput":{"path":"x.ts"},"_meta":{"terminal_info":{"terminal_id":"term","cwd":"/work"}}}),
+            false,
+        );
+        for text in ["hello\n", "world"] {
+            apply_update(
+                &mut state,
+                &json!({"sessionUpdate":"tool_call_update","toolCallId":"bash","_meta":{"terminal_output":{"terminal_id":"term","data":text}}}),
+                false,
+            );
+        }
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"bash","title":null,"status":"completed","content":[],"_meta":{"terminal_exit":{"terminal_id":"term","exit_code":0,"signal":null}}}),
+            false,
+        );
+        let entry = &state.entries[1];
+        let tool = entry.tool.as_ref().unwrap();
+        assert_eq!(tool["title"], "Read file");
+        assert_eq!(tool["rawInput"], json!({"path":"x.ts"}));
+        assert_eq!(
+            entry.terminal,
+            Some(
+                json!({"id":"term","cwd":"/work","output":"hello\nworld","exitCode":0,"signal":null})
+            )
+        );
+    }
+    #[test]
+    fn usage_updates_validate_numbers_and_clear_unknown_occupancy() {
+        let mut state = initial_state();
+        for used in [80, 90, -1] {
+            apply_update(
+                &mut state,
+                &json!({"sessionUpdate":"usage_update","used":used,"size":100}),
+                false,
+            );
+        }
+        assert_eq!(state.usage, Some(json!({"used":90,"size":100})));
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"session_info_update","_meta":{"pi-workbench-context":{"used":null,"size":100}}}),
+            false,
+        );
+        assert_eq!(state.usage, Some(json!({"used":null,"size":100})));
+    }
 }

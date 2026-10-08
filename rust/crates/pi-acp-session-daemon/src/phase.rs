@@ -53,10 +53,10 @@ impl Phase {
             Self::Active(active) => Some(active),
         }
     }
-    pub fn active_mut(&mut self) -> &mut Active {
+    pub fn active_mut(&mut self) -> Option<&mut Active> {
         match self {
-            Self::Active(active) => active,
-            Self::Idle => panic!("operation requires an active runtime"),
+            Self::Active(active) => Some(active),
+            Self::Idle => None,
         }
     }
     pub fn take_publication(&mut self) -> Option<TurnPublication> {
@@ -71,5 +71,21 @@ impl Phase {
                 task.abort();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_access_and_cleanup_do_not_panic() {
+        let mut phase = Phase::Idle;
+        assert!(phase.active_mut().is_none());
+        assert!(phase.take_publication().is_none());
+        phase.stop_cancel_timer();
+        phase = Phase::begin();
+        phase.active_mut().unwrap().cancelled = true;
+        assert!(phase.cancelled());
     }
 }

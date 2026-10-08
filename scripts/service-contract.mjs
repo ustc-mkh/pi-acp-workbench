@@ -169,8 +169,8 @@ test('hello advertises workbench capabilities', async () => {
   const info = await c.call('hello');
   assert.equal(info.protocolVersion, 1);
   assert.equal(info.agentCapabilities?.loadSession, true);
-  assert.equal(info.agentCapabilities?._meta?.['pi-workbench']?.version, 2);
-  assert.equal(info.agentCapabilities?._meta?.['pi-workbench']?.history, true);
+  assert.equal(info.agentCapabilities?._meta?.['session-service']?.version, 3);
+  assert.equal(info.agentCapabilities?._meta?.['session-service']?.authoritative, true);
 });
 
 test('validation rejects malformed requests without destroying valid work', async () => {
@@ -542,61 +542,12 @@ test('remove deletes the session from history and rejects further state', async 
   await expectError(c.call('state', { sessionId: state.sessionId }), /不存在|删除/);
 });
 
-test('historyWrite/historyRemove round-trip a delegated snapshot', async () => {
+test('removed delegated writer is rejected and history removal is authoritative', async () => {
   const c = state.client;
-  const id = 'workbench:codex:contract-' + Math.random().toString(36).slice(2);
-  const snapshot = {
-    id,
-    cwd: workspace,
-    harness: 'codex',
-    title: 'delegated',
-    updated: Date.now(),
-    entries: [{ id: 'e1', role: 'user', text: 'hi' }],
-    contextComplete: true,
-  };
-  const saved = await c.call('historyWrite', { snapshot });
-  assert.equal(saved.id, id);
-  assert.ok(typeof saved.revision === 'string' && saved.revision);
-  assert.ok(saved.sessionNumber >= 1);
-  // Non-pi harness stays invisible to list() but is stored in the shared index.
-  assert.ok(!(await c.call('list')).some((s) => s.id === id));
-  // A stale base revision conflicts; the fresh one succeeds.
-  await expectError(c.call('historyWrite', { snapshot }), /另一个窗口更新/);
-  const saved2 = await c.call('historyWrite', {
-    snapshot: { ...snapshot, revision: saved.revision },
-  });
-  assert.notEqual(saved2.revision, saved.revision);
-  const gone = await c.call('historyRemove', { sessionId: id });
-  assert.equal(gone, undefined);
-  await expectError(c.call('historyRemove', { sessionId: id }), /会话不存在/);
-});
-
-test('historyWrite accepts a caller-held fresh lease', async () => {
-  const c = state.client;
-  const id = 'workbench:codex:leased-' + Math.random().toString(36).slice(2);
-  // Simulate an extension holding the session lock: mkdir + fresh mtime.
-  const lockDir = join(
-    dataDir,
-    'history',
-    'session-' + createHash('sha256').update(id).digest('hex') + '.lock',
-  );
-  await mkdir(lockDir, { recursive: true });
-  try {
-    const snapshot = {
-      id,
-      cwd: workspace,
-      harness: 'codex',
-      title: 'leased',
-      updated: Date.now(),
-      entries: [],
-      contextComplete: true,
-    };
-    const saved = await c.call('historyWrite', { snapshot });
-    assert.equal(saved.id, id);
-    await c.call('historyRemove', { sessionId: id });
-  } finally {
-    await rm(lockDir, { recursive: true, force: true });
-  }
+  await expectError(c.call('historyWrite', { snapshot: {} }), /未知|Unknown|unknown/);
+  const snapshot = await c.call('create', { cwd: workspace });
+  await c.call('historyRemove', { sessionId: snapshot.id });
+  await expectError(c.call('state', { sessionId: snapshot.id }), /不存在/);
 });
 
 // --- runner -----------------------------------------------------------------

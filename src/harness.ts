@@ -55,24 +55,3 @@ export function nativeSessionId(harness: HarnessId, id: string) {
   if (!id.startsWith(prefix)) throw new Error('会话不属于当前 harness，拒绝发送。');
   return decodeURIComponent(id.slice(prefix.length));
 }
-export interface HarnessConfig {
-  get<T>(key: string, fallback: T): T;
-}
-export function launchSettings(config: HarnessConfig, harness: Exclude<HarnessId, 'pi'>) {
-  const prefix = harness + '.';
-  const command = config.get(prefix + 'command', HARNESSES[harness].command);
-  const args = config.get<string[]>(prefix + 'args', []);
-  const env = config.get<Record<string, string>>(prefix + 'env', {});
-  if (
-    typeof command !== 'string' ||
-    !command.trim() ||
-    !Array.isArray(args) ||
-    args.some((arg) => typeof arg !== 'string') ||
-    !env ||
-    typeof env !== 'object' ||
-    Array.isArray(env) ||
-    Object.values(env).some((value) => typeof value !== 'string')
-  )
-    throw new Error('Harness 启动配置无效，请检查 command / args / env。');
-  return { command, args, env, setting: `piAcp.${prefix}command` };
-}

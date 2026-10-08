@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { AgentProcess } from '../src/agent';
+import { AgentProcess } from './support/acp-client';
 import { localSessionId } from '../src/harness';
 it.each(['codex', 'claude'] as const)(
   '%s translates IDs for load, prompts, notifications, permissions, config and cancellation',

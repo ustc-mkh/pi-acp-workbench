@@ -111,7 +111,8 @@ async fn git(
             .arg("core.autocrlf=false")
             .args(args)
             .current_dir(cwd)
-            // execFile strips every GIT_* variable from the inherited env.
+            // Replace the inherited environment, matching TS execFile({ env }).
+            .env_clear()
             .envs(std::env::vars_os().filter(|(k, _)| !k.to_string_lossy().starts_with("GIT_")))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -761,6 +762,41 @@ mod tests {
         );
     }
 
+    // Re-exec isolates polluted environment variables from parallel tests.
+    #[tokio::test]
+    async fn git_ignores_inherited_repository_overrides() {
+        const MARKER: &str = "PI_DIFF_ENV_TEST_ROOT";
+        if let Some(root) = std::env::var_os(MARKER) {
+            let root = PathBuf::from(root);
+            let actual = git(&root, &["rev-parse", "--show-toplevel"], 4096, false)
+                .await
+                .unwrap();
+            assert_eq!(actual.trim(), root.to_str().unwrap());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("pi-diff-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        git_ok(&root, &["init"]);
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "diff::tests::git_ignores_inherited_repository_overrides",
+            ])
+            .env(MARKER, &root)
+            .env("GIT_DIR", root.join("missing-repository"))
+            .env("GIT_WORK_TREE", "/nonexistent")
+            .env("GIT_INDEX_FILE", root.join("wrong-index"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn workspace_diff_reports_changes() {
         let dir =
@@ -821,6 +857,69 @@ mod tests {
         assert_eq!(diff.warnings.last().map(String::as_str), Some(SCOPE));
         assert!(entry.text().starts_with("本轮修改 · 2 个文件"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scopes_nested_workspaces_and_preserves_git_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("pi-diff-scope-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        git_ok(&root, &["init"]);
+        std::fs::write(root.join("outside"), "before").unwrap();
+        std::fs::write(nested.join("script"), "echo ok\n").unwrap();
+        git_ok(&root, &["add", "."]);
+        let index = std::fs::read(root.join(".git/index")).unwrap();
+        let mut changes = WorkspaceDiff::begin(nested.to_str().unwrap()).await;
+        std::fs::write(root.join("outside"), "after").unwrap();
+        std::fs::set_permissions(
+            nested.join("script"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let diff = changes.finish().await.diff.unwrap();
+        assert_eq!(diff.files.len(), 1);
+        let file = &diff.files[0];
+        assert_eq!(file.path, "script");
+        assert_eq!((file.added, file.removed), (0, 0));
+        assert_ne!(file.old_mode, file.new_mode);
+        assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_symlink_directories_and_reports_omissions() {
+        let root = std::env::temp_dir().join(format!("pi-diff-safe-{}", uuid::Uuid::new_v4()));
+        let outside = root.join("secret-data");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(repo.join("folder")).unwrap();
+        git_ok(&repo, &["init"]);
+        std::fs::write(outside.join("secret"), "SECRET").unwrap();
+        std::fs::write(repo.join("folder/secret"), "safe").unwrap();
+        git_ok(&repo, &["add", "."]);
+        std::fs::write(repo.join("binary"), [0, 1]).unwrap();
+        std::fs::write(repo.join("large"), vec![b'x'; FILE_BYTES as usize + 1]).unwrap();
+        let mut changes = WorkspaceDiff::begin(repo.to_str().unwrap()).await;
+        std::fs::remove_dir_all(repo.join("folder")).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("folder")).unwrap();
+        std::fs::write(repo.join("binary"), [0, 2]).unwrap();
+        std::fs::write(repo.join("large"), vec![b'y'; FILE_BYTES as usize + 2]).unwrap();
+        let diff = changes.finish().await.diff.unwrap();
+        assert_eq!(diff.status, "partial");
+        assert!(!serde_json::to_string(&diff).unwrap().contains("SECRET"));
+        for path in ["binary", "large", "folder/secret"] {
+            assert!(
+                diff.files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .unwrap()
+                    .omitted
+                    .is_some(),
+                "{path}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

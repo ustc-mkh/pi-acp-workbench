@@ -7,7 +7,8 @@ mod worker_pool;
 use crate::agent::{AgentOptions, AgentProcess};
 use crate::diff::WorkspaceDiff;
 use crate::error::ServiceError;
-use crate::history::{SessionInUseError, SharedHistoryStore};
+use crate::harness::Harness;
+use crate::history::SharedHistoryStore;
 use crate::journal::RequestJournal;
 use crate::native::bind_native_forks;
 use crate::outbox::{StateAccessor, TaskOutbox, TurnPublication};
@@ -52,6 +53,16 @@ fn auto_cancel_permission() -> crate::agent::PermissionCb {
     )
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerLaunch {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
     pub command: String,
@@ -59,6 +70,7 @@ pub struct ServiceConfig {
     pub env: HashMap<String, String>,
     pub max_workers: usize,
     pub idle_ms: u64,
+    pub harnesses: HashMap<String, WorkerLaunch>,
 }
 
 pub struct Runtime {
@@ -74,7 +86,7 @@ pub struct Runtime {
 }
 
 pub struct SessionService {
-    /// Shared with the lease-lost callback; std Mutex, never held across await.
+    /// Runtime catalogue; std Mutex is never held across await.
     runtimes: Arc<Mutex<HashMap<String, Rt>>>,
     journal: RequestJournal,
     preferences: SessionPreferences,
@@ -82,6 +94,7 @@ pub struct SessionService {
     store: Arc<SharedHistoryStore>,
     events: Arc<TaskOutbox>,
     config: ServiceConfig,
+    capabilities: Mutex<HashMap<Harness, Value>>,
     broadcast: Broadcast,
     report: Report,
     closed: Arc<AtomicBool>,
@@ -97,22 +110,10 @@ impl SessionService {
         report: Report,
     ) -> Arc<Self> {
         let runtimes: Arc<Mutex<HashMap<String, Rt>>> = Arc::new(Mutex::new(HashMap::new()));
-        let map_for_lease = runtimes.clone();
         let runtimes_field = runtimes;
         let service = Arc::new(SessionService {
-            store: Arc::new(SharedHistoryStore::new(
-                root.join("history"),
-                Some(Arc::new(move |id: &str| {
-                    // Lease compromised mid-session: fail the live runtime loudly.
-                    if let Some(rt) = map_for_lease.lock().unwrap().get(id).cloned() {
-                        let mut r = rt.lock().unwrap();
-                        r.error = Some("会话锁失效".into());
-                        if let Some(agent) = r.agent.take() {
-                            agent.dispose();
-                        }
-                    }
-                })),
-            )),
+            capabilities: Mutex::new(HashMap::new()),
+            store: Arc::new(SharedHistoryStore::new(root.join("history"))),
             preferences: SessionPreferences::new(root.join("preferences")),
             events: Arc::new(TaskOutbox::new(root.join("telegram").join("events"))),
             journal: RequestJournal::new(root.join("service").join("requests")),
@@ -185,9 +186,7 @@ impl SessionService {
         }
         if matches!(
             command,
-            ServiceCommand::Remove { .. }
-                | ServiceCommand::HistoryWrite { .. }
-                | ServiceCommand::HistoryRemove { .. }
+            ServiceCommand::Remove { .. } | ServiceCommand::HistoryRemove { .. }
         ) || matches!(
             &command,
             ServiceCommand::Request {
@@ -210,18 +209,11 @@ impl SessionService {
 
     async fn execute(&self, command: &ServiceCommand, request_id: &str) -> Result<Value, String> {
         match command {
-            ServiceCommand::Hello => Ok(json!({
-                "protocolVersion": 1,
-                "agentInfo": { "name": "pi-session-service", "title": "Pi 会话服务", "version": "1" },
-                "agentCapabilities": {
-                    "loadSession": true,
-                    "promptCapabilities": { "image": true, "embeddedContext": true },
-                    "_meta": { "pi-workbench": { "version": 2, "inspect": true, "nativeFork": true, "history": true } },
-                },
-            })),
+            ServiceCommand::EventsNext { cursor } => self.events.next(cursor.as_deref()).await,
+            ServiceCommand::EventsAck { id, token } => Ok(json!(self.events.ack(id, token).await?)),
+            ServiceCommand::Hello { harness } => self.hello(*harness).await,
             ServiceCommand::List => Ok(json!(self.list().await?)),
-            ServiceCommand::Create { cwd } => self.create(cwd).await,
-            ServiceCommand::HistoryWrite { snapshot, .. } => self.history_write(snapshot).await,
+            ServiceCommand::Create { cwd, harness } => self.create(cwd, *harness).await,
             ServiceCommand::HistoryRemove { session_id } => {
                 self.history_remove(session_id.as_deref()).await?;
                 Ok(Value::Null)
@@ -320,7 +312,6 @@ fn command_session_id(command: &ServiceCommand) -> &str {
         | ServiceCommand::Permission { session_id, .. }
         | ServiceCommand::Prompt { session_id, .. }
         | ServiceCommand::Request { session_id, .. } => session_id,
-        ServiceCommand::HistoryWrite { snapshot } => &snapshot.id,
         ServiceCommand::HistoryRemove { session_id } => session_id.as_deref().unwrap_or(""),
         _ => "",
     }
@@ -405,5 +396,69 @@ async fn service_permission(
     match chosen {
         Some(option_id) => json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
         None => cancelled(),
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[tokio::test]
+    async fn panicking_operation_restores_committed_history_and_releases_the_worker() {
+        let root = std::env::temp_dir().join(format!("pi-runtime-recovery-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/contract-agent.mjs");
+        let service = SessionService::new(
+            &root,
+            ServiceConfig {
+                command: "node".into(),
+                args: vec![worker.to_string_lossy().into_owned()],
+                env: HashMap::new(),
+                max_workers: 2,
+                idle_ms: 900000,
+                harnesses: HashMap::new(),
+            },
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        service.initialize().await.unwrap();
+        let snapshot = service
+            .create(root.to_str().unwrap(), Harness::Pi)
+            .await
+            .unwrap();
+        let id = snapshot["id"].as_str().unwrap();
+        service
+            .handle(
+                "prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"retained"}]}),
+                "before",
+            )
+            .await
+            .unwrap();
+        let before = service.state(id).await.unwrap()["snapshot"]["entries"].clone();
+        let result = service
+            .with_worker(id, |rt, _agent| {
+                Box::pin(async move {
+                    let mut r = rt.lock().unwrap();
+                    r.state.entries.clear();
+                    panic!("simulated worker logic bug while holding the runtime mutex");
+                })
+            })
+            .await;
+        assert!(result.is_err());
+        let restored = service.state(id).await.unwrap();
+        assert_eq!(restored["snapshot"]["entries"], before);
+        assert_eq!(restored["busy"], false);
+        assert_eq!(restored["permissions"], json!([]));
+        service
+            .handle(
+                "prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"after"}]}),
+                "after",
+            )
+            .await
+            .unwrap();
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile, mkdir, symlink, writeFile, rename } from 'node:f
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionClient } from '../src/session-wire';
-import { SharedHistoryStore } from '../src/shared-history';
+import { SharedHistoryStore } from './support/history-fixture';
 import { startRustService } from './rust-service';
 import { requestFingerprint, workerPids, readOutbox } from './rust-utils';
 import { PhoneClient } from './phone-client';
@@ -55,12 +55,9 @@ it('shares a running task between desktop and phone; detaching desktop does not 
     agent = new RemoteAgent(
       {
         cwd: root,
-        command: 'unused',
-        args: [],
+        harness: 'pi',
         update: () => {},
-        permission: vi.fn(),
         closed: () => {},
-        log: () => {},
       },
       state,
       socket,
@@ -394,70 +391,6 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
   await expect(client.call('create', { cwd: join(root, 'missing') })).rejects.toThrow();
 }, 15000);
 
-it('shares TS/Rust history transactions, tombstones and live leases under contention', async () => {
-  const { root, service, client, host } = await fixture();
-  const store = new SharedHistoryStore(join(root, 'history'));
-  cleanup.push(() => store.releaseAll());
-  const snapshot = (id: string) => ({
-    id,
-    harness: 'codex' as const,
-    cwd: root,
-    title: id,
-    updated: Date.now(),
-    contextComplete: true,
-    entries: [{ id: 'u', role: 'user' as const, text: id }],
-  });
-  const localWrite = async (id: string) => {
-    await store.claim(id);
-    try {
-      return await store.write(snapshot(id));
-    } finally {
-      await store.release(id);
-    }
-  };
-  const ids = Array.from({ length: 20 }, (_, i) => `workbench:codex:interop-${i}`);
-  await Promise.all(
-    ids.map((id, i) =>
-      i % 2 ? localWrite(id) : service.call('historyWrite', { snapshot: snapshot(id) }),
-    ),
-  );
-  const first = await store.list();
-  expect(first).toHaveLength(20);
-  expect(new Set(first.map((s) => s.sessionNumber)).size).toBe(20);
-  await Promise.all([
-    ...ids
-      .slice(0, 10)
-      .map((id, i) =>
-        i % 2 ? store.remove(id) : service.call('historyRemove', { sessionId: id }),
-      ),
-    ...Array.from({ length: 10 }, (_, i) => localWrite(`workbench:codex:later-${i}`)),
-    ...Array.from({ length: 10 }, (_, i) =>
-      service.call('historyWrite', { snapshot: snapshot(`workbench:codex:rust-later-${i}`) }),
-    ),
-  ]);
-  const index = JSON.parse(await readFile(join(root, 'history/index.json'), 'utf8'));
-  expect(index.sessions).toHaveLength(30);
-  expect(index.deleted.sort()).toEqual(ids.slice(0, 10).sort());
-  expect(new Set(index.sessions.map((s: any) => s.sessionNumber)).size).toBe(30);
-  for (const id of ids.slice(0, 10)) {
-    await expect(service.call('historyWrite', { snapshot: snapshot(id) })).rejects.toThrow('删除');
-    await expect(localWrite(id)).rejects.toThrow('删除');
-  }
-  const pi = await host.create();
-  const pending = client.call(
-    'prompt',
-    { sessionId: pi.id, prompt: [{ type: 'text', text: 'wait' }] },
-    'interop-pi',
-    0,
-  );
-  await vi.waitFor(async () => expect((await host.status(pi.id)).busy).toBe(true));
-  await expect(store.claim(pi.id)).rejects.toThrow('另一个窗口');
-  await host.cancel(pi.id);
-  await pending;
-  await service.stop();
-  await store.claim(pi.id);
-  await store.release(pi.id);
-}, 20000);
 it('publishes live context and terminal output, and retains them after a cold restart', async () => {
   const { host, client, restart, socket } = await fixture(1, 900000, 'context-live');
   const session = await host.create(process.cwd());
@@ -492,4 +425,57 @@ it('publishes live context and terminal output, and retains them after a cold re
   expect(after.snapshot.usage).toEqual({ used: 1234, size: 200000 });
   expect(after.snapshot.entries).toEqual(before.snapshot.entries);
   expect(after.busy).toBe(false);
+});
+
+it('releases the singleton lock when startup fails so a corrected service can restart immediately', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-startup-failure-'));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'service'));
+  const requests = join(root, 'service', 'requests');
+  await writeFile(requests, 'blocks receipt directory');
+  const config = {
+    command: process.execPath,
+    args: [resolve('test/mock-agent.mjs'), 'context'],
+    maxWorkers: 2,
+    idleMs: 900000,
+  };
+  await expect(startRustService(root, config)).rejects.toThrow('Rust service exited');
+  await expect(readFile(join(root, 'service.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  await rm(requests);
+  const service = await startRustService(root, config);
+  cleanup.push(() => service.stop());
+  expect(await service.call('list')).toEqual([]);
+});
+
+it('consumes durable outbox through the socket across daemon restarts', async () => {
+  const { host, client, socket, restart } = await fixture();
+  const session = await host.create();
+  await client.call(
+    'prompt',
+    { sessionId: session.id, prompt: [{ type: 'text', text: 'outbox over RPC' }] },
+    'rpc-outbox',
+  );
+  const delivery = (await client.call('events.next', {})) as {
+    cursor: string;
+    token: string;
+    event: { id: string; sessionId: string; status: string; text: string };
+  };
+  expect(delivery.event.sessionId).toBe(session.id);
+  expect(delivery.event.status).toBe('completed');
+  expect(delivery.event.text).toContain('数学 $x^2$');
+  expect(await client.call('events.next', { cursor: delivery.cursor })).toBeNull();
+  expect(await client.call('events.ack', { id: delivery.event.id, token: 'stale' })).toBe(false);
+  client.dispose();
+  await restart();
+  const resumed = new SessionClient(socket);
+  cleanup.push(() => resumed.dispose());
+  expect(await resumed.call('events.next', {})).toEqual(delivery);
+  expect(await resumed.call('events.ack', { id: delivery.event.id, token: delivery.token })).toBe(
+    true,
+  );
+  expect(await resumed.call('events.ack', { id: delivery.event.id, token: delivery.token })).toBe(
+    false,
+  );
+  expect(await resumed.call('events.next', {})).toBeNull();
+  expect((await resumed.call('list', {})) as unknown[]).toHaveLength(1);
 });

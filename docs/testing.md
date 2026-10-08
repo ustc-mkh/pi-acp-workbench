@@ -113,7 +113,7 @@ Rust 服务仅支持 Linux x86_64，构建、测试与发布均使用该平台�
 
 Telegram 黑盒契约目前 25 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。另补 100 次增量合并、话题缓存/确认/开关写失败调用路径及过期票据实际响应，完整覆盖映射见迁移文档；旧 `telegram.test.ts` 及 TS relay 内部模块已删除。真实 Rust socket 用例验证最后 outbox 写失败传播和 interrupted 收据，不自动重放。
 
-Rust relay outbox 扫描为逐条消费，每次读取有硬大小限制；惰性读取、损坏/身份不匹配、过期删除和超大文件跳过均有单测。
+Rust 会话服务通过 `events.next` 提供逐条 outbox 消费，每次读取有硬大小限制；惰性读取、损坏/身份不匹配、过期删除、超大文件跳过和陈旧版本确认均有单测。客户端回归覆盖 socket 消费、服务重启与重复确认；relay 契约覆盖确认失败后重试而不重复发送。双 Rust 服务集成使用不同数据目录，通过 `serviceSocket` 连接。worker 回调与持锁操作的 panic 回归验证故障隔离、已提交历史恢复及后续任务执行。ChatProvider 拆分后继续由控制器回归和浏览器冒烟覆盖会话选择、轮次及附件行为。
 
 ## 有界并行完整验收
 

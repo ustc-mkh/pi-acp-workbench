@@ -1,8 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationStatistics } from '../src/conversation-statistics';
-import { HistoryPersistence } from '../src/history-persistence';
-import { SnapshotStore } from '../src/snapshots';
+import { ClientOperations } from '../src/conversation-history';
 import { initialState } from '../src/state';
 import type { Snapshot } from '../src/shared';
 const storage = () => {
@@ -28,7 +27,6 @@ it('does not republish a remote list after history is disabled during initializa
     current: () => state,
     changed: () => {},
     error: () => {},
-    leaseLost: () => {},
     remote: { list: () => gate, remove: async () => {} },
   });
   history.start();
@@ -50,26 +48,9 @@ it('does not republish a remote list after history is disabled during initializa
   expect(history.items).toEqual([]);
   history.dispose();
 });
-it('keeps deletion ordered behind pending writes without resurrecting the deleted index', async () => {
-  const state = { ...initialState(), sessionId: 'one' },
-    history = new ConversationHistory({
-      storage: storage(),
-      enabled: () => true,
-      current: () => state,
-      changed: () => {},
-      error: () => {},
-      leaseLost: () => {},
-    });
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const original = history.snapshots.write.bind(history.snapshots);
-  vi.spyOn(history.snapshots, 'write').mockImplementationOnce(async (snapshot) => {
-    await gate;
-    return original(snapshot);
-  });
-  const save = history.save({
+it('retains history on failed deletion and discards a poll started before a successful deletion', async () => {
+  const state = { ...initialState(), sessionId: 'one' };
+  const item: Snapshot = {
     id: 'one',
     harness: 'pi',
     title: 'one',
@@ -77,11 +58,36 @@ it('keeps deletion ordered behind pending writes without resurrecting the delete
     updated: 1,
     entries: [],
     contextComplete: true,
+  };
+  const list = vi.fn().mockResolvedValue([item]);
+  const remove = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('disk error'))
+    .mockResolvedValue(undefined);
+  const history = new ConversationHistory({
+    storage: storage(),
+    enabled: () => true,
+    current: () => state,
+    changed: () => {},
+    error: () => {},
+    remote: { list, remove },
   });
-  await vi.waitFor(() => expect(history.snapshots.write).toHaveBeenCalled());
-  const remove = history.remove(undefined, async () => {});
-  release();
-  await Promise.all([save, remove]);
+  history.start();
+  await history.ready;
+  await expect(history.remove('one', async () => {})).rejects.toThrow('disk error');
+  expect(history.items).toEqual([item]);
+  let release!: (items: Snapshot[]) => void;
+  list.mockImplementationOnce(
+    () =>
+      new Promise<Snapshot[]>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const poll = history.refresh();
+  await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  await history.remove('one', async () => {});
+  release([item]);
+  await poll;
   expect(history.items).toEqual([]);
   expect(history.forgotten.has('one')).toBe(true);
   history.dispose();
@@ -117,7 +123,7 @@ it('statistics coalesces paginated inspection and attributes usage to the conver
     window = vi.fn(),
     stats = new ConversationStatistics(
       store,
-      new HistoryPersistence(new SnapshotStore(), false),
+      new ClientOperations(),
       () => ({ state, agent, harness: 'pi', conversationId: 'conversation', retained: true }),
       window,
       () => {},
@@ -145,7 +151,7 @@ it('statistics discards late responses and errors from detached sessions', async
   };
   const stats = new ConversationStatistics(
     storage(),
-    new HistoryPersistence(new SnapshotStore(), false),
+    new ClientOperations(),
     () => ({ state, agent, harness: 'pi', retained: true }),
     () => {},
     () => {},
@@ -179,7 +185,6 @@ it('coalesces slow history polls, preserves the index, and only reports a contin
     current: () => state,
     changed: () => {},
     error,
-    leaseLost: () => {},
     remote: { list, remove: async () => {} },
   });
   try {
@@ -222,7 +227,6 @@ it('discards a failed poll after disposal', async () => {
     current: initialState,
     changed: () => {},
     error,
-    leaseLost: () => {},
     remote: {
       list: () =>
         new Promise((_, fail) => {

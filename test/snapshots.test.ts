@@ -2,7 +2,7 @@ import { it, expect } from 'vitest';
 import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SnapshotStore } from '../src/snapshots';
+import { SnapshotStore } from './support/snapshot-fixture';
 import type { Snapshot } from '../src/shared';
 it('persists a complete multi-megabyte transcript and native fork mappings across restart', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-snapshots-'));

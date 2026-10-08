@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { applyUpdate, initialState } from '../src/state';
+import { initialState } from '../src/state';
 import { StateEncoder, applyStatePatch } from '../src/state-channel';
 
 it('sends only changed entries, retaining image and statistics identities', () => {
@@ -20,10 +20,7 @@ it('sends only changed entries, retaining image and statistics identities', () =
   const receiver = structuredClone(source);
   const originalAnswer = Object.freeze(source.entries[1]);
   const stringify = vi.spyOn(JSON, 'stringify');
-  applyUpdate(source, {
-    sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: ' world' },
-  });
+  source.entries[1] = { ...source.entries[1], role: 'assistant', text: 'hello world' };
   source.error = 'example';
   const patch = encoder.encode(source);
   const serializedLargeFields = stringify.mock.calls.some(
@@ -49,18 +46,15 @@ it('sends only changed entries, retaining image and statistics identities', () =
 it('delivers replaced tool, attachment and statistics values without mutating earlier messages', () => {
   const source = initialState(),
     encoder = new StateEncoder();
-  applyUpdate(source, {
-    sessionUpdate: 'tool_call',
-    toolCallId: 't',
-    title: 'Read',
-    status: 'in_progress',
-  });
+  source.entries = [
+    { id: 'tool', role: 'tool', tool: { toolCallId: 't', title: 'Read', status: 'in_progress' } },
+  ];
   const previous = source.entries[0];
   if (previous.role !== 'tool') throw new Error('Expected tool');
   Object.freeze(previous.tool);
   encoder.encode(source);
   const receiver = structuredClone(source);
-  applyUpdate(source, { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed' });
+  source.entries[0] = { ...previous, tool: { ...previous.tool, status: 'completed' } };
   source.attachments = [
     { id: 'image', kind: 'image', name: 'screenshot', mimeType: 'image/png', data: 'AAAA' },
   ];

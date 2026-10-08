@@ -9,7 +9,7 @@
 - **每轮总 Diff**：输出末尾展示该轮工作区的文件和增删行数汇总，可展开补丁或打开编辑器对比；支持 Pi / Codex / Claude。[采集范围与限制](docs/turn-diff.md)。
 - **会话管理**：保存与恢复历史、跨端继续对话、Pi 原生会话分支、Markdown 导出。
 - **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。
-- **其他 Agent**：可选接入 Codex / Claude Code 的 ACP 适配器；Telegram 和独立会话服务目前用于 Pi。
+- **其他 Agent**：可选接入 Codex / Claude Code 的 ACP 适配器；三种 Agent 共用独立会话服务，Telegram 可打开已有会话。
 
 ## 配置 Pi 与 VS Code
 
@@ -134,7 +134,7 @@ npm install -g @agentclientprotocol/codex-acp
 npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-自定义启动路径、参数和环境变量使用 `piAcp.codex.command/args/env` 或 `piAcp.claude.command/args/env`。这些适配器由插件直接启动；实际功能取决于适配器支持的 ACP 能力。
+三种 Agent 都由 Rust daemon 托管，插件只通过 socket 连接。自定义启动路径、参数和环境变量放在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中；实际功能取决于适配器声明的 ACP 能力。配置示例见 [会话服务](docs/session-service.md#codex--claude-配置)。需要将插件与 v3 daemon 一起更新，没有文件写入降级路径。
 
 详细资料：[架构说明](docs/architecture.md) · [开发与测试](docs/testing.md) · [更新记录](CHANGELOG.md)
 

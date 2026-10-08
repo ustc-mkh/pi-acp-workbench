@@ -11,7 +11,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 try {
   const bundle = join(root, 'agent.cjs');
   await build({
-    entryPoints: ['src/agent.ts'],
+    entryPoints: ['test/support/acp-client.ts'],
     outfile: bundle,
     bundle: true,
     platform: 'node',

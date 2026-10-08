@@ -32,6 +32,7 @@
 use crate::agent::AgentProcess;
 use crate::types::ChatState;
 use regex::Regex;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -83,7 +84,8 @@ fn flatten_options(config_options: Option<&Value>) -> Vec<Value> {
     out
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionPreference {
     pub kind: String, // model | thinking | mode
     pub value: String,
@@ -229,6 +231,13 @@ pub fn model_preferences(state: &ChatState) -> Vec<SessionPreference> {
         .collect()
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreferencesFile {
+    version: u32,
+    preferences: Vec<SessionPreference>,
+}
+
 pub struct SessionPreferences {
     directory: PathBuf,
 }
@@ -245,7 +254,7 @@ impl SessionPreferences {
         Ok(self.directory.join(format!("{harness}.json")))
     }
 
-    /// harness is always 'pi' for the service.
+    /// Preferences are isolated by harness.
     pub async fn read(&self, harness: &str) -> Result<Vec<SessionPreference>, String> {
         let file = self.file(harness)?;
         let text = match tokio::fs::read_to_string(&file).await {
@@ -259,38 +268,19 @@ impl SessionPreferences {
                 file.display()
             )
         };
-        let data: Value = serde_json::from_str(&text).map_err(|_| malformed())?;
-        let preferences = data.get("preferences").and_then(Value::as_array);
-        let valid = data.get("version") == Some(&json!(1))
-            && preferences.is_some_and(|list| {
-                list.len() <= 2
-                    && list.iter().all(|p| {
-                        matches!(
-                            p.get("kind").and_then(Value::as_str),
-                            Some("model" | "thinking")
-                        ) && p
-                            .get("value")
-                            .and_then(Value::as_str)
-                            .is_some_and(|v| (1..=10000).contains(&v.encode_utf16().count()))
-                    })
-                    && {
-                        let mut kinds = std::collections::HashSet::new();
-                        list.iter().all(|p| {
-                            kinds.insert(p.get("kind").and_then(Value::as_str).unwrap_or(""))
-                        })
-                    }
-            });
-        if !valid {
+        let data: PreferencesFile = serde_json::from_str(&text).map_err(|_| malformed())?;
+        let mut kinds = std::collections::HashSet::new();
+        if data.version != 1
+            || data.preferences.len() > 2
+            || !data.preferences.iter().all(|p| {
+                matches!(p.kind.as_str(), "model" | "thinking")
+                    && (1..=10000).contains(&p.value.encode_utf16().count())
+                    && kinds.insert(p.kind.as_str())
+            })
+        {
             return Err(malformed());
         }
-        Ok(preferences
-            .unwrap()
-            .iter()
-            .map(|p| SessionPreference {
-                kind: p["kind"].as_str().unwrap_or("").to_string(),
-                value: p["value"].as_str().unwrap_or("").to_string(),
-            })
-            .collect())
+        Ok(data.preferences)
     }
 
     /// Persists model/thinking pair from state; reads first (never blind-overwrite).

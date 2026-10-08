@@ -48,6 +48,7 @@ vi.mock('vscode', () => ({
       return { show() {} };
     },
     createOutputChannel: () => ({ append() {}, appendLine() {}, show() {}, dispose() {} }),
+    showWarningMessage: vi.fn(async () => '删除'),
     registerWebviewViewProvider: (_: string, provider: unknown) => {
       host.provider = provider;
       return { dispose() {} };
@@ -62,26 +63,21 @@ vi.mock('vscode', () => ({
   },
 }));
 import { activate as activateExtension } from '../src/extension';
-import { AgentProcess } from '../src/agent';
-// Exercise the shared UI controller with an injected ACP transport. Service lifetime is tested separately.
-const activate = (context: any) =>
-  activateExtension(
-    context,
-    (options) =>
-      new AgentProcess({
-        ...options,
-        ...(options.harness === 'pi'
-          ? {
-              command: host.config.command as string,
-              args: host.config.args as string[],
-              env: host.config.env as Record<string, string>,
-            }
-          : {}),
-      }),
-  );
+import { startRustService } from './rust-service';
+let service: Awaited<ReturnType<typeof startRustService>>;
+let launchFile: string;
+// UI tests use the production socket path. Only the upstream ACP worker is mocked.
+const activate = (context: any) => {
+  activateExtension(context);
+  const create = host.provider.createAgent.bind(host.provider);
+  vi.spyOn(host.provider, 'createAgent').mockImplementation((...args: any[]) => {
+    writeFileSync(launchFile, JSON.stringify(host.config));
+    return create(...args);
+  });
+};
 let context: any;
 let preferencesHome: string;
-beforeEach(() => {
+beforeEach(async () => {
   preferencesHome = mkdtempSync(resolve(tmpdir(), 'pi-controller-home-'));
   host.home = preferencesHome;
   host.config = {
@@ -99,22 +95,34 @@ beforeEach(() => {
       update: async (key: string, value: unknown) => host.stored.set(key, structuredClone(value)),
     },
   };
+  launchFile = resolve(preferencesHome, 'launch.json');
+  host.cwd = preferencesHome;
+  writeFileSync(launchFile, JSON.stringify(host.config));
+  const worker = (harness: string) => ({
+    command: process.execPath,
+    args: [resolve('test/controller-worker.mjs'), launchFile, harness],
+  });
+  service = await startRustService(preferencesHome, {
+    command: process.execPath,
+    args: [resolve('test/controller-worker.mjs'), launchFile, 'pi'],
+    maxWorkers: 2,
+    idleMs: 900000,
+    harnesses: { codex: worker('codex'), claude: worker('claude') },
+  });
+  host.config.serviceSocket = service.socket;
   activate(context);
 });
 afterEach(async () => {
   context.subscriptions.forEach((d: { dispose(): void }) => d.dispose());
   await host.provider.persistence.pending;
+  await service.stop();
   host.cwd = undefined;
   host.home = undefined;
   rmSync(preferencesHome, { recursive: true, force: true });
 });
 const preferences = (harness = 'pi') =>
-  JSON.parse(
-    readFileSync(
-      resolve(host.home!, '.pi', 'pi-acp-workbench', 'preferences', `${harness}.json`),
-      'utf8',
-    ),
-  ).preferences;
+  JSON.parse(readFileSync(resolve(preferencesHome, 'preferences', `${harness}.json`), 'utf8'))
+    .preferences;
 function mockHarness(harness: 'codex' | 'claude', mode = '') {
   host.config[harness + '.command'] = process.execPath;
   host.config[harness + '.args'] = [resolve('test/mock-agent.mjs'), mode];
@@ -191,80 +199,6 @@ it('keeps model preferences separate and rejects switching during an active prom
   expect(host.provider.snapshot().error).toContain('暂不支持');
   expect(host.provider.snapshot().sessionId).toBe(id);
 });
-it.each([
-  ['codex', false],
-  ['claude', false],
-  ['codex', true],
-  ['claude', true],
-] as const)(
-  'keeps missing empty %s sessions (shared=%s) disconnected without replacing history',
-  async (harness, shared) => {
-    const root = mkdtempSync(resolve(tmpdir(), 'pi-empty-reconnect-'));
-    if (shared) {
-      host.provider.dispose();
-      await host.provider.persistence.pending;
-      host.home = root;
-      host.config.sharedHistory = true;
-      activate(context);
-      await host.provider.historyReady;
-    }
-    const audit = resolve(root, 'wire.jsonl');
-    host.config[harness + '.env'] = { PI_TEST_AUDIT: audit };
-    mockHarness(harness, `context-missing-${harness}`);
-    try {
-      await host.provider.perform({ type: 'switchHarness', harness });
-      await host.provider.perform({ type: 'new' });
-      await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
-      const first = host.provider.snapshot();
-      for (let i = 0; i < 2; i++) {
-        await host.provider.perform({ type: 'releaseSession' });
-        await host.provider.perform({ type: 'connect' });
-        const state = host.provider.snapshot();
-        expect(state).toMatchObject({
-          status: 'disconnected',
-          readOnly: true,
-          entries: [],
-          sessionNumber: first.sessionNumber,
-          sessionId: first.sessionId,
-        });
-        expect(state.error).toBeTruthy();
-        expect(state.configs[0].currentValue).toBe('other');
-        expect(host.provider.history).toHaveLength(1);
-        if (shared) expect(await host.provider.sharedHistory.list()).toHaveLength(1);
-      }
-      const requests = readFileSync(audit, 'utf8');
-      expect(requests).not.toContain('session/prompt');
-      expect(requests.split('\n').filter((line) => line.includes('session/new'))).toHaveLength(1);
-    } finally {
-      host.provider.dispose();
-      await host.provider.persistence.pending;
-      host.home = undefined;
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-);
-it.each([
-  ['codex', true],
-  ['claude', true],
-  ['codex', false],
-  ['claude', false],
-] as const)('never recreates missing %s sessions (content=%s)', async (harness, withContent) => {
-  mockHarness(harness, `context-missing-${harness}`);
-  await host.provider.perform({ type: 'switchHarness', harness });
-  await host.provider.perform({ type: 'new' });
-  if (withContent) await host.provider.perform({ type: 'send', text: 'retained' });
-  const before = host.provider.snapshot();
-  await host.provider.perform({ type: 'releaseSession' });
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot()).toMatchObject({
-    status: 'disconnected',
-    readOnly: true,
-    sessionId: before.sessionId,
-    entries: before.entries,
-  });
-  expect(host.provider.snapshot().error).toBeTruthy();
-  expect(host.provider.history).toHaveLength(1);
-});
 it.each(['codex', 'claude'] as const)(
   'loads existing %s conversations after release without replacing the ID or entries',
   async (harness) => {
@@ -285,38 +219,6 @@ it.each(['codex', 'claude'] as const)(
     expect(host.provider.snapshot().error).toBeUndefined();
   },
 );
-it('does not turn arbitrary internal errors into new empty sessions', async () => {
-  mockHarness('codex', 'context-load-fail');
-  await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
-  await host.provider.perform({ type: 'new' });
-  const before = host.provider.snapshot();
-  await host.provider.perform({ type: 'releaseSession' });
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot()).toMatchObject({
-    status: 'disconnected',
-    readOnly: true,
-    sessionId: before.sessionId,
-    error: 'Internal error',
-  });
-});
-it('retains external history read-only when session/load is unsupported, without fallback new', async () => {
-  mockHarness('claude');
-  await host.provider.perform({ type: 'switchHarness', harness: 'claude' });
-  await host.provider.perform({ type: 'new' });
-  await host.provider.perform({ type: 'send', text: 'retained' });
-  const id = host.provider.snapshot().sessionId;
-  await host.provider.perform({ type: 'releaseSession' });
-  mockHarness('claude', 'no-load');
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot()).toMatchObject({
-    harness: 'claude',
-    sessionId: id,
-    status: 'disconnected',
-    readOnly: true,
-  });
-  expect(host.provider.snapshot().error).toContain('session/load');
-  expect(host.provider.snapshot().entries.some((e: any) => e.text === 'retained')).toBe(true);
-});
 it('restores the selected harness after restart and rejects stale cross-harness image messages', async () => {
   mockHarness('codex');
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
@@ -336,20 +238,13 @@ it('restores the selected harness after restart and rejects stale cross-harness 
 });
 it('keeps the old harness usable if saving before a switch fails', async () => {
   await host.provider.perform({ type: 'new' });
-  vi.spyOn(host.provider, 'save').mockRejectedValueOnce(new Error('storage unavailable'));
+  vi.spyOn(host.provider, 'refreshHistory').mockRejectedValueOnce(new Error('storage unavailable'));
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   expect(host.provider.snapshot()).toMatchObject({
     harness: 'pi',
     status: 'ready',
     error: 'storage unavailable',
   });
-});
-it('returns to disconnected when a harness launch configuration is invalid', async () => {
-  await host.provider.perform({ type: 'switchHarness', harness: 'claude' });
-  host.config['claude.args'] = 'not an array';
-  await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot()).toMatchObject({ harness: 'claude', status: 'disconnected' });
-  expect(host.provider.snapshot().error).toContain('启动配置无效');
 });
 it('allows Codex fast mode and keeps collaboration default on creation and load', async () => {
   mockHarness('codex', 'context-codex-options');
@@ -379,29 +274,19 @@ it('uses harness-specific login commands and never copies Pi profile environment
   expect(host.terminals.at(-1)).toMatchObject({
     shellPath: 'codex',
     shellArgs: ['login'],
-    env: { CODEX_ONLY: 'value' },
   });
   mockHarness('claude');
   await host.provider.perform({ type: 'switchHarness', harness: 'claude' });
   await host.provider.perform({ type: 'login' });
   expect(host.terminals.at(-1)).toMatchObject({
-    shellPath: process.execPath,
-    shellArgs: [resolve('test/mock-agent.mjs'), '', '--cli', '/login'],
-    env: {},
+    shellPath: 'claude-agent-acp',
+    shellArgs: ['--cli', '/login'],
   });
-});
-it('restores ready even when saving account preferences fails before a turn', async () => {
-  await host.provider.perform({ type: 'new' });
-  vi.spyOn(host.provider.preferences, 'save').mockRejectedValueOnce(new Error('disk full'));
-  await host.provider.perform({ type: 'send', text: 'hello' });
-  expect(host.provider.snapshot()).toMatchObject({ status: 'ready', error: 'disk full' });
-  await host.provider.perform({ type: 'send', text: 'another turn' });
-  expect(host.provider.snapshot().status).toBe('ready');
 });
 it('locks preview before awaiting persistence', async () => {
   await host.provider.perform({ type: 'new' });
   let release!: () => void;
-  vi.spyOn(host.provider, 'save').mockImplementationOnce(
+  vi.spyOn(host.provider, 'refreshHistory').mockImplementationOnce(
     () =>
       new Promise<void>((resolve) => {
         release = resolve;
@@ -424,66 +309,6 @@ it('removes usage titles and does not recreate them after forgetting an active c
   await host.provider.recordUsage([]);
   expect(host.stored.get('usageTitles')).toEqual({});
 });
-it.each([false, true])(
-  'disables local persistence during writes without deleting shared history (shared=%s)',
-  async (shared) => {
-    const root = mkdtempSync(resolve(tmpdir(), 'pi-persistence-race-'));
-    host.provider.dispose();
-    await host.provider.persistence.pending;
-    host.home = root;
-    host.config.sharedHistory = shared;
-    activate(context);
-    const provider = host.provider;
-    try {
-      await provider.perform({ type: 'new' });
-      await provider.perform({ type: 'send', text: 'private message' });
-      await provider.recordUsage([]);
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const originalWrite = provider.snapshots.write.bind(provider.snapshots);
-      const write = vi
-        .spyOn(provider.snapshots, 'write')
-        .mockImplementationOnce(async (snapshot: any) => {
-          await gate;
-          return originalWrite(snapshot);
-        });
-      const clear = vi.spyOn(provider.snapshots, 'clear');
-      const saving = provider.save();
-      await vi.waitFor(() => expect(write).toHaveBeenCalled());
-      host.config.persistHistory = false;
-      host.configurationChanged!({
-        affectsConfiguration: (key: string) => key === 'piAcp' || key === 'piAcp.persistHistory',
-      });
-      expect(clear).not.toHaveBeenCalled();
-      host.config.persistHistory = true; // Even a quick toggle must invalidate the in-flight local save.
-      release();
-      await saving;
-      await provider.persistence.pending;
-      expect(provider.history).toEqual([]);
-      expect(host.stored.get('history')).toBeUndefined();
-      expect(host.stored.get('usageTitles')).toEqual({});
-      if (shared) {
-        expect(clear).not.toHaveBeenCalled();
-        const history = await provider.sharedHistory.list();
-        expect(history).toHaveLength(1);
-        expect(
-          (await provider.sharedHistory.read(history[0])).entries.some(
-            (e: any) => e.text === 'private message',
-          ),
-        ).toBe(true);
-        await provider.save(); // No tombstone was created; future saves still work.
-        expect(await provider.sharedHistory.list()).toHaveLength(1);
-      } else expect(clear).toHaveBeenCalledOnce();
-    } finally {
-      provider.dispose();
-      await provider.persistence.pending;
-      host.home = undefined;
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-);
 it.each(['codex', 'claude'] as const)(
   'shows %s turn diffs after the answer and opens native changes',
   async (harness) => {
@@ -523,7 +348,11 @@ it.each(['codex', 'claude'] as const)(
         expect.any(Array),
       );
       expect(host.provider.snapshot().error).toBeUndefined();
-      expect((host.stored.get('history') as any[])[0].entries.at(-1).role).toBe('diff');
+      expect(
+        (
+          await service.call('state', { sessionId: host.provider.snapshot().sessionId })
+        ).snapshot.entries.at(-1).role,
+      ).toBe('diff');
     } finally {
       host.provider.dispose();
       await host.provider.persistence.pending;
@@ -623,82 +452,6 @@ it('clears usage titles while preserving billed records and prices', async () =>
   expect(host.stored.get('usageRecords')).toEqual([record]);
   expect(host.provider.statistics.prices).toEqual(prices);
 });
-it('queues history deletion after in-flight snapshot writes', async () => {
-  await host.provider.perform({ type: 'new' });
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const write = vi
-    .spyOn(host.provider.snapshots, 'write')
-    .mockImplementationOnce(async (snapshot: any) => {
-      await gate;
-      return snapshot;
-    });
-  const saving = host.provider.save();
-  await vi.waitFor(() => expect(write).toHaveBeenCalled());
-  const clearing = host.provider.perform({ type: 'clearHistory' });
-  release();
-  await Promise.all([saving, clearing]);
-  expect(host.stored.get('history')).toBeUndefined();
-  expect(host.provider.history).toEqual([]);
-});
-it('shares history without importing local records across hosts, views occupied sessions, and hands off after release', async () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'pi-controller-shared-'));
-  host.provider.dispose();
-  await host.provider.persistence.pending;
-  host.home = root;
-  host.config.sharedHistory = true;
-  const legacy = {
-    id: 'legacy',
-    cwd: process.cwd(),
-    title: 'old',
-    updated: 1,
-    contextComplete: true,
-    entries: [{ id: 'old-user', role: 'user', text: 'old message' }],
-  };
-  host.stored.set('history', [legacy]);
-  let first: any, second: any;
-  const other = new Map<string, unknown>();
-  try {
-    activate(context);
-    first = host.provider;
-    await first.historyReady;
-    expect(first.history).toEqual([]);
-    expect(host.stored.get('history')).toEqual([legacy]);
-    await first.perform({ type: 'new' });
-    await first.perform({ type: 'send', text: 'shared message' });
-    expect(first.snapshot().status).toBe('ready');
-    activate({
-      subscriptions: [],
-      workspaceState: {
-        get: (k: string, d: unknown) => (other.has(k) ? other.get(k) : d),
-        update: async (k: string, v: unknown) => other.set(k, structuredClone(v)),
-      },
-    } as any);
-    second = host.provider;
-    await second.historyReady;
-    expect(second.history.map((s: any) => s.id)).toEqual(['test-session']);
-    await second.perform({ type: 'resume', id: 'test-session' });
-    expect(second.snapshot()).toMatchObject({ readOnly: true, status: 'disconnected' });
-    expect(second.snapshot().entries.some((e: any) => e.text === 'shared message')).toBe(true);
-    await second.perform({ type: 'send', text: 'must not send' });
-    expect(second.snapshot().entries.some((e: any) => e.text === 'must not send')).toBe(false);
-    await first.perform({ type: 'releaseSession' });
-    await second.perform({ type: 'connect' });
-    expect(second.snapshot()).toMatchObject({ status: 'ready' });
-    expect(second.snapshot().readOnly).not.toBe(true);
-    await second.perform({ type: 'send', text: 'second machine' });
-    await first.refreshSharedHistory();
-    expect(first.snapshot().entries.some((e: any) => e.text === 'second machine')).toBe(true);
-  } finally {
-    first?.dispose();
-    second?.dispose();
-    await Promise.all([first?.persistence.pending, second?.persistence.pending]);
-    host.home = undefined;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 it('does not create a session on ready, reconnect, or send; only explicit new does', async () => {
   const start = vi.spyOn(host.provider, 'start');
   await Promise.all([
@@ -714,32 +467,6 @@ it('does not create a session on ready, reconnect, or send; only explicit new do
   await host.provider.perform({ type: 'ready' });
   await host.provider.perform({ type: 'connect' });
   expect(host.provider.snapshot().sessionId).toBe(id);
-});
-it('restores on opening and retries the same failed history without falling back to new', async () => {
-  host.stored.set('activeSession', 'existing');
-  host.provider.history = [
-    {
-      harness: 'pi',
-      id: 'existing',
-      cwd: process.cwd(),
-      entries: [],
-      contextComplete: true,
-      title: 'existing',
-      updated: 1,
-    },
-  ];
-  host.config.args = [resolve('test/mock-agent.mjs'), 'v2'];
-  const start = vi.spyOn(host.provider, 'start');
-  await host.provider.perform({ type: 'ready' });
-  const failed = host.provider.snapshot();
-  expect(failed).toMatchObject({ status: 'disconnected', sessionId: 'existing' });
-  expect(failed.error).toBeTruthy();
-  await host.provider.perform({ type: 'dismissError', error: failed.error });
-  await host.provider.perform({ type: 'ready' });
-  expect(start).toHaveBeenCalledTimes(1);
-  host.config.args = [resolve('test/mock-agent.mjs')];
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot()).toMatchObject({ status: 'ready', sessionId: 'existing' });
 });
 it('allows error dismissal during a turn without dismissing a newer error', async () => {
   await host.provider.perform({ type: 'new' });
@@ -773,7 +500,9 @@ it('runs a complete turn through the controller, saves history, and loads it', a
   expect(state.entries).toContainEqual(
     expect.objectContaining({ role: 'assistant', text: '数学 $x^2$' }),
   );
-  expect((host.stored.get('history') as any[])[0].title).toBe('hello');
+  expect(
+    (await service.call('state', { sessionId: host.provider.snapshot().sessionId })).snapshot.title,
+  ).toBe('hello');
   await host.provider.perform({ type: 'resume', id: 'test-session' });
   expect(host.provider.snapshot().entries[0]).toMatchObject({ role: 'user', text: 'hello' });
 });
@@ -818,14 +547,16 @@ it('blocks concurrent prompts and new sessions during an active turn', async () 
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'second' });
-  expect(host.provider.snapshot().entries.filter((e: any) => e.role === 'user')).toHaveLength(1);
+  await vi.waitFor(() =>
+    expect(host.provider.snapshot().entries.filter((e: any) => e.role === 'user')).toHaveLength(1),
+  );
   await host.provider.perform({ type: 'cancel' });
   await turn;
 });
-it('keeps a crash disconnected and surfaces an actionable error', async () => {
+it('keeps the daemon connected after worker failure and surfaces an actionable error', async () => {
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'crash' });
-  expect(host.provider.snapshot().status).toBe('disconnected');
+  expect(host.provider.snapshot().status).toBe('ready');
   expect(host.provider.snapshot().error).toBeTruthy();
 });
 it('does not persist conversation content when history is disabled', async () => {
@@ -833,41 +564,6 @@ it('does not persist conversation content when history is disabled', async () =>
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'hello' });
   expect(host.stored.get('history')).toBeUndefined();
-});
-it('deletes one historical record while preserving other records and the running turn', async () => {
-  await host.provider.perform({ type: 'new' });
-  host.provider.history.push({
-    id: 'older-session',
-    title: 'older',
-    cwd: process.cwd(),
-    updated: 1,
-    entries: [],
-  });
-  const turn = host.provider.perform({ type: 'send', text: 'wait' });
-  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
-  await host.provider.perform({ type: 'deleteHistory', id: 'older-session' });
-  expect(host.provider.snapshot().status).toBe('busy');
-  expect((host.stored.get('history') as any[]).map((item) => item.id)).toEqual(['test-session']);
-  expect((host.stored.get('history') as any[])[0].title).toBe('wait');
-  await host.provider.perform({ type: 'cancel' });
-  await turn;
-});
-it('does not recreate a deleted current record when the turn completes or the provider saves again', async () => {
-  await host.provider.perform({ type: 'new' });
-  const turn = host.provider.perform({ type: 'send', text: 'wait' });
-  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
-  await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
-  expect(host.provider.snapshot()).toMatchObject({
-    status: 'disconnected',
-    entries: [],
-    attachments: [],
-  });
-  expect(host.provider.snapshot().sessionId).toBeUndefined();
-  await turn;
-  await host.provider.save();
-  expect(host.stored.get('history')).toBeUndefined();
-  expect(host.provider.snapshot().entries).toEqual([]);
-  expect(host.provider.snapshot().error).toBeUndefined();
 });
 it('keeps cleared history empty after another automatic save', async () => {
   await host.provider.perform({ type: 'new' });
@@ -928,12 +624,12 @@ it('branches at the native node, keeps historical settings, and never sends a te
   expect(branch.usage).toBeUndefined();
   expect(branch.configs.map((c: any) => c.currentValue)).toEqual(['default', 'low']);
   expect(
-    (host.stored.get('history') as any[])
-      .find((s) => s.id === old.sessionId)
-      .entries.some((e: any) => e.text === 'excluded-later'),
+    (await service.call('state', { sessionId: old.sessionId })).snapshot.entries.some(
+      (e: any) => e.text === 'excluded-later',
+    ),
   ).toBe(true);
   expect(wire().filter((r) => r.method === 'session/prompt')).toHaveLength(2);
-  expect(wire().filter((r) => r.method === 'session/load')).toHaveLength(1);
+  expect(wire().filter((r) => r.method === 'session/load')).toHaveLength(2); // Source and newly attached branch load independently.
   expect(wire().filter((r) => r.method === 'session/new')).toHaveLength(1);
   expect(wire().some((r) => r.method === '_pi_workbench/summarize')).toBe(false);
   await host.provider.perform({ type: 'send', text: 'continue-here' });
@@ -1010,17 +706,6 @@ it('never falls back to large textual reconstruction when an adapter lacks nativ
   expect(host.provider.snapshot().entries).toEqual(original.entries);
   expect(host.provider.snapshot().sessionId).toBe(original.sessionId);
 });
-it('does not dispatch cancel before a prompt when the user stops during local persistence', async () => {
-  await contextAgent();
-  const turn = host.provider.perform({ type: 'send', text: 'wait' });
-  await host.provider.perform({ type: 'cancel' });
-  await turn;
-  expect(host.provider.snapshot().status).toBe('ready');
-  expect(
-    wire().filter((r) => r.method === 'session/prompt' || r.method === 'session/cancel'),
-  ).toHaveLength(0);
-  expect(host.provider.snapshot().entries.at(-1).text).toContain('尚未发送');
-});
 
 it('deduplicates billed requests and keeps native branch spending separate', async () => {
   await contextAgent('context-native');
@@ -1054,40 +739,6 @@ it('deduplicates billed requests and keeps native branch spending separate', asy
   expect(
     (host.stored.get('usageRecords') as any[]).find((r) => r.id === 'branch-request').sessionId,
   ).not.toBe(original);
-});
-it('keeps both shared histories and releases the source lease after native branching', async () => {
-  const root = mkdtempSync(resolve(tmpdir(), 'pi-native-shared-'));
-  host.provider.dispose();
-  await host.provider.persistence.pending;
-  host.home = root;
-  host.config.sharedHistory = true;
-  activate(context);
-  await host.provider.historyReady;
-  const { SharedHistoryStore } = await import('../src/shared-history');
-  let reader: any;
-  try {
-    await contextAgent('context-native');
-    await host.provider.perform({ type: 'send', text: 'original' });
-    const original = host.provider.snapshot();
-    await host.provider.perform({ type: 'send', text: 'later' });
-    await edit('branchMessage', original.entries[1].id);
-    const branch = host.provider.snapshot();
-    expect(branch.error).toBeUndefined();
-    expect(branch.sessionId).not.toBe(original.sessionId);
-    reader = new SharedHistoryStore(host.provider.sharedHistory.root);
-    const history = await reader.list();
-    expect(history).toHaveLength(2);
-    const saved = await reader.read(history.find((s: any) => s.id === original.sessionId));
-    expect(saved.entries.some((e: any) => e.text === 'later')).toBe(true);
-    await reader.claim(original.sessionId);
-    await expect(reader.claim(branch.sessionId)).rejects.toThrow('另一个窗口');
-  } finally {
-    await reader?.releaseAll();
-    host.provider.dispose();
-    await host.provider.persistence.pending;
-    host.home = undefined;
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 it('cancels native branch preparation without discarding the original connection', async () => {
   await contextAgent('context-native');
@@ -1145,19 +796,6 @@ it('keeps a source disconnect during native branching disconnected and reconnect
   await provider.perform({ type: 'connect' });
   expect(provider.snapshot()).toMatchObject({ status: 'ready', sessionId: before.sessionId });
 });
-it('refuses a changed target adapter rather than replaying history into it', async () => {
-  await contextAgent('context-native');
-  await host.provider.perform({ type: 'send', text: 'original' });
-  const before = host.provider.snapshot();
-  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
-  await edit('branchMessage', before.entries[0].id);
-  expect(host.provider.snapshot()).toMatchObject({
-    status: 'ready',
-    sessionId: before.sessionId,
-    entries: before.entries,
-  });
-  expect(host.provider.snapshot().error).toContain('目标适配器');
-});
 it('persists custom prices, rejects invalid numbers and restores defaults', async () => {
   await host.provider.perform({
     type: 'setPrice',
@@ -1186,66 +824,6 @@ it('copies original full Markdown even when a compacted checkpoint exists', asyn
     expect.stringContaining('short summary'),
   );
 });
-
-it('switches cached conversations without initializing/loading again and preserves model settings', async () => {
-  await contextAgent();
-  await host.provider.perform({ type: 'send', text: 'first' });
-  const first = host.provider.snapshot(),
-    agent = host.provider.agent;
-  await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
-  await host.provider.perform({ type: 'new' });
-  const second = host.provider.snapshot().sessionId;
-  await host.provider.perform({ type: 'send', text: 'second' });
-  const before = wire().length;
-  await host.provider.perform({ type: 'resume', id: first.sessionId });
-  expect(host.provider.agent).toBe(agent);
-  expect(host.provider.snapshot()).toMatchObject({
-    status: 'ready',
-    sessionId: first.sessionId,
-    entries: first.entries,
-  });
-  expect(host.provider.snapshot().configs[0].currentValue).toBe('other');
-  expect(
-    wire()
-      .slice(before)
-      .filter((r) => ['initialize', 'session/load', 'session/new'].includes(r.method)),
-  ).toHaveLength(0);
-  await host.provider.perform({ type: 'resume', id: second });
-  expect(host.provider.snapshot().entries[0].text).toBe('second');
-});
-it('evicts idle LRU connections and falls back to native loading for an evicted conversation', async () => {
-  await contextAgent();
-  const first = host.provider.snapshot().sessionId,
-    agent = host.provider.agent;
-  for (let i = 0; i < 3; i++) await host.provider.perform({ type: 'new' });
-  expect(host.provider.sessions.size).toBe(2);
-  expect(agent.isClosed).toBe(true);
-  await host.provider.perform({ type: 'resume', id: first });
-  expect(
-    wire()
-      .filter((r) => r.method === 'session/load')
-      .at(-1).params.sessionId,
-  ).toBe(first);
-});
-it('reconnects dead cached agents and clears live caches on history deletion and disposal', async () => {
-  await contextAgent();
-  const first = host.provider.snapshot().sessionId,
-    agent = host.provider.agent;
-  await host.provider.perform({ type: 'new' });
-  agent.dispose();
-  await host.provider.perform({ type: 'resume', id: first });
-  expect(host.provider.agent).not.toBe(agent);
-  expect(host.provider.snapshot().status).toBe('ready');
-  await host.provider.perform({ type: 'new' });
-  const cached = host.provider.sessions.get(first).agent;
-  await host.provider.perform({ type: 'deleteHistory', id: first });
-  expect(cached.isClosed).toBe(true);
-  expect(host.provider.sessions.get(first)).toBeUndefined();
-  const current = host.provider.agent;
-  host.provider.dispose();
-  expect(current.isClosed).toBe(true);
-  expect(host.provider.sessions.size).toBe(0);
-});
 const pastedPng = {
   name: 'clipboard.png',
   mimeType: 'image/png',
@@ -1262,8 +840,14 @@ it('sends image-only messages as ACP image blocks and preserves the original ima
     .at(-1).params.prompt;
   expect(prompt).toEqual([{ type: 'image', mimeType: pastedPng.mimeType, data: pastedPng.data }]);
   expect(host.provider.snapshot().attachments).toEqual([]);
-  expect(host.provider.snapshot().entries[0].contextBlocks).toEqual(prompt);
-  expect((host.stored.get('history') as any[])[0].entries[0].contextBlocks).toEqual(prompt);
+  expect(
+    host.provider.snapshot().entries.find((e: any) => e.role === 'user').contextBlocks,
+  ).toEqual(prompt);
+  expect(
+    (await service.call('state', { sessionId })).snapshot.entries.find(
+      (e: any) => e.role === 'user',
+    ).contextBlocks,
+  ).toEqual(prompt);
 });
 it('retains image drafts when the agent lacks image support and permits removal', async () => {
   await contextAgent();
@@ -1345,7 +929,7 @@ it('reads the latest account pair instead of the currently displayed conversatio
   await contextAgent();
   expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
   writeFileSync(
-    resolve(host.home!, '.pi', 'pi-acp-workbench', 'preferences', 'pi.json'),
+    resolve(preferencesHome, 'preferences', 'pi.json'),
     JSON.stringify({
       version: 1,
       preferences: [
@@ -1393,7 +977,7 @@ it('resumes the last active warm conversation after restart, and reconnects it w
       .slice(before)
       .filter((r) => r.method === 'session/load')
       .map((r) => r.params.sessionId),
-  ).toEqual([first, first]);
+  ).toEqual([]); // The service keeps the warm worker across client reconnection.
 });
 it('does not overwrite account preferences by merely reopening an older conversation', async () => {
   await contextAgent();
@@ -1404,22 +988,6 @@ it('does not overwrite account preferences by merely reopening an older conversa
   expect(host.provider.snapshot().configs[0].currentValue).toBe('default');
   await host.provider.perform({ type: 'new' });
   expect(host.provider.snapshot().configs[0].currentValue).toBe('other');
-});
-it('does not replace an unavailable native session with a new one', async () => {
-  await contextAgent();
-  const first = host.provider.snapshot().sessionId;
-  host.provider.disconnect();
-  host.provider.state.status = 'disconnected';
-  host.config.args = [resolve('test/mock-agent.mjs'), 'no-load'];
-  const before = wire().length;
-  await host.provider.perform({ type: 'connect' });
-  expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', sessionId: first });
-  expect(host.provider.snapshot().error).toContain('session/load');
-  expect(
-    wire()
-      .slice(before)
-      .some((r) => r.method === 'session/new'),
-  ).toBe(false);
 });
 it('does not auto-open a different history after deleting the last active record', async () => {
   await contextAgent();
@@ -1438,7 +1006,7 @@ it('warns about unavailable inherited values without retrying or silently creati
   host.provider.dispose();
   await host.provider.persistence.pending;
   writeFileSync(
-    resolve(host.home!, '.pi', 'pi-acp-workbench', 'preferences', 'pi.json'),
+    resolve(preferencesHome, 'preferences', 'pi.json'),
     JSON.stringify({
       version: 1,
       preferences: [
@@ -1451,7 +1019,12 @@ it('warns about unavailable inherited values without retrying or silently creati
   const before = wire().length;
   await host.provider.perform({ type: 'new' });
   expect(host.provider.snapshot().status).toBe('ready');
-  expect(host.provider.snapshot().error).toContain('上次的设置当前不可用');
+  expect(host.provider.snapshot().entries).toContainEqual(
+    expect.objectContaining({
+      role: 'notice',
+      text: expect.stringContaining('上次的设置当前不可用'),
+    }),
+  );
   expect(
     wire()
       .slice(before)

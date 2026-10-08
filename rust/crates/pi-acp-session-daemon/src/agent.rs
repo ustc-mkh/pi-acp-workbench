@@ -1,6 +1,7 @@
 //! ACP JSON-RPC client over a child process stdin/stdout.
 //! Requests, permissions and writes are independently tracked; prompts have no timeout.
-//! Shutdown signals the process group, then checks it before escalating after 1.5s.
+//! Shutdown signals the process group, escalating after 1.5s only if the child has not exited.
+use crate::harness::Harness;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,6 +24,7 @@ pub type LogCb = Arc<dyn Fn(&str) + Send + Sync>;
 pub type ClosedCb = Arc<dyn Fn(String) + Send + Sync>;
 
 pub struct AgentOptions {
+    pub harness: Harness,
     pub cwd: String,
     pub command: String,
     pub args: Vec<String>,
@@ -43,6 +45,7 @@ const SIGKILL_DELAY: Duration = Duration::from_millis(1500);
 const EOF_GRACE: Duration = Duration::from_millis(50);
 
 struct Inner {
+    harness: Harness,
     update: UpdateCb,
     permission: PermissionCb,
     log: LogCb,
@@ -52,6 +55,7 @@ struct Inner {
     cwd: String,
     pid: u32,
     closed_flag: AtomicBool,
+    exited_flag: AtomicBool,
     next_id: AtomicU64,
     /// connection.pendingResponses — short critical sections, std Mutex so the
     /// sync dispose() path can drain without a runtime.
@@ -75,18 +79,23 @@ fn terminate(inner: &Arc<Inner>, pending_reason: &str) {
     for (_, waiter) in inner.pending.lock().unwrap().drain() {
         let _ = waiter.send(Err(pending_reason.to_string()));
     }
-    if inner.pid == 0 {
+    if inner.pid == 0 || inner.exited_flag.load(Ordering::SeqCst) {
         return;
     }
     // process.kill(-pid, 'SIGTERM') — ESRCH on an already-dead group ignored.
     unsafe { libc::kill(-(inner.pid as i32), libc::SIGTERM) };
     let pid = inner.pid;
-    // Escalate only while the process group is still alive.
-    std::thread::spawn(move || {
-        std::thread::sleep(SIGKILL_DELAY);
-        let alive = unsafe { libc::kill(-(pid as i32), 0) } == 0;
-        if alive {
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    // Stop escalation as soon as the exit monitor confirms this child exited.
+    let mut exited = inner.exit_rx.clone();
+    let child = inner.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = async { let _ = exited.wait_for(|done| *done).await; } => {}
+            _ = tokio::time::sleep(SIGKILL_DELAY) => {
+                if !child.exited_flag.load(Ordering::SeqCst) {
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                }
+            }
         }
     });
 }
@@ -96,7 +105,9 @@ fn fail_reason(inner: &Arc<Inner>, message: String, pending_reason: &str) {
         return;
     }
     terminate(inner, pending_reason);
-    (inner.closed)(message);
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (inner.closed)(message))).is_err() {
+        (inner.log)("ACP closed callback failed; worker has been terminated");
+    }
 }
 
 /// Common case: connection.close() with the SDK default reason.
@@ -282,11 +293,28 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
         // The SDK processes it on a promise — spawn a task and reply with
         // {id, result: <permission cb response>} when it resolves.
         let id = obj["id"].clone();
-        let params = obj.get("params").cloned().unwrap_or(Value::Null);
+        let params = match inner
+            .harness
+            .inbound(obj.get("params").cloned().unwrap_or(Value::Null))
+        {
+            Ok(params) => params,
+            Err(error) => {
+                fail(inner, error);
+                return false;
+            }
+        };
         if method == "session/request_permission" {
             let inner = inner.clone();
             tokio::spawn(async move {
-                let result = (inner.permission)(params).await;
+                let result =
+                    pi_acp_core::panic_guard::run(async { (inner.permission)(params).await }).await;
+                let result = match result {
+                    Ok(value) => value,
+                    Err(_) => {
+                        fail(&inner, "ACP 授权处理异常，工作进程已关闭。".into());
+                        return;
+                    }
+                };
                 send_wire(
                     &inner,
                     json!({"jsonrpc": "2.0", "id": id, "result": result}),
@@ -305,7 +333,29 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
         // Inbound notification ($/cancelRequest is ignored like an
         // unimplemented protocol hook).
         if method == Some("session/update") {
-            (inner.update)(obj.get("params").cloned().unwrap_or(Value::Null));
+            match inner
+                .harness
+                .inbound(obj.get("params").cloned().unwrap_or(Value::Null))
+            {
+                Ok(params) => {
+                    if let Err(error) = crate::acp_validation::notification(&params) {
+                        fail(inner, error);
+                        return false;
+                    }
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (inner.update)(params)
+                    }))
+                    .is_err()
+                    {
+                        fail(inner, "ACP 通知处理异常，工作进程已关闭。".into());
+                        return false;
+                    }
+                }
+                Err(error) => {
+                    fail(inner, error);
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -452,8 +502,7 @@ impl AgentProcess {
         command
             .args(&options.args)
             .current_dir(&options.cwd)
-            // vars_os: non-UTF8 env values must not panic (vars() would, and
-            // workspace release uses panic=abort → whole daemon would die).
+            // Inherit the OS environment without decoding it; apply worker overrides.
             .envs(&options.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -488,6 +537,7 @@ impl AgentProcess {
         let (exit_tx, exit_rx) = watch::channel(false);
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
+            harness: options.harness,
             update: options.update,
             permission: options.permission,
             log: options.log,
@@ -496,6 +546,7 @@ impl AgentProcess {
             cwd: options.cwd,
             pid,
             closed_flag: AtomicBool::new(false),
+            exited_flag: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             pending: StdMutex::new(HashMap::new()),
             write_tx: StdMutex::new(Some(write_tx)),
@@ -512,6 +563,7 @@ impl AgentProcess {
         let monitor = inner.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
+            monitor.exited_flag.store(true, Ordering::SeqCst);
             fail(
                 &monitor,
                 format!(
@@ -519,7 +571,7 @@ impl AgentProcess {
                     describe_exit(status)
                 ),
             );
-            let _ = monitor.exit_tx.send(true);
+            monitor.exit_tx.send_replace(true);
         });
         Ok(Self {
             inner,
@@ -536,9 +588,12 @@ impl AgentProcess {
         self.info.lock().await.clone()
     }
 
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub async fn request(&self, method: &str, mut params: Value) -> Result<Value, String> {
         if self.is_closed() {
             return Err("ACP connection closed".to_string());
+        }
+        if let Some(id) = params.get("sessionId").and_then(Value::as_str) {
+            params["sessionId"] = self.inner.harness.native_id(id)?.into();
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -552,8 +607,11 @@ impl AgentProcess {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err("ACP connection closed".to_string());
         }
-        rx.await
-            .unwrap_or_else(|_| Err("ACP connection closed".to_string()))
+        let result = rx
+            .await
+            .unwrap_or_else(|_| Err("ACP connection closed".to_string()))?;
+        crate::acp_validation::response(method, &result)?;
+        Ok(result)
     }
 
     pub async fn with_timeout(
@@ -612,9 +670,10 @@ impl AgentProcess {
         let default_ms = self.inner.request_timeout.as_millis() as u64;
         let mut params = json!({"cwd": self.inner.cwd, "mcpServers": []});
         let Some(id) = id else {
-            return self
+            let result = self
                 .with_timeout(self.request("session/new", params), default_ms)
-                .await;
+                .await?;
+            return self.inner.harness.inbound(result);
         };
         let capable = {
             let info = self.info.lock().await;
@@ -632,6 +691,26 @@ impl AgentProcess {
         let mut obj = result.as_object().cloned().unwrap_or_default();
         obj.insert("sessionId".to_string(), json!(id));
         Ok(Value::Object(obj))
+    }
+
+    /// Adapter policy is kept beside ACP negotiation, not duplicated in clients.
+    pub async fn configure_session(&self, session: &mut Value) -> Result<(), String> {
+        if self.inner.harness != Harness::Codex {
+            return Ok(());
+        }
+        let needs_default = session
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .is_some_and(|options| {
+                options
+                    .iter()
+                    .any(|o| o["id"] == "collaboration_mode" && o["currentValue"] != "default")
+            });
+        if needs_default {
+            let result = self.with_timeout(self.request("session/set_config_option", json!({ "sessionId": session["sessionId"], "configId": "collaboration_mode", "value": "default" })), 30_000).await?;
+            session["configOptions"] = result["configOptions"].clone();
+        }
+        Ok(())
     }
 
     pub async fn prompt(&self, session_id: &str, prompt: Vec<Value>) -> Result<Value, String> {
@@ -696,6 +775,7 @@ mod tests {
         let (closed_tx, closed) = tmpsc::unbounded_channel();
         (
             AgentOptions {
+                harness: Harness::Pi,
                 cwd: "/".to_string(),
                 command: "node".to_string(),
                 args: vec![agent_path()],
@@ -723,6 +803,36 @@ mod tests {
                 closed,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn a_panicking_worker_callback_closes_only_that_worker() {
+        let (mut options, _) = test_options();
+        options.update = Arc::new(|_| panic!("unexpected notification callback bug"));
+        let broken = AgentProcess::spawn(options).unwrap();
+        broken.initialize().await.unwrap();
+        let session = broken.create_session(None).await.unwrap();
+        assert!(broken
+            .prompt(
+                session["sessionId"].as_str().unwrap(),
+                vec![json!({"type":"text","text":"hello"})]
+            )
+            .await
+            .is_err());
+        assert!(broken.is_closed());
+        broken.stop().await;
+        let (options, _) = test_options();
+        let healthy = AgentProcess::spawn(options).unwrap();
+        healthy.initialize().await.unwrap();
+        let session = healthy.create_session(None).await.unwrap();
+        assert!(healthy
+            .prompt(
+                session["sessionId"].as_str().unwrap(),
+                vec![json!({"type":"text","text":"hello"})]
+            )
+            .await
+            .is_ok());
+        healthy.stop().await;
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! Typed service request boundary. serde validates shape; bounded strings and
 //! prompt sizes are checked before queueing or touching session state.
 use crate::error::ServiceError;
+use crate::harness::Harness;
 use crate::types::Snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -85,9 +86,29 @@ impl AgentRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum ServiceCommand {
-    Hello,
+    #[serde(rename = "events.next")]
+    EventsNext {
+        #[serde(default, deserialize_with = "optional_session")]
+        #[ts(optional)]
+        cursor: Option<String>,
+    },
+    #[serde(rename = "events.ack")]
+    EventsAck {
+        #[serde(deserialize_with = "session_text")]
+        id: String,
+        #[serde(deserialize_with = "session_text")]
+        token: String,
+    },
+    Hello {
+        #[serde(default)]
+        #[ts(as = "Option<Harness>", optional)]
+        harness: Harness,
+    },
     List,
     Create {
+        #[serde(default)]
+        #[ts(as = "Option<Harness>", optional)]
+        harness: Harness,
         #[serde(deserialize_with = "cwd_text")]
         cwd: String,
     },
@@ -126,10 +147,6 @@ pub enum ServiceCommand {
         session_id: String,
         #[serde(flatten)]
         request: AgentRequest,
-    },
-    HistoryWrite {
-        #[ts(type = "Snapshot")]
-        snapshot: Box<Snapshot>,
     },
     HistoryRemove {
         #[serde(default, deserialize_with = "optional_session")]
@@ -173,13 +190,13 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
     if !params.is_object() {
         return Err(ServiceError::InvalidParams("服务参数必须是对象".into()));
     }
-    if method == "hello" {
-        return Ok(ServiceCommand::Hello);
-    }
     if method == "list" {
         return Ok(ServiceCommand::List);
     }
     if ![
+        "events.next",
+        "events.ack",
+        "hello",
         "create",
         "state",
         "cancel",
@@ -187,7 +204,6 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
         "permission",
         "prompt",
         "request",
-        "historyWrite",
         "historyRemove",
     ]
     .contains(&method)
@@ -237,11 +253,7 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
                         .iter()
                         .find(|field| detail.contains(**field))
                         .copied()
-                        .unwrap_or(if method == "historyWrite" {
-                            "snapshot"
-                        } else {
-                            "request"
-                        })
+                        .unwrap_or("request")
                 )
             };
             ServiceError::InvalidParams(message)
@@ -262,13 +274,6 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
                 ));
             }
         }
-        ServiceCommand::HistoryWrite { snapshot }
-            if snapshot.id.is_empty()
-                || snapshot.cwd.is_empty()
-                || snapshot.context_complete != Some(true) =>
-        {
-            return Err(ServiceError::InvalidParams("无效参数：snapshot".into()))
-        }
         _ => {}
     }
     Ok(command)
@@ -288,6 +293,7 @@ pub fn durable_command(command: &ServiceCommand) -> bool {
 }
 pub fn typescript() -> String {
     let declarations = [
+        Harness::decl(),
         AgentRequest::decl(),
         PromptSource::decl(),
         ServiceCommand::decl(),

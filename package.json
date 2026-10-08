@@ -99,75 +99,21 @@
     "configuration": {
       "title": "Pi ACP",
       "properties": {
-        "piAcp.codex.command": {
-          "type": "string",
-          "default": "codex-acp",
-          "scope": "machine",
-          "description": "Codex ACP adapter executable (not the interactive codex CLI). Install @agentclientprotocol/codex-acp on the extension host."
-        },
-        "piAcp.codex.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "machine",
-          "description": "Arguments for the Codex ACP adapter, passed without a shell."
-        },
-        "piAcp.codex.env": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "scope": "machine",
-          "description": "Codex-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
-        },
         "piAcp.codex.loginCommand": {
           "type": "string",
           "default": "codex",
           "scope": "machine",
           "description": "Interactive Codex CLI used by Open Login Terminal (runs codex login). This is separate from codex-acp."
         },
-        "piAcp.claude.command": {
-          "type": "string",
-          "default": "claude-agent-acp",
-          "scope": "machine",
-          "description": "Claude Code ACP adapter executable (not the interactive claude CLI). Install @agentclientprotocol/claude-agent-acp on the extension host."
-        },
-        "piAcp.claude.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "machine",
-          "description": "Arguments for the Claude ACP adapter, passed without a shell."
-        },
-        "piAcp.claude.env": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "scope": "machine",
-          "description": "Claude-only environment overrides; Pi profile overrides are not inherited. Prefer external credential storage."
-        },
         "piAcp.showThoughts": {
           "type": "boolean",
           "default": true,
           "description": "Show thought chunks when the agent emits them."
         },
-        "piAcp.sharedHistory": {
-          "type": "boolean",
-          "default": true,
-          "scope": "machine",
-          "description": "Share Codex/Claude history on this server. Pi always uses session-service history. Changes require reloading the window."
-        },
         "piAcp.persistHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Show and save client history. For Pi this only hides history in this client: the independent session service always persists tasks. Use Delete History to remove server records."
+          "description": "Show history in this client. The session service persists tasks for every harness; Delete History removes server records."
         },
         "piAcp.maxContextChars": {
           "type": "number",
@@ -181,6 +127,12 @@
           "default": "",
           "scope": "machine",
           "description": "Pi session service Unix socket. Empty uses ~/.pi/pi-acp-workbench/service/sessions.sock. Pi processes and model environment are configured in sessions.json; reload the window after changing this path."
+        },
+        "piAcp.claude.loginCommand": {
+          "type": "string",
+          "default": "claude-agent-acp",
+          "scope": "machine",
+          "description": "Executable used by the login terminal (--cli /login). Worker commands belong in sessions.json."
         }
       }
     }

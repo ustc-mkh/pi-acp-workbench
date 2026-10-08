@@ -94,9 +94,7 @@ pub struct Snapshot {
     pub configs: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<Value>,
-    /// Unknown keys pass through verbatim — delegated `historyWrite` snapshots
-    /// may carry extension-side fields this daemon does not know, and TS
-    /// stores them byte-for-byte in both the file and the index stub.
+    /// Preserve optional metadata in both the full snapshot and index stub.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }

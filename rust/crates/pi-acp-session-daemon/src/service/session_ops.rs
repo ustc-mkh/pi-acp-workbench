@@ -3,13 +3,7 @@ use super::*;
 
 impl SessionService {
     pub async fn list(&self) -> Result<Vec<Snapshot>, String> {
-        Ok(self
-            .store
-            .list()
-            .await?
-            .into_iter()
-            .filter(|s| s.harness.as_deref() == Some("pi"))
-            .collect())
+        self.store.list().await
     }
 
     pub(super) async fn index(&self, id: &str) -> Result<Snapshot, String> {
@@ -99,9 +93,9 @@ impl SessionService {
                     if let Some(rt) = rt {
                         self.evict(id, &rt).await;
                     }
+                    self.store.remove(id).await
                 })
-                .await;
-                self.store.remove(id).await?;
+                .await?;
                 Ok(Value::Null)
             }
             ServiceCommand::Request {
@@ -116,6 +110,15 @@ impl SessionService {
                     .and_then(|rt| rt.lock().unwrap().agent.clone());
                 match agent {
                     Some(agent) => {
+                        if agent
+                            .info()
+                            .await
+                            .unwrap_or(Value::Null)
+                            .pointer("/agentCapabilities/_meta/pi-workbench/nativeFork")
+                            != Some(&Value::Bool(true))
+                        {
+                            return Err("当前 ACP 适配器不支持此扩展操作".into());
+                        }
                         agent
                             .request("_pi_workbench/cancel_fork", json!({ "sessionId": id }))
                             .await
@@ -177,7 +180,11 @@ impl SessionService {
         agent.stop().await;
         rt.lock().unwrap().agent = None;
         let transient_state = Arc::new(Mutex::new(initial_state()));
-        let fork = self.spawn_transient(&snapshot.cwd, transient_state)?;
+        let fork = self.spawn_transient(
+            Harness::parse(snapshot.harness.as_deref().unwrap_or(""))?,
+            &snapshot.cwd,
+            transient_state,
+        )?;
         let settings = async {
             fork.initialize().await?;
             fork.create_session(Some(&new_id)).await
@@ -203,19 +210,6 @@ impl SessionService {
         written.map(|_| ())
     }
 
-    /// Protocol-v2 historyWrite: the session lease may be held externally
-    /// (calling extension) — the store verifies freshness; a runtime we own
-    /// means the session is live here → SessionInUse like claim().
-    pub(super) async fn history_write(&self, snapshot: &Snapshot) -> Result<Value, String> {
-        if self.runtimes.lock().unwrap().contains_key(&snapshot.id) {
-            return Err(SessionInUseError.to_string());
-        }
-        Ok(
-            serde_json::to_value(self.store.write_delegated(snapshot).await?)
-                .unwrap_or(Value::Null),
-        )
-    }
-
     /// historyRemove {sessionId?}: remove one index entry (evicting a live
     /// runtime first), or clear the whole index when sessionId is absent.
     pub(super) async fn history_remove(&self, id: Option<&str>) -> Result<(), String> {
@@ -235,9 +229,9 @@ impl SessionService {
                     for (sid, rt) in runtimes {
                         self.evict(&sid, &rt).await;
                     }
+                    self.store.clear().await
                 })
-                .await;
-                self.store.clear().await
+                .await
             }
             Some(id) => {
                 if !self.store.list().await?.iter().any(|s| s.id == id) {
@@ -248,14 +242,14 @@ impl SessionService {
                     if let Some(rt) = rt {
                         self.evict(id, &rt).await;
                     }
+                    self.store.remove(id).await
                 })
-                .await;
-                self.store.remove(id).await
+                .await
             }
         }
     }
 
-    pub(super) async fn create(&self, directory: &str) -> Result<Value, String> {
+    pub(super) async fn create(&self, directory: &str, harness: Harness) -> Result<Value, String> {
         if !std::path::Path::new(directory).is_absolute() {
             return Err("工作区需要绝对目录路径".into());
         }
@@ -269,11 +263,12 @@ impl SessionService {
         self.exclusive(|| async {
             self.make_room().await?;
             let initial = Arc::new(Mutex::new(initial_state()));
-            let agent = self.spawn_transient(&cwd, initial.clone())?;
+            let agent = self.spawn_transient(harness, &cwd, initial.clone())?;
             let result = async {
                 agent.initialize().await?;
-                let preferences = self.preferences.read("pi").await?;
+                let preferences = self.preferences.read(harness.name()).await?;
                 let mut session = agent.create_session(None).await?;
+                agent.configure_session(&mut session).await?;
                 let warning = apply_preferences(agent.as_ref(), &mut session, &preferences).await?;
                 if warning.is_none() {
                     let prefs_state = ChatState {
@@ -284,7 +279,7 @@ impl SessionService {
                         modes: session.get("modes").cloned(),
                         ..Default::default()
                     };
-                    self.preferences.save("pi", &prefs_state).await?;
+                    self.preferences.save(harness.name(), &prefs_state).await?;
                 }
                 let session_id = session
                     .get("sessionId")
@@ -298,7 +293,7 @@ impl SessionService {
                     .write(&Snapshot {
                         id: session_id.clone(),
                         cwd,
-                        harness: Some("pi".into()),
+                        harness: Some(harness.name().into()),
                         title: "新对话".into(),
                         updated: now_ms(),
                         entries: match &warning {

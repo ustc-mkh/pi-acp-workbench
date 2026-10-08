@@ -1,30 +1,6 @@
 import { expect, it } from 'vitest';
-import {
-  harnessKey,
-  launchSettings,
-  localSessionId,
-  nativeSessionId,
-  snapshotHarness,
-  type HarnessConfig,
-} from '../src/harness';
-it('uses only current external harness settings and requires explicit history metadata', () => {
-  const values: Record<string, unknown> = {
-    env: { PI_ONLY: 'secret' },
-    'codex.env': { CODEX_ONLY: 'value' },
-    'claude.args': ['--example'],
-  };
-  const config: HarnessConfig = {
-    get: <T>(key: string, fallback: T) => (values[key] ?? fallback) as T,
-  };
-  expect(launchSettings(config, 'codex')).toMatchObject({
-    command: 'codex-acp',
-    env: { CODEX_ONLY: 'value' },
-  });
-  expect(launchSettings(config, 'claude')).toMatchObject({
-    command: 'claude-agent-acp',
-    env: {},
-    args: ['--example'],
-  });
+import { harnessKey, localSessionId, nativeSessionId, snapshotHarness } from '../src/harness';
+it('requires explicit history metadata and keeps client pointers isolated', () => {
   expect(() => snapshotHarness({})).toThrow();
   expect(snapshotHarness({ harness: 'pi' })).toBe('pi');
   expect(() => snapshotHarness({ harness: 'unknown' })).toThrow();

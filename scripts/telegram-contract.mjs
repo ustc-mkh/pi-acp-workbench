@@ -181,6 +181,7 @@ async function startTelegramMock() {
 }
 
 // ------------------------------------------------------------ session mock --
+const failedAcks = new Set();
 const sessions = { list: new Map(), next: 0, watchers: new Map(), pending: new Map(), calls: [] };
 function snapshot(s) {
   return {
@@ -226,6 +227,59 @@ function startSessionMock(socketPath, outboxDir) {
         const fail = (error) => socket.write(JSON.stringify({ id: item.id, error }) + '\n');
         try {
           switch (item.method) {
+            case 'events.next': {
+              const names = (
+                await readdir(outboxDir).catch((error) => {
+                  if (error.code === 'ENOENT') return [];
+                  throw error;
+                })
+              )
+                .filter(
+                  (name) =>
+                    /^[a-f0-9]{64}\.json$/.test(name) &&
+                    (!item.params.cursor || name > item.params.cursor),
+                )
+                .sort();
+              if (!names.length) {
+                ok(null);
+                break;
+              }
+              const cursor = names[0],
+                body = await readFile(join(outboxDir, cursor));
+              ok({
+                cursor,
+                event: JSON.parse(body),
+                token: createHash('sha256').update(body).digest('hex'),
+              });
+              break;
+            }
+            case 'events.ack': {
+              if (failedAcks.has(item.params.id)) {
+                fail('simulated acknowledgement transport failure');
+                break;
+              }
+              const file = join(
+                outboxDir,
+                createHash('sha256').update(item.params.id).digest('hex') + '.json',
+              );
+              let body;
+              try {
+                body = await readFile(file);
+              } catch (error) {
+                if (error.code === 'ENOENT') {
+                  ok(false);
+                  break;
+                }
+                throw error;
+              }
+              if (createHash('sha256').update(body).digest('hex') !== item.params.token) {
+                ok(false);
+                break;
+              }
+              await rm(file);
+              ok(true);
+              break;
+            }
             case 'hello':
               ok({ protocolVersion: 1 });
               break;
@@ -641,6 +695,36 @@ test('failed outbox delivery retries without re-running the service and redacts 
   );
   assert.equal(sent('sendMessage', { text: 'retry body' }).length, 1);
   assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, before);
+});
+
+test('socket acknowledgement failure retries without resending a durably delivered reply', async () => {
+  const id = 'rpc-ack-retry';
+  failedAcks.add(id);
+  try {
+    await publishEvent(id, 'ack retry body');
+    await waitUntil(
+      async () => (await savedState()).delivered.includes(id),
+      'delivery checkpoint missing',
+    );
+    await waitUntil(
+      () => sessions.calls.some((call) => call.method === 'events.ack' && call.params.id === id),
+      'ack was not attempted',
+    );
+    await stat(outboxFile(id));
+    assert.equal(sent('sendMessage', { text: 'ack retry body' }).length, 1);
+  } finally {
+    failedAcks.delete(id);
+  }
+  await waitUntil(async () => {
+    try {
+      await stat(outboxFile(id));
+      return false;
+    } catch (error) {
+      if (error.code === 'ENOENT') return true;
+      throw error;
+    }
+  }, 'acknowledged event was not removed');
+  assert.equal(sent('sendMessage', { text: 'ack retry body' }).length, 1);
 });
 
 test('429 retries the same send while preserving long Unicode output', async () => {

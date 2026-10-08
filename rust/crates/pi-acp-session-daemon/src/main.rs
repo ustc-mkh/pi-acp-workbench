@@ -4,13 +4,16 @@
 //! When command is absent, resolve PI_ADAPTER or pi-adapter.mjs beside this
 //! binary and launch it with Node from PATH. build:services ships the complete
 //! runtime directory; custom workers require explicit command/args.
+mod acp_validation;
 mod agent;
 mod diff;
 mod error;
+mod harness;
 mod history;
 mod journal;
 mod native;
 mod outbox;
+mod outbox_reader;
 mod phase;
 mod prefs;
 mod protocol;
@@ -21,8 +24,9 @@ mod types;
 mod updates;
 
 use pi_acp_core::mkdir_lock::MkdirLock;
+use serde::Deserialize;
 use serde_json::Value;
-use service::{ServiceConfig, SessionService};
+use service::{ServiceConfig, SessionService, WorkerLaunch};
 use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
@@ -43,54 +47,53 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkerConfig {
+    command: Option<String>,
+    #[serde(default)]
+    harnesses: HashMap<String, WorkerLaunch>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    #[serde(default = "default_max_workers")]
+    max_workers: usize,
+    #[serde(default = "default_idle_ms")]
+    idle_ms: u64,
+}
+fn default_max_workers() -> usize {
+    3
+}
+fn default_idle_ms() -> u64 {
+    900_000
+}
+
 fn load_config(path: &str) -> Result<ServiceConfig, String> {
-    let raw: Value = serde_json::from_str(
+    let raw: WorkerConfig = serde_json::from_str(
         &std::fs::read_to_string(path).map_err(|e| format!("无法读取会话配置：{e}"))?,
     )
-    .map_err(|e| format!("会话配置必须为 JSON 对象：{e}"))?;
+    .map_err(|e| format!("会话配置无效：{e}"))?;
     let invalid = || "工作进程参数无效".to_string();
-    let max_workers = match raw.get("maxWorkers") {
-        None => 3usize,
-        Some(v) => v
-            .as_u64()
-            .filter(|n| (1..=8).contains(n))
-            .map(|n| n as usize)
-            .ok_or_else(invalid)?,
-    };
-    let idle_ms = match raw.get("idleMs") {
-        None => 900_000,
-        Some(v) => v.as_u64().filter(|n| *n >= 1000).ok_or_else(invalid)?,
-    };
-    let args: Vec<String> = match raw.get("args") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(v)
-            if v.as_array()
-                .is_some_and(|a| a.iter().all(|x| x.is_string())) =>
-        {
-            v.as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_str().unwrap().to_string())
-                .collect()
+    let max_workers = raw.max_workers;
+    let idle_ms = raw.idle_ms;
+    if !(1..=8).contains(&max_workers) || idle_ms < 1000 {
+        return Err(invalid());
+    }
+    for name in raw.harnesses.keys() {
+        harness::Harness::parse(name)?;
+    }
+    for worker in raw.harnesses.values() {
+        if worker.command.trim().is_empty() {
+            return Err(invalid());
         }
-        _ => return Err(invalid()),
-    };
-    let mut env: HashMap<String, String> = match raw.get("env") {
-        None | Some(Value::Null) => HashMap::new(),
-        Some(v)
-            if v.as_object()
-                .is_some_and(|m| m.values().all(|x| x.is_string())) =>
-        {
-            v.as_object()
-                .unwrap()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-                .collect()
-        }
-        _ => return Err(invalid()),
-    };
-    let command = match raw.get("command").and_then(Value::as_str) {
-        Some(cmd) => cmd.to_string(),
+    }
+    let harnesses = raw.harnesses;
+    let args = raw.args.unwrap_or_default();
+    let mut env = raw.env.unwrap_or_default();
+    let command = match raw
+        .command
+        .or_else(|| harnesses.get("pi").map(|w| w.command.clone()))
+    {
+        Some(cmd) => cmd,
         None => {
             let adapter = std::env::var("PI_ADAPTER")
                 .ok()
@@ -101,12 +104,18 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
                         .and_then(|p| p.parent().map(|d| d.join("pi-adapter.mjs")))
                 })
                 .filter(|p| p.exists());
-            let Some(adapter) = adapter else {
-                return Err(
-                    "会话配置缺少 command；Rust daemon 需要显式 worker 命令或旁边的 pi-adapter.mjs"
-                        .into(),
-                );
-            };
+            let adapter = adapter.unwrap_or_else(|| PathBuf::from("pi-acp"));
+            // A Codex/Claude-only installation need not ship the Pi adapter.
+            if adapter == PathBuf::from("pi-acp") {
+                return Ok(ServiceConfig {
+                    command: "pi-acp".into(),
+                    args,
+                    env,
+                    max_workers,
+                    idle_ms,
+                    harnesses,
+                });
+            }
             env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
             let config = ServiceConfig {
                 command: "node".to_string(),
@@ -114,6 +123,7 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
                 env,
                 max_workers,
                 idle_ms,
+                harnesses,
             };
             return Ok(config);
         }
@@ -128,6 +138,7 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
         env,
         max_workers,
         idle_ms,
+        harnesses,
     })
 }
 
@@ -150,7 +161,18 @@ async fn run() -> Result<(), String> {
         .create(root.join("service"))
         .map_err(|e| format!("无法创建数据目录：{e}"))?;
 
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
     let stop = CancellationToken::new();
+    let signal_stop = stop.clone();
+    let signal_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        signal_stop.cancel();
+    });
     let stop_for_lock = stop.clone();
     let lock = MkdirLock::acquire(
         &root.join("service"),
@@ -164,7 +186,6 @@ async fn run() -> Result<(), String> {
     .await
     .map_err(|e| format!("会话服务已在运行：{e}"))?;
 
-    let stop_clone = stop.clone();
     let server_cell: Arc<tokio::sync::OnceCell<server::SessionServer>> =
         Arc::new(tokio::sync::OnceCell::new());
     let server_for_broadcast = server_cell.clone();
@@ -178,7 +199,6 @@ async fn run() -> Result<(), String> {
         }),
         Arc::new(|e| eprintln!("[sessions] {e}")),
     );
-    service.initialize().await?;
 
     let svc = service.clone();
     let server = server::SessionServer::new(
@@ -196,27 +216,24 @@ async fn run() -> Result<(), String> {
             },
         ),
     );
-    server.listen().await?;
+    let startup = async {
+        service.initialize().await?;
+        server.listen().await?;
+        Ok::<(), String>(())
+    };
+    let result = tokio::select! {
+        biased;
+        _ = stop.cancelled() => Ok(()),
+        result = startup => result,
+    };
     let _ = server_cell.set(server);
-    println!(
-        "Pi session service ready; maxWorkers={}, idleMs={}",
-        config.max_workers, config.idle_ms
-    );
-
-    {
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut term = signal(SignalKind::terminate()).expect("signal");
-            let mut int = signal(SignalKind::interrupt()).expect("signal");
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = int.recv() => {}
-            }
-            stop.cancel();
-        });
+    if result.is_ok() && !stop.is_cancelled() {
+        println!(
+            "Pi session service ready; maxWorkers={}, idleMs={}",
+            config.max_workers, config.idle_ms
+        );
+        stop.cancelled().await;
     }
-    stop.cancelled().await;
     {
         let server = server_cell.get();
         if let Some(server) = server {
@@ -227,8 +244,8 @@ async fn run() -> Result<(), String> {
     if !lock.compromised() {
         lock.release().await;
     }
-    let _ = stop_clone;
-    Ok(())
+    signal_task.abort();
+    result
 }
 
 #[tokio::main]
@@ -243,5 +260,27 @@ async fn main() -> std::process::ExitCode {
             eprintln!("{error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn typed_config_rejects_unknown_fields_and_invalid_value_types() {
+        for body in [
+            r#"{"command":"node","maxWorker":1}"#,
+            r#"{"command":"node","args":[1]}"#,
+            r#"{"command":"node","env":{"KEY":1}}"#,
+            r#"{"command":42}"#,
+            "[]",
+        ] {
+            assert!(serde_json::from_str::<WorkerConfig>(body).is_err());
+        }
+        let config: WorkerConfig =
+            serde_json::from_str(r#"{"command":"node","args":null,"env":null}"#).unwrap();
+        assert_eq!(config.max_workers, 3);
+        assert_eq!(config.idle_ms, 900_000);
     }
 }

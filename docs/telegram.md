@@ -1,6 +1,6 @@
 # Telegram 接入
 
-Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话和执行任务。生产入口为 `service-dist/pi-acp-telegram-daemon`，通过 `npm run build:services` 构建；不再发布 Node relay。接受 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，继续读写 `~/.pi/pi-acp-workbench/telegram/` 的既有格式。契约验证为 `npm run test:contract:telegram`，真实 Rust 会话服务与 relay 集成为 `npm run test:integration:rust`。一个私人群组 Topic 对应一个 Pi session；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
+Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话和执行任务。生产入口为 `service-dist/pi-acp-telegram-daemon`，通过 `npm run build:services` 构建；不再发布 Node relay。接受 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，继续读写 `~/.pi/pi-acp-workbench/telegram/` 的既有格式。契约验证为 `npm run test:contract:telegram`，真实 Rust 会话服务与 relay 集成为 `npm run test:integration:rust`。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
 
 本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复使用纯文本，避免不完整 Markdown 导致 Telegram 拒绝流式更新。
 
@@ -16,7 +16,7 @@ Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话�
 
 协议依据：[Topics](https://core.telegram.org/bots/api#createforumtopic)、[长轮询](https://core.telegram.org/bots/api#getupdates)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)、[速率限制](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)。
 
-先完成 [Pi 会话服务部署](session-service.md)，Telegram 只负责消息接入。两者使用同一个服务器账户和数据目录。
+先完成 [Pi 会话服务部署](session-service.md)，Telegram 只负责消息接入。两者使用同一个服务器账户，以便访问私有 Unix socket。默认使用相同数据目录；relay 可配置绝对路径 `serviceSocket` 连接会话服务，并用独立 `--data-dir` 保存自己的状态。
 
 ### 2. 配置服务器
 
@@ -61,7 +61,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置包含群组、用户、可选工作区别名及 `serviceSocket`。该开关缺省为 `false`。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。`/sessions` 和 `/open` 同样只显示或连接这些目录中的会话；已有话题中的状态、历史、任务、停止和授权请求也会重新检查工作区范围。无法解析的目录会被拒绝。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
 
 ### 3. 作为用户服务常驻
 
@@ -91,13 +91,13 @@ journalctl --user -u pi-telegram -f
 ## 存储与恢复边界
 
 - `~/.pi/pi-acp-workbench/telegram/` 保存话题绑定、处理游标和完成通知记录，不保存 Bot token。新目录/文件权限为 0700/0600。
-- `telegram/events/` 是磁盘待发送队列，可能含完整回复；成功发送后删除，启动中的服务清理超过 7 天的遗留记录。服务未运行时文件保留，重新启动后处理。
+- outbox 由会话服务持久化，relay 通过 `events.next` 逐项读取、在保存投递记录后通过 `events.ack` 确认。队列可能含完整回复；服务删除确认过的对应版本，并清理超过 7 天的记录。relay 不访问队列目录，离线后重新连接可继续投递。
 - 同一服务器上的同一 Bot 只有一个服务能持有轮询锁；Telegram 返回其他轮询器冲突时停止服务并报告。
 - 任务游标在执行前落盘，优先避免重复运行工具。进程若恰好在落盘后、执行前崩溃，该条任务不会自动重放，请检查历史后手动重发。
 - 完成通知在发送前落盘，网络恢复后重试。发送已成功但确认落盘前崩溃时可能重复通知，不会重跑 Pi 任务。
 - 强制杀进程不会自动继续中断的模型请求；原生历史和本地记录保留。需要继续时在原话题发新消息。
 
-`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取扩展默认目录。不要用真实 Bot/凭据运行自动测试。生产实现忽略 `PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS`，固定使用 Telegram 官方端点和 3100 ms 发送间隔。Rust 契约及集成测试单独构建 `contract-test` feature 到 `rust/target/contract/`。测试二进制支持这两个环境变量，禁止部署到生产。
+`--data-dir` 可改用隔离数据目录，主要用于测试；改动后不会自动读取默认目录；连接其他数据目录中的会话服务须显式设置 `serviceSocket`。不要用真实 Bot/凭据运行自动测试。生产实现忽略 `PI_TELEGRAM_API_BASE` 与 `PI_TELEGRAM_PACE_MS`，固定使用 Telegram 官方端点和 3100 ms 发送间隔。Rust 契约及集成测试单独构建 `contract-test` feature 到 `rust/target/contract/`。测试二进制支持这两个环境变量，禁止部署到生产。
 
 ## 维护与升级范围
 
@@ -113,7 +113,7 @@ journalctl --user -u pi-telegram -f
 
 发送 `/new /ssddata/miaokehao/LLMRouterBench` 可在任意有效绝对目录新建会话，无需预先配置。也可发送 `/new workbench` 创建会话及独立话题；仅配置一个工作区时可以省略名称。在话题中直接发文字即可与对应 Pi session 对话，`/compact` 等未被服务占用的命令转交 Pi。当前仅支持文字输入，回复为纯文本。
 
-`/sessions` 列出最近 50 个 Pi 会话（不限工作目录），`/open 12` 为已有编号会话创建或打开话题。也可以使用完整 Session ID。
+`/sessions` 列出最近 50 个各 harness 的会话（开启工作区限制时仅显示允许目录），`/open 12` 为已有编号会话创建或打开话题。也可以使用完整 Session ID。
 
 ### 将以前的会话同步到 Telegram
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
-import { SharedHistoryStore } from '../src/shared-history';
+import { SharedHistoryStore } from './support/history-fixture';
 import { SessionClient } from '../src/session-wire';
 import { startRustService } from './rust-service';
 import { processResources, requestFingerprint } from './rust-utils';

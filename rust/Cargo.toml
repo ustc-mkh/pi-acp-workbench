@@ -6,4 +6,5 @@ members = ["crates/pi-acp-core", "crates/pi-acp-telegram-daemon", "crates/pi-acp
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# Isolate worker/task panics rather than aborting every session.
+panic = "unwind"

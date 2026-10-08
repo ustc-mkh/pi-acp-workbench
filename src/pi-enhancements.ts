@@ -1,11 +1,11 @@
 import { RequestError } from '@agentclientprotocol/sdk';
 import { providerError } from './adapter-errors';
 import { createReadStream } from 'node:fs';
-import { stat, mkdtemp, copyFile, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { stat, mkdtemp, copyFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createInterface } from 'node:readline';
-import { randomUUID } from 'node:crypto';
+import { writeAtomicFile } from './atomic-json';
 import { fileURLToPath } from 'node:url';
 import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branch';
 import type { Inspection, Price, UsageRecord } from './telemetry';
@@ -193,13 +193,7 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestErr
         )
           throw new Error('原生分支文件头不匹配。');
         header.parentSession = state.sessionFile;
-        const temp = fork.sessionFile + '.' + randomUUID() + '.tmp';
-        try {
-          await writeFile(temp, JSON.stringify(header) + raw.slice(line), { mode: 0o600 });
-          await rename(temp, fork.sessionFile);
-        } finally {
-          await rm(temp, { force: true });
-        }
+        await writeAtomicFile(fork.sessionFile, JSON.stringify(header) + raw.slice(line), true);
         this.store.upsert({
           sessionId: fork.sessionId,
           cwd: session.cwd,

@@ -1,7 +1,8 @@
+// Test-only ACP/format fixture; never imported by the extension.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
-import { localSessionId, nativeSessionId, HARNESSES, type HarnessId } from './harness';
+import { localSessionId, nativeSessionId, HARNESSES, type HarnessId } from '../../src/harness';
 
 export interface AgentOptions {
   harness?: HarnessId;

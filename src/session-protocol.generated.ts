@@ -2,6 +2,7 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type { ChatState, Snapshot } from './shared';
 
+export type Harness = 'pi' | 'codex' | 'claude';
 export type AgentRequest =
   | { method: '_pi_workbench/inspect'; params: { cursor?: number; force?: boolean } }
   | { method: '_pi_workbench/fork'; params: { entryId: string; hash: string } }
@@ -10,9 +11,11 @@ export type AgentRequest =
   | { method: 'session/set_config_option'; params: { configId: string; value: string } };
 export type PromptSource = 'desktop' | 'telegram';
 export type ServiceCommand =
-  | { method: 'hello' }
+  | { method: 'events.next'; params: { cursor?: string } }
+  | { method: 'events.ack'; params: { id: string; token: string } }
+  | { method: 'hello'; params: { harness?: Harness } }
   | { method: 'list' }
-  | { method: 'create'; params: { cwd: string } }
+  | { method: 'create'; params: { harness?: Harness; cwd: string } }
   | { method: 'state'; params: { sessionId: string } }
   | { method: 'cancel'; params: { sessionId: string } }
   | { method: 'remove'; params: { sessionId: string } }
@@ -31,7 +34,6 @@ export type ServiceCommand =
         | { method: 'session/set_config_option'; params: { configId: string; value: string } }
       );
     }
-  | { method: 'historyWrite'; params: { snapshot: Snapshot } }
   | { method: 'historyRemove'; params: { sessionId?: string } };
 export type ServiceState = {
   snapshot: Snapshot;

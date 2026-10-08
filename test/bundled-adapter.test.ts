@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { AgentProcess } from '../src/agent';
+import { AgentProcess } from './support/acp-client';
 import type { Inspection } from '../src/telemetry';
 beforeAll(() => {
   execFileSync(

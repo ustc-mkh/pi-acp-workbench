@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
-import { AgentProcess } from '../src/agent';
+import { AgentProcess } from './support/acp-client';
 import type * as acp from '@agentclientprotocol/sdk';
 const agents: AgentProcess[] = [];
 afterEach(() => {

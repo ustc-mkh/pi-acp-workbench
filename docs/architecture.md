@@ -1,190 +1,68 @@
 # 架构与会话生命周期
 
-## 进程和数据流
+## 统一运行路径
 
 ```text
-VS Code Webview → ChatProvider → RemoteAgent / TS SessionClient ─┐
-                                                               ├─ Unix socket → Rust SessionService → Node pi-adapter → Pi
-Telegram Bot → Rust Telegram relay / WireClient ─────────────────┘                    ├─ Rust shared history
-                                                                                     └─ Durable Telegram outbox
-Codex / Claude：ChatProvider → AgentProcess（保留本地运行方式）
+VS Code Webview → ChatProvider → RemoteAgent / SessionClient ─┐
+                                                            ├→ Unix socket → Rust SessionService → ACP worker
+Telegram → Rust relay / WireClient ──────────────────────────┘                      ├→ Pi 增强适配器
+                                                                                   ├→ codex-acp
+                                                                                   └→ claude-agent-acp
 ```
 
-Rust `pi-acp-session-daemon` 是唯一 Pi 进程所有者；`rust/crates/pi-acp-session-daemon/src/service.rs` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。扩展通过 `session-wire.ts` 的客户端使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间向会话订阅者广播完整服务状态（流式更新按 40 ms 合并）；原始 ACP 事件保留给协议消费者，桌面 Pi 不再自行归并或生成消息 ID。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
+Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff 的唯一所有者。插件只负责 webview 接线、附件、文档预览、客户端统计和活动会话指针。没有扩展宿主直接启动 ACP worker 的路径，没有 v1/v2 文件写降级路径。插件要求 `session-service.version=3`；升级必须同时更新插件和 daemon。
 
-默认 3 个工作进程，空闲 15 分钟回收。容量满时排队，空闲进程优先淘汰；回收先终止进程组再释放槽位。新建短暂启动 Pi 取得原生 ID，查看已有历史不启动 Pi。进程组终止与 systemd 控制组兜底互补，详见 [运行与恢复边界](session-service.md)。
+`ChatProvider` 使用同一个 `RemoteAgent` 接口，所有会话状态来自服务。原来的 `ConversationBackend`、本地 `AgentProcess`、`SessionCache`、共享历史事务/租约、客户端 Diff 和快照写入已移除。测试中的直接 ACP 客户端及离线数据 fixture 仅用于上游协议与损坏数据测试，不属于生产入口。
 
-Webview 只处理渲染和用户意图，不直接访问模型或文件系统。宿主通过 `state-channel.ts` 向 Webview 发送有序增量，序号不连续时补全状态；模型任务与历史存储由服务管理。Codex / Claude 仍由插件持有进程。
+## 职责
 
-## 职责拆分与合并
+| 模块                                                                               | 职责                                                           |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `protocol.rs` / `session-protocol.generated.ts`                                    | serde 边界与 ts-rs 生成的客户端协议                            |
+| `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收           |
+| `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                         |
+| `service/turn.rs` / `phase.rs`                                                     | 轮次执行、授权、取消、分支、终态保存                           |
+| `queue.rs` / `journal.rs`                                                          | 会话串行、全局容量、取消代际、持久化防重放收据                 |
+| `history.rs` / `prefs.rs` / `diff.rs`                                              | 服务独占历史、按 harness 偏好、工作区净变化                    |
+| `conversation-session.ts` / `conversation-turn.ts` / `conversation-attachments.ts` | 会话选择与启动、轮次操作、附件与导出协调器；共用 Provider 状态 |
+| `bridge/commands.rs`                                                               | Telegram 命令解析、分发与会话权限检查                          |
+| `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                          |
+| `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务              |
+| `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                       |
+| `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                          |
 
-| 模块                                          | 单一职责                                                                                        |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| TS `session-protocol.ts` / Rust `protocol.rs` | Rust serde 请求/响应与错误类别通过 ts-rs 生成 `session-protocol.generated.ts`；构建后检查漂移   |
-| Rust `queue.rs`                               | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                                        |
-| Rust `journal.rs`                             | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                                  |
-| Rust `service.rs`                             | 协调 `service/worker_pool.rs`、`session_ops.rs`、`turn.rs`；`phase.rs` 约束活动操作的资源与取消 |
-| `workspace-diff.ts` / `turn-diff.ts`          | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统                     |
-| `workspace-documents.ts`                      | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验                         |
-| `webview/messages.ts`                         | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用            |
-| `atomic-json.ts`                              | 扩展共享历史/偏好的原子写入；Rust 收据/outbox 使用 core 的 atomic.rs                            |
-| `conversation-history.ts`                     | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                                 |
-| `conversation-statistics.ts`                  | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                              |
-| `session-preferences.ts`                      | 账户级模型/thinking 组合的校验与持久原子保存                                                    |
+## Harness 与能力边界
 
-继续保持独立的边界：`session-settings` 是纯选择器解析，`session-configuration` 是 ACP 设置应用；本地 `AgentProcess` 与服务客户端 `RemoteAgent` 生命周期不同，不应合并。共享索引事务锁与会话租约保护的对象不同，也不能为了减少模块而合并。
+worker 配置统一放在 `sessions.json`，可用 `harnesses.pi/codex/claude` 分别覆盖 command/args/env。顶层 command/args/env 为 Pi 配置；未配置的 Codex/Claude 分别从服务 PATH 启动 `codex-acp` / `claude-agent-acp`。不自动安装适配器，也不继承 Pi 专属环境覆盖。凭据归上游工具管理，登录按钮仅打开登录终端。
 
-`ChatProvider` 通过类型完备的 `UiHandlers` 表分发 UI 意图，负责会话选择与快照组装；`ConversationBackend` 封装连接创建、同步、授权与轮次 Diff，`PiServiceBackend` 接收服务状态，`LocalAcpBackend` 拥有本地 Agent、缓存、授权 resolver 与偏好。历史和统计协调交给独立模块，通过当前状态/通知回调衔接，不引入新的全局 store。暂不拆分很短的 `session-cache`、`session-numbers`，也不把不同职责的小模块机械拼接。
+每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 专用统计或分支能力。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
 
-## 当前格式边界
+Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURIComponent(nativeId)>`。Rust ACP 请求边界统一还原出站 ID、为通知和授权加入命名空间。快照必须显式记录匹配的 harness，不通过 ID 推断缺失元数据。编号、队列、删除和收据使用本地 ID。
 
-只读取当前完整快照（明确 harness、`contextComplete=true`；共享版本记录必须有 revision）和带 fingerprint 的请求收据。缺失字段或不兼容数据拒绝读取/执行，原文件保留，不做补字段、迁移、原生回放重建或静默删除。没有旧 UI 的 draft 字段、deleteMessage 入口、Telegram 接管命令或插件端 Pi 启动配置。
+## 会话生命周期
 
-## Harness 边界
+首次打开无历史时仅显示欢迎页；显式新建才调用 create。活动指针触发恢复，浏览已有历史读取服务状态，不为浏览启动工作进程。冷会话在发送、修改设置或分支时请求上游 session/load；加载失败保留原 ID 和快照，不重放提示词、不自动新建。无 loadSession 能力的历史只读展示。
 
-`src/harness.ts` 定义 Pi、Codex、Claude Code 三个 profile、启动配置和 Session ID 转换。Pi 使用独立 sessions.json；另外两者使用 piAcp.codex._ / piAcp.claude._，只在扩展宿主启动用户已安装的 ACP 适配器，不自动安装软件。
+多个桌面/Telegram 客户端可以附着同一个会话，没有客户端独占文件租约。服务队列按会话串行执行，授权可在任一端处理。关闭窗口、断开连接或切换 harness 只移除客户端连接，已经提交的任务继续运行。服务空闲回收 worker，下一次操作原生加载。
 
-`AgentProcess.request()` 是带 sessionId 请求的统一边界：非 Pi 本地 ID 为 workbench:<harness>:<编码后的原生ID>，RPC 出站还原原生 ID，通知/权限入站加入命名空间。新 Pi ID 不允许占用保留前缀。完整快照与索引必须显式记录 harness；缺失或不匹配时拒绝恢复，不从 ID 推断缺失元数据。租约、编号与历史删除均使用本地 ID。不得在宿主绕过 request() 直接发送带本地 ID 的标准请求。
+客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
 
-适配器声明 fast-mode 时，对话框提供 Fast 选择器，通过标准 set_config_option 更新并保留会话值。Codex collaboration_mode 仍固定 default；账户偏好只继承 model/thinking。Pi/Claude 不伪造 fast 能力。模型管理页显示完整可搜索目录，勾选结果以 globalState.visibleModels 按 harness 保存；当前模型始终出现在简短选择器中。
+selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ConversationLifecycle` 管理 idle/transition/turn/disposed 和取消状态。
 
-selectedHarness 按工作区持久化；非 Pi 的 activeSession 放在 harness.<id>.\* 键下。模型/thinking 偏好独立保存在账户目录，不再读写 workspaceState.sessionPreferences 或 harness.<id>.sessionPreferences。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/分支期间不允许切换。
+## 持久化与偏好
 
-恢复一律请求 session/load，错误原样报告并保留本地记录；即使是空会话也不会自动 session/new 或替换 ID。用户明确新建才创建会话。没有针对供应商特定缺失错误码的重建分支。
+所有 harness 的历史统一保存到数据目录 `history/index.json` 和 `history/conversations/`。只有持有 service.lock 的 daemon 写入，由进程内 mutex 串行事务；没有 TS/Rust 的 history.lock 或会话锁兼容协议。快照先 durable 写入，再 durable 提交索引，最后清理旧快照。文件和目录均 fsync，快照 revision 与 tombstone 防止陈旧写入及删除复活。损坏或不兼容格式拒绝读取，不自动修复或迁移。
 
-SlashCommands 将菜单挂载到 Webview body，以 fixed 定位绕过 footer 的 overflow:auto 裁剪；内容始终来自当前会话 available_commands_update，不硬编码 CLI 命令。键盘补全会阻止默认 Enter 发送。
+偏好统一保存到数据目录 `preferences/{pi,codex,claude}.json`，只继承最近成功使用的 model/thinking，按 harness 隔离。新建读取最新组合，顺序为 model → 刷新选项 → thinking。成功修改设置或实际发送才更新偏好；浏览/恢复旧会话不覆盖账户默认。不继承授权或协作模式。损坏文件拒绝覆盖。
 
-Codex / Claude 第一阶段不开放上下文编辑，也不调用 \_pi_workbench/\*。标准选择器/图片/历史恢复按 initialize 声明及后续通知处理；缺少 loadSession 时只读展示，不把本地记录自动灌入新会话。不声明尚未实现的文件/终端委托、认证网关或子会话扩展。登录按钮启动本地终端，不接收或保存用户输入的凭据。
+客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。原生历史仍由各上游适配器管理，备份需要保留原生会话和 daemon 数据目录。
 
-## 创建、恢复与活动会话
+## 异常隔离
 
-`ChatProvider.start()` 必须显式接收 `'new'` 或一个 Snapshot，不能用缺省参数意外创建会话。
+release 使用 panic unwind。worker 更新、授权回调和会话操作边界捕获 panic，关闭对应 worker，不自动重放任务；持锁异常恢复该会话最近已提交快照。ACP 响应进入可变状态前检查结构，配置、历史索引、偏好与 Telegram 状态使用 serde 类型校验。此保护针对 worker 操作，不保证任意进程级故障都可恢复。
 
-| 用户操作 / 事件                     | 行为                                                             |
-| ----------------------------------- | ---------------------------------------------------------------- |
-| 首次打开、没有历史                  | 显示欢迎页面；不启动 Agent、不创建会话                           |
-| 打开已有工作区                      | 自动恢复 `activeSession` 对应历史，至多尝试一次                  |
-| Webview 重载 / 重复 ready           | 保留当前状态，不反复连接                                         |
-| 顶部 +、欢迎页新建、Pi: New Session | 显式新建空会话并继承最近设置                                     |
-| 点击历史                            | Pi 读取服务当前状态；其他 harness 先取得锁再加载；其他工作区只读 |
-| 释放会话                            | Pi 仅断开客户端，任务继续；其他 harness 保存并断开 Agent、释放锁 |
-| 重新连接                            | 恢复当前会话；没有当前会话时尝试上次活动历史；不自动降级为新建   |
-| 恢复失败或不支持 session/load       | 留下错误与原会话记录，等待重试或用户主动新建                     |
-| 分支                                | 用户显式要求的新分支，包含所选记录之前及本条内容                 |
+## 其他边界
 
-只有明确的活动指针才会触发自动恢复；缺失时保持欢迎页。`activeSession: null` 表示明确无可恢复活动历史，避免删除当前历史后重启又打开另一段对话。删除本地历史不会中断正在运行的 Agent。关闭历史持久化时，重启回到欢迎页，但当前运行内仍可重连活跃会话。
+socket 不监听公网，只允许同服务器账户使用；当前部署支持 Linux x86_64，需要单独部署 daemon，插件不自动启动或安装服务。Telegram 可打开三种 harness 的已有会话，`/new` 默认创建 Pi。Telegram 通过 `events.next` / `events.ack` 消费持久化 outbox，不读取或删除会话服务的文件。relay 可使用独立数据目录，通过 `serviceSocket` 指向服务 socket。
 
-`ConversationLifecycle` 用 idle/transition/turn/disposed 操作状态代替独立的切换、prompting、stopping 标志；取消只附属于 turn，回放只附属于 transition。status 表示后端连接状态，generation 丢弃已切换的异步结果：busy/connecting 期间拒绝新建及切换，避免请求交错。加载前先保存旧会话；候选上下文重建失败则保留原会话。
-
-### 模型与 thinking 继承
-
-`src/session-configuration.ts` 统一新会话偏好的验证与 RPC 应用，不可用时提示；每次模型切换后重新读取选项。恢复已有会话直接使用后端加载的设置，不建立替代会话来恢复设置。`src/session-settings.ts` 提供宿主和 UI 共用的选择器解析，识别 configOptions 的 model / thought_level、常见 thinking 名称及ACP modes。已有 thinking config 时隐藏重复的 modes 控件。
-
-`session-preferences.ts` 将最近成功使用的组合保存到固定位置 `~/.pi/pi-acp-workbench/preferences/{pi,codex,claude}.json`，同账户跨工作区共享、按 harness 隔离。新建每次从磁盘读取，成功选择立即保存（无需发送消息），发送前记录当前组合；轮内 Agent 改变设置时再保存，普通长任务完成不会覆盖其他窗口后来选择的组合。新建成功时记录实际组合；若保存值不可用则提示且保留原偏好。恢复/浏览旧会话或原生分支保留该会话自身设置，不改账户默认；在其中实际发送或修改设置后才更新默认。
-
-Pi 由会话服务独占偏好读写，桌面和 Telegram 因而使用同一组合；自定义 `--data-dir` 时 Pi 偏好位于该目录的 `preferences/pi.json`。Codex/Claude 由扩展宿主写固定账户目录。每个文件含 `version:1`，原子替换并 fsync，文件权限 0600；并发写入以最后完成的整组写入为准，不混拼 model/thinking。只保存模型与思考值，不全局继承权限/协作模式，不包含正文。关闭/删除历史不清除此文件。旧 workspaceState 偏好不自动迁移；损坏或未知版本拒绝读取/覆盖，保留原文件。
-
-应用顺序必须是 **model → 重新读取 configOptions → thinking**，因为模型切换可能改变选项集合。只保存值和控制类型，不把旧模型的选项列表当成新模型能力。选项不再提供时保留 Agent 当前默认值并显示明确提示，不无限重试。RPC 失败会报告错误，用户可重新新建；不会把未成功选择的值记为偏好。
-
-## 存储与缓存
-
-| 位置 / 键                                         | 用途                                                                         |
-| ------------------------------------------------- | ---------------------------------------------------------------------------- |
-| ~/.pi/pi-acp-workbench/history/index.json         | 默认共享模式：全部会话索引、删除 tombstone、nextSessionNumber                |
-| ~/.pi/pi-acp-workbench/history/conversations      | 带版本的完整快照，索引提交后清理上一版本；新目录/文件 POSIX 权限为 0700/0600 |
-| workspaceState.history / storageUri/conversations | 本地模式：最近 20 个索引和快照；仅用于 Codex / Claude 本地模式               |
-| workspaceState.activeSession                      | 最后活动的持久化会话 ID，null 表示无                                         |
-| ~/.pi/pi-acp-workbench/preferences/{harness}.json | 跨工作区共享的最近模型/thinking 组合                                         |
-| workspaceState.usageRecords / usageTitles         | 已去重用量和逻辑对话标题                                                     |
-| workspaceState.prices                             | 用户覆盖单价                                                                 |
-| SessionCache（仅内存）                            | 至多 2 个空闲连接，序列化记录预算 32 MiB，LRU 淘汰                           |
-
-共享历史由 `src/shared-history.ts` 的索引事务锁、会话租约、revision 和删除 tombstone 保护。Pi 只由服务写入，插件通过请求读取/删除；服务失去租约则终止对应进程。Codex / Claude 仍由插件持锁，其他窗口只读。Pi 的多客户端同步来自服务推送，不依赖历史轮询。
-
-Pi 的 `persistHistory=false` 只隐藏列表，服务继续保存任务。其他 harness 在共享模式下仅隐藏/停止本客户端保存，不删除服务器上的已有记录；删除/清空共享历史需要确认。模型偏好使用独立账户文件；统计和价格仍保持 workspaceState 范围。`sharedHistory` 设置需要重载窗口才切换存储后端。
-
-以下插件空闲缓存仅用于 Codex / Claude 本地模式。当前活跃连接不计入空闲缓存。缓存存放进程、状态、工作目录及设置等，切换命中不再 initialize/load；死亡缓存转冷加载。预算不代表 Agent 进程内存上限。扩展结束或 Webview 销毁时清空空闲缓存；修改启动配置使旧缓存失效。
-
-快照写入、删除、清空及用量持久化通过 `src/history-persistence.ts` 的队列串行化；关闭历史保存会递增存储 epoch，使关闭前排队的快照即使在快速重新开启后也不能回到本机列表。已完成的本地失效写入会清理；共享写入一旦提交则保留，关闭本机保存不能调用共享删除或写入 tombstone。forgottenSessions 防止正在执行的对话被从本地历史删除后，又因自动保存复活。删除历史会移除对应统计标题；清空历史或关闭持久化会清空所有统计标题，避免保留首条消息片段。被删除的活动会话不能通过后续用量刷新重建标题。上述操作不擦除 Pi 原生文件，不删除计费记录和价格。日志与本地快照可能含工作区代码，报告问题前应脱敏。
-
-会话编号由 `src/session-numbers.ts` 按逻辑 conversationId 分配，分支获得新号；恢复时保留原 ID 和编号，不自动创建替代空会话。共享模式在写入事务内分配，本地模式使用 workspaceState.nextSessionNumber；清空不重置计数器。已删除逐次读索引时的补号迁移及冗余 sessionNumbers 映射，读取不写磁盘。未持久化会话显示完整 Session ID。
-
-不导入其他存储后端的历史，不从最近历史猜测活动指针或模型偏好。存储模式可显式选择，但不会搬运记录。标准 ACP modes 与可选能力协商仍保留，它们是协议功能，不是历史版本兼容层。
-
-## 原生上下文分支
-
-逐条消息删除的消息类型、处理分支、样式和专用测试均已删除。Pi 分支不再使用 `session/new` + 文本摘要注入，而通过 `_pi_workbench/fork` 保存原生会话路径，再用 `session/load` 加载。Codex/Claude 不调用该私有扩展。
-
-1. `src/native-branch.ts` 验证原生 parent 链、消息内容指纹、工具调用/结果配对及 compaction/context_edit 边界。显示消息通过唯一内容匹配、时间戳或已验证映射定位；歧义、孤立结果、未完成工具调用等失败关闭。
-2. `_pi_workbench/inspect` 返回 forkPoints；完整快照保存 nativeForks（显示 ID → 原生 ID/前缀 SHA-256），轻量索引不保存这些字段。流式 assistant/thought 更新携带原生时间戳 messageId，避免重复文本误定位。
-3. 原生操作先复制源文件到私有临时目录，避免 Pi 启动迁移/设置回退改写源文件。隔离 RPC worker 仅加载 `dist/pi-native-fork.mjs`，通过 `ctx.fork(entryId,{position:'at'})` 创建独立原生会话；禁止该 worker 自动 cache warming。
-4. 再次验证原生前缀并写入不进入模型上下文的 `pi-acp-workbench/native-fork` 元数据。规范化仅忽略 parent 链重接、labels 及其 compaction 边界映射；消息/图片/压缩记录必须保持一致。worker 退出后将新文件 header 的 parentSession 关联回真实源文件，再登记到 adapter store。
-5. 候选 Agent 加载成功后才切换并释放旧共享租约。准备期间使用 `contextOperation.kind=fork` 展示进度和取消入口；失败回滚根据源 Agent 的实际存活状态恢复 ready/disconnected，不覆盖已经失去的租约状态。使用分支时的模型/思考设置，不覆盖为源会话当前偏好；下一条 prompt 只含新输入。继承的旧 usage 在标记处清零，之后的新请求正常累计。原文件和原会话历史保留。
-
-这避免了新增摘要请求与人为内容改写，但不是缓存命中保证：新 Session ID 可能改变 provider 的缓存路由（openai-codex 的 prompt_cache_key 派生自 sessionId），还受系统提示、模型和有效期影响。不会回滚工作区文件或重新执行工具。
-
-文本种子重放、有界摘要工作进程及前缀检查点缓存已删除；没有第二套上下文重建路径。原生压缩记录仍由 Pi 保留。
-
-## 每轮工作区总 Diff
-
-每次实际 prompt 前由执行所有者建立基线：Pi 在服务端采集，Codex / Claude 在插件宿主采集；RemoteAgent 不重复采集。结束、取消或进程失败后记录开始/结束的净变化，追加 `role=diff` 的 UI 元数据。卡片始终在本轮末尾、折叠的执行过程之外；同一文件反复编辑只显示一份最终差异。快照保留文本对比，重新加载不重新计算，原生分支也不把这些内容灌入模型上下文。
-
-采集使用只读 `git ls-files` 枚举会话工作目录下已跟踪和未忽略的未跟踪文件，按前后内容生成差异；不以 HEAD 为基线，不修改用户 index、工作树或 Git 历史。受限文本临时副本仅供 `git diff --no-index --no-ext-diff --no-textconv` 比较。子目录工作区不越界；目录符号链接不跟随到工作区外。权限变化单独列出，重命名显示为删除/新增。
-
-完整规则与限制见 [每轮修改汇总](turn-diff.md)。所有文件的历史文本统一由 `workspace-documents` 打开虚拟文档，不能把未知路径直接交给宿主读取。Telegram 最终通知包含文件/行数汇总，不自动发送完整补丁。
-
-## 内置增强适配器
-
-Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，每个补丁都断言唯一匹配，并验证实际 SDK RequestError 别名存在；位置缺失或重复时直接失败。手动 /compact 不套用普通 RPC 的 30 秒期限，其错误保留详细原因。长 prompt 每秒最多一个 stats RPC 发布 context 占用，结束再刷新；占用保存在 Snapshot.usage，未知占用明确为 used:null。用量日志解析结果按文件身份、大小和修改时间缓存，避免同一轮分页反复扫描；文件变化后重新解析。宿主收齐分页后一次合并和保存统计。
-
-只有协商 agentCapabilities.\_meta['pi-workbench'].version=1 后，宿主才使用：
-
-- `_pi_workbench/inspect`：分页读取真实 usage、模型价格、原生有效上下文和 forkPoints。
-- `_pi_workbench/fork` / `cancel_fork`：原生分支及取消，需额外协商 `nativeFork=true`。
-
-这些是本项目扩展，不是标准 ACP 方法。外部 Agent 可只实现标准协议，此时普通聊天仍可用，详细消费统计和原生分支仅在声明相应能力时提供。用量通过稳定请求 ID 去重，历史分支不能重复计费；上下文圆环与累计 token 消费是不同数据。
-
-## Telegram 常驻服务
-
-Rust `pi-acp-telegram-daemon` 只管理 Bot 长轮询与 Telegram 权限边界，其 `sessions.rs` 是会话服务客户端，不启动 Pi 进程。生产服务只保留 Rust 入口，参数与既有磁盘格式兼容，见文末「Rust 常驻进程」。删除原有 desktop-control 与 telegram-routing 分支。服务统一发布任务进度和完成 outbox，即使插件或 Telegram 离线也可保存结果。客户端旧的完成投递分支已删除，Telegram run 只等待任务状态，不再读取整段历史拼接一个随后被丢弃的回复。
-
-Rust relay 的 `stream.rs` 合并消息，`api.rs` 节流并处理限流，`markdown.rs` 将 CommonMark 转成 Telegram text/entities 并按 UTF-16 预算分块；代码、粗体、链接和列表支持流式更新，HTTP 错误不会触发重新执行任务。游标先持久化再分发；发送、新建、分支和设置命令使用带方法/参数指纹的持久化 ID 收据，拒绝 ID 异内容复用，重启后未完成请求标记中断而不重放。关键收据、游标和最终 outbox 经 `pi-acp-core::atomic` 同步文件与父目录后才报告成功，周期进度仍使用普通原子替换。绑定、通知收据、推送开关持久化成功后才更新内存。通知发送与落盘不是分布式事务，因此崩溃边界可能重复通知，但不能重跑任务。
-
-## 渲染与安全边界
-
-`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。终端 metadata 按 toolCallId 累积为独立输出，保留最近 1 Mi UTF-16 单位并明确显示截断；位于底部时跟随输出，手动上翻后保留滚动位置。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。显式重置 html/body/后代的 scrollbar-color 和 scrollbar-width 为 auto，避免 VS Code 注入的标准属性压过 Chromium 的 WebKit 伪元素规则。
-
-`webview/markdown.ts` 使用 Markdown token 规则隔离代码和公式，KaTeX trust=false，HTML 经 DOMPurify 净化。Mermaid 只渲染闭合围栏，strict 模式及 SVG 二次净化，禁止图内配置与远程图片。所有资源随包提供，无 CDN。
-
-CSP 不允许 Webview 网络连接；只允许本地资源和 data: 图片预览。粘贴图片的格式、签名和体积在宿主重新检查。外部链接和本地文件打开经过协议、真实路径和工作区检查。
-
-Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文档、16 MiB 总文本预算（至少保留当前一对）。
-
-工作区信任限制宿主启动，ACP 授权卡片仅反映 Agent 的权限请求；Pi 自己的工具权限不由本扩展强制沙箱化。修改这条边界需要显式设计和文档，而非仅增加确认按钮。
-
-## 故障边界与维护约束
-
-- 控制 socket 使用流式 UTF-8 解码，避免中文跨数据包损坏；服务不可用时明确报错，禁止回退启动 Agent。普通控制调用默认 30 秒等待，长任务不设客户端执行期限；断线不重放。关闭客户端后拒绝新请求，服务端限制待发送缓冲。
-- 通知成功发送而收据写盘失败时保留 outbox，重试可能重复通知，但不会重跑任务。无效 outbox JSON 不应阻塞其他合法事件；保留原文件供诊断并按既有保留期清理。
-- 共享快照用 revision 检查更新冲突，会话锁与索引事务锁承担不同职责；不要为了简化而合并或绕过。
-- 改动底层能力后运行 `npm run verify`；涉及 Pi 原生树接口时额外运行 `npm run test:native-fork`。这些验证不要求真实模型请求。
-
-## Rust 常驻进程
-
-生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；旧 Telegram 内部模块也已按覆盖映射淘汰，见 [迁移进度](archive/rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
-
-| crate                    | 职责                                                                                                                           |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `pi-acp-session-daemon`  | typed wire 边界、队列/收据、共享历史、偏好、通用任务 outbox、Diff、ACP client、进程组管理；仅绑定经适配器验证的原生 forkPoints |
-| `pi-acp-telegram-daemon` | Bot 长轮询、话题绑定、outbox 消费、Markdown entities、节流发送                                                                 |
-| `pi-acp-core`            | wire 客户端、原子写、兼容 mkdir 锁、UTF-16/canonical JSON、共享 TurnEvent                                                      |
-
-Webview、扩展宿主与 `pi-adapter.mjs` 永远保持 JS/TS：渲染生态与 Pi 进程内扩展机制没有 Rust 通道；Rust daemon 只是 spawn `node pi-adapter.mjs` 作为工作进程。动机仅为常驻内存（Node ~60–100 MB → Rust ~5–9 MB RSS）与单二进制部署。
-
-跨实现最易漂移的三点（规范已逐条固化）：mkdir 锁必须兼容 proper-lockfile 的心跳/stale/compromised 语义（禁止 flock）；分块响应按 UTF-16 code unit 切片、可切断代理对；收据指纹与 fork 哈希的 canonical JSON 按 UTF-16 序排键。部署与旧版本切换见 [session-service.md](session-service.md)。
-
-## 后续方向
-
-保留标准 ACP 与固定上游适配器，本轮不另写 Rust→Pi RPC 链。共享历史 v2 委托已经让支持该能力的服务负责所有 harness 的提交；旧 daemon 的 TS 文件回退由真实跨实现并发写入/删除测试保护。完整把 Codex/Claude 进程托管到服务，以及向上游提交适配器扩展点，仍是独立架构决策。
-
-ServiceError 对外提供稳定错误码，请求校验直接使用类型；底层存储/ACP 模块仍保留原有详细 String 错误，由统一转换处分类。进一步将每个底层 IO 错误改成结构化 source 不改变本次协议。
+协议分块、请求 fingerprint 与原生分支哈希仍遵守 UTF-16/canonical JSON 契约，详见 [service-protocol.md](service-protocol.md) 和 [data-formats.md](data-formats.md)。适配器自身的 native fork 锁与 daemon 单实例锁各有独立职责，不应因删除客户端历史锁而移除。

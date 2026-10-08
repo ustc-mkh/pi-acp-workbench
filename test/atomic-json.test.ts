@@ -55,3 +55,18 @@ it('keeps noncritical periodic writes atomic without forcing disk sync', async (
   await writeAtomicJson('/private/progress.json', { text: 'progress' });
   expect(steps).toEqual(['open:file', 'write', 'close:file', 'rename', 'cleanup']);
 });
+it('checks transaction ownership after syncing and leaves the old index intact on failure', async () => {
+  await expect(
+    writeAtomicJson('/private/index.json', { sessions: [] }, true, () => {
+      steps.push('check');
+      throw new Error('lease lost');
+    }),
+  ).rejects.toThrow('lease lost');
+  expect(steps).toEqual(['open:file', 'write', 'sync:file', 'close:file', 'check', 'cleanup']);
+});
+it('checks ownership immediately before publishing a durable index', async () => {
+  await writeAtomicJson('/private/index.json', { sessions: [] }, true, () => steps.push('check'));
+  expect(steps.indexOf('check')).toBe(steps.indexOf('rename') - 1);
+  expect(steps.indexOf('sync:file')).toBeLessThan(steps.indexOf('check'));
+  expect(steps.indexOf('sync:directory')).toBeGreaterThan(steps.indexOf('rename'));
+});

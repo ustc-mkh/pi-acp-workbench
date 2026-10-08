@@ -11,15 +11,49 @@ impl SessionService {
         F: FnOnce(Rt, Arc<AgentProcess>) -> OpFuture<'a>,
     {
         let rt = self.runtime(id).await?;
-        let result: Result<Value, String> = async {
+        let guarded = pi_acp_core::panic_guard::run(async {
             let agent = self.worker(&rt).await?;
             rt.lock().unwrap().error = None;
             if rt.lock().unwrap().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
                 return Ok(json!({ "stopReason": "cancelled" }));
             }
             operation(rt.clone(), agent).await
-        }
+        })
         .await;
+        let panicked = guarded.is_err();
+        let result = guarded
+            .unwrap_or_else(|_| Err("会话处理异常，工作进程已关闭；未自动重放任务。".into()));
+        if panicked || rt.is_poisoned() {
+            // Restore only this runtime from its last committed snapshot. Do not
+            // continue with partially mutated state after an unwound callback.
+            let (agent, committed) = {
+                let mut r = rt.lock().unwrap_or_else(|p| p.into_inner());
+                r.snapshot_pending = false;
+                (r.agent.take(), r.snapshot.clone())
+            };
+            rt.clear_poison();
+            if let Some(agent) = agent {
+                agent.stop().await;
+            }
+            let restored = match self.store.read(&committed).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    // Storage failed closed: remove this unusable runtime so
+                    // subsequent state reads report the disk error directly.
+                    self.exclusive(|| async { self.evict(id, &rt).await }).await;
+                    return Err(error);
+                }
+            };
+            rt.lock().unwrap().state = ChatState {
+                entries: restored.entries,
+                configs: restored.configs,
+                modes: restored.modes,
+                commands: restored.commands.unwrap_or_default(),
+                native_forks: restored.native_forks,
+                usage: restored.usage,
+                ..Default::default()
+            };
+        }
         if let Err(error) = &result {
             let publication = {
                 let mut r = rt.lock().unwrap();
@@ -32,7 +66,9 @@ impl SessionService {
         }
         {
             let mut r = rt.lock().unwrap();
-            r.phase.active_mut().step = Step::Finishing;
+            if let Some(active) = r.phase.active_mut() {
+                active.step = Step::Finishing;
+            }
             r.phase.stop_cancel_timer();
             for (_, settle) in r.permissions.drain() {
                 let _ = settle.send(None);
@@ -62,7 +98,7 @@ impl SessionService {
                         .await
                 }
                 ServiceCommand::Request { .. } => self.agent_request(&rt, &agent, command).await,
-                _ => unreachable!(),
+                _ => Err("无效会话操作".into()),
             }
         })
     }
@@ -78,9 +114,35 @@ impl SessionService {
             session_id,
         } = command
         else {
-            unreachable!()
+            return Err("无效 ACP 操作".into());
         };
+        let harness = rt
+            .lock()
+            .unwrap()
+            .snapshot
+            .harness
+            .clone()
+            .unwrap_or_default();
         let method = request.method();
+        if method.starts_with("_pi_workbench/") {
+            let info = agent.info().await.unwrap_or(Value::Null);
+            let capability = if method == "_pi_workbench/inspect" {
+                "inspect"
+            } else {
+                "nativeFork"
+            };
+            if info.pointer(&format!(
+                "/agentCapabilities/_meta/pi-workbench/{capability}"
+            )) != Some(&Value::Bool(true))
+            {
+                return Err("当前 ACP 适配器不支持此扩展操作".into());
+            }
+        }
+        if harness == "codex"
+            && matches!(request, AgentRequest::SetConfig { config_id, value } if config_id == "collaboration_mode" && value != "default")
+        {
+            return Err("Codex 仅支持默认协作模式".into());
+        }
         let params = request.params();
         let mut outgoing = params.clone();
         outgoing["sessionId"] = json!(session_id);
@@ -144,16 +206,16 @@ impl SessionService {
                 .cloned();
         }
         if method == "session/set_mode" {
-            if let Some(modes) = &mut rt.lock().unwrap().state.modes {
+            if let Some(Value::Object(modes)) = &mut rt.lock().unwrap().state.modes {
                 if let Some(mode_id) = params.get("modeId").cloned() {
-                    modes["currentModeId"] = mode_id;
+                    modes.insert("currentModeId".into(), mode_id);
                 }
             }
         }
         self.save(rt).await?;
         if matches!(method, "session/set_config_option" | "session/set_mode") {
             let state = rt.lock().unwrap().state.clone();
-            self.preferences.save("pi", &state).await?;
+            self.preferences.save(&harness, &state).await?;
         }
         Ok(result)
     }
@@ -167,6 +229,13 @@ impl SessionService {
         source: &str,
         request_id: &str,
     ) -> Result<Value, String> {
+        let harness = rt
+            .lock()
+            .unwrap()
+            .snapshot
+            .harness
+            .clone()
+            .unwrap_or_default();
         let image_capable = agent
             .info()
             .await
@@ -180,10 +249,10 @@ impl SessionService {
             .any(|b| b.get("type").and_then(Value::as_str) == Some("image"))
             && !image_capable
         {
-            return Err("当前 Pi 适配器不支持图片".into());
+            return Err("当前 ACP 适配器不支持图片".into());
         }
         let prefs_state = rt.lock().unwrap().state.clone();
-        self.preferences.save("pi", &prefs_state).await?;
+        self.preferences.save(&harness, &prefs_state).await?;
         let settings_before = {
             let r = rt.lock().unwrap();
             serde_json::to_string(
@@ -225,7 +294,7 @@ impl SessionService {
                     })
                 })
             };
-            rt.lock().unwrap().phase.active_mut().publication = Some(TurnPublication::new(
+            let publication = TurnPublication::new(
                 self.events.clone(),
                 accessor,
                 cwd.clone(),
@@ -236,7 +305,12 @@ impl SessionService {
                     report: self.report.clone(),
                     closed: self.closed.clone(),
                 },
-            ));
+            );
+            let mut r = rt.lock().unwrap();
+            let Some(active) = r.phase.active_mut() else {
+                return Err("会话操作已结束，未启动本轮任务。".into());
+            };
+            active.publication = Some(publication);
         }
         let ckpt_cancel = tokio_util::sync::CancellationToken::new();
         let checkpoint = {
@@ -265,7 +339,11 @@ impl SessionService {
         };
         let mut changes = WorkspaceDiff::begin(&cwd).await;
         let mut result: Result<Value, String> = async {
-            rt.lock().unwrap().phase.active_mut().step = Step::Prompting;
+            if let Some(active) = rt.lock().unwrap().phase.active_mut() {
+                active.step = Step::Prompting;
+            } else {
+                return Err("会话操作已结束。".into());
+            }
             let outcome =
                 if rt.lock().unwrap().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
                     Ok(json!({ "stopReason": "cancelled" }))
@@ -312,7 +390,9 @@ impl SessionService {
         .await;
         {
             let mut r = rt.lock().unwrap();
-            r.phase.active_mut().step = Step::Finishing;
+            if let Some(active) = r.phase.active_mut() {
+                active.step = Step::Finishing;
+            }
             r.phase.stop_cancel_timer();
         }
         if agent.is_closed() {
@@ -338,7 +418,7 @@ impl SessionService {
         };
         if settings_before != settings_after {
             let state = rt.lock().unwrap().state.clone();
-            self.preferences.save("pi", &state).await?;
+            self.preferences.save(&harness, &state).await?;
         }
         let publication = rt.lock().unwrap().phase.take_publication();
         if let Some(publication) = publication {
@@ -369,7 +449,10 @@ impl SessionService {
                 return false;
             }
             r.phase.stop_cancel_timer();
-            r.phase.active_mut().cancelled = true;
+            let Some(active) = r.phase.active_mut() else {
+                return false;
+            };
+            active.cancelled = true;
             for (_, settle) in r.permissions.drain() {
                 let _ = settle.send(None);
             }
@@ -405,7 +488,11 @@ impl SessionService {
         {
             let mut r = rt.lock().unwrap();
             if r.phase.token() == token {
-                r.phase.active_mut().cancel_task = Some(task);
+                if let Some(active) = r.phase.active_mut() {
+                    active.cancel_task = Some(task);
+                } else {
+                    task.abort();
+                }
             } else {
                 task.abort();
             }

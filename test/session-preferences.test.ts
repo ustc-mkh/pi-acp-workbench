@@ -1,8 +1,10 @@
 import { afterEach, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { SessionPreferences } from '../src/session-preferences';
+import { sessionPreferences } from '../src/session-settings';
+const modelPreferences = (state: Pick<ChatState, 'configs' | 'modes' | 'harness'>) =>
+  sessionPreferences(state).filter((p) => p.kind === 'model' || p.kind === 'thinking');
 import { startRustService } from './rust-service';
 import type { ChatState, Snapshot } from '../src/shared';
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -32,53 +34,43 @@ const settings = (
     },
   ],
 });
-it('stores only atomic model/thinking pairs, isolated by harness and shared across instances', async () => {
-  const root = await directory(),
-    a = new SessionPreferences(root),
-    b = new SessionPreferences(root);
-  expect(await a.read('pi')).toEqual([]);
-  await a.save('pi', settings());
-  await b.save('codex', settings('default', 'low'));
-  expect(await b.read('pi')).toEqual([
-    { kind: 'model', value: 'other' },
-    { kind: 'thinking', value: 'high' },
-  ]);
-  expect(await a.read('codex')).toEqual([
-    { kind: 'model', value: 'default' },
-    { kind: 'thinking', value: 'low' },
-  ]);
-  expect((await stat(join(root, 'pi.json'))).mode & 0o777).toBe(0o600);
-  await a.save('pi', { harness: 'pi' });
-  expect(await b.read('pi')).toHaveLength(2);
-  await Promise.all([a.save('pi', settings('A', 'low')), b.save('pi', settings('B', 'high'))]);
-  expect([
-    [
-      { kind: 'model', value: 'A' },
-      { kind: 'thinking', value: 'low' },
-    ],
-    [
-      { kind: 'model', value: 'B' },
-      { kind: 'thinking', value: 'high' },
-    ],
-  ]).toContainEqual(await a.read('pi'));
-});
+// Seed/read fixtures use the documented disk shape; all runtime writes use RPC.
+class PreferencesFixture {
+  constructor(private root: string) {}
+  async read(harness: string) {
+    return JSON.parse(await readFile(join(this.root, `${harness}.json`), 'utf8')).preferences;
+  }
+  async save(harness: string, state: Pick<ChatState, 'harness' | 'configs' | 'modes'>) {
+    await mkdir(this.root, { recursive: true });
+    await writeFile(
+      join(this.root, `${harness}.json`),
+      JSON.stringify({ version: 1, preferences: modelPreferences(state) }),
+    );
+  }
+}
 it.each([
   'broken',
-  JSON.stringify({ version: 0, preferences: [] }),
-  JSON.stringify({ version: 1, preferences: [{ kind: 'mode', value: 'full-access' }] }),
-])('preserves invalid preferences instead of replacing them (%s)', async (text) => {
-  const root = await directory(),
-    store = new SessionPreferences(root),
-    file = join(root, 'pi.json');
+  '{"version":0,"preferences":[]}',
+  '{"version":1,"preferences":[{"kind":"mode","value":"full-access"}]}',
+])('daemon preserves corrupt preferences (%s)', async (text) => {
+  const root = await directory();
+  await mkdir(join(root, 'preferences'));
+  const file = join(root, 'preferences', 'pi.json');
   await writeFile(file, text);
-  await expect(store.read('pi')).rejects.toThrow('原文件未修改');
-  await expect(store.save('pi', settings())).rejects.toThrow('原文件未修改');
+  const service = await startRustService(root, {
+    command: process.execPath,
+    args: [resolve('test/mock-agent.mjs'), 'context'],
+    maxWorkers: 1,
+    idleMs: 900000,
+  });
+  cleanups.push(() => service.stop());
+  await expect(service.call('create', { cwd: root })).rejects.toThrow('原文件未修改');
   expect(await readFile(file, 'utf8')).toBe(text);
 });
 it('Pi service shares selections across directories and restart without changing restored sessions', async () => {
   const root = await directory(),
     other = await directory(),
-    preferences = new SessionPreferences(join(root, 'preferences'));
+    preferences = new PreferencesFixture(join(root, 'preferences'));
   const config = {
     command: process.execPath,
     args: [resolve('test/mock-agent.mjs'), 'context-native'],
@@ -132,7 +124,7 @@ it('Pi service shares selections across directories and restart without changing
 }, 15000);
 it('restores the saved pair when a new worker returns adapter defaults', async () => {
   const root = await directory(),
-    preferences = new SessionPreferences(join(root, 'preferences'));
+    preferences = new PreferencesFixture(join(root, 'preferences'));
   await preferences.save('pi', settings());
   // Non-native mock deliberately returns default/low whenever loaded in a new process.
   const config = {
@@ -161,7 +153,7 @@ it('restores the saved pair when a new worker returns adapter defaults', async (
 }, 15000);
 it('Pi service warns about unavailable saved values without destroying the saved pair', async () => {
   const root = await directory(),
-    preferences = new SessionPreferences(join(root, 'preferences'));
+    preferences = new PreferencesFixture(join(root, 'preferences'));
   await preferences.save('pi', settings('removed', 'missing'));
   const service = await startRustService(root, {
     command: process.execPath,

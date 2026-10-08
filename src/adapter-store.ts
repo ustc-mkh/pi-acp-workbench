@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { writeAtomicFileSync } from './atomic-json';
 import { lockSync } from 'proper-lockfile';
 
 /** Upstream's synchronous registry API needs a cross-process read/modify/write transaction. */
@@ -19,7 +19,6 @@ export function mutateAdapterStore(
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
-  const temp = file + '.' + randomUUID() + '.tmp';
   try {
     let data: { version: number; sessions: Record<string, unknown> } = { version: 1, sessions: {} };
     try {
@@ -35,10 +34,8 @@ export function mutateAdapterStore(
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     update(data);
-    writeFileSync(temp, JSON.stringify(data) + '\n', { mode: 0o600 });
-    renameSync(temp, file);
+    writeAtomicFileSync(file, JSON.stringify(data) + '\n', true);
   } finally {
-    rmSync(temp, { force: true });
     release();
   }
 }

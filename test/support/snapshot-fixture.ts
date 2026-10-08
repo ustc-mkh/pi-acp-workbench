@@ -1,9 +1,10 @@
+// Test-only ACP/format fixture; never imported by the extension.
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm } from 'node:fs/promises';
-import { writeAtomicJson } from './atomic-json';
-import { snapshotHarness } from './harness';
+import { writeAtomicJson } from '../../src/atomic-json';
+import { snapshotHarness } from '../../src/harness';
 import { join } from 'node:path';
-import type { Snapshot } from './shared';
+import type { Snapshot } from '../../src/shared';
 /** Full local records survive compaction and restart; workspaceState stores small indices only. */
 export class SnapshotStore {
   constructor(private directory?: string) {}
@@ -13,7 +14,7 @@ export class SnapshotStore {
   async write(snapshot: Snapshot, storageKey = snapshot.id): Promise<Snapshot> {
     if (!this.directory) return snapshot;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await writeAtomicJson(this.file(storageKey), snapshot);
+    await writeAtomicJson(this.file(storageKey), snapshot, true);
     const { entries, nativeForks, ...index } = snapshot;
     return { ...index, entries: [], stored: true };
   }

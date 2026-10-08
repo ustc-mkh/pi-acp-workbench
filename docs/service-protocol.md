@@ -21,7 +21,7 @@
   - 事件推送 `{"event": <object>}`（无 `id`，不对应任何请求）
   - 分块帧 `{"fragment": "<string>", "last": <boolean>}`（见 §5）
 
-共享历史委托扩展版本为 v2；`hello.protocolVersion:1` 仍指 ACP v1，不能改为 2。通过 `_meta.pi-workbench.history:true` 协商委托能力。
+统一服务扩展版本为 v3，通过 `_meta['session-service'].version` 协商；`hello.protocolVersion:1` 仍指 ACP v1。不存在共享历史委托写入能力。
 
 ## 3. 客户端约束（服务端强制执行）
 
@@ -45,28 +45,27 @@
 
 入参校验逻辑对应 `serviceCommand()`。所有 `text` 参数规则：非空 string、≤10000 字符，违反返回 `{id,error:"无效参数：<name>"}`。
 
-| method          | params                                                              | 返回值                                                                                                                                                                                                                                                   | 持久化         |
-| --------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `hello`         | `{}`                                                                | `{protocolVersion:1, agentInfo:{name:'pi-session-service',title,version:'1'}, agentCapabilities:{loadSession:true, promptCapabilities:{image:true,embeddedContext:true}, _meta:{'pi-workbench':{version:2,inspect:true,nativeFork:true,history:true}}}}` | 否             |
-| `list`          | `{}`                                                                | `Snapshot[]`（仅 `harness==='pi'`，按 `updated` 降序；快照的 `entries` 为空数组）                                                                                                                                                                        | 否             |
-| `create`        | `{cwd}`                                                             | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`）                                                                                                                      | **是**         |
-| `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, error?}`；`snapshot` 含完整 `entries`                                                                                                                                                            | 否             |
-| `cancel`        | `{sessionId}`                                                       | `boolean`（无可取消任务返回 `false`）                                                                                                                                                                                                                    | 否             |
-| `remove`        | `{sessionId}`                                                       | `undefined`（响应帧为 `{"id":…}`，无 `value` 键）                                                                                                                                                                                                        | 否（排队执行） |
-| `permission`    | `{sessionId, permissionId, optionId?}`                              | `boolean`（票据不存在/选项非法返回 `false`）                                                                                                                                                                                                             | 否             |
-| `prompt`        | `{sessionId, prompt:ContentBlock[], source?:'desktop'\|'telegram'}` | `{stopReason:string}`                                                                                                                                                                                                                                    | **是**         |
-| `request`       | `{sessionId, method, params?}`                                      | 透传 ACP 结果                                                                                                                                                                                                                                            | 部分是         |
-| `_watch`        | `{sessionId, enabled:boolean}`                                      | `true`                                                                                                                                                                                                                                                   | 否             |
-| `historyWrite`  | `{snapshot:Snapshot}`                                               | 持久化后的 `Snapshot`（index stub；服务端回写 `sessionNumber`）                                                                                                                                                                                          | 否（排队执行） |
-| `historyRemove` | `{sessionId?}`                                                      | `undefined`（响应帧为 `{"id":…}`，无 `value` 键，同 `remove`）                                                                                                                                                                                           | 否（排队执行） |
+| method          | params                                                              | 返回值                                                                                                                              | 持久化         |
+| --------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `hello`         | `{harness?}`                                                        | 实际 ACP initialize 结果及 v3 session-service 标识                                                                                  | 否             |
+| `list`          | `{}`                                                                | `Snapshot[]`（全部 harness，按 `updated` 降序；快照的 `entries` 为空数组）                                                          | 否             |
+| `create`        | `{cwd,harness?}`                                                    | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`） | **是**         |
+| `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, error?}`；`snapshot` 含完整 `entries`                                       | 否             |
+| `cancel`        | `{sessionId}`                                                       | `boolean`（无可取消任务返回 `false`）                                                                                               | 否             |
+| `remove`        | `{sessionId}`                                                       | `undefined`（响应帧为 `{"id":…}`，无 `value` 键）                                                                                   | 否（排队执行） |
+| `permission`    | `{sessionId, permissionId, optionId?}`                              | `boolean`（票据不存在/选项非法返回 `false`）                                                                                        | 否             |
+| `prompt`        | `{sessionId, prompt:ContentBlock[], source?:'desktop'\|'telegram'}` | `{stopReason:string}`                                                                                                               | **是**         |
+| `request`       | `{sessionId, method, params?}`                                      | 透传 ACP 结果                                                                                                                       | 部分是         |
+| `_watch`        | `{sessionId, enabled:boolean}`                                      | `true`                                                                                                                              | 否             |
+| `historyRemove` | `{sessionId?}`                                                      | `undefined`（响应帧为 `{"id":…}`，无 `value` 键，同 `remove`）                                                                      | 否（排队执行） |
 
-`historyWrite`/`historyRemove`（协议版本 2，`hello` 的 `_meta.pi-workbench.history:true` 宣告）把扩展端共享历史写路径收编为 socket 命令：
+`events.next` 参数为 `{cursor?:string}`，返回 `{cursor,event?,token?}` 或队列末尾的 `null`。首次及每轮重试省略 cursor；后续传回上次 cursor。cursor/token 是不透明值，消费方不得推导磁盘路径。损坏或过期记录可返回仅含 cursor 的结果，以便继续扫描；每次最多读取一个事件，保留期与大小限制由服务管理。
 
-- `historyWrite.snapshot` 必须是 object 且 `snapshot.id` 为非空 string（否则 `无效参数：snapshot`）。任意 harness 均可（扩展还会写 codex/claude 会话条目），未知字段原样进存档与 index stub。
-- **乐观并发契约**：对已存在会话，`snapshot.revision` 必须等于 index 中当前 revision（即调用方的写入基线），否则 `会话已被另一个窗口更新，请重新连接。`；`revision` 缺失同样冲突（新会话无此约束）。响应返回持久化 stub，其中 `revision` 为服务端新分配值——调用方必须把它记为下一次写入的基线。
-- 租约语义：服务端先尝试短时 `session-<id>` 租约：获得 → 写完即释放；`Held` 且为 daemon 自持 runtime 租约 → `SessionInUseError`（"正在被其他客户端使用"）；`Held` 且锁目录心跳新鲜（mtime < 30s，与 claim 的 stale 阈值一致）→ 视为调用方（扩展）持有租约，放行写入；`Held` 但心跳陈旧 → 偷取后写入。新鲜度是写入前的准入检查，写入过程不再复检（一致性由 `history.lock` 事务 + revision/墓碑校验兜底）。未持锁者直接由服务端租约保护，调用方不必先 claim。
-- `historyRemove`：`sessionId` 存在 → 移除该条目（daemon 有活动 runtime 则先处置，同 `remove`）；缺失 → **处置全部活动 runtime**（等价对每个会话逐个 `remove`）并移除 index 全部条目（clear）。不存在的 id → `会话不存在`（调用方的批量删除应容忍此错——条目可能被其他窗口先删）。
-- 两方法均不进请求收据（非 durable）；排队按 `sessionId`（缺省时为全局空 lane）串行。
+`events.ack` 参数为 `{id:string,token:string}`，返回 boolean；仅删除与 token 匹配的版本，并同步目录。不存在或版本已更新返回 false。relay 先 durable 保存投递记录再确认，连接失败后重试，不重新执行模型任务。该队列当前供单个 Telegram relay 消费，不提供多个独立订阅者的投递保证；socket 权限边界与其他方法相同。
+
+v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `_meta['session-service']={version:3,authoritative:true}`。缺省 harness 为 Pi。`list` 返回所有 harness；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
+
+`historyRemove` 带 sessionId 删除单个会话，不带则清空全部 harness；先处置运行时，再提交 tombstone。多个客户端可同时订阅/提交同一会话，服务按会话串行化，无客户端文件租约。
 
 `request.method` 白名单（`AGENT_METHODS`）：`_pi_workbench/inspect`、`_pi_workbench/fork`、`_pi_workbench/cancel_fork`、`session/set_mode`、`session/set_config_option`。其中 `fork`、`set_mode`、`set_config_option` 走持久化队列（journal）；`inspect` 走会话队列；`cancel_fork` 直接执行。
 
