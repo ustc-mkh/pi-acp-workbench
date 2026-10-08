@@ -393,3 +393,103 @@ it('uses arbitrary directories from desktop and Telegram without workspace regis
   await expect(client.call('create', { cwd: 'relative' })).rejects.toThrow('绝对目录路径');
   await expect(client.call('create', { cwd: join(root, 'missing') })).rejects.toThrow();
 }, 15000);
+
+it('shares TS/Rust history transactions, tombstones and live leases under contention', async () => {
+  const { root, service, client, host } = await fixture();
+  const store = new SharedHistoryStore(join(root, 'history'));
+  cleanup.push(() => store.releaseAll());
+  const snapshot = (id: string) => ({
+    id,
+    harness: 'codex' as const,
+    cwd: root,
+    title: id,
+    updated: Date.now(),
+    contextComplete: true,
+    entries: [{ id: 'u', role: 'user' as const, text: id }],
+  });
+  const localWrite = async (id: string) => {
+    await store.claim(id);
+    try {
+      return await store.write(snapshot(id));
+    } finally {
+      await store.release(id);
+    }
+  };
+  const ids = Array.from({ length: 20 }, (_, i) => `workbench:codex:interop-${i}`);
+  await Promise.all(
+    ids.map((id, i) =>
+      i % 2 ? localWrite(id) : service.call('historyWrite', { snapshot: snapshot(id) }),
+    ),
+  );
+  const first = await store.list();
+  expect(first).toHaveLength(20);
+  expect(new Set(first.map((s) => s.sessionNumber)).size).toBe(20);
+  await Promise.all([
+    ...ids
+      .slice(0, 10)
+      .map((id, i) =>
+        i % 2 ? store.remove(id) : service.call('historyRemove', { sessionId: id }),
+      ),
+    ...Array.from({ length: 10 }, (_, i) => localWrite(`workbench:codex:later-${i}`)),
+    ...Array.from({ length: 10 }, (_, i) =>
+      service.call('historyWrite', { snapshot: snapshot(`workbench:codex:rust-later-${i}`) }),
+    ),
+  ]);
+  const index = JSON.parse(await readFile(join(root, 'history/index.json'), 'utf8'));
+  expect(index.sessions).toHaveLength(30);
+  expect(index.deleted.sort()).toEqual(ids.slice(0, 10).sort());
+  expect(new Set(index.sessions.map((s: any) => s.sessionNumber)).size).toBe(30);
+  for (const id of ids.slice(0, 10)) {
+    await expect(service.call('historyWrite', { snapshot: snapshot(id) })).rejects.toThrow('删除');
+    await expect(localWrite(id)).rejects.toThrow('删除');
+  }
+  const pi = await host.create();
+  const pending = client.call(
+    'prompt',
+    { sessionId: pi.id, prompt: [{ type: 'text', text: 'wait' }] },
+    'interop-pi',
+    0,
+  );
+  await vi.waitFor(async () => expect((await host.status(pi.id)).busy).toBe(true));
+  await expect(store.claim(pi.id)).rejects.toThrow('另一个窗口');
+  await host.cancel(pi.id);
+  await pending;
+  await service.stop();
+  await store.claim(pi.id);
+  await store.release(pi.id);
+}, 20000);
+it('publishes live context and terminal output, and retains them after a cold restart', async () => {
+  const { host, client, restart, socket } = await fixture(1, 900000, 'context-live');
+  const session = await host.create(process.cwd());
+  const events: any[] = [];
+  const watcher = new SessionClient(socket, (event) => events.push(event));
+  cleanup.push(() => watcher.dispose());
+  await watcher.watch(session.id);
+  const turn = client.call(
+    'prompt',
+    { sessionId: session.id, prompt: [{ type: 'text', text: 'wait' }] },
+    undefined,
+    0,
+  );
+  await vi.waitFor(() =>
+    expect(
+      events.some(
+        (event) => event.type === 'state' && event.busy && event.snapshot.usage?.used === 1234,
+      ),
+    ).toBe(true),
+  );
+  const live: any = await client.call('state', { sessionId: session.id });
+  expect(live.snapshot.entries.find((entry: any) => entry.terminal).terminal.output).toBe(
+    'first\nsecond',
+  );
+  await client.call('cancel', { sessionId: session.id });
+  await turn;
+  const before: any = await client.call('state', { sessionId: session.id });
+  await restart();
+  const cold = new SessionClient(socket);
+  cleanup.push(() => cold.dispose());
+  const after: any = await cold.call('state', { sessionId: session.id });
+  expect(after.snapshot.usage).toEqual({ used: 1234, size: 200000 });
+  expect(after.snapshot.entries).toEqual(before.snapshot.entries);
+  expect(after.busy).toBe(false);
+});

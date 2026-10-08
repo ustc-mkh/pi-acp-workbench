@@ -65,7 +65,7 @@ service-protocol.md §4）；旧版 daemon 下扩展回退为直接文件写。�
 
 完整 `Snapshot`（含 `entries`）。读取时校验 `id`/`cwd`/`entries` 一致性、`harness` 合法且与 ID 命名空间匹配、`contextComplete===true`，且**共享版本必须带 `revision`**；任何不满足即拒绝读取。
 
-Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`、`sessionNumber`、`revision`、`conversationId`（fork 前原会话 id，编号按此归属）、`contextWindow`、`contextComplete`、`configs`、`modes`、`commands`、`nativeForks`、`stored`。未知字段容忍；必需字段缺失即拒绝。
+Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`、`sessionNumber`、`revision`、`conversationId`（fork 前原会话 id，编号按此归属）、`contextWindow`、`usage`（`{used:number|null,size:number}`，当前 context 占用，非累计计费）、`contextComplete`、`configs`、`modes`、`commands`、`nativeForks`、`stored`。未知字段容忍；必需字段缺失即拒绝。
 
 乐观锁：`read` 记录 `seen[id]=revision`；`write` 要求持租约且当前 `revision` 等于 `seen`，写时生成新 `revision`（UUID），旧版本文件在 index commit 后删除。
 
@@ -122,3 +122,5 @@ Snapshot 字段：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`
 ## 8. nativeForks / fork 哈希
 
 `_pi_workbench/inspect` 返回的 `forkPoints` 与 `_pi_workbench/fork` 的 `hash` 校验依赖 `native-branch.ts` 的确定性计算：按 leaf→root 取原生历史链 → `canonicalEntries`（剔除 `label` 节点、label→下一节点 id 映射、剥离 `parentId`、compaction 的 `firstKeptEntryId` 重映射）→ 逐节点 `JSON.stringify` 连接（`,` 分隔）做流式 SHA-256 得前缀 hash。Rust 移植时必须对同一组 fixtures 得到逐比特一致的 hash——把 `test/native-branch.test.ts` 的用例导出为 JSON fixtures 供 Rust 侧断言。
+
+通用任务事件由 `pi-acp-core::TurnEvent` 同时供 outbox 写入与 relay 读取，保留既有 `telegram/events` 目录兼容性。可选 `pendingPermissions` 和 `nonTextBlocks` 均为非负计数，缺省为 0，服务不拼接通知呈现文案。工具条目可附 `terminal`（id/output/cwd/exitCode/signal/truncated），用于流式输出与恢复查看。

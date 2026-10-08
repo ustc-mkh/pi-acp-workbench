@@ -1,4 +1,9 @@
-import type { ChatState, Snapshot } from './shared';
+export type {
+  AgentRequest,
+  ServiceCommand,
+  ServiceState,
+  ErrorCode,
+} from './session-protocol.generated';
 
 // Client/config DTOs only. Runtime command validation belongs to the Rust service.
 export interface ServiceConfig {
@@ -7,11 +12,4 @@ export interface ServiceConfig {
   env?: Record<string, string>;
   maxWorkers: number;
   idleMs: number;
-}
-export interface ServiceState {
-  snapshot: Snapshot;
-  busy: boolean;
-  permissions: ChatState['permissions'];
-  commands: ChatState['commands'];
-  error?: string;
 }

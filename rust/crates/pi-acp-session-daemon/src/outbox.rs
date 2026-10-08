@@ -1,26 +1,6 @@
-//! Durable turn event writer and latest-state-coalescing publisher.
-//! The daemon is the ONLY writer; the telegram daemon consumes/deletes.
-//!
-//! File naming: telegram/events/<sha256(event.id)>.json — same as the reader.
-//! write(): mkdir 0700; atomic write, durable iff status != 'running'.
-//!
-//! DesktopTelegramTurn — per-prompt durable publisher:
-//! - ctor: event = {id:'service:'+requestId, sessionId, cwd, title (first user
-//!   text ≤70 chars or 'Pi 任务'), sessionNumber, text:'', status:'running',
-//!   updated:now}; source 'desktop' + input is a user entry → inputText =
-//!   text + optional '\n[附带 N 个非文本内容，请在 VS Code 查看]' (contextBlocks
-//!   non-text count). publish() immediately.
-//! - publish(): latest-pending coalesced writes — never queue more than one
-//!   pending event; errors reported, terminal failures also propagated by finish().
-//! - update(): 2.5 s debounce → capture() + publish() (skipped after end).
-//! - capture(): text = entries[start..] filtered assistant|diff, texts joined
-//!   '\n\n'; permissions pending → append '\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。';
-//!   updated=now.
-//! - cancel(): marks cancelled.
-//! - discard(): end + remove the event file entirely.
-//! - finish(error?, stopReason?): capture + status = error→'failed' |
-//!   cancelled||stopReason=='cancelled'→'cancelled' | stopReason && !='end_turn'→'failed'
-//!   | else 'completed'; set error; publish + await all writes.
+//! Latest-state-coalescing durable task publisher. Consumers own presentation.
+//! The existing telegram/events directory is retained for disk compatibility.
+//! Final writes are durable and their failures propagate to the task receipt.
 use crate::types::Entry;
 use pi_acp_core::utf16::utf16_head;
 use serde_json::Value;
@@ -37,23 +17,7 @@ use tokio::sync::watch;
 pub type StateAccessor =
     Arc<dyn Fn() -> Option<(String, Option<u64>, Vec<Entry>, usize)> + Send + Sync>;
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnEvent {
-    pub id: String,
-    pub session_id: String,
-    pub cwd: String,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_number: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_text: Option<String>,
-    pub text: String,
-    pub status: String, // running | completed | cancelled | failed
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub updated: u64,
-}
+pub use pi_acp_core::turn_event::TurnEvent;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -62,7 +26,7 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub struct TelegramEvents {
+pub struct TaskOutbox {
     directory: PathBuf,
     #[cfg(test)]
     write_gate: Option<Arc<tokio::sync::Semaphore>>,
@@ -70,9 +34,9 @@ pub struct TelegramEvents {
     write_attempts: std::sync::atomic::AtomicUsize,
 }
 
-impl TelegramEvents {
+impl TaskOutbox {
     pub fn new(directory: PathBuf) -> Self {
-        TelegramEvents {
+        TaskOutbox {
             directory,
             #[cfg(test)]
             write_gate: None,
@@ -118,13 +82,6 @@ impl TelegramEvents {
         .await
         .map_err(|e| e.to_string())
     }
-
-    /// rm(file, {force:true}) — the skeleton returns unit, so all errors are
-    /// dropped here; ENOENT is the only expected one anyway.
-    #[allow(dead_code)] // used by the fork path / tests; wired by service integration
-    pub async fn remove(&self, id: &str) {
-        let _ = tokio::fs::remove_file(self.file(id)).await;
-    }
 }
 
 pub type Report = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -134,16 +91,15 @@ struct Inner {
     pending: Option<TurnEvent>,
     writer_active: bool,
     ended: bool,
-    cancelled: bool,
     debounce_scheduled: bool,
     last_write_error: Option<String>,
     /// ctor-time fields (title/inputText/sessionId/sessionNumber) still pending
-    /// their first accessor() read — see DesktopTelegramTurn::new.
+    /// their first accessor() read — see TurnPublication::new.
     needs_init: bool,
 }
 
 struct Shared {
-    events: Arc<TelegramEvents>,
+    events: Arc<TaskOutbox>,
     accessor: StateAccessor,
     start: usize,
     /// source === 'desktop' gates the inputText attachment note.
@@ -156,30 +112,26 @@ struct Shared {
     drained: watch::Sender<u64>,
 }
 
-pub struct DesktopTelegramTurn {
+pub struct TurnPublication {
     inner: Arc<Shared>,
 }
 
-impl DesktopTelegramTurn {
-    /// `accessor` returns (session_id, session_number, entries, pendingPermissions).
-    /// `closed` mirrors service.closed: update() stops scheduling interim writes
-    /// during shutdown, but finish() still serializes the final event.
-    ///
-    /// NOTE: the constructor must NOT call `accessor()` — service.rs invokes
-    /// new() while holding the runtime Mutex, so a synchronous accessor call
-    /// would deadlock. Ctor-time fields are instead resolved by the first
-    /// writer pass (needs_init flag), matching the TS ordering: the event is
-    /// still published immediately, just from the spawned writer task.
+pub struct PublicationControl {
+    pub report: Report,
+    pub closed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TurnPublication {
     pub fn new(
-        events: Arc<TelegramEvents>,
+        events: Arc<TaskOutbox>,
         accessor: StateAccessor,
         cwd: String,
         start: usize,
         id: String,
         source: String,
-        report: Report,
-        closed: Arc<std::sync::atomic::AtomicBool>,
+        control: PublicationControl,
     ) -> Self {
+        let PublicationControl { report, closed } = control;
         let (drained, _) = watch::channel(0u64);
         let inner = Arc::new(Shared {
             events,
@@ -201,24 +153,22 @@ impl DesktopTelegramTurn {
                     status: "running".into(),
                     error: None,
                     updated: now_ms(),
+                    pending_permissions: 0,
+                    non_text_blocks: 0,
                 },
                 pending: None,
                 writer_active: false,
                 ended: false,
-                cancelled: false,
                 debounce_scheduled: false,
                 last_write_error: None,
                 needs_init: true,
             }),
         });
-        let this = DesktopTelegramTurn { inner };
+        let this = TurnPublication { inner };
         this.publish();
         this
     }
 
-    /// Ctor-time capture from the accessor — fills sessionId, sessionNumber,
-    /// title and inputText exactly like the TS constructor body, then replaces
-    /// the queued pending event so the write carries the real fields.
     fn init_capture(shared: &Shared) {
         let Some((session_id, session_number, entries, _)) = (shared.accessor)() else {
             return;
@@ -248,13 +198,8 @@ impl DesktopTelegramTurn {
                                 .count()
                         })
                         .unwrap_or(0);
-                    let mut text = input.text.clone().unwrap_or_default();
-                    if attachments > 0 {
-                        text.push_str(&format!(
-                            "\n[附带 {attachments} 个非文本内容，请在 VS Code 查看]"
-                        ));
-                    }
-                    s.event.input_text = Some(text);
+                    s.event.non_text_blocks = attachments;
+                    s.event.input_text = input.text.clone();
                 }
             }
         }
@@ -333,11 +278,7 @@ impl DesktopTelegramTurn {
             .map(|e| e.text().to_string())
             .collect::<Vec<_>>()
             .join("\n\n");
-        if permissions > 0 {
-            s.event
-                .text
-                .push_str("\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。");
-        }
+        s.event.pending_permissions = permissions;
         s.event.updated = now_ms();
     }
 
@@ -368,23 +309,6 @@ impl DesktopTelegramTurn {
         });
     }
 
-    #[allow(dead_code)] // used by the fork path / tests; wired by service integration
-    pub fn cancel(&self) {
-        self.inner.state.lock().unwrap().cancelled = true;
-    }
-
-    #[allow(dead_code)] // used by the fork path / tests; wired by service integration
-    pub async fn discard(&self) {
-        {
-            let mut s = self.inner.state.lock().unwrap();
-            s.ended = true;
-            s.debounce_scheduled = false;
-        }
-        self.wait_writes().await;
-        let id = self.inner.state.lock().unwrap().event.id.clone();
-        self.inner.events.remove(&id).await;
-    }
-
     pub async fn finish(
         &self,
         error: Option<String>,
@@ -400,7 +324,7 @@ impl DesktopTelegramTurn {
             s.debounce_scheduled = false;
             s.event.status = if error.is_some() {
                 "failed"
-            } else if s.cancelled || stop_reason == Some("cancelled") {
+            } else if stop_reason == Some("cancelled") {
                 "cancelled"
             } else if stop_reason.is_some() && stop_reason != Some("end_turn") {
                 "failed"
@@ -430,7 +354,7 @@ mod tests {
     async fn stalled_storage_keeps_only_latest_pending_event_and_flushes_terminal_state() {
         let dir = test_dir();
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let mut events = TelegramEvents::new(dir.clone());
+        let mut events = TaskOutbox::new(dir.clone());
         events.write_gate = Some(gate.clone());
         let events = Arc::new(events);
         let entries = Arc::new(Mutex::new(vec![entry("assistant", "initial")]));
@@ -444,15 +368,17 @@ mod tests {
             ))
         });
         let (report, errors) = report_sink();
-        let turn = DesktopTelegramTurn::new(
+        let turn = TurnPublication::new(
             events.clone(),
             get,
             "/work".into(),
             0,
             "coalesced".into(),
             "telegram".into(),
-            report,
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while events.write_attempts.load(Ordering::SeqCst) != 1 {
@@ -463,7 +389,7 @@ mod tests {
         .unwrap();
         for i in 0..50 {
             *entries.lock().unwrap() = vec![entry("assistant", &format!("version {i}"))];
-            DesktopTelegramTurn::capture_shared(&turn.inner);
+            TurnPublication::capture_shared(&turn.inner);
             turn.publish();
         }
         assert_eq!(events.write_attempts.load(Ordering::SeqCst), 1);
@@ -500,17 +426,19 @@ mod tests {
     async fn final_outbox_storage_failure_is_reported_and_writer_drains() {
         let dir = test_dir();
         let backup = dir.with_extension("backup");
-        let events = Arc::new(TelegramEvents::new(dir.clone()));
+        let events = Arc::new(TaskOutbox::new(dir.clone()));
         let (report, errors) = report_sink();
-        let turn = DesktopTelegramTurn::new(
+        let turn = TurnPublication::new(
             events.clone(),
             accessor(vec![entry("assistant", "final")], 0),
             "/work".into(),
             0,
             "failure".into(),
             "telegram".into(),
-            report,
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
         turn.wait_writes().await;
         tokio::fs::rename(&dir, &backup).await.unwrap();
@@ -561,18 +489,20 @@ mod tests {
     #[tokio::test]
     async fn writes_running_then_terminal_event() {
         let dir = test_dir();
-        let events = Arc::new(TelegramEvents::new(dir.clone()));
+        let events = Arc::new(TaskOutbox::new(dir.clone()));
         let entries = vec![entry("user", "hello world")];
         let (report, errors) = report_sink();
-        let turn = DesktopTelegramTurn::new(
+        let turn = TurnPublication::new(
             events,
             accessor(entries, 0),
             "/tmp".into(),
             1,
             "service:req-1".into(),
             "desktop".into(),
-            report,
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
         turn.finish(None, Some("end_turn")).await.unwrap();
         let name = format!("{}.json", hex::encode(Sha256::digest(b"service:req-1")));
@@ -590,20 +520,21 @@ mod tests {
     #[tokio::test]
     async fn cancelled_and_error_mapping() {
         let dir = test_dir();
-        let events = Arc::new(TelegramEvents::new(dir.clone()));
+        let events = Arc::new(TaskOutbox::new(dir.clone()));
         let (report, _) = report_sink();
-        let turn = DesktopTelegramTurn::new(
+        let turn = TurnPublication::new(
             events.clone(),
             accessor(vec![entry("user", "t")], 0),
             "/tmp".into(),
             1,
             "service:a".into(),
             "telegram".into(),
-            report.clone(),
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report: report.clone(),
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
-        turn.cancel();
-        turn.finish(None, Some("end_turn")).await.unwrap();
+        turn.finish(None, Some("cancelled")).await.unwrap();
         let file_a = dir.join(format!(
             "{}.json",
             hex::encode(Sha256::digest(b"service:a"))
@@ -611,15 +542,17 @@ mod tests {
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&file_a).unwrap()).unwrap();
         assert_eq!(raw["status"], "cancelled");
         // non-end_turn stopReason → failed
-        let turn2 = DesktopTelegramTurn::new(
+        let turn2 = TurnPublication::new(
             events.clone(),
             accessor(vec![entry("user", "t")], 0),
             "/tmp".into(),
             1,
             "service:b".into(),
             "telegram".into(),
-            report.clone(),
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report: report.clone(),
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
         turn2.finish(None, Some("length")).await.unwrap();
         let file_b = dir.join(format!(
@@ -629,15 +562,17 @@ mod tests {
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&file_b).unwrap()).unwrap();
         assert_eq!(raw["status"], "failed");
         // explicit error → failed
-        let turn3 = DesktopTelegramTurn::new(
+        let turn3 = TurnPublication::new(
             events,
             accessor(vec![entry("user", "t")], 0),
             "/tmp".into(),
             1,
             "service:c".into(),
             "desktop".into(),
-            report,
-            Arc::new(AtomicBool::new(false)),
+            PublicationControl {
+                report,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
         );
         turn3.finish(Some("boom".into()), None).await.unwrap();
         let file_c = dir.join(format!(
@@ -650,44 +585,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn discard_removes_the_file() {
-        let dir = test_dir();
-        let events = Arc::new(TelegramEvents::new(dir.clone()));
-        let (report, _) = report_sink();
-        let turn = DesktopTelegramTurn::new(
-            events.clone(),
-            accessor(vec![entry("user", "x")], 0),
-            "/tmp".into(),
-            1,
-            "service:d".into(),
-            "desktop".into(),
-            report,
-            Arc::new(AtomicBool::new(false)),
-        );
-        turn.discard().await;
-        let file = dir.join(format!(
-            "{}.json",
-            hex::encode(Sha256::digest(b"service:d"))
-        ));
-        // give the writer a moment if the file write raced the removal — the
-        // contract is only that nothing survives discard().
-        for _ in 0..20 {
-            if !file.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(!file.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn capture_text_appends_permission_notice() {
         // Direct exercise of the capture mapping (assistant|diff only + pending notice).
         let (drained, _) = watch::channel(0u64);
         let shared = Shared {
-            events: Arc::new(TelegramEvents::new(test_dir())),
+            events: Arc::new(TaskOutbox::new(test_dir())),
             accessor: accessor(
                 vec![
                     entry("user", "q"),
@@ -713,20 +616,22 @@ mod tests {
                     status: "running".into(),
                     error: None,
                     updated: 0,
+                    pending_permissions: 0,
+                    non_text_blocks: 0,
                 },
                 pending: None,
                 writer_active: false,
                 ended: false,
-                cancelled: false,
                 debounce_scheduled: false,
                 last_write_error: None,
                 needs_init: false,
             }),
             source_desktop: true,
         };
-        DesktopTelegramTurn::capture_shared(&shared);
+        TurnPublication::capture_shared(&shared);
         let s = shared.state.lock().unwrap();
         assert!(s.event.text.starts_with("a1\n\nd1"));
-        assert!(s.event.text.contains("等待工具授权"));
+        assert_eq!(s.event.pending_permissions, 1);
+        assert!(!s.event.text.contains("等待工具授权"));
     }
 }

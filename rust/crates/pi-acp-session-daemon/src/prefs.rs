@@ -48,7 +48,6 @@ static LEVEL_NAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabled|on)$").unwrap()
 });
 
-/// isHarnessId (src/harness.ts): the only valid file stems.
 fn is_harness_id(value: &str) -> bool {
     matches!(value, "pi" | "codex" | "claude")
 }
@@ -99,8 +98,6 @@ enum Change {
 /// SessionSelector from session-settings.ts (internal — only prefs flow out).
 #[derive(Clone)]
 struct Selector {
-    #[allow(dead_code)] // label parity with TS; not read by preference code paths
-    label: String,
     category: Option<String>,
     kind: &'static str, // model | thinking | mode | other
     current: String,
@@ -132,7 +129,6 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
         };
         let options = flatten_options(config.get("options"));
         controls.push(Selector {
-            label: name.to_string(),
             category: category.map(str::to_string),
             kind,
             current: vstr(config.get("currentValue")).to_string(),
@@ -188,12 +184,6 @@ fn session_selectors(configs: Option<&[Value]>, modes: Option<&Value>) -> Vec<Se
     let mut selectors: Vec<Selector> = Vec::new();
     if modes.is_some() && !modes_covered {
         selectors.push(Selector {
-            label: if thinking_modes {
-                "Thinking"
-            } else {
-                "会话模式"
-            }
-            .to_string(),
             category: None,
             kind: if thinking_modes { "thinking" } else { "mode" },
             current: vstr(modes.and_then(|m| m.get("currentModeId"))).to_string(),
@@ -227,7 +217,7 @@ pub fn session_preferences(
         })
         .collect();
     // JS stable sort: model entries first, rest keep source order.
-    preferences.sort_by(|a, b| (b.kind == "model").cmp(&(a.kind == "model")));
+    preferences.sort_by_key(|a| std::cmp::Reverse(a.kind == "model"));
     preferences
 }
 
@@ -425,8 +415,6 @@ async fn apply_selection(
     }
 }
 
-/// Apply saved preferences to a fresh session; returns the warning text or None.
-/// `session` is mutated in place (configOptions/modes fields) like the TS version.
 pub async fn apply_preferences(
     agent: &AgentProcess,
     session: &mut Value,
@@ -434,7 +422,7 @@ pub async fn apply_preferences(
 ) -> Result<Option<String>, String> {
     let mut unavailable: Vec<String> = Vec::new();
     let mut ordered: Vec<SessionPreference> = preferences.to_vec();
-    ordered.sort_by(|a, b| (b.kind == "model").cmp(&(a.kind == "model")));
+    ordered.sort_by_key(|a| std::cmp::Reverse(a.kind == "model"));
     for preference in &ordered {
         let configs = session
             .get("configOptions")
@@ -538,11 +526,10 @@ mod tests {
         let store = SessionPreferences::new(dir.clone());
         assert!(store.read("pi").await.unwrap().is_empty());
         assert!(store.read("bogus").await.is_err());
-        let mut state = ChatState::default();
-        state.configs = serde_json::from_str(
+        let state = ChatState { configs: serde_json::from_str(
             r#"[{"id":"model","type":"select","category":"model","name":"Model","currentValue":"m2","options":[]}]"#,
         )
-        .unwrap();
+        .unwrap(), ..Default::default() };
         store.save("pi", &state).await.unwrap();
         let read = store.read("pi").await.unwrap();
         assert_eq!(read.len(), 1);

@@ -168,7 +168,9 @@ async fn failed_delivery_ack_retains_the_event_without_rerunning_or_resending_in
         text: "answer".into(),
         status: "completed".into(),
         error: None,
-        updated: 1.0,
+        updated: 1,
+        pending_permissions: 0,
+        non_text_blocks: 0,
     };
     let mut wrong = event.clone();
     wrong.cwd = "/forbidden".into();

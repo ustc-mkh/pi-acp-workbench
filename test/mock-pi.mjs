@@ -81,6 +81,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         cost: 0.01,
       });
       break;
+    case 'compact':
+      if (cmd.customInstructions === 'fail') {
+        send({
+          type: 'response',
+          id: cmd.id,
+          command: cmd.type,
+          success: false,
+          error: 'compaction model unavailable',
+        });
+      } else reply({ tokensBefore: 1020, summary: '手动压缩后的上下文' });
+      break;
     case 'abort':
       reply({});
       send({ type: 'agent_end', messages });
@@ -136,8 +147,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       });
       send({ type: 'message_end', message });
       send({ type: 'turn_end', message, toolResults: [] });
-      send({ type: 'agent_end', messages });
-      send({ type: 'agent_settled' });
+      const finish = () => {
+        send({ type: 'agent_end', messages });
+        send({ type: 'agent_settled' });
+      };
+      if (cmd.message === 'LONG_CONTEXT') setTimeout(finish, 2200);
+      else finish();
       break;
     }
     default:

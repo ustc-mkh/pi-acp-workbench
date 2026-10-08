@@ -1,3 +1,4 @@
+import { ModelsPage, visibleModelSelector } from './models';
 import { createRenderer } from './markdown';
 import { sessionSelectors, createSessionSelector } from './selectors';
 import { contextUsage } from './usage';
@@ -166,6 +167,9 @@ app.innerHTML = /* HTML */ `<header>
         <div class="composer-tools">
           <button id="attach" data-tooltip="添加当前编辑器的选区或文件">＋ 上下文</button>
           <div id="selectors"></div>
+          <button id="models-toggle" data-tooltip="选择显示的模型" aria-label="管理模型">
+            模型管理
+          </button>
           <span id="hint">Enter 发送 · Shift+Enter 换行</span>
           <div class="composer-actions">
             <div id="usage" role="img" tabindex="0" aria-label="上下文占用">
@@ -196,7 +200,8 @@ app.innerHTML = /* HTML */ `<header>
     </footer>
   </div>
   <section id="statistics" hidden aria-label="用量统计"></section>
-  <section id="prices" hidden aria-label="模型价格设置"></section>`;
+  <section id="prices" hidden aria-label="模型价格设置"></section>
+  <section id="models" hidden aria-label="显示的模型"></section>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
@@ -305,8 +310,11 @@ el('export').onclick = () => send({ type: 'export' });
 el('copy-conversation').onclick = () => send({ type: 'copyConversation' });
 el('cancel-context').onclick = () => send({ type: 'cancelContext' });
 let statisticsOpen = false,
-  pricesOpen = false;
+  pricesOpen = false,
+  modelsOpen = false;
 const showStatistics = (show: boolean) => {
+  modelsOpen = false;
+  el('models').hidden = true;
   statisticsOpen = show;
   pricesOpen = false;
   el('prices').hidden = true;
@@ -322,6 +330,8 @@ const showStatistics = (show: boolean) => {
     });
 };
 const showPrices = (model?: string) => {
+  modelsOpen = false;
+  el('models').hidden = true;
   statisticsOpen = true;
   pricesOpen = true;
   el('statistics').hidden = true;
@@ -337,6 +347,15 @@ const statisticsPage = new StatisticsPage(
   showPrices,
 );
 const pricesPage = new PricesPage(el('prices'), send, () => showStatistics(true));
+const modelsPage = new ModelsPage(el('models'), send, () => showStatistics(false));
+el('models-toggle').onclick = () => {
+  showStatistics(false);
+  modelsOpen = true;
+  el('models').hidden = false;
+  el('chat-page').hidden = true;
+  modelsPage.update(state);
+  modelsPage.focus();
+};
 el('statistics-toggle').onclick = () => showStatistics(pricesOpen || !statisticsOpen);
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
@@ -486,6 +505,7 @@ function paint() {
   if (!statisticsOpen) renderDiagrams(messages);
   if (statisticsOpen && !pricesOpen) statisticsPage.update(state.statistics);
   if (pricesOpen) pricesPage.update(state.statistics);
+  if (modelsOpen) modelsPage.update(state);
   const attachments = el('attachments');
   attachments.replaceChildren();
   for (const a of state.attachments) {
@@ -550,14 +570,17 @@ function paint() {
     state.configs,
     state.status,
     state.readOnly,
+    state.visibleModels,
   ]);
   if (selectors.dataset.signature !== selectSignature) {
     selectors.dataset.signature = selectSignature;
     selectors.replaceChildren();
     for (const control of sessionSelectors(state)) {
       selectors.append(
-        createSessionSelector(control, state.status !== 'ready' || !!state.readOnly, (value) =>
-          send({ ...control.change, value }),
+        createSessionSelector(
+          visibleModelSelector(control, state.visibleModels),
+          state.status !== 'ready' || !!state.readOnly,
+          (value) => send({ ...control.change, value }),
         ),
       );
     }

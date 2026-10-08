@@ -20,6 +20,8 @@ pub struct Entry {
     pub tool: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<TurnDiff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +87,8 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_complete: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configs: Option<Vec<Value>>,
@@ -127,6 +131,7 @@ impl Entry {
             context_blocks: None,
             tool: None,
             diff: None,
+            terminal: None,
         }
     }
     pub fn is(&self, role: &str) -> bool {

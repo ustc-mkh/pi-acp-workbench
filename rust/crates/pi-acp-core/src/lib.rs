@@ -4,5 +4,6 @@
 pub mod atomic;
 pub mod canonical;
 pub mod mkdir_lock;
+pub mod turn_event;
 pub mod utf16;
 pub mod wire;

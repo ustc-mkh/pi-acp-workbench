@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Export native-branch fixtures for cross-implementation verification (docs/data-formats.md §8).
 // Bundles src/native-branch.ts, runs the same entry sequences as test/native-branch.test.ts,
-// and writes test/fixtures/native-branch/*.json with expected hashes/bindings that a Rust
-// implementation must reproduce byte-for-byte. Re-run after intentional algorithm changes.
+// and writes test/fixtures/native-branch/*.json with frozen hashes/bindings verified by test/native-fixtures.test.ts. Re-run after intentional algorithm changes.
 import { build } from 'esbuild';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

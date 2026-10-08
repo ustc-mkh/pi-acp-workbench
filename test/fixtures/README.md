@@ -1,8 +1,7 @@
 # Fixtures：跨实现验证样例
 
 本目录是 [docs/service-protocol.md](../../docs/service-protocol.md) 与
-[docs/data-formats.md](../../docs/data-formats.md) 的可执行形态，供 TypeScript 参考实现与未来的
-Rust 实现对同一输入做**逐比特一致**的输出断言。
+[docs/data-formats.md](../../docs/data-formats.md) 的可执行形态，原生分支样例由 `test/native-fixtures.test.ts` 对生产 TS 校验器运行冻结输出断言。Rust 不再保留另一套未调用的树校验/哈希算法，仅绑定已验证的切点；格式样例继续服务于磁盘契约测试。
 
 ## `native-branch/`（由 `scripts/export-fixtures.mjs` 生成，勿手改）
 

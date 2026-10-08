@@ -32,7 +32,7 @@ function turnDiffNode(
   const filesTitle = document.createElement('summary');
   filesTitle.textContent = `全部修改（${entry.diff.files.length} 个文件）`;
   files.append(filesTitle);
-  if (entry.diff.files.length) node.append(files);
+  node.append(files);
   const notes = document.createElement('div');
   notes.className = 'turn-diff-notes';
   if (!entry.diff.files.length && entry.diff.status !== 'unavailable') {
@@ -104,7 +104,7 @@ function turnDiffNode(
     p.textContent = warning;
     notes.append(p);
   }
-  if (notes.childElementCount) node.append(notes);
+  if (notes.childElementCount) files.append(notes);
   return node;
 }
 
@@ -144,7 +144,13 @@ export function createMessageRenderer(
             'file-link',
           ),
         );
-      (entry.tool.content || []).forEach((content, index) => {
+      const content = [...(entry.tool.content || [])];
+      if (
+        entry.terminal &&
+        !content.some((c) => c.type === 'terminal' && c.terminalId === entry.terminal!.id)
+      )
+        content.push({ type: 'terminal', terminalId: entry.terminal.id });
+      content.forEach((content, index) => {
         if (content.type === 'diff') {
           body.append(
             button(
@@ -168,9 +174,27 @@ export function createMessageRenderer(
           markdown.innerHTML = renderMarkdown(text);
           body.append(markdown);
         } else {
-          const p = document.createElement('p');
-          p.textContent = `终端 ${content.terminalId}`;
-          body.append(p);
+          const terminal = entry.terminal?.id === content.terminalId ? entry.terminal : undefined;
+          const pre = document.createElement('pre');
+          pre.className = 'terminal-output';
+          pre.tabIndex = 0;
+          pre.setAttribute('aria-label', '终端输出');
+          pre.textContent =
+            terminal?.output ||
+            (entry.tool.status === 'completed' ? '命令已完成，没有文本输出。' : '等待终端输出…');
+          body.append(pre);
+          if (terminal?.truncated) {
+            const note = document.createElement('p');
+            note.textContent = '输出过长，仅保留最近约 100 万字符。';
+            body.append(note);
+          }
+          if (terminal?.exitCode !== undefined || terminal?.signal) {
+            const status = document.createElement('small');
+            status.textContent = terminal.signal
+              ? `终止信号：${terminal.signal}`
+              : `退出码：${terminal.exitCode ?? '未知'}`;
+            body.append(status);
+          }
         }
       });
       if (entry.tool.rawInput != null || entry.tool.rawOutput != null) {

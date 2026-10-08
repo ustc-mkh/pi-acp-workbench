@@ -15,10 +15,13 @@ it('fails closed for missing or duplicate upstream patch targets', () => {
         '-e',
         `
     import assert from 'node:assert/strict';
-    import {replaceExactlyOnce} from './scripts/build-adapter.mjs';
+    import {replaceExactlyOnce,assertRequestErrorBinding} from './scripts/build-adapter.mjs';
     assert.equal(replaceExactlyOnce('before target after','target','replacement'),'before replacement after');
     assert.throws(()=>replaceExactlyOnce('missing','target','x'), /integration seam changed/);
     assert.throws(()=>replaceExactlyOnce('target target','target','x'), /integration seam changed/);
+    assertRequestErrorBinding('import { RequestError as RequestError3 } from "@agentclientprotocol/sdk";');
+    assert.throws(()=>assertRequestErrorBinding('import { RequestError as RequestError4 } from "@agentclientprotocol/sdk";'), /RequestError3 import binding/);
+    assert.throws(()=>assertRequestErrorBinding('const RequestError3 = {};'), /RequestError3 import binding/);
   `,
       ],
       { stdio: 'pipe' },

@@ -57,13 +57,11 @@ impl TaskQueue {
         }
     }
 
-    #[allow(dead_code)] // TS pendingCount parity (diagnostics)
+    #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         self.queued.load(Ordering::SeqCst)
     }
 
-    /// Bump the session epoch so operations queued before this call fail check().
-    /// TS: `if (this.tails.has(id)) this.epochs.set(id, (this.epochs.get(id)||0)+1)`.
     pub async fn cancel(&self, id: &str) {
         let mut inner = self.inner.lock().unwrap();
         if inner.lanes.contains_key(id) {
@@ -79,9 +77,6 @@ impl TaskQueue {
         F: FnOnce(Check) -> Fut,
         Fut: Future<Output = Result<T, String>>,
     {
-        // TS run(): closed → '会话服务正在停止'; queued ≥ limit → '服务排队已满'.
-        // The closed check races harmlessly with close(): a late increment is
-        // still rejected by check() below, exactly like the TS tail task.
         if self.closed.load(Ordering::SeqCst) {
             return Err("会话服务正在停止".into());
         }
@@ -102,12 +97,9 @@ impl TaskQueue {
                 })
                 .clone();
             lane.queued.fetch_add(1, Ordering::SeqCst);
-            // TS: const epoch = this.epochs.get(id) || 0;
             let epoch = *inner.epochs.get(id).unwrap_or(&0);
             (lane, epoch)
         };
-        // TS check(): stale epoch or closed queue → '排队请求已取消'. The closure
-        // re-reads the shared epochs map each call, like the TS `tails` lookup.
         let check: Check = {
             let inner = Arc::clone(&self.inner);
             let closed = Arc::clone(&self.closed);
@@ -122,11 +114,7 @@ impl TaskQueue {
             })
         };
         let result = async {
-            // Lane mutex = the TS tail chain: same sessionId runs strictly serially.
             let _lane_guard = lane.lock.lock().await;
-            // Global budget — the FIFO semaphore replaces the TS waiters/active
-            // counter. acquire() only fails on a closed semaphore, which never
-            // happens here; the message matches the closest contract error.
             let _permit = self
                 .semaphore
                 .acquire()
@@ -136,9 +124,6 @@ impl TaskQueue {
             operation(check).await
         }
         .await;
-        // TS finally: queued--; drop the tail and its epoch when it is current.
-        // Lane removal follows bridge.rs enqueue: under the inner mutex, only
-        // when the lane drained to zero and the map still holds this same Arc.
         if self.queued.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.drained.notify_waiters();
         }
@@ -156,12 +141,6 @@ impl TaskQueue {
         result
     }
 
-    /// Reject new work; wait for every in-flight tail to settle.
-    /// TS close(): closed=true; await Promise.allSettled([...tails.values()]).
-    /// `queued` counts every run() call, so it reaching zero is exactly "all
-    /// tails settled"; new work is rejected before it can increment.
-    /// TS close() sets `closed` synchronously (async fn bodies run to the first
-    /// await). Split so callers can set the flag immediately and drain lazily.
     pub fn mark_closed(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
@@ -245,10 +224,11 @@ mod tests {
         third.await.unwrap().unwrap();
         assert_eq!(*ran.lock().unwrap(), vec!["first", "third"]);
         assert_eq!(queue.pending_count(), 0);
-        let inner = queue.inner.lock().unwrap();
-        assert!(inner.lanes.is_empty());
-        assert!(inner.epochs.is_empty());
-        drop(inner);
+        {
+            let inner = queue.inner.lock().unwrap();
+            assert!(inner.lanes.is_empty());
+            assert!(inner.epochs.is_empty());
+        }
         queue.close().await;
     }
 

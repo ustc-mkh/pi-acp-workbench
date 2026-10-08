@@ -1,43 +1,6 @@
-//! AgentProcess port (src/agent.ts) — ACP v1 ndjson JSON-RPC client over a
-//! spawned worker's stdio, with process-group termination.
-//!
-//! Spawn contract (from session-daemon config):
-//! - `spawn(command, args, { cwd, env: process.env ++ options.env, stdio: pipe, detached: true })`
-//!   → child runs in its own process group (Rust: `setsid` in pre_exec).
-//! - stderr → `log` callback lines; stdout = ndjson protocol (never log to it).
-//! - Frames: `{id:number, method, params}` requests out; `{id,result}`/`{id,error}`
-//!   replies in; notifications `{method:'session/update', params}` → `update` cb;
-//!   requests `{id, method:'session/request_permission', params}` → `permission` cb
-//!   → respond `{id,result:<response>}`.
-//! - Inbound line cap 16 MiB (MessageTooLargeError → connection close). Malformed
-//!   JSON lines are NOT fatal in the SDK (v1.7.0 stream.js): it writes
-//!   `{id:null,error:{code:-32700,'Parse error'}}` back and skips the line —
-//!   mirrored here, likewise non-record frames get `-32600 'Invalid request'`.
-//!   JSON arrays are rejected: `allowBatches:false` closes the connection.
-//! - Request ids: incrementing u64 (adapter echoes them back verbatim).
-//! - localSessionId/nativeSessionId are identity for harness 'pi' (service only
-//!   spawns the pi adapter) — no id rewriting needed.
-//!
-//! Timeouts: `initialize` 20s (TS `requestTimeoutMs ?? 20000`; the service never
-//! sets requestTimeoutMs so the effective value is 20s); `with_timeout` default
-//! = `options.request_timeout` (30s, fork 180s passed by callers); timeout →
-//! reject 'ACP 请求超过 N 秒，连接已关闭。' + fail('ACP 请求超时，连接已关闭。').
-//!
-//! initialize params: {protocolVersion:1, clientInfo:{name:'pi-acp-workbench',
-//! title:'Pi ACP Workbench', version:'0.9.4'}, clientCapabilities:{}} — response
-//! protocolVersion must == 1 else '不支持 ACP 协议版本 N'.
-//!
-//! session/new: {cwd, mcpServers:[]}; session/load: same + sessionId, requires
-//! info.agentCapabilities.loadSession === true else '此 Agent 未声明 session/load 能力，无法恢复远端会话。'.
-//!
-//! cancel(sessionId): notification only. prompt(sessionId,prompt): request.
-//!
-//! Process lifecycle (dispose/stop):
-//! - dispose(): close connection, destroy stdio, `killpg(pid, SIGTERM)`;
-//!   1.5s later `killpg(pid, SIGKILL)` (unconditional, ESRCH ignored like TS).
-//!   stop() = dispose + wait for group exit (child.wait() in the monitor task).
-//! - on child 'error'/'exit'/stdin error/connection close → fail(msg) →
-//!   closed(msg) callback once; isClosed flag.
+//! ACP JSON-RPC client over a child process stdin/stdout.
+//! Requests, permissions and writes are independently tracked; prompts have no timeout.
+//! Shutdown signals the process group, then checks it before escalating after 1.5s.
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
@@ -73,43 +36,31 @@ pub struct AgentOptions {
 
 /// ndJsonStream({maxMessageBytes: 16 * 1024 * 1024}).
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-/// TS dispose(): SIGTERM, then a 1.5s `timer.unref()` escalation to SIGKILL.
 const SIGKILL_DELAY: Duration = Duration::from_millis(1500);
 /// Grace window after stdout EOF so the exit monitor's
 /// 'ACP 进程退出 (…)。' beats 'ACP 连接已关闭。' — Node delivers the child
 /// 'exit' event before the stream closes the connection.
 const EOF_GRACE: Duration = Duration::from_millis(50);
 
-/// Shared state between the AgentProcess handle and its reader/writer/monitor
-/// tasks (TS puts all of this on the `this` instance + SDK internals).
 struct Inner {
     update: UpdateCb,
     permission: PermissionCb,
     log: LogCb,
     closed: ClosedCb,
-    /// TS `withTimeout` default (`requestTimeoutMs ?? 30000`); callers may also
-    /// pass explicit ms (fork uses 180s).
     request_timeout: Duration,
     /// createSession params.cwd.
     cwd: String,
     pid: u32,
-    /// TS `disposed` — set by fail()/dispose(); first writer wins the message.
     closed_flag: AtomicBool,
     next_id: AtomicU64,
     /// connection.pendingResponses — short critical sections, std Mutex so the
     /// sync dispose() path can drain without a runtime.
     pending: StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
-    /// Serialized writes to child stdin (TS: SDK outputWrite promise chain).
-    /// Option so dispose() can drop it → writer task ends → stdin EOF.
     write_tx: StdMutex<Option<mpsc::UnboundedSender<Value>>>,
-    /// `true` once the exit monitor's child.wait() returned (TS `exited` +
-    /// the termination promise). `exit_rx` pins a receiver so `send` always
-    /// stores the value even with no stop() subscribers.
     exit_tx: watch::Sender<bool>,
     exit_rx: watch::Receiver<bool>,
 }
 
-/// Serialized write through the stdin channel (TS: sendWireMessage → writeJson).
 fn send_wire(inner: &Inner, message: Value) -> bool {
     inner
         .write_tx
@@ -119,31 +70,27 @@ fn send_wire(inner: &Inner, message: Value) -> bool {
         .is_some_and(|tx| tx.send(message).is_ok())
 }
 
-/// TS dispose() body minus the disposed-flag guard: connection.close()
-/// (reject pending), destroy stdio, killpg SIGTERM, schedule killpg SIGKILL.
-/// `pending_reason` is what pending request futures observe — the SDK rejects
-/// them with the connection's close reason.
 fn terminate(inner: &Arc<Inner>, pending_reason: &str) {
     inner.write_tx.lock().unwrap().take();
     for (_, waiter) in inner.pending.lock().unwrap().drain() {
         let _ = waiter.send(Err(pending_reason.to_string()));
     }
     if inner.pid == 0 {
-        return; // TS: `if (!pid) return;`
+        return;
     }
     // process.kill(-pid, 'SIGTERM') — ESRCH on an already-dead group ignored.
     unsafe { libc::kill(-(inner.pid as i32), libc::SIGTERM) };
     let pid = inner.pid;
-    // Detached escalation timer (timer.unref() in TS): fires unconditionally;
-    // kill on a dead pgid just errors and is ignored.
+    // Escalate only while the process group is still alive.
     std::thread::spawn(move || {
         std::thread::sleep(SIGKILL_DELAY);
-        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        let alive = unsafe { libc::kill(-(pid as i32), 0) } == 0;
+        if alive {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
     });
 }
 
-/// TS fail(): if already disposed return; dispose(); closed(message).
-/// `pending_reason` mirrors what the SDK would reject in-flight requests with.
 fn fail_reason(inner: &Arc<Inner>, message: String, pending_reason: &str) {
     if inner.closed_flag.swap(true, Ordering::SeqCst) {
         return;
@@ -157,7 +104,6 @@ fn fail(inner: &Arc<Inner>, message: String) {
     fail_reason(inner, message, "ACP connection closed");
 }
 
-/// `${value}` rendering for error text (TS template literal coercion).
 fn js_display(value: Option<&Value>) -> String {
     match value {
         None => "undefined".to_string(),
@@ -243,7 +189,6 @@ fn signal_name(signal: i32) -> String {
     .to_string()
 }
 
-/// TS `'exit'` handler argument: `signal || code` (null → prints "null").
 fn describe_exit(status: std::io::Result<ExitStatus>) -> String {
     match status {
         Ok(status) => status
@@ -329,13 +274,16 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
     };
     let envelope = obj.get("jsonrpc") == Some(&json!("2.0"));
     let method = obj.get("method").and_then(Value::as_str);
-    if envelope && obj.contains_key("id") && method.is_some() && is_json_rpc_id(&obj["id"]) {
+    if let (true, Some(method)) = (
+        envelope && obj.contains_key("id") && is_json_rpc_id(&obj["id"]),
+        method,
+    ) {
         // Inbound request: only session/request_permission has a handler.
         // The SDK processes it on a promise — spawn a task and reply with
         // {id, result: <permission cb response>} when it resolves.
         let id = obj["id"].clone();
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
-        if method == Some("session/request_permission") {
+        if method == "session/request_permission" {
             let inner = inner.clone();
             tokio::spawn(async move {
                 let result = (inner.permission)(params).await;
@@ -348,7 +296,7 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
             // responder.respondWithError(RequestError.methodNotFound(method))
             send_wire(
                 inner,
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("\"Method not found\": {}", method.unwrap()), "data": {"method": method.unwrap()}}}),
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("\"Method not found\": {}", method), "data": {"method": method}}}),
             );
         }
         return true;
@@ -357,8 +305,6 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
         // Inbound notification ($/cancelRequest is ignored like an
         // unimplemented protocol hook).
         if method == Some("session/update") {
-            // TS onNotification → options.update({...params, sessionId: local(params.sessionId)})
-            // — localSessionId is identity for harness 'pi'.
             (inner.update)(obj.get("params").cloned().unwrap_or(Value::Null));
         }
         return true;
@@ -398,7 +344,7 @@ async fn reader_task(inner: Arc<Inner>, stdout: ChildStdout) {
             let (found, consumed) = {
                 match reader.fill_buf().await {
                     Err(_) => break End::Io,
-                    Ok(buf) if buf.is_empty() => {
+                    Ok([]) => {
                         // EOF: flush() — a trailing partial line is still
                         // parsed (SDK lines.flush() → enqueueLine).
                         break if line.is_empty() { End::Eof } else { End::Line };
@@ -463,8 +409,6 @@ async fn reader_task(inner: Arc<Inner>, stdout: ChildStdout) {
     }
 }
 
-/// stdin writer — serializes every outbound frame (TS outputWrite chain).
-/// A write/flush error is the TS `child.stdin 'error'` event → fail(e.message).
 async fn writer_task(
     inner: Arc<Inner>,
     mut stdin: ChildStdin,
@@ -485,8 +429,6 @@ async fn writer_task(
     // Channel closed (dispose) → stdin drops here → child sees EOF.
 }
 
-/// stderr → log cb. TS forwards raw 'data' chunks; we forward whole lines
-/// (newline included) — diagnostic text only, chunking is not contractual.
 async fn stderr_task(inner: Arc<Inner>, stderr: ChildStderr) {
     let mut reader = BufReader::new(stderr);
     let mut line = Vec::new();
@@ -501,14 +443,10 @@ async fn stderr_task(inner: Arc<Inner>, stderr: ChildStderr) {
 
 pub struct AgentProcess {
     inner: Arc<Inner>,
-    /// TS `this.info` — the initialize() response for capability checks.
     info: Mutex<Option<Value>>,
 }
 
 impl AgentProcess {
-    /// TS constructor: spawn + stderr 'data' → log + 'error'/'exit'/stdin
-    /// 'error'/connection.closed handlers. Spawn errors go through the same
-    /// fail() path message (Pi Agent / sessions.json wording, harness 'pi').
     pub fn spawn(options: AgentOptions) -> Result<Self, String> {
         let mut command = Command::new(&options.command);
         command
@@ -516,7 +454,6 @@ impl AgentProcess {
             .current_dir(&options.cwd)
             // vars_os: non-UTF8 env values must not panic (vars() would, and
             // workspace release uses panic=abort → whole daemon would die).
-            .envs(std::env::vars_os())
             .envs(&options.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -535,8 +472,6 @@ impl AgentProcess {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                // TS 'error' listener message, harness 'pi', session-daemon's
-                // commandSetting ('sessions.json 的 command/env').
                 let message = format!(
                     "无法启动 Pi Agent ACP 进程：{error}。请检查 sessions.json 的 command/env 和远端 PATH。安装：npm install -g @earendil-works/pi-coding-agent"
                 );
@@ -592,7 +527,6 @@ impl AgentProcess {
         })
     }
 
-    /// TS `isClosed` — set by dispose() / fail().
     pub fn is_closed(&self) -> bool {
         self.inner.closed_flag.load(Ordering::SeqCst)
     }
@@ -602,9 +536,6 @@ impl AgentProcess {
         self.info.lock().await.clone()
     }
 
-    /// ACP request — connection.agent.request(method, params). sessionId
-    /// rewriting is identity for harness 'pi'. No timeout here (TS callers
-    /// opt into withTimeout; prompt/cancel_fork intentionally have none).
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         if self.is_closed() {
             return Err("ACP connection closed".to_string());
@@ -625,8 +556,6 @@ impl AgentProcess {
             .unwrap_or_else(|_| Err("ACP connection closed".to_string()))
     }
 
-    /// TS withTimeout: on expiry reject 'ACP 请求超过 {s} 秒，连接已关闭。'
-    /// and fail('ACP 请求超时，连接已关闭。').
     pub async fn with_timeout(
         &self,
         future: impl std::future::Future<Output = Result<Value, String>>,
@@ -643,9 +572,6 @@ impl AgentProcess {
         }
     }
 
-    /// TS initialize(): withTimeout(request('initialize', …), requestTimeoutMs
-    /// ?? 20000) — the service never sets requestTimeoutMs → 20s. On failure or
-    /// protocolVersion !== 1: dispose() then throw.
     pub async fn initialize(&self) -> Result<Value, String> {
         let result = self
             .with_timeout(
@@ -703,13 +629,11 @@ impl AgentProcess {
         let result = self
             .with_timeout(self.request("session/load", params), default_ms)
             .await?;
-        // TS: { ...result, sessionId: id } — result is a response object.
         let mut obj = result.as_object().cloned().unwrap_or_default();
         obj.insert("sessionId".to_string(), json!(id));
         Ok(Value::Object(obj))
     }
 
-    /// TS prompt(): request('session/prompt', {sessionId, prompt}) — no timeout.
     pub async fn prompt(&self, session_id: &str, prompt: Vec<Value>) -> Result<Value, String> {
         self.request(
             "session/prompt",
@@ -718,8 +642,6 @@ impl AgentProcess {
         .await
     }
 
-    /// session/cancel notification (no response expected). TS returns the
-    /// notify promise; this port's signature swallows the send result.
     pub async fn cancel(&self, session_id: &str) {
         let _ = send_wire(
             &self.inner,
@@ -727,16 +649,12 @@ impl AgentProcess {
         );
     }
 
-    /// Dispose + wait for the process group to die (SIGTERM → 1.5s → SIGKILL).
-    /// TS stop(): dispose() then await this.termination (child 'exit').
     pub async fn stop(&self) {
         self.dispose();
         let mut rx = self.inner.exit_rx.clone();
         let _ = rx.wait_for(|v| *v).await;
     }
 
-    /// TS dispose(): mark closed, connection.close() (reject pending), destroy
-    /// stdio, killpg SIGTERM, 1.5s-later killpg SIGKILL. Idempotent.
     pub fn dispose(&self) {
         if self.inner.closed_flag.swap(true, Ordering::SeqCst) {
             return;
@@ -746,8 +664,6 @@ impl AgentProcess {
 }
 
 impl Drop for AgentProcess {
-    /// Safety net so a dropped worker still gets SIGTERM+SIGKILL (TS relies on
-    /// callers; cheap to guarantee here since dispose is sync).
     fn drop(&mut self) {
         self.dispose();
     }

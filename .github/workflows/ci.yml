@@ -13,10 +13,11 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - run: npm ci
       - run: npm run format:check
       # One preparation per target; independent suites overlap, not stateful cases.
+      - run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
       - run: npm run test:full
         env:
           TEST_JOBS: 2
@@ -39,7 +40,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
   production:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,7 +48,22 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - run: npm ci
-      - run: npm run build:services
-      - run: npm run sessions -- --help
-      - run: npm run telegram -- --help
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
+      - run: npm run build:services -- --target x86_64-unknown-linux-musl
+        env:
+          CC: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      - run: npm run test:service:artifact -- --dir service-dist --report test-results/production-x86_64-unknown-linux-musl.json
+      - run: node scripts/service-contract.mjs
+        env:
+          PI_CONTRACT_DAEMON: service-dist/pi-acp-session-daemon
+      - run: npm run package:services
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-services-x86_64-unknown-linux-musl
+          path: |
+            service-artifacts/
+            test-results/production-*.json

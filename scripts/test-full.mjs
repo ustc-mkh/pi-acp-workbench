@@ -90,6 +90,7 @@ if (prep.some((r) => !r.ok)) {
   process.exitCode = 1;
 } else {
   const suites = [
+    node('protocol-types', 'scripts/generate-service-types.mjs', '--check'),
     node(
       'typescript',
       'node_modules/vitest/vitest.mjs',

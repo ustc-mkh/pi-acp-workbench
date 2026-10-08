@@ -6,10 +6,12 @@
 //! runtime directory; custom workers require explicit command/args.
 mod agent;
 mod diff;
+mod error;
 mod history;
 mod journal;
 mod native;
 mod outbox;
+mod phase;
 mod prefs;
 mod protocol;
 mod queue;
@@ -47,8 +49,6 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
     )
     .map_err(|e| format!("会话配置必须为 JSON 对象：{e}"))?;
     let invalid = || "工作进程参数无效".to_string();
-    // TS: Number.isInteger check — an explicitly non-integer value is invalid
-    // config, not a silent default (1.5 / "3" / -2 must all be rejected).
     let max_workers = match raw.get("maxWorkers") {
         None => 3usize,
         Some(v) => v
@@ -89,14 +89,9 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
         }
         _ => return Err(invalid()),
     };
-    // TS defaults: command=process.execPath (node) args=[dist/pi-adapter.mjs].
-    // For the Rust binary: explicit command wins; otherwise look for the adapter
-    // beside the executable and use `node` from PATH.
     let command = match raw.get("command").and_then(Value::as_str) {
         Some(cmd) => cmd.to_string(),
         None => {
-            // TS default was `node <dist>/pi-adapter.mjs`; for the Rust binary
-            // look beside the executable (or PI_ADAPTER) else require config.
             let adapter = std::env::var("PI_ADAPTER")
                 .ok()
                 .map(PathBuf::from)
@@ -193,7 +188,10 @@ async fn run() -> Result<(), String> {
                 let svc = svc.clone();
                 Box::pin(async move { svc.handle(&method, params, &request_id).await })
                     as std::pin::Pin<
-                        Box<dyn std::future::Future<Output = Result<Value, String>> + Send>,
+                        Box<
+                            dyn std::future::Future<Output = Result<Value, error::ServiceError>>
+                                + Send,
+                        >,
                     >
             },
         ),
@@ -235,8 +233,10 @@ async fn run() -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // std::process::exit() would bypass destructors — MkdirLock's Drop removes
-    // the lock dir, so errors must return normally (TS used process.exitCode).
+    if std::env::args().any(|arg| arg == "--print-types") {
+        print!("{}", protocol::typescript());
+        return std::process::ExitCode::SUCCESS;
+    }
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

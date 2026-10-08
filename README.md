@@ -5,7 +5,7 @@
 ## 功能
 
 - **Telegram 远程控制**：每个会话对应一个群组话题，支持流式回复、完成通知、工具授权、停止任务，以及旧会话与历史消息同步。桌面输入和 Pi 回复可同步到手机。
-- **桌面编码助手**：侧栏对话、模型与思考强度选择、代码选区和文件上下文、粘贴图片、工具调用与 diff 查看。
+- **桌面编码助手**：侧栏对话、模型可见性管理、思考强度与适配器支持的 Fast 选择、代码选区和文件上下文、粘贴图片、工具调用与 diff 查看。
 - **每轮总 Diff**：输出末尾展示该轮工作区的文件和增删行数汇总，可展开补丁或打开编辑器对比；支持 Pi / Codex / Claude。[采集范围与限制](docs/turn-diff.md)。
 - **会话管理**：保存与恢复历史、跨端继续对话、Pi 原生会话分支、Markdown 导出。
 - **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。
@@ -15,7 +15,7 @@
 
 ### 1. 准备运行环境
 
-Pi 服务使用 Rust 常驻进程，运行需要 **Linux、Node.js 22+ 和用户级 systemd**；从源码构建还需要 Rust/Cargo。使用 Remote SSH / WSL 时，以下操作在扩展宿主所在的机器、同一用户账户下完成。
+Pi 服务使用 Rust 常驻进程，运行需要 **Linux x86_64、Node.js 22+ 和用户级 systemd**；从源码构建还需要 Rust/Cargo。使用 Remote SSH / WSL 时，以下操作在扩展宿主所在的机器、同一用户账户下完成。
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent
@@ -137,3 +137,5 @@ npm install -g @agentclientprotocol/claude-agent-acp
 自定义启动路径、参数和环境变量使用 `piAcp.codex.command/args/env` 或 `piAcp.claude.command/args/env`。这些适配器由插件直接启动；实际功能取决于适配器支持的 ACP 能力。
 
 详细资料：[架构说明](docs/architecture.md) · [开发与测试](docs/testing.md) · [更新记录](CHANGELOG.md)
+
+长任务期间 context 占用会持续刷新并保存在会话快照中；终端工具实时显示输出，“全部修改”展开后显示采集说明。Telegram 通知保留 Markdown 格式。

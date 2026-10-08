@@ -20,7 +20,7 @@ Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话�
 
 ### 2. 配置服务器
 
-要求 Node.js 22+、已配置凭据的 Pi、当前仓库的 Rust 服务构建产物；从源码构建需要 Rust/Cargo。以实际执行 Pi 的服务器账户操作：
+仅支持 Linux x86_64，要求 Node.js 22+、已配置凭据的 Pi、当前仓库的 Rust 服务构建产物；从源码构建需要 Rust/Cargo。以实际执行 Pi 的服务器账户操作：
 
 ```bash
 npm ci
@@ -61,7 +61,7 @@ npm run telegram -- --config "$HOME/.config/pi-acp-workbench/telegram.json"
 
 如果不知道 ID，在群组中向 Bot 发 `/help`，然后在服务**尚未启动**时执行 `npm run telegram -- --discover`。它只打印收到消息的 chatId / userId / threadId，不执行任务，也不打印 token。填入配置后启动服务，再重新发送 `/help`；首次启动会跳过配置前积压的消息。
 
-Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。默认 `workspaces` 只是 `/new` 的快捷入口，可直接使用 `/new /absolute/path`。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
+Pi 的 `command` / `args` / `env`、代理和 `maxWorkers` 全部放在 `sessions.json`。旧 Telegram 配置中的这些字段必须移走；`maxConcurrent` 改为服务端的 `maxWorkers`。Telegram 配置仅保留群组、用户与可选工作区别名。未设置限制时，`workspaces` 只是 `/new` 的快捷入口，也可直接使用 `/new /absolute/path`。仓库生产示例默认 `restrictToWorkspaces:true`，仅允许列出的工作目录。可配置 `"restrictToWorkspaces": true`，使 `/new` 只接受 `workspaces` 中声明的目录根（不包含子目录）；绝对路径会解析真实路径后匹配，拒绝符号链接越界。此配置不是 Pi 命令的文件系统沙箱，仍应只允许可信用户，必要时用独立系统账户或容器隔离。Token 不进入 Pi 服务或 Pi 子进程。
 
 ### 3. 作为用户服务常驻
 
@@ -163,3 +163,5 @@ Telegram Bot API 的 [`sendMessage.disable_notification`](https://core.telegram.
 - `/stop` 对工具的取消能力取决于 Pi；取消不撤销工具已经完成的文件修改。
 
 持久化写入失败时，通知、话题绑定及推送开关都不会在内存中假定成功。通知发送成功但确认未保存时可能重复；话题创建成功但绑定保存失败时可能留下未绑定的话题。先恢复服务器磁盘权限或空间，再重试操作。
+
+输出支持粗体、斜体、删除线、代码块、链接与列表；使用原生 entities 而不是把模型输出作为未转义的 MarkdownV2，中文/emoji 分块仍保留格式。工具授权和非文本附件提示由 relay 根据通用事件字段生成。

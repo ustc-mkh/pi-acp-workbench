@@ -6,6 +6,7 @@ mod api;
 mod bridge;
 mod config;
 mod events;
+mod markdown;
 mod sessions;
 mod stream;
 #[cfg(test)]
@@ -67,16 +68,17 @@ fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeStat
             .get("delivered")
             .and_then(Value::as_array)
             .is_some_and(|a| a.iter().all(|d| d.is_string()))
-        || v.get("offset")
+        || !v
+            .get("offset")
             .map(|o| o.as_i64().is_some_and(|i| i >= 0))
             .unwrap_or(true)
-            == false
-        || v.get("silent").map(|s| s.is_boolean()).unwrap_or(true) == false
-        || v.get("notifications")
+        || !v.get("silent").map(|s| s.is_boolean()).unwrap_or(true)
+        || !v
+            .get("notifications")
             .map(|s| s.is_boolean())
             .unwrap_or(true)
-            == false
-        || v.get("historySent")
+        || !v
+            .get("historySent")
             .map(|h| {
                 h.as_object().is_some_and(|m| {
                     m.values().all(|v| {
@@ -86,33 +88,10 @@ fn validate_state(value: &Value, bot_id: i64, chat_id: i64) -> Result<BridgeStat
                 })
             })
             .unwrap_or(true)
-            == false
     {
         return Err(invalid());
     }
     serde_json::from_value(value.clone()).map_err(|_| invalid())
-}
-
-#[cfg(test)]
-mod state_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn optional_history_sync_state_is_not_required_to_restart() {
-        let value = json!({"version":1,"botId":123,"chatId":-100,"topics":[],"delivered":[]});
-        let state = validate_state(&value, 123, -100).unwrap();
-        let saved = serde_json::to_value(state).unwrap();
-        assert!(saved.get("historySent").is_none());
-        assert!(validate_state(&saved, 123, -100).is_ok());
-        let mut invalid = value;
-        invalid["historySent"] = Value::Null;
-        assert!(validate_state(&invalid, 123, -100).is_err());
-        invalid["historySent"] = json!({"session":["hash"]});
-        assert!(validate_state(&invalid, 123, -100).is_ok());
-        invalid["historySent"] = json!({"session":[42]});
-        assert!(validate_state(&invalid, 123, -100).is_err());
-    }
 }
 
 fn report_fn(token: String) -> impl Fn(&str) + Send + Sync + 'static {
@@ -359,5 +338,27 @@ async fn main() {
         let token = std::env::var("PI_TELEGRAM_BOT_TOKEN").unwrap_or_default();
         eprintln!("{}", error.replace(&token, "[redacted]"));
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn optional_history_sync_state_is_not_required_to_restart() {
+        let value = json!({"version":1,"botId":123,"chatId":-100,"topics":[],"delivered":[]});
+        let state = validate_state(&value, 123, -100).unwrap();
+        let saved = serde_json::to_value(state).unwrap();
+        assert!(saved.get("historySent").is_none());
+        assert!(validate_state(&saved, 123, -100).is_ok());
+        let mut invalid = value;
+        invalid["historySent"] = Value::Null;
+        assert!(validate_state(&invalid, 123, -100).is_err());
+        invalid["historySent"] = json!({"session":["hash"]});
+        assert!(validate_state(&invalid, 123, -100).is_ok());
+        invalid["historySent"] = json!({"session":[42]});
+        assert!(validate_state(&invalid, 123, -100).is_err());
     }
 }

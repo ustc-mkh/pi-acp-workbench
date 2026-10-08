@@ -774,6 +774,38 @@ test('/help and /commands list all relay routes without executing prompts', asyn
   assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, count);
 });
 
+test('outbox messages reach Bot API with Markdown entities and structured attachment notices', async () => {
+  const id = 'markdown-entities';
+  await publishEvent(id, '**粗体** 与 `😀<>&` [链接](https://example.com)', {
+    inputText: 'question',
+    nonTextBlocks: 2,
+  });
+  await waitUntil(
+    async () => (await savedState()).delivered.includes(id),
+    'Markdown event was not delivered',
+  );
+  const calls = [...sent('sendMessage'), ...sent('editMessageText')].filter((call) =>
+    call.params.text?.includes('粗体 与 😀<>& 链接'),
+  );
+  assert(calls.length > 0);
+  for (const { params } of calls) {
+    assert(params.text.includes('附带 2 个非文本内容'));
+    const units = params.text.split('');
+    assert(
+      params.entities.some(
+        (e) => e.type === 'bold' && units.slice(e.offset, e.offset + e.length).join('') === '粗体',
+      ),
+    );
+    assert(
+      params.entities.some(
+        (e) => e.type === 'code' && units.slice(e.offset, e.offset + e.length).join('') === '😀<>&',
+      ),
+    );
+    assert(params.entities.some((e) => e.type === 'text_link' && e.url === 'https://example.com'));
+    assert.equal(params.parse_mode, undefined);
+  }
+});
+
 test('permission cards reject unauthorized, wrong-topic and invalid-option callbacks, then retire the ticket', async () => {
   message('ask', { thread: state.threadId });
   const cards = await waitSent('sendMessage', {

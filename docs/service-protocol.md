@@ -1,6 +1,6 @@
 # 会话服务 Wire 协议规范
 
-本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端及命令校验已删除，`src/session-protocol.ts` 仅保留客户端/config DTO。
+本文件是 Rust 会话服务（`rust/crates/pi-acp-session-daemon/src/{server,protocol}.rs`）与 TS 客户端（`src/session-wire.ts`）的**冻结规范**，供第三方客户端实现对照。服务与客户端必须满足本文件的字节级语义；协议变更需要同时更新本文件、实现与 contract 测试。TS 服务端及命令校验已删除，`protocol.rs` 用 serde 校验带类型的请求和状态，用 ts-rs 生成 `src/session-protocol.generated.ts`；`session-protocol.ts` 只重导出契约并保留启动配置。`npm run generate:protocol` 更新，`npm run check:protocol` 检查漂移。
 
 黑盒验证入口：`npm run test:contract`（`scripts/service-contract.mjs`，只依赖 socket，不 import 服务实现）。
 
@@ -105,7 +105,7 @@
 
 - 客户端断线**不取消**已提交任务；客户端不得自动重发（防重放由收据保证）。
 - 服务关闭时销毁所有连接；客户端把 pending 全部 reject。
-- 错误响应的 `error` 是人类可读字符串（当前为中文），**不作为程序契约**；契约仅以成功与否区分。
+- 错误响应的 `error` 是人类可读字符串（当前为中文），**不作为程序契约**；客户端按稳定 `code` 区分 invalid_params/busy/not_found/io_error/agent_error/interrupted/unknown_method/stopping；旧客户端仍可只判断成功与否。
 - 授权请求（`permissions`）5 分钟无人应答自动按取消处理；同会话并发授权上限 32，单次请求载荷 ≤256 KiB。
 
 ## 8. 明确不做的事

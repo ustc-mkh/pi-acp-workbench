@@ -2,6 +2,7 @@ import type { ChatState } from '../src/shared';
 export function contextUsage(usage: ChatState['usage']) {
   if (
     !usage ||
+    usage.used === null ||
     !Number.isFinite(usage.used) ||
     !Number.isFinite(usage.size) ||
     usage.used < 0 ||

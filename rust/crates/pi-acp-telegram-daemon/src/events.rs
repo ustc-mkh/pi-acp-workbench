@@ -1,5 +1,4 @@
 //! Lazy durable outbox reader; only the session service writes events.
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,24 +8,7 @@ use tokio::io::AsyncReadExt;
 const MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
 const MAX_SIZE: u64 = 16 * 1024 * 1024;
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // title/session_number/updated are contract fields, not all read here
-pub struct TurnEvent {
-    pub id: String,
-    pub session_id: String,
-    pub cwd: String,
-    pub title: String,
-    #[serde(default)]
-    pub session_number: Option<u64>,
-    #[serde(default)]
-    pub input_text: Option<String>,
-    pub text: String,
-    pub status: String,
-    #[serde(default)]
-    pub error: Option<String>,
-    pub updated: f64,
-}
+pub use pi_acp_core::turn_event::TurnEvent;
 
 fn is_event_name(name: &str) -> bool {
     name.len() == 69
@@ -141,6 +123,13 @@ async fn scan(dir: &Path) -> io::Result<Vec<TurnEvent>> {
     Ok(out)
 }
 
+pub async fn remove(dir: &Path, id: &str) -> io::Result<()> {
+    match tokio::fs::remove_file(event_file(dir, id)).await {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,12 +220,5 @@ mod tests {
         assert!(scan(&root.0).await.unwrap().is_empty());
         assert!(!event_file(&root.0, "old").exists());
         assert!(event_file(&root.0, "large").exists());
-    }
-}
-
-pub async fn remove(dir: &Path, id: &str) -> io::Result<()> {
-    match tokio::fs::remove_file(event_file(dir, id)).await {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
     }
 }

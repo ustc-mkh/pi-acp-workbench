@@ -1,5 +1,6 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type { ChatState } from './shared';
+import { mergeTerminalOutput } from './terminal-output';
 let serial = 0;
 export const nextId = () => `entry-${Date.now()}-${++serial}`;
 export function initialState(): ChatState {
@@ -16,7 +17,7 @@ export function initialState(): ChatState {
     contextComplete: true,
   };
 }
-export function appendText(
+function appendText(
   state: ChatState,
   role: 'user' | 'assistant' | 'thought' | 'notice',
   text: string,
@@ -71,11 +72,17 @@ export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay 
       const fields = Object.fromEntries(
         Object.entries(update).filter(([, value]) => value !== undefined && value !== null),
       );
-      if (old?.role === 'tool') state.entries[index] = { ...old, tool: { ...old.tool, ...fields } };
+      const terminal = mergeTerminalOutput(
+        old?.role === 'tool' ? old.terminal : undefined,
+        update._meta,
+      );
+      if (old?.role === 'tool')
+        state.entries[index] = { ...old, terminal, tool: { ...old.tool, ...fields } };
       else
         state.entries.push({
           id: nextId(),
           role: 'tool',
+          terminal,
           tool: {
             title: '工具调用',
             status: 'pending',
@@ -98,7 +105,26 @@ export function applyUpdate(state: ChatState, update: acp.SessionUpdate, replay 
       state.configs = update.configOptions;
       break;
     case 'usage_update':
-      state.usage = { used: update.used, size: update.size };
+      if (
+        Number.isFinite(update.used) &&
+        update.used >= 0 &&
+        Number.isFinite(update.size) &&
+        update.size > 0
+      )
+        state.usage = { used: update.used, size: update.size };
       break;
+    case 'session_info_update': {
+      const usage = update._meta?.['pi-workbench-context'] as
+        | { used?: unknown; size?: unknown }
+        | undefined;
+      if (
+        usage?.used === null &&
+        typeof usage.size === 'number' &&
+        Number.isFinite(usage.size) &&
+        usage.size > 0
+      )
+        state.usage = { used: null, size: usage.size };
+      break;
+    }
   }
 }

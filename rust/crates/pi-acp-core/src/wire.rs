@@ -178,7 +178,7 @@ fn parse_fragment_frame(text: &str) -> Option<(Vec<u16>, bool)> {
     let key_pos = text.find("\"fragment\"")?;
     let mut chars = text[key_pos + 10..].char_indices().peekable();
     // skip ':' + whitespace
-    while let Some((_, c)) = chars.next() {
+    for (_, c) in chars.by_ref() {
         if c == '"' {
             break;
         }
@@ -221,35 +221,6 @@ fn parse_fragment_frame(text: &str) -> Option<(Vec<u16>, bool)> {
         .to_string();
     let last = rest.contains("\"last\":true") || rest.contains("\"last\": true");
     Some((units, last))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_fragment_frame;
-
-    /// spec §4: a 128Ki-code-unit chunk boundary may sever a surrogate pair.
-    /// serde_json rejects lone surrogates, so the manual parser must keep the
-    /// raw unit; reassembly via from_utf16 must restore the pair.
-    #[test]
-    fn fragment_frame_keeps_lone_surrogate() {
-        let (units, last) =
-            parse_fragment_frame("{\"fragment\":\"prefix \\ud835\",\"last\":false}").unwrap();
-        assert!(!last);
-        assert_eq!(*units.last().unwrap(), 0xD835);
-        let (tail, last) =
-            parse_fragment_frame("{\"fragment\":\"\\udd4a tail\",\"last\":true}").unwrap();
-        assert!(last);
-        assert_eq!(tail[0], 0xDD4A);
-        let mut all = units;
-        all.extend_from_slice(&tail);
-        let text = String::from_utf16(&all).unwrap();
-        assert_eq!(text, "prefix 𝕊 tail"); // U+1D54A = \ud835\udd4a
-    }
-
-    #[test]
-    fn fragment_frame_ignores_non_fragment() {
-        assert!(parse_fragment_frame("{\"id\":\"x\"}").is_none());
-    }
 }
 
 impl Inner {
@@ -366,5 +337,34 @@ impl Inner {
         for (_, tx) in pending.drain() {
             let _ = tx.send(Err(WireError::Closed));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fragment_frame;
+
+    /// spec §4: a 128Ki-code-unit chunk boundary may sever a surrogate pair.
+    /// serde_json rejects lone surrogates, so the manual parser must keep the
+    /// raw unit; reassembly via from_utf16 must restore the pair.
+    #[test]
+    fn fragment_frame_keeps_lone_surrogate() {
+        let (units, last) =
+            parse_fragment_frame("{\"fragment\":\"prefix \\ud835\",\"last\":false}").unwrap();
+        assert!(!last);
+        assert_eq!(*units.last().unwrap(), 0xD835);
+        let (tail, last) =
+            parse_fragment_frame("{\"fragment\":\"\\udd4a tail\",\"last\":true}").unwrap();
+        assert!(last);
+        assert_eq!(tail[0], 0xDD4A);
+        let mut all = units;
+        all.extend_from_slice(&tail);
+        let text = String::from_utf16(&all).unwrap();
+        assert_eq!(text, "prefix 𝕊 tail"); // U+1D54A = \ud835\udd4a
+    }
+
+    #[test]
+    fn fragment_frame_ignores_non_fragment() {
+        assert!(parse_fragment_frame("{\"id\":\"x\"}").is_none());
     }
 }

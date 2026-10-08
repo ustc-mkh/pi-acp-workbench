@@ -4,7 +4,7 @@ Pi 由独立的 `pi-sessions.service` 启动和管理。VS Code 与 Telegram 都
 
 ## 安装
 
-生产会话服务仅使用 Rust daemon。需要 Linux、Node 22+、可用的 Pi 和用户级 systemd；从源码构建需要 Rust/Cargo。服务与 VS Code Remote 扩展运行在同一服务器账户。此版本不支持 Windows 的本地管道。
+生产会话服务仅使用 Rust daemon。仅支持 Linux x86_64，需要 Node 22+、可用的 Pi 和用户级 systemd；从源码构建需要 Rust/Cargo。服务与 VS Code Remote 扩展运行在同一服务器账户。此版本不支持 Windows 的本地管道。
 
 ```bash
 npm ci
@@ -28,7 +28,7 @@ journalctl --user -u pi-sessions -f
 
 ### 实现维护策略
 
-Rust 是生产服务的唯一实现。终态 outbox 写失败会使请求失败并标记 interrupted 收据，不重新执行已运行的模型任务。TS daemon 入口、会话服务、队列、收据和 socket 服务端已删除；会话与偏好回归直接连接 Rust 进程。旧 TS Telegram 内部模块也已按覆盖映射删除，不再维护第二套服务实现。契约、真实双服务集成及迁移进度见 [Rust 收敛进度](rust-migration.md)。
+Rust 是生产服务的唯一实现。终态 outbox 写失败会使请求失败并标记 interrupted 收据，不重新执行已运行的模型任务。TS daemon 入口、会话服务、队列、收据和 socket 服务端已删除；会话与偏好回归直接连接 Rust 进程。旧 TS Telegram 内部模块也已按覆盖映射删除，不再维护第二套服务实现。契约、真实双服务集成及迁移进度见 [Rust 收敛进度](archive/rust-migration.md)。
 
 桌面端「清空历史」会删除整个服务器账户的共享历史，并停止服务上的全部会话任务（包括 Telegram）；界面会进行二次确认。只想停止一个任务时请使用取消，而不是清空历史。
 

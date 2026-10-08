@@ -71,10 +71,10 @@ export function mergeUsage(existing: UsageRecord[], incoming: UsageRecord[]): Us
     (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
   );
 }
-export function inputTotal(r: TokenUsage) {
+function inputTotal(r: TokenUsage) {
   return r.input + r.cacheRead + r.cacheWrite;
 }
-export function estimateCost(r: TokenUsage, p?: Price) {
+function estimateCost(r: TokenUsage, p?: Price) {
   return p
     ? (r.input * p.input +
         r.output * p.output +

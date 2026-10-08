@@ -1,7 +1,8 @@
 //! Telegram relay: polling, per-session lanes,
 //! permission tickets, topic bindings, history sync and outbox consumption.
-use crate::api::{chunks, ApiError, TelegramApi};
+use crate::api::{ApiError, TelegramApi};
 use crate::events::TurnEvent;
+use crate::markdown::chunks;
 use crate::sessions::{SessionStub, Sessions};
 use crate::stream::TelegramStream;
 use pi_acp_core::atomic::write_atomic_json;
@@ -174,9 +175,10 @@ impl Bridge {
         for chunk in chunks(text) {
             let mut params = json!({
                 "chat_id": self.shared.opts.chat_id,
-                "text": chunk,
+                "text": chunk.text,
                 "disable_notification": self.shared.silent_on.load(Ordering::SeqCst),
             });
+            params["entities"] = serde_json::to_value(chunk.entities).unwrap();
             if let Some(t) = thread_id {
                 params["message_thread_id"] = json!(t);
             }
@@ -521,17 +523,31 @@ impl Bridge {
             Err(_) => return false,
         };
         let stream = self.stream(&event.id, thread_id).await;
+        let mut body = event.text.clone();
+        if event.pending_permissions > 0 {
+            body.push_str("\n🔐 等待工具授权，可在 VS Code 或 Telegram /status 中处理。");
+        }
         let text = if let Some(input) = &event.input_text {
-            let body = if event.text.is_empty() && event.status == "running" {
-                "正在处理…"
-            } else if event.text.is_empty() {
-                "本轮没有文本回复。"
+            let attachments = if event.non_text_blocks > 0 {
+                format!(
+                    "\n[附带 {} 个非文本内容，请在 VS Code 查看]",
+                    event.non_text_blocks
+                )
             } else {
-                &event.text
+                String::new()
             };
-            format!("你（VS Code）：\n{input}\n\nPi：\n{body}")
+            let body = if body.is_empty() {
+                if event.status == "running" {
+                    "正在处理…"
+                } else {
+                    "本轮没有文本回复。"
+                }
+            } else {
+                &body
+            };
+            format!("你（VS Code）：\n{input}{attachments}\n\nPi：\n{body}")
         } else {
-            event.text.clone()
+            body
         };
         if event.status == "running" {
             stream
@@ -724,7 +740,7 @@ impl Bridge {
     ) -> Result<(), String> {
         match command {
             Some("start" | "help" | "commands") => self
-                .send(&HELP, thread_id, json!({ "disable_notification": true }))
+                .send(HELP, thread_id, json!({ "disable_notification": true }))
                 .await
                 .map_err(|e| e.message),
             Some("silent") => self.silent_menu(thread_id).await.map_err(|e| e.message),

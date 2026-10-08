@@ -305,8 +305,9 @@ try {
     ),
   );
   assert.equal(await page.locator('.turn-diff-files').evaluate((node) => node.open), false);
-  assert(await page.locator('.turn-diff-notes').isVisible());
+  assert(await page.locator('.turn-diff-notes').isHidden());
   await page.locator('.turn-diff-files > summary').click();
+  assert(await page.locator('.turn-diff-notes').isVisible());
   await page.locator('.turn-diff-file > summary').click();
   await page.getByText('在编辑器中对比', { exact: true }).click();
   assert(
@@ -431,8 +432,8 @@ try {
   state.harness = 'codex';
   state.sessionId = 'workbench:codex:s1';
   await emit(state);
-  assert.equal(await page.locator('#selectors select').count(), 3);
-  assert.equal(await page.locator('#selectors select[aria-label="Fast mode"]').count(), 0);
+  assert.equal(await page.locator('#selectors select').count(), 4);
+  assert.equal(await page.locator('#selectors select[aria-label="Fast mode"]').count(), 1);
   assert.equal(await page.locator('#selectors select[aria-label="Collaboration mode"]').count(), 0);
   assert.equal(await page.locator('.message.tool [data-context-action]').count(), 0);
   assert.equal(await page.locator('#input').inputValue(), '');
@@ -488,9 +489,83 @@ try {
   assert.equal(await page.locator('.message.tool').count(), 1);
   state.status = 'ready';
   await emit(state);
+  await page.locator('#selectors select[aria-label="Fast mode"]').selectOption('on');
+  assert(
+    (await page.evaluate(() => window.messages)).some(
+      (m) => m.type === 'config' && m.id === 'fast-mode' && m.value === 'on',
+    ),
+  );
+  state.configs[0].options = [
+    { value: 'm', name: 'Current Model' },
+    { value: 'other', name: 'Other Model' },
+    { value: 'hidden', name: 'Hidden Model' },
+  ];
+  state.visibleModels = ['other'];
+  await emit(state);
+  assert.equal(await page.locator('#selectors select[aria-label="Model"] option').count(), 2);
+  await page.locator('#models-toggle').click();
+  assert(await page.locator('#models').isVisible());
+  assert.equal(await page.locator('#models input[type="checkbox"]').count(), 3);
+  await page.locator('#models input[type="search"]').fill('Hidden');
+  assert.equal(await page.locator('#models .model-row:visible').count(), 1);
+  await page.locator('#models input[value="hidden"]').check();
+  assert(
+    (await page.evaluate(() => window.messages)).some(
+      (m) => m.type === 'setVisibleModels' && m.harness === 'codex' && m.models.includes('hidden'),
+    ),
+  );
+  await page.screenshot({ path: resolve(artifacts, 'preview-models.png') });
+  await page.locator('#models button').first().click();
+  state.entries = state.entries.map((entry) =>
+    entry.role === 'tool'
+      ? { ...entry, terminal: { id: 'terminal', output: 'line\n'.repeat(200) } }
+      : entry,
+  );
+  await emit(state);
+  const terminal = page.locator('.terminal-output');
+  if (
+    !(await page
+      .locator('.activity-group')
+      .first()
+      .evaluate((node) => node.open))
+  )
+    await page.locator('.activity-group summary').first().click();
+  if (
+    !(await page
+      .locator('.message.tool')
+      .first()
+      .evaluate((node) => node.open))
+  )
+    await page.locator('.message.tool summary').first().click();
+  await terminal.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  state.entries = state.entries.map((entry) =>
+    entry.role === 'tool'
+      ? { ...entry, terminal: { ...entry.terminal, output: entry.terminal.output + 'new line\n' } }
+      : entry,
+  );
+  await emit(state);
+  assert(
+    await terminal.evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight < 24),
+  );
+  await terminal.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  state.entries = state.entries.map((entry) =>
+    entry.role === 'tool'
+      ? {
+          ...entry,
+          terminal: { ...entry.terminal, output: entry.terminal.output + 'another line\n' },
+        }
+      : entry,
+  );
+  await emit(state);
+  assert.equal(await terminal.evaluate((node) => node.scrollTop), 0);
+  await page.screenshot({ path: resolve(artifacts, 'preview-terminal.png') });
   assert.deepEqual(errors, []);
   console.log(
-    'Browser smoke passed: lazy Mermaid under CSP, dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, per-tool/per-turn diffs, no runtime errors.',
+    'Browser smoke passed: lazy Mermaid under CSP, dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, per-tool/per-turn diffs, model visibility, Fast mode, following terminal output, no runtime errors.',
   );
 } finally {
   await browser?.close();

@@ -1,7 +1,7 @@
 import { type SessionSelector } from '../src/session-settings';
 export { sessionSelectors, type SessionSelector } from '../src/session-settings';
 
-export function selectedLabel(control: SessionSelector, name: string): string {
+function selectedLabel(control: SessionSelector, name: string): string {
   if (control.kind !== 'model') return name;
   const slash = name.indexOf('/');
   return slash >= 0 && slash < name.length - 1 ? name.slice(slash + 1).trim() : name;
@@ -32,7 +32,7 @@ export function createSessionSelector(
   const updateLabel = () => {
     const full =
       control.options.find((option) => option.id === select.value)?.name || control.current;
-    label.textContent = selectedLabel(control, full);
+    label.textContent = control.kind === 'fast' ? `Fast · ${full}` : selectedLabel(control, full);
     wrapper.dataset.tooltip = full;
   };
   updateLabel();

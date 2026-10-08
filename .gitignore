@@ -2,6 +2,7 @@ node_modules/
 dist/
 service-dist/
 service-dist.*.tmp/
+service-artifacts/
 *.vsix
 playwright-report/
 test-results/

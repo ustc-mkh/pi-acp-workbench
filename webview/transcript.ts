@@ -63,7 +63,17 @@ export class TranscriptView {
         const node = this.render(entry);
         if (node instanceof HTMLDetailsElement && cached?.node instanceof HTMLDetailsElement)
           node.open = cached.node.open;
+        const previousOutput = cached?.node.querySelector<HTMLElement>('.terminal-output');
+        const nextOutput = node.querySelector<HTMLElement>('.terminal-output');
+        const follow =
+          !previousOutput ||
+          previousOutput.scrollHeight - previousOutput.scrollTop - previousOutput.clientHeight < 24;
+        const scrollTop = previousOutput?.scrollTop || 0;
         cached?.node.replaceWith(node);
+        if (nextOutput)
+          requestAnimationFrame(() => {
+            nextOutput.scrollTop = follow ? nextOutput.scrollHeight : scrollTop;
+          });
         cached = { entry, node };
         this.messages.set(entry.id, cached);
       }

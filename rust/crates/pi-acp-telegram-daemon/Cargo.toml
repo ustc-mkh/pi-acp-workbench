@@ -20,3 +20,4 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 indexmap = "2"
+pulldown-cmark = "0.13"

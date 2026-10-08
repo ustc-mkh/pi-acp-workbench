@@ -22,6 +22,7 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
   try {
     await mkdir(join(dir, '.pi'));
     await writeFile(join(dir, '.pi/settings.json'), '{"quietStartup":true}');
+    const updates: any[] = [];
     agent = new AgentProcess({
       command: process.execPath,
       args: [resolve('dist/pi-adapter.mjs')],
@@ -32,7 +33,7 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
         PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
         PI_TEST_AUDIT: join(dir, 'audit.jsonl'),
       },
-      update: () => {},
+      update: (notification) => updates.push(notification.update),
       permission: async () => ({ outcome: { outcome: 'cancelled' } }),
       closed: () => {},
       log: () => {},
@@ -44,11 +45,40 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
     expect(await agent.prompt(sessionId, [{ type: 'text', text: 'test' }])).toMatchObject({
       stopReason: 'end_turn',
     });
+    updates.length = 0;
+    let completed = false;
+    const live = agent
+      .prompt(sessionId, [{ type: 'text', text: 'LONG_CONTEXT' }])
+      .then((result) => {
+        completed = true;
+        return result;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    expect(completed).toBe(false);
+    expect(
+      updates.some((update) => update.sessionUpdate === 'usage_update' && update.used === 1020),
+    ).toBe(true);
+    await live;
+    updates.length = 0;
+    expect(
+      await agent.prompt(sessionId, [{ type: 'text', text: '/compact keep decisions' }]),
+    ).toMatchObject({ stopReason: 'end_turn' });
+    expect(updates.some((update) => update.content?.text?.includes('手动压缩后的上下文'))).toBe(
+      true,
+    );
+    await expect(
+      agent.prompt(sessionId, [{ type: 'text', text: '/compact fail' }]),
+    ).rejects.toThrow('compaction model unavailable');
     const inspect = () =>
       agent!.connection.agent.request<Inspection>('_pi_workbench/inspect', { sessionId });
     const data = await inspect();
-    expect(data.records).toHaveLength(2);
-    expect(data.records.map((r) => r.kind)).toEqual(['inference', 'compaction']);
+    expect(data.records).toHaveLength(4);
+    expect(data.records.map((r) => r.kind)).toEqual([
+      'inference',
+      'compaction',
+      'inference',
+      'compaction',
+    ]);
     expect(data.records[0]).toMatchObject({
       cacheRead: 800,
       input: 100,

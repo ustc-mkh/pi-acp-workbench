@@ -6,16 +6,25 @@ export function replaceExactlyOnce(source, target, replacement) {
     throw new Error(`pi-acp integration seam changed: ${target}`);
   return source.replace(target, () => replacement);
 }
+export function assertRequestErrorBinding(source) {
+  if (
+    !/import\s*\{[^}]*\bRequestError\s+as\s+RequestError3\b[^}]*\}\s*from\s*["']@agentclientprotocol\/sdk["']/.test(
+      source,
+    )
+  )
+    throw new Error('pi-acp integration seam changed: RequestError3 import binding');
+}
 export async function buildAdapter() {
   // Pin upstream and fail closed if its integration seam changes; keep our implementation in src/.
   const entry = resolve('node_modules/pi-acp/dist/index.js');
   let source = await readFile(entry, 'utf8');
+  assertRequestErrorBinding(source);
   const factory = 'new PiAcpAgent(conn)',
     args = 'const args = ["--mode", "rpc", "--no-themes"];';
   source = replaceExactlyOnce(
     source,
     factory,
-    'new (enhancePiAgent(PiAcpAgent, PiRpcProcess))(conn)',
+    'new (enhancePiAgent(PiAcpAgent, PiRpcProcess, RequestError3))(conn)',
   );
   source = replaceExactlyOnce(
     source,
@@ -36,7 +45,7 @@ export async function buildAdapter() {
   source = replaceExactlyOnce(
     source,
     'const timeoutMs = opts?.timeoutMs;',
-    'const timeoutMs = opts?.timeoutMs ?? 30000;',
+    'const timeoutMs = opts?.timeoutMs ?? (cmd.type === "compact" ? undefined : 30000);',
   );
   // Upstream treats exhausted model retries as a successful end_turn. Preserve the final failure.
   source = replaceExactlyOnce(
@@ -97,7 +106,13 @@ export async function buildAdapter() {
       `sessionUpdate: "${kind}",\n            messageId: typeof ame.partial?.timestamp === "number" ? String(ame.partial.timestamp) : undefined,\n            content: { type: "text", text: ame.delta }`,
     );
   }
+  source = replaceExactlyOnce(
+    source,
+    '  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;',
+    '  if (used === null && Number.isSafeInteger(size) && size > 0) return { sessionUpdate: "session_info_update", _meta: { "pi-workbench-context": { used: null, size } } };\n  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;',
+  );
   source = source.replace(/^#!.*\n/, '');
+
   source =
     `import {enhancePiAgent} from ${JSON.stringify(resolve('src/pi-enhancements.ts'))};\n` + source;
   source =

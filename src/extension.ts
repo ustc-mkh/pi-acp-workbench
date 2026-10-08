@@ -1,18 +1,24 @@
+import {
+  LocalAcpBackend,
+  PiServiceBackend,
+  type CachedConversation,
+  type ConversationBackend,
+} from './conversation-backend';
+import { ConversationLifecycle } from './conversation-lifecycle';
+import { dispatchUi, type UiHandlers } from './ui-dispatch';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
-import { codexFixedConfigs } from './session-settings';
-import { SessionPreferences, modelPreferences } from './session-preferences';
+import { sessionSelectors, codexFixedConfigs } from './session-settings';
+import { modelPreferences } from './session-preferences';
 import { applyPreferences } from './session-configuration';
-import { WorkspaceDiff } from './workspace-diff';
 import { DiffDocuments, openWorkspaceLink } from './workspace-documents';
-import { SessionCache } from './session-cache';
 import { StateEncoder } from './state-channel';
 import { validateImage, MAX_ATTACHMENT_IMAGE_BYTES } from './images';
 import { AgentProcess, type AgentOptions } from './agent';
-import { RemoteAgent, type Agent } from './remote-agent';
+import { type Agent } from './remote-agent';
 import { SessionClient } from './session-wire';
 import type { ServiceState } from './session-protocol';
 import { applyUpdate, initialState, nextId } from './state';
@@ -55,16 +61,19 @@ export function activate(
   return { getState: () => provider.snapshot() };
 }
 
-interface CachedConversation {
-  agent: Agent;
-  state: ReturnType<typeof initialState>;
-  cwd: string;
-  contextWindow?: number;
-  conversationId?: string;
-}
-
 class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
-  private sessions = new SessionCache<CachedConversation>();
+  private localBackend: LocalAcpBackend;
+  private piBackend = new PiServiceBackend();
+  private lifecycle = new ConversationLifecycle();
+  private get backend(): ConversationBackend {
+    return this.managedPi ? this.piBackend : this.localBackend;
+  }
+  private get sessions() {
+    return this.localBackend.sessions;
+  }
+  private get preferences() {
+    return this.localBackend.preferences;
+  }
   private activeCacheable = true;
   private view?: vscode.WebviewView;
   private stateEncoder = new StateEncoder();
@@ -74,13 +83,24 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private transientSnapshots = new Map<HarnessId, Snapshot>();
   private agent?: Agent;
   private cwd = '';
-  private replay = false;
+  private get replay() {
+    return this.lifecycle.replaying;
+  }
+  private set replay(value: boolean) {
+    this.lifecycle.replaying = value;
+  }
   private generation = 0;
   private timer?: NodeJS.Timeout;
   private cancelTimer?: NodeJS.Timeout;
-  private stopping = false;
-  private prompting = false;
-  private transitioning = false;
+  private get stopping() {
+    return this.lifecycle.cancelled;
+  }
+  private get prompting() {
+    return this.lifecycle.prompting;
+  }
+  private get transitioning() {
+    return this.lifecycle.transitioning;
+  }
   private autoConnectHandled = false;
   private historyStore: ConversationHistory;
   private get history() {
@@ -110,7 +130,9 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private get forgottenSessions() {
     return this.historyStore.forgotten;
   }
-  private disposed = false;
+  private get disposed() {
+    return this.lifecycle.disposed;
+  }
   private contextWindow?: number;
   private conversationId?: string;
   private contextAbort?: AbortController;
@@ -121,18 +143,28 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private get inspecting() {
     return this.telemetry.pending;
   }
-  private permissionResolvers = new Map<
-    string,
-    (response: acp.RequestPermissionResponse) => void
-  >();
-  private preferences = new SessionPreferences();
   private documents = new DiffDocuments();
   private resources: vscode.Disposable[] = [];
+  private get modelStorage() {
+    return this.context.globalState || this.context.workspaceState;
+  }
+  private visibleModels() {
+    return this.modelStorage.get<Partial<Record<HarnessId, string[]>>>('visibleModels', {})[
+      this.harness
+    ];
+  }
   private serviceClient = new SessionClient();
   private applyServiceState(value: ServiceState) {
     if (this.harness !== 'pi' || this.state.sessionId !== value.snapshot.id) return;
     const s = value.snapshot;
-    this.state.entries = s.entries;
+    const previous = new Map(this.state.entries.map((entry) => [entry.id, entry]));
+    this.state.entries = s.entries.map((entry) => {
+      const old = previous.get(entry.id);
+      return old && JSON.stringify(old) === JSON.stringify(entry) ? old : entry;
+    });
+    this.state.usage = s.usage;
+    this.contextWindow = s.contextWindow ?? s.usage?.size;
+    this.state.plan = value.plan || [];
     this.state.sessionNumber = s.sessionNumber;
     this.state.configs = s.configs;
     this.state.modes = s.modes;
@@ -154,6 +186,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     private context: vscode.ExtensionContext,
     private agentFactory?: (options: AgentOptions) => Agent,
   ) {
+    this.localBackend = new LocalAcpBackend(agentFactory);
     const selected = context.workspaceState.get('selectedHarness', 'pi');
     if (isHarnessId(selected)) this.harness = selected;
     this.state.harness = this.harness;
@@ -247,6 +280,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         agent: this.agent,
         state: this.state,
         harness: this.harness,
+        authoritative: this.backend.authoritative,
         conversationId: this.conversationId,
         retained:
           this.config.get('persistHistory', true) &&
@@ -355,6 +389,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.telemetry.models(this.state);
       this.state.statistics = this.statistics;
       this.state.showThoughts = this.config.get('showThoughts', true);
+      this.state.visibleModels = this.visibleModels();
       if (this.view) {
         void this.view.webview.postMessage(this.stateEncoder.encode(this.state)).then(
           (delivered) => {
@@ -389,6 +424,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       configs: structuredClone(this.state.configs),
       modes: structuredClone(this.state.modes),
       contextWindow: this.contextWindow,
+      usage: this.state.usage,
       conversationId: this.conversationId,
     };
     await this.historyStore.save(snapshot);
@@ -427,6 +463,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       configs: this.state.configs,
       modes: this.state.modes,
       contextWindow: this.contextWindow,
+      usage: this.state.usage,
       conversationId: this.conversationId,
     };
   }
@@ -475,7 +512,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     return folder.uri.fsPath;
   }
   snapshot() {
-    return structuredClone({ ...this.state, harness: this.harness });
+    return structuredClone({
+      ...this.state,
+      harness: this.harness,
+      visibleModels: this.visibleModels(),
+    });
   }
   private async selectHarness(harness: HarnessId) {
     if (harness === this.harness) return;
@@ -517,6 +558,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         configs: snapshot.configs,
         modes: snapshot.modes,
         contextComplete: snapshot.contextComplete,
+        usage: snapshot.usage,
         readOnly: true,
         connectionAttempted: true,
       };
@@ -527,11 +569,11 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     if (this.transitioning) return;
     this.autoConnectHandled = true;
     this.state.connectionAttempted = true;
-    this.transitioning = true;
+    this.lifecycle.transition(true);
     try {
       await this.startSession(target);
     } finally {
-      this.transitioning = false;
+      this.lifecycle.transition(false);
     }
   }
   private async startSession(target: Snapshot | 'new') {
@@ -554,16 +596,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.parkActive();
       snapshot = await this.snapshots.read(snapshot);
       this.cwd = cwd;
-      this.state = {
-        ...initialState(),
-        sessionId: snapshot.id,
-        sessionNumber: snapshot.sessionNumber,
-        entries: structuredClone(snapshot.entries),
-        contextComplete: snapshot.contextComplete,
-        readOnly: true,
-        connectionAttempted: true,
-        error: '只读查看：请打开此会话对应的工作区后再继续对话。',
-      };
+      this.showReadOnlySnapshot(snapshot, '只读查看：请打开此会话对应的工作区后再继续对话。');
       this.emit();
       return;
     }
@@ -588,16 +621,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       !snapshot && !this.managedPi ? await this.preferences.read(this.harness) : [];
     this.parkActive();
     if (cached) {
-      this.agent = cached.agent;
-      this.activeCacheable = true;
-      this.state = cached.state;
-      this.cwd = cached.cwd;
-      this.contextWindow = cached.contextWindow;
-      this.conversationId = cached.conversationId;
-      this.replay = false;
-      this.state.status = 'ready';
-      await this.rememberActive();
-      this.emit();
+      await this.activateCached(cached);
       return;
     }
     if (!this.managedPi && this.sharedHistory && snapshot) {
@@ -610,18 +634,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.releaseLease();
         if (!(error instanceof SessionInUseError)) throw error;
         this.cwd = cwd;
-        this.state = {
-          ...initialState(),
-          sessionId: snapshot.id,
-          sessionNumber: snapshot.sessionNumber,
-          entries: structuredClone(snapshot.entries),
-          configs: snapshot.configs,
-          modes: snapshot.modes,
-          contextComplete: snapshot.contextComplete,
-          readOnly: true,
-          connectionAttempted: true,
-          error: error.message,
-        };
+        this.showReadOnlySnapshot(snapshot, error.message);
         this.emit();
         return;
       }
@@ -634,6 +647,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       status: 'connecting',
       connectionAttempted: true,
       attachments,
+      usage: snapshot?.usage,
     };
     this.replay = !!snapshot;
     this.emit();
@@ -646,20 +660,10 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (snapshot && this.harness !== 'pi' && !info.agentCapabilities?.loadSession) {
         this.disconnect();
         this.releaseLease();
-        this.state = {
-          ...initialState(),
-          harness: this.harness,
-          sessionId: snapshot.id,
-          sessionNumber: snapshot.sessionNumber,
-          entries: structuredClone(snapshot.entries),
-          configs: snapshot.configs,
-          modes: snapshot.modes,
-          contextComplete: snapshot.contextComplete,
-          readOnly: true,
-          connectionAttempted: true,
-          error:
-            '当前 ACP 适配器未声明 session/load 能力，仅查看本地记录。需要继续时请显式新建会话；不会自动重放历史。',
-        };
+        this.showReadOnlySnapshot(
+          snapshot,
+          '当前 ACP 适配器未声明 session/load 能力，仅查看本地记录。需要继续时请显式新建会话；不会自动重放历史。',
+        );
         this.emit();
         return;
       }
@@ -694,7 +698,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.state.modes = session.modes || snapshot?.modes;
       this.state.configs = session.configOptions || snapshot?.configs;
       this.state.nativeForks = snapshot?.nativeForks;
-      for (const notification of pending)
+      for (const notification of this.managedPi ? [] : pending)
         if (notification.sessionId === session.sessionId)
           applyUpdate(this.state, notification.update, this.replay);
       if (snapshot) this.state.entries = structuredClone(snapshot.entries);
@@ -702,7 +706,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       if (!snapshot && !this.state.error) await this.rememberSettings();
       this.state.status = 'ready';
       this.replay = false;
-      if (agent instanceof RemoteAgent) await agent.sync();
+      await this.backend.sync(agent);
       await this.rememberActive();
       await this.refreshTelemetry();
       await this.save();
@@ -721,9 +725,42 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.state.sessionId = snapshot.id;
         this.state.sessionNumber = snapshot.sessionNumber;
         this.state.contextComplete = snapshot.contextComplete;
+        this.state.usage = snapshot.usage;
       }
       throw error;
     }
+  }
+  private showReadOnlySnapshot(snapshot: Snapshot, error: string) {
+    this.cwd = snapshot.cwd;
+    this.contextWindow = snapshot.contextWindow;
+    this.conversationId = snapshot.conversationId;
+    this.state = {
+      ...initialState(),
+      harness: this.harness,
+      sessionId: snapshot.id,
+      sessionNumber: snapshot.sessionNumber,
+      entries: structuredClone(snapshot.entries),
+      configs: snapshot.configs,
+      modes: snapshot.modes,
+      nativeForks: snapshot.nativeForks,
+      contextComplete: snapshot.contextComplete,
+      usage: snapshot.usage,
+      readOnly: true,
+      connectionAttempted: true,
+      error,
+    };
+  }
+  private async activateCached(cached: CachedConversation) {
+    this.agent = cached.agent;
+    this.activeCacheable = true;
+    this.state = cached.state;
+    this.cwd = cached.cwd;
+    this.contextWindow = cached.contextWindow;
+    this.conversationId = cached.conversationId;
+    this.replay = false;
+    this.state.status = 'ready';
+    await this.rememberActive();
+    this.emit();
   }
   private createAgent(cwd: string, pending: acp.SessionNotification[]) {
     const { command, args, env, setting } =
@@ -739,6 +776,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       env,
       log: (text) => this.log.append(text),
       update: (notification) => {
+        if (this.managedPi) return;
         const cachedId = this.sessions.find(agent);
         if (cachedId) {
           const cached = this.sessions.get(cachedId)!;
@@ -759,11 +797,10 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         if (this.agent !== agent || this.stopping || request.sessionId !== this.state.sessionId)
           return Promise.resolve({ outcome: { outcome: 'cancelled' } });
         const id = nextId();
-        return new Promise((resolve) => {
-          this.permissionResolvers.set(id, resolve);
-          this.state.permissions.push({ id, request });
-          this.emit();
-        });
+        const response = this.localBackend.requestPermission(id);
+        this.state.permissions.push({ id, request });
+        this.emit();
+        return response;
       },
       closed: (error) => {
         const cachedId = this.sessions.find(agent);
@@ -783,17 +820,13 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         this.emit();
       },
     };
-    const agent: Agent = this.agentFactory
-      ? this.agentFactory(options)
-      : this.harness === 'pi'
-        ? new RemoteAgent(
-            options,
-            (value) => {
-              if (this.agent === agent) this.applyServiceState(value);
-            },
-            this.config.get<string>('serviceSocket') || undefined,
-          )
-        : new AgentProcess(options);
+    const agent = this.backend.create(
+      options,
+      (value) => {
+        if (this.agent === agent) this.applyServiceState(value);
+      },
+      this.config.get<string>('serviceSocket') || undefined,
+    );
     return agent;
   }
   private recordUsage(records: UsageRecord[]) {
@@ -824,7 +857,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     const previous = this.state,
       oldId = previous.sessionId!,
       generation = this.generation;
-    this.transitioning = true;
+    this.lifecycle.transition(true);
     this.state = { ...previous, status: 'connecting', contextOperation: { kind: 'fork' } };
     this.emit();
     this.contextAbort = new AbortController();
@@ -882,7 +915,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
           readOnly: previous.readOnly || this.state.readOnly,
           permissions: [],
         };
-        this.transitioning = false;
+        this.lifecycle.transition(false);
         this.emit();
       }
       throw error;
@@ -920,20 +953,18 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         )
       )
         applyUpdate(this.state, n.update);
-    if (candidate instanceof RemoteAgent) await candidate.sync();
+    await this.backend.sync(candidate);
     try {
       await this.rememberActive();
       await this.refreshTelemetry();
       await this.save();
     } finally {
-      this.transitioning = false;
+      this.lifecycle.transition(false);
       this.emit();
     }
   }
   private cancelPermissions() {
-    for (const resolve of this.permissionResolvers.values())
-      resolve({ outcome: { outcome: 'cancelled' } });
-    this.permissionResolvers.clear();
+    this.localBackend.cancelPermissions();
     this.state.permissions = [];
   }
   private cacheBytes(value: CachedConversation) {
@@ -974,8 +1005,8 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.contextAbort?.abort();
     this.cancelPermissions();
     if (this.cancelTimer) clearTimeout(this.cancelTimer);
-    this.stopping = false;
-    this.prompting = false;
+    this.lifecycle.finishTurn();
+    this.lifecycle.prompt(false);
     this.agent?.dispose();
     this.agent = undefined;
   }
@@ -1004,477 +1035,563 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.emit();
     }
   }
+  private handlers = {
+    switchHarness: (message) => this.onSwitchHarness(message),
+    setVisibleModels: (message) => this.onSetVisibleModels(message),
+    refreshHistory: (message) => this.onRefreshHistory(message),
+    releaseSession: (message) => this.onReleaseSession(message),
+    ready: (message) => this.onReady(message),
+    dismissError: (message) => this.onDismissError(message),
+    deleteHistory: (message) => this.onDeleteHistory(message),
+    clearHistory: (message) => this.onDeleteHistory(message),
+    copyConversation: (message) => this.onCopyConversation(message),
+    cancelContext: (message) => this.onCancelContext(message),
+    refreshStatistics: (message) => this.onRefreshStatistics(message),
+    setPrice: (message) => this.onSetPrice(message),
+    logs: (message) => this.onLogs(message),
+    login: (message) => this.onLogin(message),
+    cancel: (message) => this.onCancel(message),
+    permission: (message) => this.onPermission(message),
+    attachmentError: (message) => this.onAttachmentError(message),
+    attachImages: (message) => this.onAttachImages(message),
+    attach: (message) => this.onAttach(message),
+    removeAttachment: (message) => this.onRemoveAttachment(message),
+    open: (message) => this.onOpen(message),
+    diff: (message) => this.onDiff(message),
+    export: (message) => this.onExport(message),
+    new: (message) => this.onNew(message),
+    connect: (message) => this.onConnect(message),
+    branchMessage: (message) => this.onBranchMessage(message),
+    resume: (message) => this.onResume(message),
+    preview: (message) => this.onPreview(message),
+    send: (message) => this.onSend(message),
+    mode: (message) => this.onMode(message),
+    config: (message) => this.onConfig(message),
+  } satisfies UiHandlers;
+  private async onSwitchHarness(message: UiMessage & { type: 'switchHarness' }): Promise<void> {
+    if (!isHarnessId(message.harness)) throw new Error('未知 harness。');
+    if (this.transitioning || this.state.status === 'busy' || this.state.status === 'connecting') {
+      this.emit();
+      return;
+    }
+    if (message.harness === this.harness) {
+      this.emit();
+      return;
+    }
+    this.lifecycle.transition(true);
+    this.state.status = 'connecting';
+    this.emit();
+    try {
+      await this.selectHarness(message.harness);
+    } finally {
+      if (this.state.status === 'connecting')
+        this.state.status = this.agent ? 'ready' : 'disconnected';
+      this.lifecycle.transition(false);
+      this.emit();
+    }
+    return;
+  }
+  private async onSetVisibleModels(
+    message: UiMessage & { type: 'setVisibleModels' },
+  ): Promise<void> {
+    if (message.harness !== this.harness || !isHarnessId(message.harness)) return;
+    if (
+      message.models !== null &&
+      (!Array.isArray(message.models) ||
+        message.models.length > 10000 ||
+        !message.models.every((id) => typeof id === 'string' && id.length <= 10000))
+    )
+      throw new Error('模型列表格式无效。');
+    const catalog = new Set(
+      sessionSelectors(this.state)
+        .filter((c) => c.kind === 'model')
+        .flatMap((c) => c.options.map((o) => o.id)),
+    );
+    const saved = {
+      ...this.modelStorage.get<Partial<Record<HarnessId, string[]>>>('visibleModels', {}),
+    };
+    if (message.models === null) delete saved[this.harness];
+    else saved[this.harness] = [...new Set(message.models)].filter((id) => catalog.has(id));
+    await this.modelStorage.update('visibleModels', saved);
+    this.emit();
+    return;
+  }
+  private async onRefreshHistory(message: UiMessage & { type: 'refreshHistory' }): Promise<void> {
+    await this.refreshSharedHistory();
+    this.emit();
+    return;
+  }
+  private async onReleaseSession(message: UiMessage & { type: 'releaseSession' }): Promise<void> {
+    if (this.transitioning || this.state.status === 'busy' || this.state.status === 'connecting')
+      return;
+    this.lifecycle.transition(true);
+    try {
+      await this.save();
+      this.disconnect();
+      this.releaseLease();
+      await this.persistence.pending;
+      this.state.status = 'disconnected';
+      this.state.readOnly = true;
+    } finally {
+      this.lifecycle.transition(false);
+      this.emit();
+    }
+    return;
+  }
+  private async onReady(message: UiMessage & { type: 'ready' }): Promise<void> {
+    this.stateEncoder.reset();
+    // Webview reloads must not reset a session or repeatedly retry a failed start.
+    if (!this.autoConnectHandled) {
+      this.autoConnectHandled = true;
+      if (this.state.status === 'disconnected' && !this.state.preview)
+        await this.perform({ type: 'connect' });
+    }
+    this.emit();
+    return;
+  }
+  private async onDismissError(message: UiMessage & { type: 'dismissError' }): Promise<void> {
+    // A click on an older banner must not dismiss a newer error in flight.
+    if (this.state.error === message.error) this.state.error = undefined;
+    this.emit();
+    return;
+  }
+  private async onDeleteHistory(
+    message: UiMessage & { type: 'deleteHistory' | 'clearHistory' },
+  ): Promise<void> {
+    if (
+      this.sharedHistory &&
+      (await vscode.window.showWarningMessage(
+        message.type === 'clearHistory'
+          ? '清空此服务器账户的全部共享会话？所有客户端都会失去这些历史记录，所有正在运行的任务（包括 Telegram）都会停止。'
+          : '删除此共享会话？所有客户端都会失去这条历史记录。',
+        { modal: true },
+        '删除',
+      )) !== '删除'
+    )
+      return;
+    if (message.type === 'deleteHistory') {
+      const forgotten = this.history.find((item) => item.id === message.id);
+      if (!forgotten) return;
+      this.telemetry.forget(forgotten.conversationId || forgotten.id);
+      this.sessions.remove(message.id);
+    } else {
+      this.sessions.clear();
+      this.telemetry.forget();
+    }
+    const deletedState = this.state;
+    const deletesCurrent =
+      message.type === 'clearHistory' ||
+      (message.type === 'deleteHistory' && message.id === deletedState.sessionId);
+    await this.historyStore.remove(
+      message.type === 'deleteHistory' ? message.id : undefined,
+      async () => {
+        await this.telemetry.persistTitles();
+        for (const harness of HARNESS_IDS)
+          if (
+            message.type === 'clearHistory' ||
+            (message.type === 'deleteHistory' &&
+              this.transientSnapshots.get(harness)?.id === message.id)
+          )
+            this.transientSnapshots.delete(harness);
+      },
+    );
+    if (deletesCurrent && this.state === deletedState) {
+      this.disconnect();
+      this.releaseLease();
+      this.cwd = '';
+      this.contextWindow = undefined;
+      this.conversationId = undefined;
+      this.state = { ...initialState(), harness: this.harness };
+      this.telemetry.reset(this.harness);
+      this.autoConnectHandled = true;
+    }
+    this.emit();
+    return;
+  }
+  private async onCopyConversation(
+    message: UiMessage & { type: 'copyConversation' },
+  ): Promise<void> {
+    await vscode.env.clipboard.writeText(this.conversationText());
+    return;
+  }
+  private async onCancelContext(message: UiMessage & { type: 'cancelContext' }): Promise<void> {
+    this.contextAbort?.abort(new Error('已取消操作，原会话保留。'));
+    return;
+  }
+  private async onRefreshStatistics(
+    message: UiMessage & { type: 'refreshStatistics' },
+  ): Promise<void> {
+    await this.refreshTelemetry();
+    this.emit();
+    return;
+  }
+  private async onSetPrice(message: UiMessage & { type: 'setPrice' }): Promise<void> {
+    await this.telemetry.setPrice(message.model, message.price);
+    this.emit();
+    return;
+  }
+  private async onLogs(message: UiMessage & { type: 'logs' }): Promise<void> {
+    this.log.show();
+    return;
+  }
+  private async onLogin(message: UiMessage & { type: 'login' }): Promise<void> {
+    const cwd = await this.workspaceCwd();
+    const { command, args, env } =
+      this.harness === 'pi'
+        ? { command: process.env.PI_ACP_PI_COMMAND || 'pi', args: [], env: {} }
+        : launchSettings(this.config, this.harness);
+    const shellPath =
+      this.harness === 'codex' ? this.config.get('codex.loginCommand', 'codex') : command;
+    const shellArgs =
+      this.harness === 'codex'
+        ? ['login']
+        : this.harness === 'claude'
+          ? [...args, '--cli', '/login']
+          : [];
+    vscode.window
+      .createTerminal({
+        name: `${HARNESSES[this.harness].name} Login`,
+        cwd,
+        shellPath,
+        shellArgs,
+        env,
+      })
+      .show();
+    return;
+  }
+  private async onCancel(message: UiMessage & { type: 'cancel' }): Promise<void> {
+    if (!this.agent || this.state.status !== 'busy' || !this.state.sessionId) return;
+    this.lifecycle.cancel();
+    if (this.backend.authoritative) {
+      await this.agent.cancel(this.state.sessionId);
+      return;
+    }
+    this.cancelPermissions();
+    this.emit();
+    if (!this.prompting) return;
+    await this.agent.cancel(this.state.sessionId);
+    if (this.cancelTimer) clearTimeout(this.cancelTimer);
+    if (this.state.status !== 'busy') return;
+    this.cancelTimer = setTimeout(() => {
+      this.disconnect();
+      this.state.status = 'disconnected';
+      this.state.error = 'Agent 未在 5 秒内响应取消，连接已关闭。可从历史记录恢复。';
+      void this.save().catch((error) => {
+        this.state.error = String(error);
+        this.emit();
+      });
+      this.emit();
+    }, 5000);
+    return;
+  }
+  private async onPermission(message: UiMessage & { type: 'permission' }): Promise<void> {
+    if (!this.agent) return;
+    if (this.backend.authoritative) {
+      await this.backend.answerPermission(this.agent, message.id, message.optionId);
+      return;
+    }
+    const item = this.state.permissions.find((p) => p.id === message.id);
+    if (!item) return;
+    if (message.optionId && !item.request.options.some((o) => o.optionId === message.optionId))
+      return;
+    await this.backend.answerPermission(this.agent, message.id, message.optionId);
+    this.state.permissions = this.state.permissions.filter((p) => p.id !== message.id);
+    this.emit();
+    return;
+  }
+  private async onAttachmentError(message: UiMessage & { type: 'attachmentError' }): Promise<void> {
+    if (
+      (message.harness === undefined || message.harness === this.harness) &&
+      message.sessionId === this.state.sessionId
+    ) {
+      this.state.error = String(message.error).slice(0, 300);
+      this.emit();
+    }
+    return;
+  }
+  private async onAttachImages(message: UiMessage & { type: 'attachImages' }): Promise<void> {
+    if (message.harness !== undefined && message.harness !== this.harness)
+      throw new Error('Harness 已切换，请重新粘贴图片。');
+    if (message.sessionId !== this.state.sessionId) throw new Error('会话已切换，请重新粘贴图片。');
+    if (
+      !Array.isArray(message.images) ||
+      !message.images.length ||
+      message.images.length + this.state.attachments.length > 8
+    )
+      throw new Error('每条消息最多附加 8 个附件。');
+    const total =
+      message.images.reduce((n, image) => n + validateImage(image), 0) +
+      this.state.attachments.reduce(
+        (n, a) => n + (a.kind === 'image' ? Buffer.byteLength(a.data, 'base64') : 0),
+        0,
+      );
+    if (total > MAX_ATTACHMENT_IMAGE_BYTES) throw new Error('每条消息的图片总大小不能超过 6 MB。');
+    this.state.attachments = [
+      ...this.state.attachments,
+      ...message.images.map((image) => ({
+        kind: 'image' as const,
+        id: nextId(),
+        name: image.name.slice(0, 120) || '粘贴图片',
+        mimeType: image.mimeType,
+        data: image.data,
+      })),
+    ];
+    this.emit();
+    return;
+  }
+  private async onAttach(message: UiMessage & { type: 'attach' }): Promise<void> {
+    await this.attach();
+    return;
+  }
+  private async onRemoveAttachment(
+    message: UiMessage & { type: 'removeAttachment' },
+  ): Promise<void> {
+    this.state.attachments = this.state.attachments.filter((a) => a.id !== message.id);
+    this.emit();
+    return;
+  }
+  private async onOpen(message: UiMessage & { type: 'open' }): Promise<void> {
+    await openWorkspaceLink(this.cwd, message.url, message.line);
+    return;
+  }
+  private async onDiff(message: UiMessage & { type: 'diff' }): Promise<void> {
+    await this.documents.open(
+      this.state.sessionId,
+      this.state.entries.find((e) => e.id === message.id),
+      message.index,
+    );
+    return;
+  }
+  private async onExport(message: UiMessage & { type: 'export' }): Promise<void> {
+    await this.exportChat();
+    return;
+  }
+  private async onNew(message: UiMessage & { type: 'new' }): Promise<void> {
+    await this.start('new');
+  }
+  private async onConnect(message: UiMessage & { type: 'connect' }): Promise<void> {
+    const snapshot = this.currentSnapshot();
+    if (snapshot) await this.start(snapshot);
+  }
+  private async onBranchMessage(message: UiMessage & { type: 'branchMessage' }): Promise<void> {
+    await this.branchNative(message);
+  }
+  private async onResume(message: UiMessage & { type: 'resume' }): Promise<void> {
+    const snapshot = this.history.find((s) => s.id === message.id);
+    if (snapshot) await this.start(snapshot);
+  }
+  private async onPreview(message: UiMessage & { type: 'preview' }): Promise<void> {
+    this.lifecycle.transition(true);
+    try {
+      await this.save();
+      this.disconnect();
+      this.releaseLease();
+      this.state = {
+        ...initialState(),
+        preview: true,
+        entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }],
+      };
+      await vscode.commands.executeCommand('piAcp.chat.focus');
+    } finally {
+      this.lifecycle.transition(false);
+    }
+  }
+  private async onSend(message: UiMessage & { type: 'send' }): Promise<void> {
+    if (
+      typeof message.text !== 'string' ||
+      (!message.text.trim() && !this.state.attachments.some((a) => a.kind === 'image'))
+    )
+      return;
+    if (message.text.length > 500000) throw new Error('消息过长。');
+    if (!this.agent || !this.state.sessionId || this.state.status !== 'ready')
+      throw new Error('请先连接 Agent 或从历史记录恢复会话。');
+    if (
+      this.state.attachments.some((a) => a.kind === 'image') &&
+      !this.agent.info?.agentCapabilities?.promptCapabilities?.image
+    )
+      throw new Error('当前 Agent 未声明图片支持，请切换支持图片的 Agent。');
+    const agent = this.agent,
+      generation = this.generation;
+    const settingsBefore = JSON.stringify(modelPreferences(this.state));
+    if (generation !== this.generation || agent !== this.agent)
+      throw new Error('连接状态已改变，请重试。');
+    const prompt: acp.ContentBlock[] = message.text.trim()
+      ? [{ type: 'text', text: message.text }]
+      : [];
+    const attached = this.state.attachments;
+    for (const a of attached) {
+      if (a.kind === 'image') {
+        prompt.push({ type: 'image', data: a.data, mimeType: a.mimeType });
+        continue;
+      }
+      if (agent.info?.agentCapabilities?.promptCapabilities?.embeddedContext)
+        prompt.push({
+          type: 'resource',
+          resource: { uri: a.uri, mimeType: 'text/plain', text: a.text },
+        });
+      else
+        prompt.push({
+          type: 'text',
+          text: `\n附加代码上下文：${a.name} (${a.uri})\n${a.text}`,
+        });
+    }
+    const contextBlocks = structuredClone(prompt);
+    checkPromptSize(prompt);
+    if (!this.backend.authoritative)
+      this.state.entries.push({
+        id: nextId(),
+        role: 'user',
+        contextBlocks,
+        text:
+          message.text +
+          (attached.length ? '\n\n' + attached.map((a) => `📎 ${a.name}`).join(' · ') : ''),
+      });
+    this.state.attachments = [];
+    this.state.status = 'busy';
+    this.lifecycle.beginTurn();
+    this.emit();
+    try {
+      await this.save();
+      await this.view?.webview.postMessage({ type: 'sent' });
+      if (this.stopping || generation !== this.generation) {
+        if (generation === this.generation) {
+          if (this.backend.authoritative) {
+            await this.backend.sync(agent);
+            this.state.error = '本轮已停止，消息尚未发送给 Agent。';
+          } else
+            this.state.entries.push({
+              id: nextId(),
+              role: 'notice',
+              text: '本轮已停止，消息尚未发送给 Agent。',
+            });
+        }
+        return;
+      }
+      await this.rememberSettings();
+      const turnState = this.state;
+      const changes = await this.backend.beginTurn(this.cwd);
+      let response: acp.PromptResponse;
+      try {
+        this.lifecycle.prompt(true);
+        response =
+          this.stopping || generation !== this.generation
+            ? { stopReason: 'cancelled' }
+            : await agent.prompt(this.state.sessionId!, prompt);
+        if (changes && this.state === turnState && response.stopReason !== 'end_turn')
+          this.state.entries.push({
+            id: nextId(),
+            role: 'notice',
+            text: `本轮结束：${response.stopReason}`,
+          });
+      } finally {
+        this.lifecycle.prompt(false);
+        clearTimeout(this.cancelTimer);
+        if (changes) {
+          if (agent instanceof AgentProcess && agent.isClosed) await agent.stop();
+          const summary = await changes.finish();
+          if (!this.disposed && this.state === turnState) {
+            this.state.entries.push(summary);
+            await this.save();
+          }
+        }
+      }
+      await this.backend.sync(agent);
+    } catch (error) {
+      if (generation === this.generation) throw error;
+    } finally {
+      if (generation === this.generation) {
+        if (this.cancelTimer) clearTimeout(this.cancelTimer);
+        this.lifecycle.finishTurn();
+        this.lifecycle.prompt(false);
+        if (!this.backend.authoritative) this.cancelPermissions();
+        try {
+          await this.refreshTelemetry(true);
+          if (this.agent && settingsBefore !== JSON.stringify(modelPreferences(this.state)))
+            await this.rememberSettings();
+        } finally {
+          if (!this.backend.authoritative)
+            this.state.status = this.agent ? 'ready' : 'disconnected';
+          try {
+            await this.save();
+          } finally {
+            this.emit();
+          }
+        }
+      }
+    }
+  }
+  private async onMode(message: UiMessage & { type: 'mode' }): Promise<void> {
+    if (!this.agent || !this.state.sessionId) return;
+    if (!this.state.modes?.availableModes.some((m) => m.id === message.value)) return;
+    this.state.status = 'connecting';
+    this.emit();
+    try {
+      await this.agent.withTimeout(
+        this.agent.request('session/set_mode', {
+          sessionId: this.state.sessionId,
+          modeId: message.value,
+        }),
+        15000,
+      );
+      this.state.modes.currentModeId = message.value;
+      await this.rememberSettings();
+      await this.save();
+    } finally {
+      this.state.status = this.agent ? 'ready' : 'disconnected';
+    }
+  }
+  private async onConfig(message: UiMessage & { type: 'config' }): Promise<void> {
+    if (!this.agent || !this.state.sessionId) return;
+    if (this.harness === 'codex' && Object.hasOwn(codexFixedConfigs, message.id))
+      throw new Error('此选项已隐藏并使用默认协作模式 Default。');
+    const config = this.state.configs?.find((c) => c.id === message.id);
+    if (!config || config.type !== 'select') return;
+    const options = config.options.flatMap((o) => ('options' in o ? o.options : [o]));
+    if (!options.some((o) => o.value === message.value)) return;
+    this.state.status = 'connecting';
+    this.emit();
+    try {
+      const response = await this.agent.withTimeout(
+        this.agent.request('session/set_config_option', {
+          sessionId: this.state.sessionId,
+          configId: message.id,
+          value: message.value,
+        }),
+        15000,
+      );
+      this.state.configs = response.configOptions;
+      await this.rememberSettings();
+      await this.save();
+      await this.refreshTelemetry();
+    } finally {
+      this.state.status = this.agent ? 'ready' : 'disconnected';
+    }
+  }
   async perform(message: UiMessage): Promise<void> {
     try {
-      if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
+      if (
+        !message ||
+        typeof message !== 'object' ||
+        typeof message.type !== 'string' ||
+        !Object.hasOwn(this.handlers, message.type)
+      )
+        return;
       await this.historyReady;
       if (this.disposed) return;
-      if (message.type === 'switchHarness') {
-        if (!isHarnessId(message.harness)) throw new Error('未知 harness。');
-        if (
-          this.transitioning ||
-          this.state.status === 'busy' ||
-          this.state.status === 'connecting'
-        ) {
-          this.emit();
-          return;
-        }
-        if (message.harness === this.harness) {
-          this.emit();
-          return;
-        }
-        this.transitioning = true;
-        this.state.status = 'connecting';
-        this.emit();
-        try {
-          await this.selectHarness(message.harness);
-        } finally {
-          if (this.state.status === 'connecting')
-            this.state.status = this.agent ? 'ready' : 'disconnected';
-          this.transitioning = false;
-          this.emit();
-        }
-        return;
-      }
-      if (message.type === 'refreshHistory') {
-        await this.refreshSharedHistory();
-        this.emit();
-        return;
-      }
-      if (message.type === 'releaseSession') {
+      if (
+        ['new', 'connect', 'branchMessage', 'resume', 'preview', 'send', 'mode', 'config'].includes(
+          message.type,
+        )
+      ) {
         if (
           this.transitioning ||
           this.state.status === 'busy' ||
           this.state.status === 'connecting'
         )
           return;
-        this.transitioning = true;
-        try {
-          await this.save();
-          this.disconnect();
-          this.releaseLease();
-          await this.persistence.pending;
-          this.state.status = 'disconnected';
-          this.state.readOnly = true;
-        } finally {
-          this.transitioning = false;
-          this.emit();
-        }
-        return;
+        this.state.error = undefined;
       }
-      if (message.type === 'ready') {
-        this.stateEncoder.reset();
-        // Webview reloads must not reset a session or repeatedly retry a failed start.
-        if (!this.autoConnectHandled) {
-          this.autoConnectHandled = true;
-          if (this.state.status === 'disconnected' && !this.state.preview)
-            await this.perform({ type: 'connect' });
-        }
-        this.emit();
-        return;
-      }
-      if (message.type === 'dismissError') {
-        // A click on an older banner must not dismiss a newer error in flight.
-        if (this.state.error === message.error) this.state.error = undefined;
-        this.emit();
-        return;
-      }
-      if (message.type === 'deleteHistory' || message.type === 'clearHistory') {
-        if (
-          this.sharedHistory &&
-          (await vscode.window.showWarningMessage(
-            message.type === 'clearHistory'
-              ? '清空此服务器账户的全部共享会话？所有客户端都会失去这些历史记录，所有正在运行的任务（包括 Telegram）都会停止。'
-              : '删除此共享会话？所有客户端都会失去这条历史记录。',
-            { modal: true },
-            '删除',
-          )) !== '删除'
-        )
-          return;
-        if (message.type === 'deleteHistory') {
-          const forgotten = this.history.find((item) => item.id === message.id);
-          if (!forgotten) return;
-          this.telemetry.forget(forgotten.conversationId || forgotten.id);
-          this.sessions.remove(message.id);
-        } else {
-          this.sessions.clear();
-          this.telemetry.forget();
-        }
-        const deletedState = this.state;
-        const deletesCurrent =
-          message.type === 'clearHistory' ||
-          (message.type === 'deleteHistory' && message.id === deletedState.sessionId);
-        await this.historyStore.remove(
-          message.type === 'deleteHistory' ? message.id : undefined,
-          async () => {
-            await this.telemetry.persistTitles();
-            for (const harness of HARNESS_IDS)
-              if (
-                message.type === 'clearHistory' ||
-                (message.type === 'deleteHistory' &&
-                  this.transientSnapshots.get(harness)?.id === message.id)
-              )
-                this.transientSnapshots.delete(harness);
-          },
-        );
-        if (deletesCurrent && this.state === deletedState) {
-          this.disconnect();
-          this.releaseLease();
-          this.cwd = '';
-          this.contextWindow = undefined;
-          this.conversationId = undefined;
-          this.state = { ...initialState(), harness: this.harness };
-          this.telemetry.reset(this.harness);
-          this.autoConnectHandled = true;
-        }
-        this.emit();
-        return;
-      }
-      if (message.type === 'copyConversation') {
-        await vscode.env.clipboard.writeText(this.conversationText());
-        return;
-      }
-      if (message.type === 'cancelContext') {
-        this.contextAbort?.abort(new Error('已取消操作，原会话保留。'));
-        return;
-      }
-      if (message.type === 'refreshStatistics') {
-        await this.refreshTelemetry();
-        this.emit();
-        return;
-      }
-      if (message.type === 'setPrice') {
-        await this.telemetry.setPrice(message.model, message.price);
-        this.emit();
-        return;
-      }
-      if (message.type === 'logs') {
-        this.log.show();
-        return;
-      }
-      if (message.type === 'login') {
-        const cwd = await this.workspaceCwd();
-        const { command, args, env } =
-          this.harness === 'pi'
-            ? { command: process.env.PI_ACP_PI_COMMAND || 'pi', args: [], env: {} }
-            : launchSettings(this.config, this.harness);
-        const shellPath =
-          this.harness === 'codex' ? this.config.get('codex.loginCommand', 'codex') : command;
-        const shellArgs =
-          this.harness === 'codex'
-            ? ['login']
-            : this.harness === 'claude'
-              ? [...args, '--cli', '/login']
-              : [];
-        vscode.window
-          .createTerminal({
-            name: `${HARNESSES[this.harness].name} Login`,
-            cwd,
-            shellPath,
-            shellArgs,
-            env,
-          })
-          .show();
-        return;
-      }
-      if (message.type === 'cancel') {
-        if (!this.agent || this.state.status !== 'busy' || !this.state.sessionId) return;
-        if (this.agent instanceof RemoteAgent) {
-          await this.agent.cancel(this.state.sessionId);
-          return;
-        }
-        this.stopping = true;
-        this.cancelPermissions();
-        this.emit();
-        if (!this.prompting) return;
-        await this.agent.cancel(this.state.sessionId);
-        if (this.cancelTimer) clearTimeout(this.cancelTimer);
-        if (this.state.status !== 'busy') return;
-        this.cancelTimer = setTimeout(() => {
-          this.disconnect();
-          this.state.status = 'disconnected';
-          this.state.error = 'Agent 未在 5 秒内响应取消，连接已关闭。可从历史记录恢复。';
-          void this.save().catch((error) => {
-            this.state.error = String(error);
-            this.emit();
-          });
-          this.emit();
-        }, 5000);
-        return;
-      }
-      if (message.type === 'permission' && this.agent instanceof RemoteAgent) {
-        await this.agent.permission(message.id, message.optionId);
-        return;
-      }
-      if (message.type === 'permission') {
-        const item = this.state.permissions.find((p) => p.id === message.id);
-        if (!item) return;
-        if (message.optionId && !item.request.options.some((o) => o.optionId === message.optionId))
-          return;
-        this.permissionResolvers.get(message.id)?.({
-          outcome: message.optionId
-            ? { outcome: 'selected', optionId: message.optionId }
-            : { outcome: 'cancelled' },
-        });
-        this.permissionResolvers.delete(message.id);
-        this.state.permissions = this.state.permissions.filter((p) => p.id !== message.id);
-        this.emit();
-        return;
-      }
-      if (message.type === 'attachmentError') {
-        if (
-          (message.harness === undefined || message.harness === this.harness) &&
-          message.sessionId === this.state.sessionId
-        ) {
-          this.state.error = String(message.error).slice(0, 300);
-          this.emit();
-        }
-        return;
-      }
-      if (message.type === 'attachImages') {
-        if (message.harness !== undefined && message.harness !== this.harness)
-          throw new Error('Harness 已切换，请重新粘贴图片。');
-        if (message.sessionId !== this.state.sessionId)
-          throw new Error('会话已切换，请重新粘贴图片。');
-        if (
-          !Array.isArray(message.images) ||
-          !message.images.length ||
-          message.images.length + this.state.attachments.length > 8
-        )
-          throw new Error('每条消息最多附加 8 个附件。');
-        const total =
-          message.images.reduce((n, image) => n + validateImage(image), 0) +
-          this.state.attachments.reduce(
-            (n, a) => n + (a.kind === 'image' ? Buffer.byteLength(a.data, 'base64') : 0),
-            0,
-          );
-        if (total > MAX_ATTACHMENT_IMAGE_BYTES)
-          throw new Error('每条消息的图片总大小不能超过 6 MB。');
-        this.state.attachments = [
-          ...this.state.attachments,
-          ...message.images.map((image) => ({
-            kind: 'image' as const,
-            id: nextId(),
-            name: image.name.slice(0, 120) || '粘贴图片',
-            mimeType: image.mimeType,
-            data: image.data,
-          })),
-        ];
-        this.emit();
-        return;
-      }
-      if (message.type === 'attach') {
-        await this.attach();
-        return;
-      }
-      if (message.type === 'removeAttachment') {
-        this.state.attachments = this.state.attachments.filter((a) => a.id !== message.id);
-        this.emit();
-        return;
-      }
-      if (message.type === 'open') {
-        await openWorkspaceLink(this.cwd, message.url, message.line);
-        return;
-      }
-      if (message.type === 'diff') {
-        await this.documents.open(
-          this.state.sessionId,
-          this.state.entries.find((e) => e.id === message.id),
-          message.index,
-        );
-        return;
-      }
-      if (message.type === 'export') {
-        await this.exportChat();
-        return;
-      }
-      if (this.transitioning || this.state.status === 'busy' || this.state.status === 'connecting')
-        return;
-      this.state.error = undefined;
-      if (message.type === 'new') await this.start('new');
-      else if (message.type === 'connect') {
-        const snapshot = this.currentSnapshot();
-        if (snapshot) await this.start(snapshot);
-      } else if (message.type === 'branchMessage') await this.branchNative(message);
-      else if (message.type === 'resume') {
-        const snapshot = this.history.find((s) => s.id === message.id);
-        if (snapshot) await this.start(snapshot);
-      } else if (message.type === 'preview') {
-        this.transitioning = true;
-        try {
-          await this.save();
-          this.disconnect();
-          this.releaseLease();
-          this.state = {
-            ...initialState(),
-            preview: true,
-            entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }],
-          };
-          await vscode.commands.executeCommand('piAcp.chat.focus');
-        } finally {
-          this.transitioning = false;
-        }
-      } else if (message.type === 'send') {
-        if (
-          typeof message.text !== 'string' ||
-          (!message.text.trim() && !this.state.attachments.some((a) => a.kind === 'image'))
-        )
-          return;
-        if (message.text.length > 500000) throw new Error('消息过长。');
-        if (!this.agent || !this.state.sessionId || this.state.status !== 'ready')
-          throw new Error('请先连接 Agent 或从历史记录恢复会话。');
-        if (
-          this.state.attachments.some((a) => a.kind === 'image') &&
-          !this.agent.info?.agentCapabilities?.promptCapabilities?.image
-        )
-          throw new Error('当前 Agent 未声明图片支持，请切换支持图片的 Agent。');
-        const agent = this.agent,
-          generation = this.generation;
-        const settingsBefore = JSON.stringify(modelPreferences(this.state));
-        if (generation !== this.generation || agent !== this.agent)
-          throw new Error('连接状态已改变，请重试。');
-        const prompt: acp.ContentBlock[] = message.text.trim()
-          ? [{ type: 'text', text: message.text }]
-          : [];
-        const attached = this.state.attachments;
-        for (const a of attached) {
-          if (a.kind === 'image') {
-            prompt.push({ type: 'image', data: a.data, mimeType: a.mimeType });
-            continue;
-          }
-          if (agent.info?.agentCapabilities?.promptCapabilities?.embeddedContext)
-            prompt.push({
-              type: 'resource',
-              resource: { uri: a.uri, mimeType: 'text/plain', text: a.text },
-            });
-          else
-            prompt.push({
-              type: 'text',
-              text: `\n附加代码上下文：${a.name} (${a.uri})\n${a.text}`,
-            });
-        }
-        const contextBlocks = structuredClone(prompt);
-        checkPromptSize(prompt);
-        this.state.entries.push({
-          id: nextId(),
-          role: 'user',
-          contextBlocks,
-          text:
-            message.text +
-            (attached.length ? '\n\n' + attached.map((a) => `📎 ${a.name}`).join(' · ') : ''),
-        });
-        this.state.attachments = [];
-        this.state.status = 'busy';
-        this.stopping = false;
-        this.emit();
-        try {
-          await this.save();
-          await this.view?.webview.postMessage({ type: 'sent' });
-          if (this.stopping || generation !== this.generation) {
-            if (generation === this.generation)
-              this.state.entries.push({
-                id: nextId(),
-                role: 'notice',
-                text: '本轮已停止，消息尚未发送给 Agent。',
-              });
-            return;
-          }
-          await this.rememberSettings();
-          const turnState = this.state;
-          const changes =
-            agent instanceof RemoteAgent ? undefined : await WorkspaceDiff.begin(this.cwd);
-          let response: acp.PromptResponse;
-          try {
-            this.prompting = true;
-            response =
-              this.stopping || generation !== this.generation
-                ? { stopReason: 'cancelled' }
-                : await agent.prompt(this.state.sessionId!, prompt);
-            if (changes && this.state === turnState && response.stopReason !== 'end_turn')
-              this.state.entries.push({
-                id: nextId(),
-                role: 'notice',
-                text: `本轮结束：${response.stopReason}`,
-              });
-          } finally {
-            this.prompting = false;
-            clearTimeout(this.cancelTimer);
-            if (changes) {
-              if (agent instanceof AgentProcess && agent.isClosed) await agent.stop();
-              const summary = await changes.finish();
-              if (!this.disposed && this.state === turnState) {
-                this.state.entries.push(summary);
-                await this.save();
-              }
-            }
-          }
-          if (agent instanceof RemoteAgent) await agent.sync();
-        } catch (error) {
-          if (generation === this.generation) throw error;
-        } finally {
-          if (generation === this.generation) {
-            if (this.cancelTimer) clearTimeout(this.cancelTimer);
-            this.stopping = false;
-            this.prompting = false;
-            this.cancelPermissions();
-            try {
-              await this.refreshTelemetry(true);
-              if (this.agent && settingsBefore !== JSON.stringify(modelPreferences(this.state)))
-                await this.rememberSettings();
-            } finally {
-              this.state.status = this.agent ? 'ready' : 'disconnected';
-              try {
-                await this.save();
-              } finally {
-                this.emit();
-              }
-            }
-          }
-        }
-      } else if (message.type === 'mode' && this.agent && this.state.sessionId) {
-        if (!this.state.modes?.availableModes.some((m) => m.id === message.value)) return;
-        this.state.status = 'connecting';
-        this.emit();
-        try {
-          await this.agent.withTimeout(
-            this.agent.request('session/set_mode', {
-              sessionId: this.state.sessionId,
-              modeId: message.value,
-            }),
-            15000,
-          );
-          this.state.modes.currentModeId = message.value;
-          await this.rememberSettings();
-          await this.save();
-        } finally {
-          this.state.status = this.agent ? 'ready' : 'disconnected';
-        }
-      } else if (message.type === 'config' && this.agent && this.state.sessionId) {
-        if (this.harness === 'codex' && Object.hasOwn(codexFixedConfigs, message.id))
-          throw new Error('此选项已隐藏并使用默认值：Fast mode Off、协作模式 Default。');
-        const config = this.state.configs?.find((c) => c.id === message.id);
-        if (!config || config.type !== 'select') return;
-        const options = config.options.flatMap((o) => ('options' in o ? o.options : [o]));
-        if (!options.some((o) => o.value === message.value)) return;
-        this.state.status = 'connecting';
-        this.emit();
-        try {
-          const response = await this.agent.withTimeout(
-            this.agent.request('session/set_config_option', {
-              sessionId: this.state.sessionId,
-              configId: message.id,
-              value: message.value,
-            }),
-            15000,
-          );
-          this.state.configs = response.configOptions;
-          await this.rememberSettings();
-          await this.save();
-          await this.refreshTelemetry();
-        } finally {
-          this.state.status = this.agent ? 'ready' : 'disconnected';
-        }
-      }
+      await dispatchUi(this.handlers, message);
       this.emit();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1484,6 +1601,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       this.emit();
     }
   }
+
   private conversationText() {
     return this.state.entries
       .map((e) =>
@@ -1508,7 +1626,7 @@ class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     this.disconnect();
     this.releaseLease();
     this.sessions.clear();
-    this.disposed = true;
+    this.lifecycle.dispose();
     this.serviceClient.dispose();
     this.historyStore.dispose();
     if (this.timer) clearTimeout(this.timer);

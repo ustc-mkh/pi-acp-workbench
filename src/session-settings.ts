@@ -2,7 +2,7 @@ import type { ChatState } from './shared';
 
 export interface SessionSelector {
   label: string;
-  kind: 'model' | 'thinking' | 'mode' | 'other';
+  kind: 'model' | 'thinking' | 'mode' | 'fast' | 'other';
   current: string;
   options: { id: string; name: string }[];
   change: { type: 'mode' } | { type: 'config'; id: string };
@@ -14,7 +14,6 @@ const levelName = /^(?:off|none|minimal|low|medium|high|xhigh|max|enabled|disabl
 const compactThinking = (name: string) => name.replace(thinkingPrefix, '').trim();
 
 export const codexFixedConfigs: Readonly<Record<string, string>> = {
-  'fast-mode': 'off',
   collaboration_mode: 'default',
 };
 export function sessionSelectors({
@@ -32,11 +31,13 @@ export function sessionSelectors({
     const kind: SessionSelector['kind'] =
       config.category === 'model' || config.id === 'model'
         ? 'model'
-        : thinking
-          ? 'thinking'
-          : config.category === 'mode'
-            ? 'mode'
-            : 'other';
+        : /^(?:fast[-_ ]mode)$/i.test(config.id) || /^(?:fast[-_ ]mode)$/i.test(config.name)
+          ? 'fast'
+          : thinking
+            ? 'thinking'
+            : config.category === 'mode'
+              ? 'mode'
+              : 'other';
     const options = config.options.flatMap((option) =>
       'options' in option ? option.options : [option],
     );

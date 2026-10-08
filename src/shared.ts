@@ -12,12 +12,24 @@ export type Entry = Readonly<
       messageId?: string | null;
       contextBlocks?: acp.ContentBlock[];
     }
-  | { id: string; role: 'tool'; tool: acp.ToolCall }
+  | { id: string; role: 'tool'; tool: acp.ToolCall; terminal?: TerminalOutput }
   | { id: string; role: 'diff'; text: string; diff: TurnDiff }
 >;
 export type Attachment =
   | { kind?: 'text'; id: string; name: string; uri: string; text: string }
   | { kind: 'image'; id: string; name: string; mimeType: string; data: string };
+export interface TerminalOutput {
+  id: string;
+  output: string;
+  cwd?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  truncated?: boolean;
+}
+export interface ContextUsage {
+  used: number | null;
+  size: number;
+}
 export interface Snapshot {
   commands?: acp.AvailableCommand[];
   nativeForks?: Record<string, NativeBranchTarget>;
@@ -32,6 +44,7 @@ export interface Snapshot {
   stored?: boolean;
   conversationId?: string;
   contextWindow?: number;
+  usage?: ContextUsage;
   contextComplete?: boolean;
   configs?: acp.SessionConfigOption[];
   modes?: acp.SessionModeState;
@@ -51,7 +64,8 @@ export interface ChatState {
   configs?: acp.SessionConfigOption[];
   commands: acp.AvailableCommand[];
   plan: acp.PlanEntry[];
-  usage?: { used: number; size: number };
+  usage?: ContextUsage;
+  visibleModels?: string[];
   history: Omit<Snapshot, 'entries'>[];
   permissions: { id: string; request: acp.RequestPermissionRequest }[];
   showThoughts: boolean;
@@ -94,6 +108,7 @@ export type UiMessage =
   | { type: 'permission'; id: string; optionId?: string }
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }
+  | { type: 'setVisibleModels'; harness: HarnessId; models: string[] | null }
   | { type: 'resume' | 'removeAttachment' | 'deleteHistory'; id: string }
   | { type: 'branchMessage'; id: string; sessionId: string }
   | { type: 'diff'; id: string; index: number }

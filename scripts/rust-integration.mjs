@@ -103,7 +103,14 @@ await writeFile(
 );
 const children = [];
 async function start(binary, config, env = {}) {
-  const child = spawn(resolve(binary), ['--config', config, '--data-dir', root], {
+  const isRelay = binary.endsWith('telegram-daemon');
+  const selected = resolve(
+    isRelay
+      ? process.env.PI_INTEGRATION_RELAY_DAEMON || binary
+      : process.env.PI_INTEGRATION_SESSION_DAEMON || binary,
+  );
+  const args = ['--config', config, '--data-dir', root];
+  const child = spawn(selected, args, {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

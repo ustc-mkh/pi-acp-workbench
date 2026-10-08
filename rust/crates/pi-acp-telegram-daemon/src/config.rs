@@ -73,7 +73,7 @@ pub fn parse(value: &Value) -> Result<Config, String> {
         ));
     }
     Ok(Config {
-        chat_id: chat_id,
+        chat_id,
         allowed_user_ids: allowed,
         workspaces,
         restrict_to_workspaces,

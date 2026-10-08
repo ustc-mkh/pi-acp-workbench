@@ -10,7 +10,7 @@ Telegram Bot → Rust Telegram relay / WireClient ──────────
 Codex / Claude：ChatProvider → AgentProcess（保留本地运行方式）
 ```
 
-Rust `pi-acp-session-daemon` 是唯一 Pi 进程所有者；`rust/crates/pi-acp-session-daemon/src/service.rs` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。扩展通过 `session-wire.ts` 的客户端使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间仅向会话订阅者广播 ACP 增量与生命周期状态。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
+Rust `pi-acp-session-daemon` 是唯一 Pi 进程所有者；`rust/crates/pi-acp-session-daemon/src/service.rs` 管理按会话串行队列、全局进程容量、空闲回收、授权和任务收据。扩展通过 `session-wire.ts` 的客户端使用账户私有 Unix socket、UTF-8 流式解码和有界缓冲；协议与磁盘格式的冻结规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)。两端提交请求后断线不会取消服务端执行；客户端不自动重发。重新连接读取完整当前状态，在线期间向会话订阅者广播完整服务状态（流式更新按 40 ms 合并）；原始 ACP 事件保留给协议消费者，桌面 Pi 不再自行归并或生成消息 ID。大响应分块传输并等待背压，完整响应上限 64 MiB；超限报告错误，不再断开所有客户端。
 
 默认 3 个工作进程，空闲 15 分钟回收。容量满时排队，空闲进程优先淘汰；回收先终止进程组再释放槽位。新建短暂启动 Pi 取得原生 ID，查看已有历史不启动 Pi。进程组终止与 systemd 控制组兜底互补，详见 [运行与恢复边界](session-service.md)。
 
@@ -18,23 +18,23 @@ Webview 只处理渲染和用户意图，不直接访问模型或文件系统。
 
 ## 职责拆分与合并
 
-| 模块                                          | 单一职责                                                                             |
-| --------------------------------------------- | ------------------------------------------------------------------------------------ |
-| TS `session-protocol.ts` / Rust `protocol.rs` | TS 只定义客户端 DTO；服务命令与入口参数校验只由 Rust 实现                            |
-| Rust `queue.rs`                               | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                             |
-| Rust `journal.rs`                             | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                       |
-| Rust `service.rs`                             | 工作进程/租约、会话状态、prompt 与原生分支；路由处决定调度，不在操作中重复入队       |
-| `workspace-diff.ts` / `turn-diff.ts`          | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统          |
-| `workspace-documents.ts`                      | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验              |
-| `webview/messages.ts`                         | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用 |
-| `atomic-json.ts`                              | 扩展共享历史/偏好的原子写入；Rust 收据/outbox 使用 core 的 atomic.rs                 |
-| `conversation-history.ts`                     | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                      |
-| `conversation-statistics.ts`                  | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                   |
-| `session-preferences.ts`                      | 账户级模型/thinking 组合的校验与持久原子保存                                         |
+| 模块                                          | 单一职责                                                                                        |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| TS `session-protocol.ts` / Rust `protocol.rs` | Rust serde 请求/响应与错误类别通过 ts-rs 生成 `session-protocol.generated.ts`；构建后检查漂移   |
+| Rust `queue.rs`                               | 按会话顺序执行、全局并发限制和取消代际；不拥有进程或磁盘                                        |
+| Rust `journal.rs`                             | 合并收据读写、请求指纹和进行中去重；持久化命令只有一个执行入口                                  |
+| Rust `service.rs`                             | 协调 `service/worker_pool.rs`、`session_ops.rs`、`turn.rs`；`phase.rs` 约束活动操作的资源与取消 |
+| `workspace-diff.ts` / `turn-diff.ts`          | 后端工作区前后采集，与纯数据类型/汇总格式化分离，浏览器不引入 Node 文件系统                     |
+| `workspace-documents.ts`                      | 合并工具 Diff、本轮总 Diff 的虚拟文档缓存，并集中本地链接的真实路径校验                         |
+| `webview/messages.ts`                         | 消息与本轮 Diff 卡片渲染；`main.ts` 只编排页面，`transcript.ts` 只负责分组和节点复用            |
+| `atomic-json.ts`                              | 扩展共享历史/偏好的原子写入；Rust 收据/outbox 使用 core 的 atomic.rs                            |
+| `conversation-history.ts`                     | 历史索引、轮询、串行保存/删除、失效代际与租约释放；不拥有 Agent                                 |
+| `conversation-statistics.ts`                  | 用量分页/去重/归属、价格、标题与统计状态；丢弃已切换会话的迟到结果                              |
+| `session-preferences.ts`                      | 账户级模型/thinking 组合的校验与持久原子保存                                                    |
 
 继续保持独立的边界：`session-settings` 是纯选择器解析，`session-configuration` 是 ACP 设置应用；本地 `AgentProcess` 与服务客户端 `RemoteAgent` 生命周期不同，不应合并。共享索引事务锁与会话租约保护的对象不同，也不能为了减少模块而合并。
 
-`ChatProvider` 仍负责 UI 意图、Agent 生命周期、会话切换与快照组装；历史和统计协调交给独立模块，通过当前状态/通知回调衔接，不引入新的全局 store。暂不拆分很短的 `session-cache`、`session-numbers`，也不把不同职责的小模块机械拼接。
+`ChatProvider` 通过类型完备的 `UiHandlers` 表分发 UI 意图，负责会话选择与快照组装；`ConversationBackend` 封装连接创建、同步、授权与轮次 Diff，`PiServiceBackend` 接收服务状态，`LocalAcpBackend` 拥有本地 Agent、缓存、授权 resolver 与偏好。历史和统计协调交给独立模块，通过当前状态/通知回调衔接，不引入新的全局 store。暂不拆分很短的 `session-cache`、`session-numbers`，也不把不同职责的小模块机械拼接。
 
 ## 当前格式边界
 
@@ -46,7 +46,7 @@ Webview 只处理渲染和用户意图，不直接访问模型或文件系统。
 
 `AgentProcess.request()` 是带 sessionId 请求的统一边界：非 Pi 本地 ID 为 workbench:<harness>:<编码后的原生ID>，RPC 出站还原原生 ID，通知/权限入站加入命名空间。新 Pi ID 不允许占用保留前缀。完整快照与索引必须显式记录 harness；缺失或不匹配时拒绝恢复，不从 ID 推断缺失元数据。租约、编号与历史删除均使用本地 ID。不得在宿主绕过 request() 直接发送带本地 ID 的标准请求。
 
-Codex 的 fast-mode 和 collaboration_mode 选择器隐藏，创建/恢复时通过标准 set_config_option 固定为 off/default；拒绝旧 UI 修改这两个配置，偏好保存也排除它们。其他模型、思考和权限配置照常，Pi/Claude 不应用这些覆盖。
+适配器声明 fast-mode 时，对话框提供 Fast 选择器，通过标准 set_config_option 更新并保留会话值。Codex collaboration_mode 仍固定 default；账户偏好只继承 model/thinking。Pi/Claude 不伪造 fast 能力。模型管理页显示完整可搜索目录，勾选结果以 globalState.visibleModels 按 harness 保存；当前模型始终出现在简短选择器中。
 
 selectedHarness 按工作区持久化；非 Pi 的 activeSession 放在 harness.<id>.\* 键下。模型/thinking 偏好独立保存在账户目录，不再读写 workspaceState.sessionPreferences 或 harness.<id>.sessionPreferences。切换先保存并等待统计请求，关闭当前与闲置连接、释放租约，再展示目标 profile 最近快照（只读）或欢迎页，不自动 initialize/new/prompt。草稿和附件按 harness 暂存，不跨提供商搬运。生成/连接/分支期间不允许切换。
 
@@ -74,7 +74,7 @@ Codex / Claude 第一阶段不开放上下文编辑，也不调用 \_pi_workbenc
 
 只有明确的活动指针才会触发自动恢复；缺失时保持欢迎页。`activeSession: null` 表示明确无可恢复活动历史，避免删除当前历史后重启又打开另一段对话。删除本地历史不会中断正在运行的 Agent。关闭历史持久化时，重启回到欢迎页，但当前运行内仍可重连活跃会话。
 
-`transitioning`、status 和 generation 保护异步切换：busy/connecting 期间拒绝新建及切换，避免请求交错。加载前先保存旧会话；候选上下文重建失败则保留原会话。
+`ConversationLifecycle` 用 idle/transition/turn/disposed 操作状态代替独立的切换、prompting、stopping 标志；取消只附属于 turn，回放只附属于 transition。status 表示后端连接状态，generation 丢弃已切换的异步结果：busy/connecting 期间拒绝新建及切换，避免请求交错。加载前先保存旧会话；候选上下文重建失败则保留原会话。
 
 ### 模型与 thinking 继承
 
@@ -135,7 +135,7 @@ Pi 的 `persistHistory=false` 只隐藏列表，服务继续保存任务。其�
 
 ## 内置增强适配器
 
-Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，每个补丁都断言唯一匹配，位置缺失或重复时直接失败。用量日志解析结果按文件身份、大小和修改时间缓存，避免同一轮分页反复扫描；文件变化后重新解析。宿主收齐分页后一次合并和保存统计。
+Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi-acp 源码注入 `src/pi-enhancements.ts`，每个补丁都断言唯一匹配，并验证实际 SDK RequestError 别名存在；位置缺失或重复时直接失败。手动 /compact 不套用普通 RPC 的 30 秒期限，其错误保留详细原因。长 prompt 每秒最多一个 stats RPC 发布 context 占用，结束再刷新；占用保存在 Snapshot.usage，未知占用明确为 used:null。用量日志解析结果按文件身份、大小和修改时间缓存，避免同一轮分页反复扫描；文件变化后重新解析。宿主收齐分页后一次合并和保存统计。
 
 只有协商 agentCapabilities.\_meta['pi-workbench'].version=1 后，宿主才使用：
 
@@ -148,11 +148,11 @@ Pi 服务默认用 Node 执行 dist/pi-adapter.mjs。构建基于固定上游 pi
 
 Rust `pi-acp-telegram-daemon` 只管理 Bot 长轮询与 Telegram 权限边界，其 `sessions.rs` 是会话服务客户端，不启动 Pi 进程。生产服务只保留 Rust 入口，参数与既有磁盘格式兼容，见文末「Rust 常驻进程」。删除原有 desktop-control 与 telegram-routing 分支。服务统一发布任务进度和完成 outbox，即使插件或 Telegram 离线也可保存结果。客户端旧的完成投递分支已删除，Telegram run 只等待任务状态，不再读取整段历史拼接一个随后被丢弃的回复。
 
-`telegram-stream.ts` 合并消息，`telegram-api.ts` 节流并处理限流。游标先持久化再分发；发送、新建、分支和设置命令使用带方法/参数指纹的持久化 ID 收据，拒绝 ID 异内容复用，重启后未完成请求标记中断而不重放。关键收据、游标和最终 outbox 经通用 atomic-json 工具同步文件与父目录后才报告成功，周期进度仍使用普通原子替换。绑定、通知收据、推送开关持久化成功后才更新内存。通知发送与落盘不是分布式事务，因此崩溃边界可能重复通知，但不能重跑任务。
+Rust relay 的 `stream.rs` 合并消息，`api.rs` 节流并处理限流，`markdown.rs` 将 CommonMark 转成 Telegram text/entities 并按 UTF-16 预算分块；代码、粗体、链接和列表支持流式更新，HTTP 错误不会触发重新执行任务。游标先持久化再分发；发送、新建、分支和设置命令使用带方法/参数指纹的持久化 ID 收据，拒绝 ID 异内容复用，重启后未完成请求标记中断而不重放。关键收据、游标和最终 outbox 经 `pi-acp-core::atomic` 同步文件与父目录后才报告成功，周期进度仍使用普通原子替换。绑定、通知收据、推送开关持久化成功后才更新内存。通知发送与落盘不是分布式事务，因此崩溃边界可能重复通知，但不能重跑任务。
 
 ## 渲染与安全边界
 
-`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。显式重置 html/body/后代的 scrollbar-color 和 scrollbar-width 为 auto，避免 VS Code 注入的标准属性压过 Chromium 的 WebKit 伪元素规则。
+`webview/transcript.ts` 按用户轮次将最后一次工具/思考之前的执行过程（含中间说明）放入一层 details，默认折叠，最终回答单独展示。流式更新复用分组与消息节点，保留用户展开状态，不改变底层记录。终端 metadata 按 toolCallId 累积为独立输出，保留最近 1 Mi UTF-16 单位并明确显示截断；位于底部时跟随输出，手动上翻后保留滚动位置。`composer-resize.ts` 用可键盘操作的 separator 和 pointer capture 调整输入高度，限制在视口范围内，并保存到 Webview UI 状态。滚动条统一采用透明轨道和淡色滑块。显式重置 html/body/后代的 scrollbar-color 和 scrollbar-width 为 auto，避免 VS Code 注入的标准属性压过 Chromium 的 WebKit 伪元素规则。
 
 `webview/markdown.ts` 使用 Markdown token 规则隔离代码和公式，KaTeX trust=false，HTML 经 DOMPurify 净化。Mermaid 只渲染闭合围栏，strict 模式及 SVG 二次净化，禁止图内配置与远程图片。所有资源随包提供，无 CDN。
 
@@ -171,14 +171,20 @@ Diff 预览复用同一消息的文档 URI，并限制缓存为最近 20 对文�
 
 ## Rust 常驻进程
 
-生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；旧 Telegram 内部模块也已按覆盖映射淘汰，见 [迁移进度](rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
+生产服务入口与构建仅使用 `rust/` workspace。行为按 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md) 的契约验证（`npm run test:contract` / `npm run test:contract:telegram`）；`npm run test:integration:rust` 连接两个真实 Rust 服务，只有 Bot HTTP 与 ACP worker 使用 mock。TS 会话服务、队列、收据和 socket 服务端已经删除；旧 Telegram 内部模块也已按覆盖映射淘汰，见 [迁移进度](archive/rust-migration.md)。严禁新旧版本共用同一 `--data-dir` 并行运行。
 
-| crate                    | 对应 TS                                                                 | 职责                                                                                                                                           |
-| ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pi-acp-session-daemon`  | session-daemon / session-service / session-wire 服务端等                | wire 服务端、命令校验、TaskQueue、RequestJournal、共享历史、偏好、outbox 发布、workspace-diff、native-branch 哈希、ACP client 子集、进程组管理 |
-| `pi-acp-telegram-daemon` | telegram-daemon / telegram-bridge / telegram-stream / telegram-sessions | Bot 长轮询、话题绑定、outbox 消费、节流发送                                                                                                    |
-| `pi-acp-core`            | session-wire 客户端 / atomic-json / 锁                                  | wire 客户端、原子写、proper-lockfile 兼容 mkdir 锁、UTF-16/canonical 序列化                                                                    |
+| crate                    | 职责                                                                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `pi-acp-session-daemon`  | typed wire 边界、队列/收据、共享历史、偏好、通用任务 outbox、Diff、ACP client、进程组管理；仅绑定经适配器验证的原生 forkPoints |
+| `pi-acp-telegram-daemon` | Bot 长轮询、话题绑定、outbox 消费、Markdown entities、节流发送                                                                 |
+| `pi-acp-core`            | wire 客户端、原子写、兼容 mkdir 锁、UTF-16/canonical JSON、共享 TurnEvent                                                      |
 
 Webview、扩展宿主与 `pi-adapter.mjs` 永远保持 JS/TS：渲染生态与 Pi 进程内扩展机制没有 Rust 通道；Rust daemon 只是 spawn `node pi-adapter.mjs` 作为工作进程。动机仅为常驻内存（Node ~60–100 MB → Rust ~5–9 MB RSS）与单二进制部署。
 
 跨实现最易漂移的三点（规范已逐条固化）：mkdir 锁必须兼容 proper-lockfile 的心跳/stale/compromised 语义（禁止 flock）；分块响应按 UTF-16 code unit 切片、可切断代理对；收据指纹与 fork 哈希的 canonical JSON 按 UTF-16 序排键。部署与旧版本切换见 [session-service.md](session-service.md)。
+
+## 后续方向
+
+保留标准 ACP 与固定上游适配器，本轮不另写 Rust→Pi RPC 链。共享历史 v2 委托已经让支持该能力的服务负责所有 harness 的提交；旧 daemon 的 TS 文件回退由真实跨实现并发写入/删除测试保护。完整把 Codex/Claude 进程托管到服务，以及向上游提交适配器扩展点，仍是独立架构决策。
+
+ServiceError 对外提供稳定错误码，请求校验直接使用类型；底层存储/ACP 模块仍保留原有详细 String 错误，由统一转换处分类。进一步将每个底层 IO 错误改成结构化 source 不改变本次协议。

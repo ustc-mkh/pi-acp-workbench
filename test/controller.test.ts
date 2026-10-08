@@ -351,20 +351,24 @@ it('returns to disconnected when a harness launch configuration is invalid', asy
   expect(host.provider.snapshot()).toMatchObject({ harness: 'claude', status: 'disconnected' });
   expect(host.provider.snapshot().error).toContain('启动配置无效');
 });
-it('keeps Codex fast mode off and collaboration default on creation and load, rejecting stale switch controls', async () => {
+it('allows Codex fast mode and keeps collaboration default on creation and load', async () => {
   mockHarness('codex', 'context-codex-options');
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   await host.provider.perform({ type: 'new' });
-  for (let i = 0; i < 2; i++) {
-    const configs = host.provider.snapshot().configs;
-    expect(configs.find((c: any) => c.id === 'fast-mode').currentValue).toBe('off');
-    expect(configs.find((c: any) => c.id === 'collaboration_mode').currentValue).toBe('default');
-    await host.provider.perform({ type: 'config', id: 'fast-mode', value: 'on' });
-    expect(host.provider.snapshot().error).toContain('默认值');
-    await host.provider.perform({ type: 'releaseSession' });
-    await host.provider.perform({ type: 'connect' });
-    expect(host.provider.snapshot().status).toBe('ready');
-  }
+  expect(
+    host.provider.snapshot().configs.find((c: any) => c.id === 'collaboration_mode').currentValue,
+  ).toBe('default');
+  await host.provider.perform({ type: 'config', id: 'fast-mode', value: 'off' });
+  expect(host.provider.snapshot().configs.find((c: any) => c.id === 'fast-mode').currentValue).toBe(
+    'off',
+  );
+  await host.provider.perform({ type: 'config', id: 'fast-mode', value: 'on' });
+  expect(host.provider.snapshot().error).toBeUndefined();
+  expect(host.provider.snapshot().configs.find((c: any) => c.id === 'fast-mode').currentValue).toBe(
+    'on',
+  );
+  await host.provider.perform({ type: 'config', id: 'collaboration_mode', value: 'plan' });
+  expect(host.provider.snapshot().error).toContain('默认协作模式');
 });
 it('uses harness-specific login commands and never copies Pi profile environment overrides', async () => {
   host.config.env = { PI_ONLY: 'secret' };
@@ -1480,6 +1484,38 @@ it('uses the production remote Pi client and receives phone turns without owning
     await host.provider.perform({ type: 'new' });
     expect(host.provider.snapshot().status).toBe('ready');
     const id = host.provider.snapshot().sessionId;
+    let release!: () => void, submitted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sent = new Promise<void>((resolve) => {
+      submitted = resolve;
+    });
+    host.provider.view = {
+      webview: {
+        postMessage: async (message: any) => {
+          if (message.type === 'sent') {
+            submitted();
+            await gate;
+          }
+          return true;
+        },
+      },
+    };
+    const sending = host.provider.perform({ type: 'send', text: 'cancel before submission' });
+    await sent;
+    await host.provider.perform({ type: 'cancel' });
+    release();
+    await sending;
+    host.provider.view = undefined;
+    expect(host.provider.snapshot().status).toBe('ready');
+    expect((await phone.call<any>('state', { sessionId: id })).snapshot.entries).toHaveLength(0);
+    await host.provider.perform({ type: 'send', text: 'desktop-owned' });
+    const serverState = await phone.call<any>('state', { sessionId: id });
+    expect(host.provider.snapshot().entries.map((entry: any) => entry.id)).toEqual(
+      serverState.snapshot.entries.map((entry: any) => entry.id),
+    );
+
     await phone.call(
       'prompt',
       { sessionId: id, prompt: [{ type: 'text', text: 'from phone' }] },
@@ -1507,3 +1543,30 @@ it('uses the production remote Pi client and receives phone turns without owning
     rmSync(root, { recursive: true, force: true });
   }
 }, 15000);
+it('persists model visibility per harness and rejects stale page submissions', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  await host.provider.perform({
+    type: 'setVisibleModels',
+    harness: 'pi',
+    models: ['other', 'invalid', 'other'],
+  });
+  expect(host.provider.snapshot().visibleModels).toEqual(['other']);
+  expect(host.stored.get('visibleModels')).toEqual({ pi: ['other'] });
+  await host.provider.perform({ type: 'setVisibleModels', harness: 'codex', models: [] });
+  expect(host.stored.get('visibleModels')).toEqual({ pi: ['other'] });
+  await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: null });
+  expect(host.provider.snapshot().visibleModels).toBeUndefined();
+});
+it('restores locally persisted context occupancy after extension restart', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context-live'];
+  await host.provider.perform({ type: 'new' });
+  await host.provider.perform({ type: 'send', text: 'usage' });
+  expect(host.provider.snapshot().usage).toEqual({ used: 1234, size: 200000 });
+  host.provider.dispose();
+  await host.provider.persistence.pending;
+  activate(context);
+  await host.provider.historyReady;
+  await host.provider.perform({ type: 'connect' });
+  expect(host.provider.snapshot().usage).toEqual({ used: 1234, size: 200000 });
+});

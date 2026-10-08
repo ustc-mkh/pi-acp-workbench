@@ -1,3 +1,5 @@
+> 历史研究与迁移记录。当前实现请看 [架构](../architecture.md)、[测试](../testing.md) 与 [服务协议](../service-protocol.md)。
+
 # 常驻服务单实现收敛研究
 
 > 决策已确定为 Rust-only。下文保留为选型研究记录，不是当前部署指南；实际实施与未完成覆盖见 [Rust 迁移进度](rust-migration.md)。
@@ -82,7 +84,7 @@
 
 ### 阶段 2：切换部署与发布
 
-- 提供 Linux x86_64 / aarch64 的生产二进制、校验和、明确的 libc / TLS 兼容要求；生产产物不得开启 `contract-test` feature。
+- 提供 Linux x86_64 的生产二进制、校验和、明确的 libc / TLS 兼容要求；生产产物不得开启 `contract-test` feature。
 - 发布完整运行目录：两个二进制 + `pi-adapter.mjs` + `pi-native-fork.mjs`；适配器会依赖后者，不能只发布 Rust 可执行文件。
 - 明确 Node 22+ / Pi 的安装依赖，固定 worker 命令或适配器发现规则，不再依赖当前工作目录碰巧正确。
 - 将 systemd、npm 入口、README 和默认契约目标统一切到 Rust。不要引入“Rust 启动失败自动退回 TS”的隐式双实现路径。

@@ -93,7 +93,7 @@ cat "$PI_TEST_ROOT/result.json"
 
 ## 独立会话服务回归
 
-`test/rust-sessions.test.ts` 直接启动真实 Rust 会话服务与 ACP mock，覆盖桌面断开后手机继续、并发去重、进程上限/回收、授权、真实文件系统存储失败不执行/不重放、重启收据恢复、原生分支和三种终态的 Diff/outbox。`session-preferences.test.ts` 的服务用例也连接真实 Rust，验证跨目录/重启/恢复偏好。已移除 TS 会话服务与其队列/收据单测，对应边界由 Rust queue/journal 测试验证，包括落盘成功后、执行前取消的确定性注入（仅 cfg(test)，不存在于服务二进制）。控制器真实 RemoteAgent 用例继续验证桌面订阅与手机任务。剩余 Telegram 覆盖迁移见 [rust-migration.md](rust-migration.md)。
+`test/rust-sessions.test.ts` 直接启动真实 Rust 会话服务与 ACP mock，覆盖桌面断开后手机继续、并发去重、进程上限/回收、授权、真实文件系统存储失败不执行/不重放、重启收据恢复、原生分支和三种终态的 Diff/outbox。`session-preferences.test.ts` 的服务用例也连接真实 Rust，验证跨目录/重启/恢复偏好。已移除 TS 会话服务与其队列/收据单测，对应边界由 Rust queue/journal 测试验证，包括落盘成功后、执行前取消的确定性注入（仅 cfg(test)，不存在于服务二进制）。控制器真实 RemoteAgent 用例继续验证桌面订阅与手机任务。覆盖迁移依据见 [rust-migration.md](archive/rust-migration.md)，生产验收证据见 [Rust 验收记录](rust-acceptance.md)。
 
 发布前执行 `npm run verify`，并执行 `npm run test:native-fork` 验证安装的 Pi 原生树接口；均不发送真实模型任务。
 
@@ -101,15 +101,17 @@ cat "$PI_TEST_ROOT/result.json"
 
 `npm run test:contract` 运行 `scripts/service-contract.mjs`：只通过 Unix socket 驱动 daemon 的黑盒协议验证（自带最小 wire 客户端，不 import 服务实现），覆盖方法/参数校验、违规连接隔离、大帧上限、会话编号、事件订阅与上限、授权流转、取消、同 ID 幂等、>512 KiB 分块响应、磁盘产物格式与损坏拒启动、重启中断防重放、数据目录单例锁与删除语义。`test/fixtures/` 存放 native-branch 哈希 fixtures（`scripts/export-fixtures.mjs` 生成）与磁盘格式 golden 样例，供替代实现逐比特断言。规范见 [service-protocol.md](service-protocol.md) 与 [data-formats.md](data-formats.md)；默认先构建并测试 Rust daemon；`PI_CONTRACT_DAEMON=/path/to/daemon` 可指定其他 Rust 构建产物。
 
-`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 10 项黑盒测试（含 restrictToWorkspaces 符号链接越界拒绝）（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；只测试 Rust；`PI_TG_DAEMON` 可指定另一个 Rust 测试构建产物（需支持隔离的模拟传输）。
+`npm run test:contract:telegram` 运行 `scripts/telegram-contract.mjs`：模拟 Bot API HTTP + 模拟 session socket server 的 25 项黑盒测试（含 restrictToWorkspaces 符号链接越界拒绝）（启动/offset 检查点、陌生用户/群忽略、/new 话题绑定、prompt→outbox 投递、权限按钮、/stop、/notifications、/status、单例锁）；只测试 Rust；`PI_TG_DAEMON` 可指定另一个 Rust 测试构建产物（需支持隔离的模拟传输）。
 
 Rust 侧单测：`cd rust && cargo test`（pi-acp-core 的 canonical UTF-16 键序对拍、wire 孤立代理分块重组；pi-acp-session-daemon 的 native-branch fixtures 9 例逐字节哈希、journal/queue/diff 等单测）。
 
 ## 真实 Rust 双服务集成
 
-`npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。生产发布前还需完整覆盖迁移与长时间浸泡检查。
+`npm run test:integration:rust` 同时启动真实 Rust 会话服务和 Rust relay，仅 Bot HTTP 与 ACP worker 使用 mock，不调用 Telegram 或付费模型。覆盖 `/new` 绑定、手机 prompt 与桌面订阅、授权回调、取消，以及 relay 重启后离线桌面 outbox 的单次投递和绑定/游标保持。持续负载与历史回滚的复现入口见 [服务发布说明](service-release.md)，实际执行结果见 [验收记录](rust-acceptance.md)。
 
-Telegram 黑盒契约目前 24 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。另补 100 次增量合并、话题缓存/确认/开关写失败调用路径及过期票据实际响应，完整覆盖映射见迁移文档；旧 `telegram.test.ts` 及 TS relay 内部模块已删除。真实 Rust socket 用例验证最后 outbox 写失败传播和 interrupted 收据，不自动重放。
+Rust 服务仅支持 Linux x86_64，构建、测试与发布均使用该平台的本机产物。
+
+Telegram 黑盒契约目前 25 项，覆盖真实 Rust relay 的游标磁盘失败、重复 update ID、投递与 history 重试、100 条 history 分批、通知/实时静音、权限隔离、Unicode/429、webhook 和重启。Rust bridge 单测补事务回滚/并发保存、弃置预览/票据；outbox 单测补慢盘最新状态合并和最后落盘失败。另补 100 次增量合并、话题缓存/确认/开关写失败调用路径及过期票据实际响应，完整覆盖映射见迁移文档；旧 `telegram.test.ts` 及 TS relay 内部模块已删除。真实 Rust socket 用例验证最后 outbox 写失败传播和 interrupted 收据，不自动重放。
 
 Rust relay outbox 扫描为逐条消费，每次读取有硬大小限制；惰性读取、损坏/身份不匹配、过期删除和超大文件跳过均有单测。
 
@@ -128,3 +130,11 @@ Rust stream 单测独立验证 32 个预览处理共 128 MiB 源文本后只保�
 `workspace-diff.test.ts` 使用临时 Git 仓库验证只读采集，不修改真实项目的 index/工作树；`messages.test.ts` 与浏览器冒烟覆盖末尾汇总渲染。
 
 `long-running.test.ts` 通过真实 Rust 服务覆盖超过 16 MiB 的 Unicode 历史分块传输与订阅隔离；原两个 relay/outbox 参考用例已经迁移到 Rust outbox/API/stream 单测并删除。Rust server 单测验证超大响应隔离、32 连接/128 请求上限及字节/队列回收。`session-client.test.ts` 的 transport-only mock 只验证 TS 客户端超时不重放、晚到结果忽略、序列化/待处理上限与断线分块清理，不实现另一套会话服务。`atomic-json.test.ts` 验证 fsync/rename 顺序和同步失败时不发布文件；服务集成测试验证收据失败不启动 worker、创建/分支去重以及 ID 异内容冲突。这些测试不等价于真实掉电实验。功能回归继续使用 `npm run verify`。
+
+## 本轮补充覆盖
+
+`native-fixtures.test.ts` 运行十个冻结原生分支样例。`rust-sessions.test.ts` 同时让 SharedHistoryStore 与真实 Rust daemon 写入/删除同一目录，断言唯一编号、无丢失更新、tombstone 不复活和活跃租约互斥；另验证长任务 context/terminal 推送与冷重启。控制器验证模型可见性按 harness 保存、本地 context 重启恢复，以及发送前取消不触发 Pi 请求、远端 entry ID 不被本地替换。
+
+`bundled-adapter.test.ts` 使用模拟 Pi RPC 验证长 prompt 期间 usage 更新、手动 /compact 成功与具体失败原因及恢复。Telegram 契约检查实际 Bot API entities（emoji 偏移、代码、链接、附件提示），Rust 单测覆盖长代码分块与不完整流式 Markdown。浏览器新增模型管理、Fast 控件、Diff 折叠说明和终端滚动断言。
+
+Rust 协议生成使用 `npm run generate:protocol`，完整套件内有 `check:protocol` 漂移校验。CI 同时运行 Clippy，不能通过新增 dead_code 抑制来绕过检查。

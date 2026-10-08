@@ -1,3 +1,5 @@
+import { RequestError } from '@agentclientprotocol/sdk';
+import { providerError } from './adapter-errors';
 import { createReadStream } from 'node:fs';
 import { stat, mkdtemp, copyFile, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,7 +46,7 @@ function historicalMessages(messages: any[]) {
     });
 }
 /** Add negotiated ACP extension methods to the pinned upstream adapter. Prompts remain standard ACP. */
-export function enhancePiAgent(Base: any, PiRpcProcess: any) {
+export function enhancePiAgent(Base: any, PiRpcProcess: any, Errors = RequestError) {
   return class extends Base {
     private forkWorkers = new Map<string, { dispose: () => void }>();
     private usageCache?: { key: string; records: UsageRecord[] };
@@ -55,6 +57,31 @@ export function enhancePiAgent(Base: any, PiRpcProcess: any) {
         'pi-workbench': { version: 1, inspect: true, nativeFork: true },
       };
       return result;
+    }
+    async prompt(params: any) {
+      const session = await this.restoreSession(params.sessionId);
+      session.cancelRequested = false;
+      let refreshing: Promise<void> | undefined;
+      const refresh = () =>
+        (refreshing ??= session.publishContextUsage().finally(() => {
+          refreshing = undefined;
+        }));
+      // Context can grow across many model/tool steps in one ACP prompt. Never
+      // run billing/tree inspection here; Pi's bounded stats RPC is sufficient.
+      const timer = setInterval(() => {
+        void refresh().catch(() => {});
+      }, 1000);
+      timer.unref();
+      try {
+        return await super.prompt(params);
+      } catch (error) {
+        if (session.wasCancelRequested()) return { stopReason: 'cancelled' };
+        const detail = error instanceof Error ? error.message : String(error);
+        throw Errors.internalError({}, providerError(detail));
+      } finally {
+        clearInterval(timer);
+        await refresh().catch(() => {});
+      }
     }
     dispose() {
       for (const worker of this.forkWorkers.values()) worker.dispose();

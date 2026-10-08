@@ -1491,3 +1491,48 @@ body *::-webkit-scrollbar-button {
   border-radius: 4px;
   padding: 1px 4px;
 }
+
+.terminal-output {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+#models {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+#models input[type='search'] {
+  color: var(--text);
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+}
+.models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.model-row {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.model-row[hidden] {
+  display: none;
+}
+.selector-fast .selector-label {
+  min-width: 60px;
+}

@@ -1,7 +1,6 @@
 //! Telegram transport: paced sends, 429 honor, redacted errors.
 //! Production builds always use Telegram's official endpoint and caller pace.
 //! The opt-in contract-test feature enables mock transport environment hooks.
-use pi_acp_core::utf16::telegram_chunks;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -53,7 +52,7 @@ mod production_tests {
     #[test]
     fn production_transport_ignores_mock_environment_hooks() {
         let keys = ["PI_TELEGRAM_API_BASE", "PI_TELEGRAM_PACE_MS"];
-        let previous: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
+        let previous: Vec<_> = keys.iter().map(std::env::var_os).collect();
         std::env::set_var(keys[0], "http://attacker.invalid");
         std::env::set_var(keys[1], "1");
         let api = TelegramApi::new(
@@ -69,57 +68,6 @@ mod production_tests {
         }
         assert_eq!(api.base, "https://api.telegram.org/botsynthetic-token");
         assert_eq!(api.interval, Duration::from_millis(3100));
-    }
-}
-
-#[cfg(test)]
-mod queue_tests {
-    use super::*;
-    use serde_json::json;
-    use std::sync::Arc;
-    #[tokio::test]
-    async fn network_errors_never_expose_the_token_or_request_url() {
-        let token = "synthetic-private-token";
-        let mut api = TelegramApi::new(token, Duration::ZERO, CancellationToken::new());
-        api.base = format!("http://127.0.0.1:0/bot{token}");
-        api.http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let error = api.call("getMe", json!({})).await.unwrap_err();
-        assert!(error.message.contains("网络请求失败"));
-        assert!(!error.message.contains(token));
-        assert!(!error.message.contains("http://"));
-    }
-    #[tokio::test]
-    async fn bounds_paced_queue_and_releases_every_slot_on_shutdown() {
-        let stop = CancellationToken::new();
-        let mut api = TelegramApi::new("synthetic", Duration::from_secs(3600), stop.clone());
-        api.base = "http://127.0.0.1:0".into(); // Never contact Telegram even if this test regresses.
-        api.pace.lock().await.next_send = Instant::now() + Duration::from_secs(3600);
-        let api = Arc::new(api);
-        let mut tasks = Vec::new();
-        for _ in 0..QUEUE_LIMIT {
-            let api = api.clone();
-            tasks.push(tokio::spawn(async move {
-                api.call("sendMessage", json!({"text":"held"})).await
-            }));
-        }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while api.queued.load(Ordering::SeqCst) != QUEUE_LIMIT {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(api
-            .call("sendMessage", json!({"text":"overflow"}))
-            .await
-            .unwrap_err()
-            .message
-            .contains("发送队列已满"));
-        stop.cancel();
-        for task in tasks {
-            assert!(task.await.unwrap().unwrap_err().message.contains("已停止"));
-        }
-        assert_eq!(api.queued.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -236,6 +184,12 @@ impl TelegramApi {
                 .get("description")
                 .and_then(Value::as_str)
                 .unwrap_or("API 请求失败");
+            if method == "editMessageText"
+                && code == 400
+                && description.contains("message is not modified")
+            {
+                return Ok(Value::Null);
+            }
             return Err(ApiError {
                 code,
                 message: format!("Telegram: {}", self.redact(description)),
@@ -245,7 +199,53 @@ impl TelegramApi {
     }
 }
 
-/// Outbound text split identical to telegramChunks(text, 3900).
-pub fn chunks(text: &str) -> Vec<String> {
-    telegram_chunks(text, 3900)
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn network_errors_never_expose_the_token_or_request_url() {
+        let token = "synthetic-private-token";
+        let mut api = TelegramApi::new(token, Duration::ZERO, CancellationToken::new());
+        api.base = format!("http://127.0.0.1:0/bot{token}");
+        api.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let error = api.call("getMe", json!({})).await.unwrap_err();
+        assert!(error.message.contains("网络请求失败"));
+        assert!(!error.message.contains(token));
+        assert!(!error.message.contains("http://"));
+    }
+    #[tokio::test]
+    async fn bounds_paced_queue_and_releases_every_slot_on_shutdown() {
+        let stop = CancellationToken::new();
+        let mut api = TelegramApi::new("synthetic", Duration::from_secs(3600), stop.clone());
+        api.base = "http://127.0.0.1:0".into(); // Never contact Telegram even if this test regresses.
+        api.pace.lock().await.next_send = Instant::now() + Duration::from_secs(3600);
+        let api = Arc::new(api);
+        let mut tasks = Vec::new();
+        for _ in 0..QUEUE_LIMIT {
+            let api = api.clone();
+            tasks.push(tokio::spawn(async move {
+                api.call("sendMessage", json!({"text":"held"})).await
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while api.queued.load(Ordering::SeqCst) != QUEUE_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(api
+            .call("sendMessage", json!({"text":"overflow"}))
+            .await
+            .unwrap_err()
+            .message
+            .contains("发送队列已满"));
+        stop.cancel();
+        for task in tasks {
+            assert!(task.await.unwrap().unwrap_err().message.contains("已停止"));
+        }
+        assert_eq!(api.queued.load(Ordering::SeqCst), 0);
+    }
 }

@@ -21,6 +21,7 @@ interface StatisticsContext {
   harness: HarnessId;
   conversationId?: string;
   retained: boolean;
+  authoritative?: boolean;
 }
 function metadataDeadline<T>(request: Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -132,7 +133,7 @@ export class ConversationStatistics {
   }
   async refresh(settledTurn = false) {
     if (this.pending) return this.pending;
-    const { agent, state, harness } = this.current(),
+    const { agent, state, harness, authoritative } = this.current(),
       sessionId = state.sessionId;
     const meta = agent?.info?.agentCapabilities?._meta?.['pi-workbench'] as
       | { version?: number }
@@ -165,6 +166,7 @@ export class ConversationStatistics {
           records.push(...(data.records || []));
           if (!cursor) {
             if (
+              !authoritative &&
               entries.length === state.entries.length &&
               entries.every((entry, i) => entry === state.entries[i])
             )

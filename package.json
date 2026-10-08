@@ -207,7 +207,13 @@
     "test:integration:rust": "npm run build:service:test && cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/rust-integration.mjs",
     "telegram": "node scripts/run-service.mjs telegram",
     "sessions": "node scripts/run-service.mjs sessions",
-    "test:memory": "npm run build:service:test && node scripts/memory-smoke.mjs"
+    "test:memory": "npm run build:service:test && node scripts/memory-smoke.mjs",
+    "generate:protocol": "npm run build:service:test && node scripts/generate-service-types.mjs",
+    "check:protocol": "node scripts/generate-service-types.mjs --check",
+    "test:service:rollback": "node scripts/service-rollback.mjs",
+    "test:service:soak": "node scripts/service-soak.mjs",
+    "test:service:artifact": "node scripts/service-artifact-smoke.mjs",
+    "package:services": "node scripts/package-services.mjs"
   },
   "overrides": {
     "katex": "$katex"

@@ -1,43 +1,7 @@
-//! SharedHistoryStore + SnapshotStore + allocateSessionNumber port
-//! (src/shared-history.ts + snapshots.ts + session-numbers.ts).
-//! Disk contract: docs/data-formats.md §4 — index.json transaction under a
-//! proper-lockfile mkdir lock on the history ROOT (retries 20 / 50–500 ms jitter),
-//! per-session lease locks on `session-<sha256(id)>` (retries 0),
-//! snapshots in `conversations/<sha256(`${id}:${revision}`)>.json`.
-//!
-//! Invariants:
-//! - validateSnapshot(): id/cwd strings + entries array + contextComplete===true +
-//!   no `contextPending` key, else '历史格式不受支持：需要当前完整快照。原文件未修改。'
-//!   + harness validation (harness must be 'pi' for the service; reject others and
-//!     workbench:(codex|claude): namespaced ids → '历史记录中的 harness 不受支持或不匹配，未启动 Agent。').
-//! - SnapshotStore.write(snapshot, storageKey): durable atomic write of the FULL
-//!   snapshot, returns stub {...snapshot minus entries&nativeForks, entries:[],
-//!   stored:true}. read(stub): stored→read file, verify id/cwd match + entries
-//!   array else '本地完整历史文件不匹配，未恢复会话。'; not stored → validate clone.
-//! - Transactions serialized via a single Mutex (TS `transactions` promise chain).
-//!   Inside: lock(root) → read index → operation → check compromised → release.
-//!   commit(): temp `${file}.${uuid}.tmp` write 0600 → check transactionError →
-//!   rename. Compromised error must abort the commit (TS throws transactionError).
-//! - index(): parse index.json {sessions[], deleted[], nextSessionNumber?};
-//!   malformed shape → '共享历史索引无效，请从备份恢复。'; ENOENT → empty.
-//! - list(): index().sessions sorted by updated desc — NO lock needed for reads.
-//! - claim(id): lease on `session-<sha256(id)>` retries:0; Held → SessionInUseError
-//!   ('此会话正在另一个窗口中使用，当前仅查看。请在原窗口释放会话或关闭窗口后重新连接。').
-//!   Second claim of same id is a no-op unless lost ('共享会话锁已失效，请重新连接。').
-//!   onLeaseLost callback → mark lost + notify service.
-//! - write(): inside transaction — lost or unleased → '未持有共享会话锁，请重新连接后再保存。';
-//!   deleted includes id → '此会话已从共享历史删除，不会重新保存。';
-//!   current.revision != seen[id] → '会话已被另一个窗口更新，请重新连接。';
-//!   then sessionNumber = allocateSessionNumber(index, snapshot),
-//!   revision = new uuid, raw.write under key `${id}:${revision}`,
-//!   index.sessions = [saved, ...without(id)], commit, seen[id]=revision,
-//!   remove old snapshot file.
-//! - remove(id): transaction — filter sessions, push deleted if absent, COMMIT
-//!   tombstone BEFORE unlinking the snapshot file.
-//! - clear(): same pattern for all sessions.
-//! - allocateSessionNumber: logical = conversationId || id; reuse existing
-//!   valid number; else floor = valid(nextSessionNumber)?next:1 → max+1;
-//!   overflow → '会话编号已超过安全范围。'
+//! Shared history transactions use a proper-lockfile-compatible directory lock.
+//! Root transactions preserve tombstones and allocate unique safe-integer session numbers.
+//! Live sessions hold separate leases; compromised ownership aborts commits.
+//! Snapshot files are atomic, private and revision-addressed (docs/data-formats.md).
 use crate::types::Snapshot;
 use pi_acp_core::atomic::write_atomic_json;
 use pi_acp_core::canonical::sha256_hex;
@@ -59,8 +23,6 @@ const FORMAT_UNSUPPORTED: &str = "历史格式不受支持：需要当前完整�
 const HARNESS_UNSUPPORTED: &str = "历史记录中的 harness 不受支持或不匹配，未启动 Agent。";
 const INDEX_INVALID: &str = "共享历史索引无效，请从备份恢复。";
 const SNAPSHOT_MISMATCH: &str = "本地完整历史文件不匹配，未恢复会话。";
-/// TS propagates proper-lockfile's compromised error; there is no frozen text,
-/// so the daemon reports the equivalent state in its own wording.
 const LOCK_COMPROMISED: &str = "共享历史锁已失效，事务中止。";
 
 /// proper-lockfile timing shared by every mkdir lock (docs/data-formats.md §2).
@@ -87,7 +49,6 @@ pub struct Index {
     pub sessions: Vec<Snapshot>,
     #[serde(default)]
     pub deleted: Vec<String>,
-    /// TS drops `undefined` keys on JSON.stringify — skip None for parity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_session_number: Option<u64>,
 }
@@ -97,17 +58,11 @@ pub type LeaseLost = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct SharedHistoryStore {
     root: PathBuf,
     conversations: PathBuf,
-    /// id → revision returned by the last read/write while leased (TS `seen`
-    /// stores `string | undefined`, hence Option values).
     seen: Mutex<HashMap<String, Option<String>>>,
     leases: Mutex<HashMap<String, pi_acp_core::mkdir_lock::MkdirLock>>,
-    /// std::sync::Mutex + Arc: the lease onCompromised heartbeat callback is
-    /// sync and 'static, so it needs shared non-async access (TS `lost`).
     lost: Arc<StdMutex<HashSet<String>>>,
     on_lease_lost: Option<LeaseLost>,
     transactions: Mutex<()>,
-    /// TS `transactionError`: set by the root lock's onCompromised heartbeat,
-    /// cleared per transaction, checked by commit() before rename.
     transaction_error: Arc<StdMutex<Option<String>>>,
 }
 
@@ -125,7 +80,6 @@ impl SharedHistoryStore {
         }
     }
 
-    /// TS initialize(): mkdir(root, {recursive:true, mode:0o700}).
     async fn initialize(&self) -> Result<(), String> {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -134,24 +88,18 @@ impl SharedHistoryStore {
             .map_err(|e| e.to_string())
     }
 
-    /// TS index(): strict {sessions[], deleted[]} shape, ENOENT → empty index.
     async fn index(&self) -> Result<Index, String> {
         let text = match tokio::fs::read_to_string(self.root.join("index.json")).await {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Index::default()),
             Err(e) => return Err(e.to_string()),
         };
-        // Parse errors propagate raw like TS JSON.parse; shape errors get the
-        // contract message.
         let data: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         let valid = data.get("sessions").is_some_and(Value::is_array)
             && data.get("deleted").is_some_and(Value::is_array);
         if !valid {
             return Err(INDEX_INVALID.into());
         }
-        // TS: stub fields beyond the array-shape check are tolerated —
-        // Snapshot uses serde(default) for absent fields; a non-u64
-        // nextSessionNumber is ignored (TS `valid()` discards it, floor=1).
         let mut index = Index::default();
         for stub in data["sessions"].as_array().unwrap() {
             index.sessions.push(
@@ -169,10 +117,6 @@ impl SharedHistoryStore {
         Ok(index)
     }
 
-    /// TS transaction(): the Mutex serializes index transactions like the
-    /// `transactions` promise chain. Inside: initialize → root lock (retries
-    /// 20 / 50–500 ms jitter via acquire_retry) → index → operation →
-    /// compromised check → release.
     async fn transaction<T, F>(&self, operation: F) -> Result<T, String>
     where
         F: AsyncFnOnce(&mut Index) -> Result<T, String>,
@@ -187,7 +131,6 @@ impl SharedHistoryStore {
             LOCK_STALE,
             INDEX_LOCK_RETRIES,
             move || {
-                // proper-lockfile onCompromised → TS transactionError; commit aborts.
                 *flag.lock().unwrap() = Some(LOCK_COMPROMISED.into());
             },
         )
@@ -196,7 +139,6 @@ impl SharedHistoryStore {
         let result = async {
             let mut index = self.index().await?;
             let out = operation(&mut index).await?;
-            // TS: if (compromised) throw compromised — even after a clean op.
             if let Some(error) = self.transaction_error.lock().unwrap().clone() {
                 return Err(error);
             }
@@ -206,16 +148,11 @@ impl SharedHistoryStore {
         if self.transaction_error.lock().unwrap().is_none() {
             lock.release().await;
         } else {
-            // TS skips release() on a compromised lock: the .lock dir may already
-            // belong to a new holder. MkdirLock::drop would remove_dir_all it, so
-            // leak the dead handle — its heartbeat already exited when it fired.
-            std::mem::forget(lock);
+            drop(lock);
         }
         result
     }
 
-    /// TS commit(): temp `${file}.${uuid}.tmp` at 0600 → abort if the lock was
-    /// compromised mid-transaction → rename. Temp file always removed.
     async fn commit(&self, index: &Index) -> Result<(), String> {
         let file = self.root.join("index.json");
         let tmp = self.root.join(format!("index.json.{}.tmp", Uuid::new_v4()));
@@ -231,8 +168,6 @@ impl SharedHistoryStore {
             let body = serde_json::to_vec(index).map_err(|e| e.to_string())?;
             handle.write_all(&body).await.map_err(|e| e.to_string())?;
             drop(handle);
-            // TS: if (this.transactionError) throw this.transactionError —
-            // the compromised check must precede the rename.
             if let Some(error) = self.transaction_error.lock().unwrap().clone() {
                 return Err(error);
             }
@@ -248,10 +183,8 @@ impl SharedHistoryStore {
 
     /// index.json sessions sorted by updated desc; no lock needed (atomic rename).
     pub async fn list(&self) -> Result<Vec<Snapshot>, String> {
-        // TS comment: readers see a complete committed version without waiting
-        // behind transcript I/O or cross-process writer locks.
         let mut sessions = self.index().await?.sessions;
-        sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.updated));
         Ok(sessions)
     }
 
@@ -259,7 +192,6 @@ impl SharedHistoryStore {
     pub async fn claim(&self, id: &str) -> Result<(), String> {
         match self.try_claim(id).await {
             Ok(()) => Ok(()),
-            // TS: ELOCKED → SessionInUseError
             Err(LockError::Held) => Err(SessionInUseError.to_string()),
             Err(error) => Err(error.to_string()),
         }
@@ -268,11 +200,9 @@ impl SharedHistoryStore {
     /// claim() returning the typed LockError so callers (write_delegated) can
     /// branch on Held without matching the localized message string.
     async fn try_claim(&self, id: &str) -> Result<(), LockError> {
-        // TS: existing lease is a no-op unless the lease was lost.
         if self.leases.lock().await.contains_key(id) {
             if self.lost.lock().unwrap().contains(id) {
-                return Err(LockError::Io(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(LockError::Io(io::Error::other(
                     "共享会话锁已失效，请重新连接。",
                 )));
             }
@@ -280,14 +210,12 @@ impl SharedHistoryStore {
         }
         self.initialize()
             .await
-            .map_err(|e| LockError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| LockError::Io(io::Error::other(e)))?;
         let key = self.root.join(format!("session-{}", sha256_hex(id)));
         let lost = self.lost.clone();
         let on_lease_lost = self.on_lease_lost.clone();
         let owned = id.to_string();
         let lock = MkdirLock::acquire(&key, LOCK_UPDATE, LOCK_STALE, move || {
-            // TS onCompromised: lost.add(id) + onLeaseLost?.(id) — the service
-            // callback fails the live runtime loudly.
             lost.lock().unwrap().insert(owned.clone());
             if let Some(callback) = &on_lease_lost {
                 callback(&owned);
@@ -300,15 +228,12 @@ impl SharedHistoryStore {
     }
 
     pub async fn release(&self, id: &str) {
-        // TS: drop the lease + seen revision first, then release unless lost.
         let lock = self.leases.lock().await.remove(id);
         self.seen.lock().await.remove(id);
         let lost = self.lost.lock().unwrap().remove(id);
         if let Some(lock) = lock {
             if lost {
-                // Lost lease: the lock dir may already be re-acquired by another
-                // window — never remove it (TS: `if (release && !lost)`).
-                std::mem::forget(lock);
+                drop(lock);
             } else {
                 lock.release().await;
             }
@@ -322,23 +247,18 @@ impl SharedHistoryStore {
         }
     }
 
-    /// TS SnapshotStore.file(key) → conversations/<sha256(key)>.json.
     fn snapshot_file(&self, storage_key: &str) -> PathBuf {
         self.conversations
             .join(format!("{}.json", sha256_hex(storage_key)))
     }
 
-    /// TS key(snapshot): `${id}:${revision}` — shared history requires one.
     fn storage_key(snapshot: &Snapshot) -> Result<String, String> {
-        // TS throws on any falsy revision (missing or empty string).
         match snapshot.revision.as_deref() {
             Some(revision) if !revision.is_empty() => Ok(format!("{}:{}", snapshot.id, revision)),
             _ => Err("共享历史缺少版本标识，拒绝读取或覆盖。".into()),
         }
     }
 
-    /// TS SnapshotStore.write(snapshot, storageKey): atomic write of the FULL
-    /// snapshot under conversations/, returns the stored stub.
     async fn raw_write(&self, snapshot: &Snapshot, storage_key: &str) -> Result<Snapshot, String> {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -348,8 +268,6 @@ impl SharedHistoryStore {
         write_atomic_json(&self.snapshot_file(storage_key), snapshot, false)
             .await
             .map_err(|e| e.to_string())?;
-        // TS: const {entries, nativeForks, ...index} = snapshot;
-        //     return {...index, entries:[], stored:true}
         let mut stub = snapshot.clone();
         stub.entries = Vec::new();
         stub.native_forks = None;
@@ -357,8 +275,6 @@ impl SharedHistoryStore {
         Ok(stub)
     }
 
-    /// TS SnapshotStore.read(stub, storageKey): not-stored → validate clone;
-    /// stored → read file, verify id/cwd/entries, then validateSnapshot.
     async fn raw_read(&self, stub: &Snapshot, storage_key: &str) -> Result<Snapshot, String> {
         if stub.stored != Some(true) {
             return validate_snapshot(stub.clone());
@@ -367,7 +283,6 @@ impl SharedHistoryStore {
             .await
             .map_err(|e| e.to_string())?;
         let data: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        // TS: data.id!==snapshot.id || data.cwd!==snapshot.cwd || !Array.isArray(data.entries)
         if data.get("id").and_then(Value::as_str) != Some(stub.id.as_str())
             || data.get("cwd").and_then(Value::as_str) != Some(stub.cwd.as_str())
             || !data.get("entries").is_some_and(Value::is_array)
@@ -378,7 +293,6 @@ impl SharedHistoryStore {
         serde_json::from_value(data).map_err(|_| FORMAT_UNSUPPORTED.into())
     }
 
-    /// TS SnapshotStore.remove(storageKey) → rm(file, {force:true}).
     async fn raw_remove(&self, storage_key: &str) {
         let _ = tokio::fs::remove_file(self.snapshot_file(storage_key)).await;
     }
@@ -389,7 +303,6 @@ impl SharedHistoryStore {
         self.transaction(async |index: &mut Index| {
             let current = index.sessions.iter().find(|s| s.id == stub.id).cloned();
             let Some(current) = current else {
-                // TS: unstored + untombstoned → validate and echo the input clone.
                 if stub.stored != Some(true) && !index.deleted.iter().any(|d| d == &stub.id) {
                     return validate_snapshot(stub.clone());
                 }
@@ -398,14 +311,12 @@ impl SharedHistoryStore {
             let mut data = self
                 .raw_read(&current, &Self::storage_key(&current)?)
                 .await?;
-            // TS: if (this.leases.has(data.id)) this.seen.set(data.id, data.revision)
             if self.leases.lock().await.contains_key(&data.id) {
                 self.seen
                     .lock()
                     .await
                     .insert(data.id.clone(), data.revision.clone());
             }
-            // TS: {...data, sessionNumber:current.sessionNumber}
             data.session_number = current.session_number;
             Ok(data)
         })
@@ -495,7 +406,6 @@ impl SharedHistoryStore {
             let saved = self
                 .raw_write(&version, &Self::storage_key(&version)?)
                 .await?;
-            // TS: index.sessions = [saved, ...sessions.filter(s => s.id !== id)]
             index.sessions.retain(|s| s.id != snapshot.id);
             index.sessions.insert(0, saved.clone());
             self.commit(index).await?;
@@ -511,7 +421,6 @@ impl SharedHistoryStore {
         .await
     }
 
-    /// TS clear(): tombstone every index entry, commit, then unlink files.
     pub async fn clear(&self) -> Result<(), String> {
         self.transaction(async |index: &mut Index| {
             let sessions = std::mem::take(&mut index.sessions);
@@ -537,8 +446,6 @@ impl SharedHistoryStore {
             if !index.deleted.iter().any(|d| d == id) {
                 index.deleted.push(id.to_string());
             }
-            // TS comment: commit tombstones before unlinking — a failed unlink
-            // cannot resurrect history.
             self.commit(index).await?;
             if let Some(current) = current {
                 self.raw_remove(&Self::storage_key(&current)?).await;
@@ -549,9 +456,6 @@ impl SharedHistoryStore {
     }
 }
 
-/// TS validateSnapshot() on a typed Snapshot: id/cwd strings and the entries
-/// array are guaranteed by the struct, and `contextPending` cannot survive
-/// serde — only contextComplete and the harness rule remain checkable here.
 fn validate_snapshot(snapshot: Snapshot) -> Result<Snapshot, String> {
     if snapshot.context_complete != Some(true) {
         return Err(FORMAT_UNSUPPORTED.into());
@@ -560,8 +464,6 @@ fn validate_snapshot(snapshot: Snapshot) -> Result<Snapshot, String> {
     Ok(snapshot)
 }
 
-/// TS validateSnapshot() on a freshly parsed JSON object — checks the same raw
-/// keys the TS version inspects, including the `contextPending` own-property.
 fn validate_snapshot_value(data: &Value) -> Result<(), String> {
     let Some(object) = data.as_object() else {
         return Err(FORMAT_UNSUPPORTED.into());
@@ -580,9 +482,6 @@ fn validate_snapshot_value(data: &Value) -> Result<(), String> {
     )
 }
 
-/// TS snapshotHarness() restricted to the service's own harness: the daemon
-/// only owns 'pi' sessions, so other harnesses and workbench:(codex|claude):
-/// namespaced ids are always foreign and rejected.
 fn check_harness(id: &str, harness: Option<&str>) -> Result<(), String> {
     if harness != Some("pi")
         || id.starts_with("workbench:codex:")
@@ -596,12 +495,10 @@ fn check_harness(id: &str, harness: Option<&str>) -> Result<(), String> {
 /// session-numbers.ts allocateSessionNumber — pure function, fully implementable
 /// from the index invariants above.
 pub fn allocate_session_number(index: &mut Index, snapshot: &Snapshot) -> Result<u64, String> {
-    /// TS `valid` = Number.isSafeInteger(v) && v > 0 — the JS bound, not u64::MAX.
     const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991; // 2**53 - 1
     fn valid(number: Option<u64>) -> Option<u64> {
         number.filter(|n| *n > 0 && *n <= MAX_SAFE_INTEGER)
     }
-    // TS: conversationId || id — empty strings are falsy and fall back to id.
     let logical = snapshot
         .conversation_id
         .as_deref()
@@ -626,7 +523,6 @@ pub fn allocate_session_number(index: &mut Index, snapshot: &Snapshot) -> Result
             Some(current) => n.max(current + 1),
             None => n,
         });
-    // TS: if (!Number.isSafeInteger(number+1)) throw
     if number + 1 > MAX_SAFE_INTEGER {
         return Err("会话编号已超过安全范围。".into());
     }

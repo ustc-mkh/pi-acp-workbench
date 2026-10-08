@@ -3,5 +3,6 @@
   "allowedUserIds": [123456789],
   "workspaces": {
     "project": "/absolute/path/to/project"
-  }
+  },
+  "restrictToWorkspaces": true
 }

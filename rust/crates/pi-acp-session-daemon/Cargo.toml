@@ -19,3 +19,5 @@ hex = "0.4"
 indexmap = "2"
 regex = "1"
 libc = "0.2"
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
+thiserror = "2"

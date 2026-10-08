@@ -252,6 +252,25 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       if (text === 'edit-workspace-crash') process.exit(7);
       if (text === 'edit-workspace-wait') return;
     }
+    if (mode === 'context-live') {
+      update({ sessionUpdate: 'usage_update', used: 1234, size: 200000 });
+      update({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'term',
+        title: 'bash',
+        _meta: { terminal_info: { terminal_id: 'term', cwd: process.cwd() } },
+      });
+      update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'term',
+        _meta: { terminal_output: { terminal_id: 'term', data: 'first\n' } },
+      });
+      update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'term',
+        _meta: { terminal_output: { terminal_id: 'term', data: 'second' } },
+      });
+    }
     if (text === 'crash') process.exit(7);
     if (text === 'wait') return;
     if (text === 'permission') {

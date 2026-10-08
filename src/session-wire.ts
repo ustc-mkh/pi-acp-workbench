@@ -2,8 +2,7 @@ import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-export const sessionSocket = () =>
-  join(homedir(), '.pi', 'pi-acp-workbench', 'service', 'sessions.sock');
+const sessionSocket = () => join(homedir(), '.pi', 'pi-acp-workbench', 'service', 'sessions.sock');
 const LIMIT = 16 * 1024 * 1024;
 /** Client-side bounds only. The Rust service owns server limits and accounting. */
 export const WIRE_LIMITS = { pending: 128, partialMs: 10000, responseBytes: 64 * 1024 * 1024 };

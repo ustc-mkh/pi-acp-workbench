@@ -1,5 +1,3 @@
-//! initialState / appendText / applyUpdate port (src/state.ts). Operates on the
-//! daemon's mutable ChatState; semantics must match the TS switch exactly.
 use crate::types::{ChatState, Entry};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
-/// `entry-${Date.now()}-${++serial}` — same shape as the TS generator.
 pub fn next_id() -> String {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -20,8 +17,6 @@ pub fn initial_state() -> ChatState {
     ChatState::default()
 }
 
-/// JS falsy for messageId: null/""/0/false mean "no id" (mergeable with a
-/// messageId-less last entry), same as TS `!messageId`.
 fn js_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -37,10 +32,8 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
     let mergeable = state.entries.last().is_some_and(|last| {
         last.role == role
             && role != "notice"
-            // TS: `!messageId || last.messageId===messageId` — a falsy messageId
-            // (null/""/0/false) merges into ANY last entry; a truthy one must
-            // equal the last entry's id exactly.
-            && (message_id.map(|m| !js_truthy(m)).unwrap_or(true) || &last.message_id == &message_id.cloned())
+            && (message_id.map(|m| !js_truthy(m)).unwrap_or(true)
+                || last.message_id == message_id.cloned())
     });
     if mergeable {
         let last = state.entries.last_mut().unwrap();
@@ -56,6 +49,7 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
             context_blocks: None,
             tool: None,
             diff: None,
+            terminal: None,
         });
     }
 }
@@ -140,6 +134,7 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             match index {
                 Some(i) => {
                     let entry = &mut state.entries[i];
+                    entry.terminal = merge_terminal(entry.terminal.take(), update.get("_meta"));
                     if let (Some(Value::Object(old)), Value::Object(new)) =
                         (entry.tool.take(), fields)
                     {
@@ -166,6 +161,7 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                         context_blocks: None,
                         tool: Some(tool),
                         diff: None,
+                        terminal: merge_terminal(None, update.get("_meta")),
                     });
                 }
             }
@@ -185,8 +181,6 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                 .unwrap_or_default()
         }
         "current_mode_update" => {
-            // TS writes `currentModeId: update.currentModeId` — undefined is
-            // dropped on stringify, so absence must not emit `null`.
             if let (Some(Value::Object(modes)), Some(mode)) =
                 (&mut state.modes, update.get("currentModeId"))
             {
@@ -200,16 +194,73 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                 .cloned()
         }
         "usage_update" => {
-            // TS {used,size} with undefined keys dropped — same omit rule.
-            let mut usage = serde_json::Map::new();
-            if let Some(v) = update.get("used") {
-                usage.insert("used".into(), v.clone());
+            if let (Some(used), Some(size)) = (
+                update.get("used").and_then(Value::as_f64),
+                update.get("size").and_then(Value::as_f64),
+            ) {
+                if used.is_finite() && used >= 0.0 && size.is_finite() && size > 0.0 {
+                    state.usage =
+                        Some(serde_json::json!({"used": update["used"], "size": update["size"]}));
+                }
             }
-            if let Some(v) = update.get("size") {
-                usage.insert("size".into(), v.clone());
+        }
+        "session_info_update" => {
+            if let Some(usage) = update.pointer("/_meta/pi-workbench-context") {
+                if usage.get("used") == Some(&Value::Null)
+                    && usage
+                        .get("size")
+                        .and_then(Value::as_f64)
+                        .is_some_and(|size| size.is_finite() && size > 0.0)
+                {
+                    state.usage = Some(usage.clone());
+                }
             }
-            state.usage = Some(Value::Object(usage));
         }
         _ => {}
     }
+}
+
+/// Terminal output arrives as deltas in metadata, even when content is absent.
+fn merge_terminal(previous: Option<Value>, meta: Option<&Value>) -> Option<Value> {
+    let Some(meta) = meta else { return previous };
+    let info = &meta["terminal_info"];
+    let chunk = &meta["terminal_output"];
+    let exit = &meta["terminal_exit"];
+    let id = [info, chunk, exit]
+        .iter()
+        .find_map(|v| v.get("terminal_id").and_then(Value::as_str));
+    let Some(id) = id.filter(|id| !id.is_empty()) else {
+        return previous;
+    };
+    let mut result = previous
+        .filter(|p| p["id"].as_str() == Some(id))
+        .unwrap_or_else(|| serde_json::json!({"id":id,"output":""}));
+    if let Some(cwd) = info.get("cwd").and_then(Value::as_str) {
+        result["cwd"] = Value::String(cwd.into());
+    }
+    if chunk["terminal_id"].as_str() == Some(id) {
+        if let Some(data) = chunk["data"].as_str() {
+            let output = format!("{}{data}", result["output"].as_str().unwrap_or_default());
+            let units = output.encode_utf16().count();
+            result["output"] = Value::String(pi_acp_core::utf16::utf16_tail(&output, 1024 * 1024));
+            if units > 1024 * 1024 {
+                result["truncated"] = Value::Bool(true);
+            }
+        }
+    }
+    if exit["terminal_id"].as_str() == Some(id) {
+        if exit
+            .get("exit_code")
+            .is_some_and(|v| v.is_null() || v.is_number())
+        {
+            result["exitCode"] = exit["exit_code"].clone();
+        }
+        if exit
+            .get("signal")
+            .is_some_and(|v| v.is_null() || v.is_string())
+        {
+            result["signal"] = exit["signal"].clone();
+        }
+    }
+    Some(result)
 }

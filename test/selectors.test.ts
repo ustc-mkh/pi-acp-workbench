@@ -26,7 +26,7 @@ it('uses one config selector for Pi modes and thought_level without changing pro
     ],
   });
 });
-it('hides only Codex fast mode and collaboration mode, retaining reasoning and permissions', () => {
+it('exposes Codex fast mode while retaining the default collaboration mode', () => {
   const configs = [
     thinking,
     { ...thinking, id: 'fast-mode', name: 'Fast mode', category: 'model_config' },
@@ -40,6 +40,7 @@ it('hides only Codex fast mode and collaboration mode, retaining reasoning and p
   ];
   expect(sessionSelectors({ harness: 'codex', configs }).map((c) => c.change)).toEqual([
     { type: 'config', id: 'thinking' },
+    { type: 'config', id: 'fast-mode' },
     { type: 'config', id: 'mode' },
   ]);
   expect(sessionSelectors({ harness: 'pi', configs })).toHaveLength(4);

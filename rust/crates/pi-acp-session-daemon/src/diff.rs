@@ -1,43 +1,3 @@
-//! WorkspaceDiff + turnDiffText port (src/workspace-diff.ts + turn-diff.ts).
-//! Read-only git commands only — never stage/reset/commit or external diff tools.
-//!
-//! DIFF_LIMITS: files 5000, fileBytes 1 MiB, snapshotBytes 16 MiB, resultBytes
-//! 4 MiB, commandMs 10 s, collectionMs 15 s.
-//!
-//! Port notes:
-//! - git() helper: `git --no-pager --no-optional-locks -c core.fsmonitor=false
-//!   -c core.autocrlf=false <args>` with all GIT_* env stripped, 10s timeout,
-//!   2 MiB maxBuffer (custom for diff); non-zero exit → 'Git 修改采集失败或超过时间/大小限制。'
-//!   except diff --no-index exit 1 (allowed).
-//! - readState(root, name, budget): resolve + inside-workspace check
-//!   ('文件路径超出工作区'); realpath(dirname) inside check ('目录链接超出工作区');
-//!   lstat mode = mode & 0o177777; signature `metadata:${mode}:${size}:${mtimeMs}:${ctimeMs}`;
-//!   symlink → signature `link:${target}` + text=target; non-regular →
-//!   {signature, omitted:'非普通文件（目录或子模块）'}; over file/snapshot budget →
-//!   {signature, omitted:'文件或快照超过采集上限'}; else open O_RDONLY|O_NOFOLLOW|
-//!   O_NONBLOCK, verify ino/dev match (replacement → '采集时文件发生替换'),
-//!   realpath(/proc/self/fd/N) inside check ('打开的文件超出工作区'), read ≤limit,
-//!   final stat must match mtime/size ('采集期间文件发生变化'), sha256 → text
-//!   only if valid UTF-8 without NUL else {signature:hash, omitted:'二进制或非 UTF-8 文件，不展示内容'}.
-//! - capture(root, known=[]): names = git ls-files -z --cached --others
-//!   --exclude-standard -- . plus `known`; >5000 → '工作区超过 5000 个文件，未采集完整差异。';
-//!   per file readState failures → {signature:'unreadable', omitted:'文件无法安全读取'};
-//!   warnings: `${n} 个文件未采集文本内容（大小限制、二进制、子模块或读取失败）。` when omitted>0.
-//! - compare(before,after): union sorted names; skip same signature+mode;
-//!   status added|deleted|modified + oldMode/newMode; omitted passthrough;
-//!   patch via tempdir + git diff --no-index --no-ext-diff --no-textconv --no-color
-//!   --unified=3 -- before after; added/removed = +/- hunk lines; headers built
-//!   with JSON.stringify-quoted paths (`diff --git "a/x" "b/x"` etc.) — reproduce
-//!   new file mode/deleted file mode/old mode lines exactly (octal modes);
-//!   resultBytes budget → strip before/after/patch + omitted note; .gitignore
-//!   change → warning '本轮忽略规则发生变化；新增文件列表可能包含此前被忽略的文件。'.
-//! - WorkspaceDiff::begin(cwd): realpath; not a git worktree →
-//!   error '无法建立本轮基线：需要 Git 工作区且文件数量/体积在采集限制内。{msg}'.
-//! - finish(): compare → diff entry {id:next_id(), role:'diff', text:turnDiffText,
-//!   diff}; always appends scope line '工作区本轮开始到结束的净变化；不含 Git 忽略文件。并发的手工或其他会话修改也可能计入；不是文件回滚点。'.
-//! - turnDiffTitle/Text: '本轮修改 · {files} 个文件 · +{added} −{removed}' +
-//!   '（部分结果）' when partial; '本轮修改 · 未能采集' when unavailable;
-//!   per file '{path}: +{added} −{removed}' + ' · {omitted}'; then warnings.
 use crate::types::{Entry, TurnDiff, TurnFileDiff};
 use crate::updates::next_id;
 use sha2::{Digest, Sha256};
@@ -46,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 
-// DIFF_LIMITS from src/workspace-diff.ts.
 const FILES_LIMIT: usize = 5000;
 const FILE_BYTES: u64 = 1024 * 1024;
 const SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -135,8 +94,6 @@ fn is_enoent(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENOENT)
 }
 
-/// Read-only git subprocess — see the TS `git()` helper. Never passes args that
-/// mutate the worktree; `allow_diff` exists only for `diff --no-index` exit 1.
 async fn git(
     cwd: &Path,
     args: &[&str],
@@ -197,9 +154,6 @@ async fn git(
     }
 }
 
-/// Port of readState(). Ok(None) mirrors the TS `ENOENT → return undefined`
-/// path (file disappeared between ls-files and read). Any other error is
-/// reported to capture() which records the file as unreadable.
 async fn read_state(
     root: &Path,
     name: &str,
@@ -309,7 +263,7 @@ async fn read_state(
             *budget += length as u64;
             Ok::<Vec<u8>, String>(buffer)
         }
-        .await?; // `handle` drops on the error path too, matching TS `finally { handle.close() }`
+        .await?;
         let hash = hex::encode(Sha256::digest(&bytes));
         // TextDecoder fatal+ignoreBOM: valid UTF-8 without NUL bytes only.
         match std::str::from_utf8(&bytes) {

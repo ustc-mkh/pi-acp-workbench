@@ -1,48 +1,6 @@
-//! Session service transport — docs/service-protocol.md.
-//! Unix listener + bounded per-connection reader/writer.
-//! TS parity notes below describe the retired implementation, not a dependency.
-//!
-//! Limits (MUST match): connections 32; inbound line 16 MiB; incomplete inbound
-//! frame 10s destroys socket; global pending 128 ops / 32 MiB buffered request
-//! bytes; per-socket outgoing 64 MiB queue, global 128 MiB; subscriptions ≤32;
-//! sessionId ≤1000 chars; request id ≤200 chars.
-//!
-//! Frames (single-line JSON):
-//!   request   {id, method, params}          params must be a JSON object (arrays
-//!                                           pass typeof check but fail serviceCommand)
-//!   response  {id, value} | {id, error}     value key OMITTED when result is undefined
-//!   event     {event: {…}}                  only to sockets subscribed via _watch
-//!   fragment  {id?, fragment, last}         responses >512 KiB are split at 128 KiB
-//!
-//! KEY SUBTLETY (spec §4): fragments are cut at 128 *KIB* of UTF-16 code units on
-//! the JS string and may split a surrogate pair (escaped as \uXXXX in the frame).
-//! In Rust: serialize the response with serde_json (UTF-8), then… NO — the JS
-//! server slices the *string* in UTF-16 units. Equivalent: encode the serialized
-//! JSON to UTF-16 (Vec<u16>), slice at 128*1024 u16 units, then emit each slice
-//! as a JSON string — escaping lone surrogates manually since serde_json refuses
-//! them. Implemented by `encode_fragment()` below; a slice that ends on a high
-//! surrogate / starts on a low one is legal and REQUIRED for parity.
-//!
-//! Behavior (TS → Rust mapping):
-//! - accept → if sockets>=32 destroy; else spawn reader+writer+emit tasks.
-//! - per conn: Conn{outbox queue,queued_bytes,subscriptions}; reader loop:
-//!   `{id,method,params}` validation (id string ≤200 UTF-16 units, method
-//!   string, params object — JS `typeof [] === 'object'` passes the wire check)
-//!   else destroy; `_watch` → validate sessionId str ≤1000 units + enabled bool;
-//!   enabled && size>=32 && !has → {id,error:'订阅已满'} else add/remove +
-//!   {id,value:true}; other methods → pending guard → spawn
-//!   handle(method,params,id,emit) → {id,value} or {id,error: msg} — the emit
-//!   channel sends {event} to THIS socket only.
-//! - send(): serialize `{id,value}` — encode size >64MiB → fallback
-//!   {id,error:'会话响应超过 64 MiB，请缩小查询范围或创建新会话。'}.
-//! - writer loop = TS flush(): sequential per socket; >512*1024-byte bodies
-//!   become fragment frames (sliced in UTF-16 units). Frame write timeout 10s →
-//!   destroy. Queue caps → destroy socket on overflow.
-//! - broadcast(event): sessionId = event.snapshot?.id || event.notification?.sessionId;
-//!   only subscribed sockets. Oversized encode → fallback
-//!   {event:{type:'serviceError',sessionId,error:'会话状态超过 64 MiB，请创建新会话。'}}.
-//! - listen(): bind inside a private 0700 directory, chmod 0600, then publish by rename.
-//! - dispose(): destroy all sockets, close listener, rm socket file.
+//! Bounded newline-delimited service transport with fragmented responses.
+//! Per-socket writers serialize output; malformed input closes only its connection.
+//! Allocation limits and frame deadlines are specified in docs/service-protocol.md.
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -59,8 +17,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// WIRE_LIMITS / LIMIT from src/session-wire.ts — docs/service-protocol.md §3.
-/// `LIMIT` doubles as the inbound line cap and the default encode() cap.
 const LINE_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_PENDING: usize = 128;
@@ -72,23 +28,18 @@ const PARTIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SUBSCRIPTIONS: usize = 32;
 const MAX_SESSION_ID: usize = 1000;
 const MAX_REQUEST_ID: usize = 200;
-/// TS flush(): bodies whose UTF-8 byte length exceeds 512 KiB are fragmented.
 const FRAGMENT_MIN: usize = 512 * 1024;
-/// TS body.slice() step — 128 Ki UTF-16 code units; may split surrogate pairs.
 const FRAGMENT_UNITS: usize = 128 * 1024;
 
 pub type Handler =
     Arc<dyn Fn(String, Value, String, mpsc::UnboundedSender<Value>) -> HandlerFuture + Send + Sync>;
-pub type HandlerFuture = std::pin::Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
+pub type HandlerFuture =
+    std::pin::Pin<Box<dyn Future<Output = Result<Value, crate::error::ServiceError>> + Send>>;
 
-/// TS `Outgoing` — per-socket writer state plus _watch subscriptions.
 struct Conn {
     id: u64,
-    /// TS state.bytes — bytes currently queued for this socket.
     queued_bytes: AtomicUsize,
     subscriptions: Mutex<HashSet<String>>,
-    /// TS state.queue — serialized frames; the writer task is the only consumer,
-    /// which makes every transfer sequential like the TS flush() loop.
     outbox: mpsc::UnboundedSender<String>,
     /// handler `emit` endpoint → emit_loop wraps each item as {event} → send().
     emit: mpsc::UnboundedSender<Value>,
@@ -96,22 +47,14 @@ struct Conn {
     cancel: CancellationToken,
 }
 
-/// TS `this` (SessionServer privates): sockets, pending, pendingBytes,
-/// bufferedBytes, outgoingBytes.
 struct Shared {
     handle: Handler,
-    /// TS this.sockets (id → live connection).
     conns: Mutex<HashMap<u64, Arc<Conn>>>,
     next_conn: AtomicU64,
-    /// TS this.pending — in-flight handler calls.
     pending: AtomicUsize,
-    /// TS this.pendingBytes — bytes of in-flight requests.
     pending_bytes: AtomicUsize,
-    /// TS this.bufferedBytes — global inbound buffered bytes (reader `adjust`).
     buffered_bytes: AtomicUsize,
-    /// TS this.outgoingBytes — global queued outbound bytes.
     outgoing_bytes: AtomicUsize,
-    /// server lifetime — stops the accept loop (TS server.close()).
     shutdown: CancellationToken,
     accept_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
@@ -127,8 +70,6 @@ impl Shared {
         MAX_RESPONSE_BYTES
     }
 
-    /// TS reader's `adjust(delta)` — global inbound buffered-byte accounting.
-    /// Returns false when the added bytes push the total past 32 MiB.
     fn adjust_buffered(&self, delta: isize) -> bool {
         if delta >= 0 {
             self.buffered_bytes
@@ -142,19 +83,14 @@ impl Shared {
         }
     }
 
-    /// TS 'close' handler — drop the socket from the set and stop its tasks.
-    /// Queued bytes are reclaimed by the writer task draining its channel.
     fn close_conn(&self, conn: &Arc<Conn>) {
         conn.cancel.cancel();
         self.conns.lock().unwrap().remove(&conn.id);
     }
 
-    /// TS enqueue(): cap-check then queue a serialized frame for this socket.
-    /// Reserve-then-check mirrors the single-threaded TS accounting exactly;
-    /// overflow destroys the socket (TS socket.destroy()).
     fn enqueue(&self, conn: &Arc<Conn>, body: String) {
         if conn.cancel.is_cancelled() {
-            return; // TS: !state || socket.destroyed → drop
+            return;
         }
         let bytes = body.len();
         let per = conn.queued_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
@@ -171,8 +107,6 @@ impl Shared {
         }
     }
 
-    /// TS send(): encode under 64 MiB; oversize falls back to a fixed error —
-    /// but only for {id,…} frames ({event} frames have no id and are dropped).
     fn send(&self, conn: &Arc<Conn>, frame: Value) {
         match encode(&frame, self.response_limit()) {
             Some(body) => self.enqueue(conn, body),
@@ -187,16 +121,8 @@ impl Shared {
         }
     }
 
-    /// TS accept-handler `reader(socket, receive, adjust)` receive callback —
-    /// per-line request validation, `_watch`, pending guard, handler spawn.
-    /// Err(()) destroys the socket (TS socket.destroy() on invalid frames).
     fn receive(self: &Arc<Self>, conn: &Arc<Conn>, line: &[u8], size: usize) -> Result<(), ()> {
-        // TS: JSON.parse failure → destroy ('会话协议无效' — error event is a no-op,
-        // so nothing reaches the client, matching serde failure → destroy here).
         let item: Value = serde_json::from_slice(line).map_err(|_| ())?;
-        // TS: !item || typeof id!=='string' || id.length>200 || typeof method!=='string'
-        //     || !params || typeof params!=='object' → destroy (no error frame).
-        // `length` counts UTF-16 units; arrays pass the JS typeof-object check.
         let Some(id) = item.get("id").and_then(Value::as_str) else {
             return Err(());
         };
@@ -238,7 +164,6 @@ impl Shared {
             return Ok(());
         }
 
-        // TS pending/pendingBytes guard → error frame (not a destroy).
         if self.pending.fetch_add(1, Ordering::SeqCst) >= MAX_PENDING {
             self.pending.fetch_sub(1, Ordering::SeqCst);
             self.send(
@@ -257,9 +182,6 @@ impl Shared {
             return Ok(());
         }
 
-        // TS: Promise.resolve().then(()=>this.handle(method,params,id,emit))
-        //     .then(v=>send({id,value:v}), e=>send({id,error:e.message}))
-        //     .finally(()=>{pending--;pendingBytes-=bytes;})
         let shared = self.clone();
         let conn = conn.clone();
         let emit = conn.emit.clone();
@@ -267,31 +189,14 @@ impl Shared {
         let method = method.to_string();
         tokio::spawn(async move {
             let result = (shared.handle)(method.clone(), params, id.clone(), emit).await;
-            // `remove`/`historyRemove` resolve `undefined` in TS → the value
-            // key is OMITTED; other commands resolve a real JSON value.
             let frame = match result {
                 Ok(Value::Null) if method == "remove" || method == "historyRemove" => {
                     json!({ "id": id })
                 }
                 Ok(value) => json!({ "id": id, "value": value }),
                 Err(error) => {
-                    let mut frame = json!({ "id": id, "error": error });
-                    if !matches!(
-                        method.as_str(),
-                        "hello"
-                            | "list"
-                            | "create"
-                            | "state"
-                            | "cancel"
-                            | "remove"
-                            | "permission"
-                            | "prompt"
-                            | "request"
-                            | "historyWrite"
-                            | "historyRemove"
-                    ) {
-                        frame["code"] = json!("unknown_method");
-                    }
+                    let frame =
+                        json!({ "id": id, "error": error.to_string(), "code": error.code() });
                     frame
                 }
             };
@@ -302,7 +207,6 @@ impl Shared {
         Ok(())
     }
 
-    /// TS createServer(connection => {…}) accept loop.
     async fn accept_loop(self: &Arc<Self>, listener: UnixListener) {
         loop {
             let stream = tokio::select! {
@@ -324,7 +228,6 @@ impl Shared {
             });
             {
                 let mut conns = self.conns.lock().unwrap();
-                // TS: sockets.size>=WIRE_LIMITS.connections → socket.destroy().
                 if conns.len() >= MAX_CONNECTIONS {
                     continue;
                 }
@@ -338,21 +241,15 @@ impl Shared {
     }
 }
 
-/// TS reader(): consume a byte stream into buffered lines, enforce the 16 MiB
-/// cap and the single-armed 10 s partial-frame timer, then call receive() per
-/// line. Exiting destroys the connection (reader owns teardown).
 async fn reader_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut read: OwnedReadHalf) {
     let mut buffer: Vec<u8> = Vec::with_capacity(8192);
     let mut chunk = [0u8; 64 * 1024];
-    let mut bytes = 0usize; // TS `bytes` — buffered byte count under `adjust`
-                            // TS arms the 10 s timer ONCE when a remainder first appears and clears it
-                            // when the buffer empties — it is NOT refreshed by later chunks.
+    let mut bytes = 0usize;
     let mut deadline: Option<tokio::time::Instant> = None;
     'read: loop {
         let n = match deadline {
             Some(dl) => tokio::select! {
                 _ = conn.cancel.cancelled() => break 'read,
-                // TS: '会话消息未完整发送' → destroy (error object is a no-op event).
                 _ = tokio::time::sleep_until(dl) => break 'read,
                 r = read.read(&mut chunk) => match r {
                     Ok(0) | Err(_) => break 'read,
@@ -368,20 +265,18 @@ async fn reader_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut read: OwnedReadHa
             },
         };
         bytes += n;
-        // TS: !adjust(added) || bytes > LIMIT → destroy ('会话消息缓冲已满').
         if !shared.adjust_buffered(n as isize) || bytes > LINE_LIMIT {
             break 'read;
         }
         buffer.extend_from_slice(&chunk[..n]);
         while let Some(end) = buffer.iter().position(|&b| b == b'\n') {
-            let size = end + 1; // TS Buffer.byteLength(line)+1
+            let size = end + 1;
             let line: Vec<u8> = buffer.drain(..size).collect();
             bytes -= size;
             shared.adjust_buffered(-(size as isize));
             if shared.receive(&conn, &line[..end], size).is_err() {
                 break 'read;
             }
-            // TS: if(socket.destroyed) after receive → stop processing lines.
             if conn.cancel.is_cancelled() {
                 break 'read;
             }
@@ -392,15 +287,12 @@ async fn reader_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut read: OwnedReadHa
             deadline.or_else(|| Some(tokio::time::Instant::now() + PARTIAL_TIMEOUT))
         };
     }
-    // TS release() on 'close' — return any buffered remainder to the global pool.
     if bytes > 0 {
         shared.adjust_buffered(-(bytes as isize));
     }
     shared.close_conn(&conn);
 }
 
-/// TS flush()+frame(): single sequential writer per socket. Bodies >512 KiB go
-/// out as fragment frames; a failed/timed-out write destroys the socket.
 async fn writer_loop(
     shared: Arc<Shared>,
     conn: Arc<Conn>,
@@ -416,7 +308,6 @@ async fn writer_loop(
             },
         };
         let bytes = body.len();
-        // TS: try{…}catch{socket.destroy()} — any frame error ends the socket.
         let ok = flush_body(&mut write, &body, &conn.cancel).await.is_ok();
         conn.queued_bytes.fetch_sub(bytes, Ordering::SeqCst);
         shared.outgoing_bytes.fetch_sub(bytes, Ordering::SeqCst);
@@ -424,8 +315,6 @@ async fn writer_loop(
             break;
         }
     }
-    // TS 'close': state.queue=[] — drain anything queued so the byte accounting
-    // returns to zero (senders already failed or will fail on rx.close()).
     rx.close();
     while let Some(body) = rx.recv().await {
         let bytes = body.len();
@@ -435,8 +324,6 @@ async fn writer_loop(
     shared.close_conn(&conn);
 }
 
-/// TS flush() body dispatch: ≤512 KiB writes the frame whole; larger bodies are
-/// cut into 128 Ki-UTF-16-unit fragments {fragment,last} (TS sends no id).
 async fn flush_body(
     write: &mut OwnedWriteHalf,
     body: &str,
@@ -459,8 +346,6 @@ async fn flush_body(
     Ok(())
 }
 
-/// TS frame(): one write bounded by the 10 s partialMs drain ceiling; timeout
-/// or io error destroys the socket ('客户端读取超时' is a no-op error event).
 async fn write_frame(
     write: &mut OwnedWriteHalf,
     bytes: &[u8],
@@ -475,8 +360,6 @@ async fn write_frame(
     }
 }
 
-/// TS emit closure: `event => this.send(socket, {event})` — scoped to this one
-/// socket; broadcast() is the global path.
 async fn emit_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut rx: mpsc::UnboundedReceiver<Value>) {
     loop {
         let event = tokio::select! {
@@ -490,7 +373,6 @@ async fn emit_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut rx: mpsc::Unbounded
     }
 }
 
-/// TS encode(value,limit): `JSON.stringify(value)+'\n'` under a UTF-8 byte cap.
 fn encode(value: &Value, limit: usize) -> Option<String> {
     let mut body = serde_json::to_string(value).ok()?;
     body.push('\n');
@@ -865,7 +747,6 @@ impl SessionServer {
                 .create(dir)
                 .map_err(|e| format!("无法创建会话服务目录：{e}"))?;
         }
-        // TS rm(path,{force:true}) — missing file is fine, other errors fail.
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -887,16 +768,11 @@ impl SessionServer {
         Ok(())
     }
 
-    /// Push `{event}` to every socket subscribed to the event's sessionId —
-    /// TS broadcast(): snapshot.id || notification.sessionId routing, one shared
-    /// encode, 64 MiB cap with serviceError fallback.
     pub fn broadcast(&self, event: Value) {
         let session_id = match event.get("snapshot").and_then(|s| s.get("id")) {
             Some(v) if js_truthy(v) => Some(v),
             _ => event.get("notification").and_then(|n| n.get("sessionId")),
         };
-        // TS `sessionId && subscriptions.has(sessionId)` — a non-string value
-        // can never match a Set<string>, and a falsy one short-circuits.
         let Some(session_id) = session_id.and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             return;
         };
@@ -933,10 +809,10 @@ impl SessionServer {
         }
     }
 
-    /// TS dispose(): destroy every socket, close the listener, rm socket file.
     pub async fn dispose(&self) {
         self.shared.shutdown.cancel();
-        if let Some(task) = self.shared.accept_task.lock().unwrap().take() {
+        let task = self.shared.accept_task.lock().unwrap().take();
+        if let Some(task) = task {
             task.abort();
             let _ = task.await;
         }

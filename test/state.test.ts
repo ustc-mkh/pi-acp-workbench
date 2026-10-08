@@ -69,3 +69,45 @@ it('uses distinct UI keys when a protocol message spans a tool boundary', () => 
   applyUpdate(s, chunk);
   expect(new Set(s.entries.map((e) => e.id)).size).toBe(3);
 });
+it('accumulates terminal deltas and keeps output after content is replaced', () => {
+  const state = initialState();
+  applyUpdate(state, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 'bash',
+    title: 'ls',
+    _meta: { terminal_info: { terminal_id: 'term', cwd: '/work' } },
+  } as any);
+  for (const data of ['hello\n', 'world'])
+    applyUpdate(state, {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'bash',
+      _meta: { terminal_output: { terminal_id: 'term', data } },
+    } as any);
+  applyUpdate(state, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'bash',
+    status: 'completed',
+    content: [],
+    _meta: { terminal_exit: { terminal_id: 'term', exit_code: 0, signal: null } },
+  } as any);
+  expect(state.entries[0].role === 'tool' && state.entries[0].terminal).toEqual({
+    id: 'term',
+    cwd: '/work',
+    output: 'hello\nworld',
+    exitCode: 0,
+    signal: null,
+  });
+});
+it('updates context during a turn and clears stale occupancy when Pi reports unknown', () => {
+  const state = initialState();
+  applyUpdate(state, { sessionUpdate: 'usage_update', used: 80, size: 100 });
+  applyUpdate(state, { sessionUpdate: 'usage_update', used: 90, size: 100 });
+  expect(state.usage).toEqual({ used: 90, size: 100 });
+  applyUpdate(state, { sessionUpdate: 'usage_update', used: -1, size: 100 });
+  expect(state.usage?.used).toBe(90);
+  applyUpdate(state, {
+    sessionUpdate: 'session_info_update',
+    _meta: { 'pi-workbench-context': { used: null, size: 100 } },
+  } as any);
+  expect(state.usage).toEqual({ used: null, size: 100 });
+});

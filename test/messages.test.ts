@@ -89,7 +89,7 @@ it('does not call unavailable or partial results a clean workspace', () => {
   });
   expect(partial.textContent).toContain('已采集范围内');
 });
-it('shows empty results and scope notes without a disclosure', () => {
+it('keeps scope notes inside the all-changes disclosure, including empty turns', () => {
   const node = createMessageRenderer(
     (text) => text,
     () => undefined,
@@ -97,7 +97,9 @@ it('shows empty results and scope notes without a disclosure', () => {
   )({ ...summary, diff: { status: 'complete', files: [], warnings: ['净变化，不是回滚点'] } });
   const notes = node.querySelector('.turn-diff-notes')!;
   expect(notes.tagName).toBe('DIV');
-  expect(node.querySelector('details')).toBeNull();
+  const disclosure = node.querySelector('details')!;
+  expect(disclosure.open).toBe(false);
+  expect(disclosure.contains(notes)).toBe(true);
   expect(notes.textContent).toContain('本轮未检测到文件净变化。');
   expect(notes.textContent).toContain('净变化，不是回滚点');
 });
