@@ -2,11 +2,13 @@
 
 ## 0.11.4 验收 — 2026-10-10（Asia/Hong_Kong）
 
-本轮修复历史列表的后台运行指示器，并调整历史档位与圆形按钮。最终全量回归 `.test-results/run-5U094m/` 通过：类型 / 协议一致性、TS 42 文件 / 256 项、Rust 100 项（core 14 / session 56 / relay 30）、会话契约 22 项、Telegram 契约 32 项、集成、内存及 runner。新增跨 harness 的前台 / 后台并发运行标记回归、取消后清除回归；浏览器验证 4 → 10 → 20 → 10 → 4 → 关闭、20 条上限、全部运行圆环、按钮圆形尺寸和停止方块。clippy、格式、GNU 生产产物 smoke 通过，辅助日志在 `.test-results/release-0.11.4/`。
+本轮修复历史列表的后台运行指示器，并调整历史档位与圆形按钮。最终全量回归 `.test-results/run-sLqWL4/` 通过：类型 / 协议一致性、TS 42 文件 / 256 项、Rust 100 项（core 14 / session 56 / relay 30）、会话契约 22 项、Telegram 契约 32 项、集成、内存及 runner。新增跨 harness 的前台 / 后台并发运行标记回归、取消后清除回归；浏览器验证 4 → 10 → 20 → 10 → 4 → 关闭、20 条上限、全部运行圆环、按钮圆形尺寸和停止方块。clippy、格式、GNU 生产产物 smoke 通过，辅助日志在 `.test-results/release-0.11.4/`。
 
 完整浸泡 `.test-results/service-soak-0.11.4/` **通过**，退出码 0，`passed:true`：UTC 2026-10-09 18:56:13.818 至 20:56:14.482，实际 **7200.666 秒**，1440 轮 / 2959 次提示词 / 1440 次重复请求 / 1440 次取消 / 72 次授权 / 86 次删除。每轮额外检查历史列表中的后台 held 会话 `busy:true`，并在取消后验证 `busy:false`。会话服务重启 2 次、relay 重启 9 次，投递 5817 次；观察到的 2880 个 worker 全部退出，孤儿 0。会话 / relay RSS 峰值分别 16936 / 16424 KiB，FD 峰值 22 / 12；最终 RSS 14984 / 15732 KiB、FD 均 12，worker 均 0。
 
 本轮同样使用冻结的 GNU 生产会话 daemon 和 contract-test relay，模拟 ACP / Bot 传输；运行期间二进制不变：会话 SHA-256 `11fb638b0b60435a94061e5a66c23ee830fea2c38a5a81ec8d2170d8490866cf`，relay `585f100ed3acc06c18254e9a9a45bfdd3e29b227f9a78d73de898eb2af822013`。本地 GNU 浸泡不替代标签 CI 的 musl 生产包验收；实际 Extension Host、付费模型、真实 Telegram 群组及数周负载未验证。发布须配套升级会话 daemon，否则旧服务不提供后台 busy 元数据。
+
+首个候选标签 CI 的新增 controller 并发用例失败：它把初始化 / 检查阶段的短暂 busy 当作提示词已提交，可能提前脱离连接。回归现等待真实 user 轮次并主动刷新至最新历史状态再断言；这是测试时序修正，没有修改生产代码或浸泡所用二进制。失败流水线 `37991044879` 保留，诊断结果及最终回归日志保存在本地 release-0.11.4 目录。候选标签未发布，修正后重新走 main / tag CI，不绕过失败检查。
 
 ## 0.11.3 验收 — 2026-10-10（Asia/Hong_Kong）
 

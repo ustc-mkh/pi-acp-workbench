@@ -173,19 +173,33 @@ it('publishes busy history metadata for concurrent foreground and background ses
   await host.provider.perform({ type: 'new' });
   const pi = required(host.provider.state.sessionId);
   const first = host.provider.perform({ type: 'send', text: 'wait' });
-  await vi.waitFor(async () =>
-    expect((await service.call('state', { sessionId: pi })).busy).toBe(true),
-  );
+  // Initialization/inspection can also be busy: wait for a durable user turn
+  // before detaching, not merely a transient busy flag on a slow runner.
+  const submitted = (sessionId: string) =>
+    vi.waitFor(
+      async () => {
+        const value = await service.call('state', { sessionId });
+        expect(value.busy).toBe(true);
+        expect(value.snapshot.entries.some((e) => e.role === 'user' && e.text === 'wait')).toBe(
+          true,
+        );
+      },
+      { timeout: 5000 },
+    );
+  await submitted(pi);
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   await first;
   await host.provider.perform({ type: 'new' });
   const codex = required(host.provider.state.sessionId);
   const second = host.provider.perform({ type: 'send', text: 'wait' });
-  await vi.waitFor(async () =>
-    expect((await service.call('state', { sessionId: codex })).busy).toBe(true),
+  await submitted(codex);
+  await vi.waitFor(
+    async () => {
+      await host.provider.refreshHistory();
+      expect(host.provider.state.history.filter((s) => s.busy)).toHaveLength(2);
+    },
+    { timeout: 5000 },
   );
-  await host.provider.refreshHistory();
-  await vi.waitFor(() => expect(host.provider.state.history.filter((s) => s.busy)).toHaveLength(2));
   await host.provider.perform({ type: 'cancel' });
   await second;
   await vi.waitFor(() =>
