@@ -117,23 +117,28 @@ await writeFile(
     restrictToWorkspaces: true,
   }),
 );
-const sessionBinary = resolve(
+const sessionSource = resolve(
   process.env.PI_SOAK_SESSION_DAEMON || 'service-dist/pi-acp-session-daemon',
 );
-const relayBinary = resolve(
+const relaySource = resolve(
   process.env.PI_SOAK_RELAY_DAEMON || 'rust/target/contract/debug/pi-acp-telegram-daemon',
 );
+// A concurrent rebuild must not silently change the executable at the next restart.
+const sessionBytes = await readFile(sessionSource);
+const relayBytes = await readFile(relaySource);
+const sessionBinary = join(root, 'session-daemon');
+const relayBinary = join(root, 'telegram-daemon');
+await writeFile(sessionBinary, sessionBytes, { mode: 0o755 });
+await writeFile(relayBinary, relayBytes, { mode: 0o755 });
 const metadata = {
   durationSeconds: duration / 1000,
   root,
   sessionBinary,
   relayBinary,
-  sessionSha256: createHash('sha256')
-    .update(await readFile(sessionBinary))
-    .digest('hex'),
-  relaySha256: createHash('sha256')
-    .update(await readFile(relayBinary))
-    .digest('hex'),
+  sessionSource,
+  relaySource,
+  sessionSha256: createHash('sha256').update(sessionBytes).digest('hex'),
+  relaySha256: createHash('sha256').update(relayBytes).digest('hex'),
   mockBot: true,
   mockAcp: true,
   productionSession: true,
@@ -390,10 +395,26 @@ try {
       relay = await start(relayBinary, telegramConfig, 'telegram', relayEnv);
       await until(() => delivered(`echo: ${text}`), 'restart outbox delivery');
       const after = JSON.parse(await readFile(bindingFile, 'utf8'));
-      assert.deepEqual(
-        after.topics,
-        before.topics.filter((t) => liveIds.has(t.sessionId)),
+      await appendFile(
+        join(reportDir, 'restart-checks.jsonl'),
+        JSON.stringify({
+          cycle: n,
+          before: before.topics,
+          liveIds: [...liveIds],
+          after: after.topics,
+        }) + '\n',
       );
+      // Startup prunes deleted bindings, while pending desktop outbox events may
+      // legitimately create a new topic. Verify identities, not table equality.
+      for (const topic of before.topics.filter((t) => liveIds.has(t.sessionId)))
+        assert.deepEqual(
+          after.topics.find((t) => t.sessionId === topic.sessionId),
+          topic,
+        );
+      for (const topic of after.topics)
+        assert(liveIds.has(topic.sessionId), `restart bound a deleted session: ${topic.sessionId}`);
+      assert.equal(new Set(after.topics.map((t) => t.sessionId)).size, after.topics.length);
+      assert.equal(new Set(after.topics.map((t) => t.threadId)).size, after.topics.length);
       assert(after.offset >= before.offset);
       assert.equal(
         sent.filter((s) => s.method === 'sendMessage' && s.params.text?.includes(`echo: ${text}`))

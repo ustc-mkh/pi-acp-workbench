@@ -25,11 +25,13 @@ async function onPath(command: string, cwd = process.cwd()) {
     windows && !/\.[^/\\]+$/.test(command)
       ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')]
       : [''];
-  for (const directory of (process.env.PATH || '').split(delimiter))
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
     for (const extension of extensions) {
       const file = resolve(cwd, directory, command + extension);
       if (await executable(file)) return file;
     }
+  }
 }
 
 /** Resolve each launch afresh: Pi upgrades and npm prefix changes must not leave a cached path. */
@@ -64,6 +66,8 @@ export async function resolvePiCommand(override?: string, cwd = process.cwd()): 
   const nodeBin = dirname(process.execPath);
   const agentDir = expandHome(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
   const prefix = process.env.npm_config_prefix || process.env.NPM_CONFIG_PREFIX;
+  // The managed root identifies the executable installation; agentDir may only be a data profile.
+  // Prefer the installation when both are supplied (PATH and explicit overrides still win).
   const candidates = [
     ...(process.env.PI_MANAGED_INSTALL_ROOT
       ? [join(dirname(expandHome(process.env.PI_MANAGED_INSTALL_ROOT)), 'bin', defaultCommand)]
@@ -98,5 +102,9 @@ export async function resolvePiCommand(override?: string, cwd = process.cwd()): 
       }
     }
   }
-  return configured || defaultCommand;
+  // A bare fallback would delegate discovery back to execFile, re-enabling unsafe PATH entries.
+  if (configured && isAbsolute(configured)) return configured;
+  throw Object.assign(new Error('未找到可信的 Pi 可执行文件，请安装 Pi 或显式配置其绝对路径。'), {
+    code: 'ENOENT',
+  });
 }

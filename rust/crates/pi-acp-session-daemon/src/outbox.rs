@@ -20,12 +20,7 @@ pub type StateAccessor =
 
 pub use pi_acp_core::turn_event::TurnEvent;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use pi_acp_core::util::now_ms;
 
 pub struct TaskOutbox {
     directory: PathBuf,

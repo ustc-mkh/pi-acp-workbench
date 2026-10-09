@@ -65,6 +65,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply({});
       break;
     case 'set_model':
+      if (process.env.PI_TEST_MODEL_RESETS_THINKING) thinking = 'low';
       reply(model);
       break;
     case 'get_commands':

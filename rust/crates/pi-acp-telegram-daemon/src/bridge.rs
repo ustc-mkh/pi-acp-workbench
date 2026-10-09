@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{Mutex, Notify, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -48,12 +48,7 @@ use store::StateStore;
 #[cfg(test)]
 mod tests;
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use pi_acp_core::util::now_ms;
 
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
 

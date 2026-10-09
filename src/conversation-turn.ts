@@ -3,25 +3,27 @@ import { codexFixedConfigs } from './session-settings';
 import { RemoteAgent } from './remote-agent';
 import { checkPromptSize } from './context';
 import type { UiMessage } from './shared';
-import type { ChatProvider } from './extension';
+import type * as vscode from 'vscode';
+import type { ActiveConversation } from './active-conversation';
+import type { ConversationLifecycle } from './conversation-lifecycle';
+import type { HarnessId } from './harness';
 
-type TurnCoordinatorHost = Pick<
-  ChatProvider,
-  | 'state'
-  | 'agent'
-  | 'generation'
-  | 'lifecycle'
-  | 'emit'
-  | 'refreshHistory'
-  | 'view'
-  | 'stopping'
-  | 'refreshTelemetry'
-  | 'harness'
->;
+export interface TurnHost {
+  readonly state: ActiveConversation['state'];
+  readonly agent: ActiveConversation['agent'];
+  readonly generation: number;
+  readonly lifecycle: Pick<ConversationLifecycle, 'beginTurn' | 'prompt' | 'finishTurn' | 'cancel'>;
+  readonly view?: vscode.WebviewView;
+  readonly stopping: boolean;
+  readonly harness: HarnessId;
+  emit(): void;
+  refreshHistory(): Promise<void>;
+  refreshTelemetry(settledTurn?: boolean): Promise<void>;
+}
 
 /** Coordinates turn submission, settings, cancellation and permissions using the current UI state. */
 export class TurnCoordinator {
-  constructor(private readonly host: TurnCoordinatorHost) {}
+  constructor(private readonly host: TurnHost) {}
 
   async onSend(message: UiMessage & { type: 'send' }): Promise<void> {
     if (

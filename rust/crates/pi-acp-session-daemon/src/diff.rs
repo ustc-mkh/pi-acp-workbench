@@ -37,9 +37,7 @@ pub struct FileState {
 
 /// JavaScript `Array.prototype.sort()` order = UTF-16 code-unit order
 /// (pi-acp-core::canonical uses the same rule for object keys).
-fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
-}
+use pi_acp_core::util::utf16_cmp;
 
 /// Node `path.resolve(root, name)`: lexical join + normalization only.
 fn resolve(root: &Path, name: &str) -> PathBuf {

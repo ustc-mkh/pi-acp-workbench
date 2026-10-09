@@ -23,6 +23,9 @@ jobs:
       - run: npm ci
       - run: npm run check && npm run build
       - run: npm audit --omit=dev
+      - name: Audit development dependencies (advisory)
+        run: npm audit --audit-level=critical
+        continue-on-error: true
       # Tar preserves executable bits for esbuild and test runners in downstream jobs.
       - run: tar -czf /tmp/workbench-js.tgz node_modules dist THIRD_PARTY_NOTICES.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

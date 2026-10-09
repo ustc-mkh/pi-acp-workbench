@@ -1,24 +1,11 @@
 //! Normalize the per-turn usage reported by Codex/Claude ACP adapters.
 //! Context occupancy is deliberately kept separate from billing counters.
 use crate::types::{ChatState, Snapshot};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const MAX_SAFE: u64 = 9_007_199_254_740_991;
 const PAGE: usize = 500;
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageRecord {
-    pub id: String,
-    pub session_id: String,
-    pub model: String,
-    pub timestamp: u64,
-    pub kind: String,
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-}
+pub use pi_acp_core::usage::UsageRecord;
 fn count(v: &Value, key: &str, optional: bool) -> Option<u64> {
     match v.get(key) {
         None | Some(Value::Null) if optional => Some(0),

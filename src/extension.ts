@@ -1,17 +1,19 @@
-import { SessionCoordinator } from './conversation-session';
-import { TurnCoordinator } from './conversation-turn';
-import { AttachmentCoordinator } from './conversation-attachments';
-import { ConversationLifecycle } from './conversation-lifecycle';
+import { SessionCoordinator, type SessionHost } from './conversation-session';
+import { TurnCoordinator, type TurnHost } from './conversation-turn';
+import { AttachmentCoordinator, type AttachmentHost } from './conversation-attachments';
+import { ConversationLifecycle, type RequestGate } from './conversation-lifecycle';
+import { parseUiMessage } from './ui-message-schema';
+import type { UiPolicy } from './ui-dispatch';
 import { dispatchUi, type UiHandlers } from './ui-dispatch';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { sessionSelectors } from './session-settings';
 import { DiffDocuments } from './workspace-documents';
 import { StateEncoder } from './state-channel';
-import { RemoteAgent, type Agent } from './remote-agent';
 import { SessionClient } from './session-wire';
 import type { ServiceState } from './session-protocol';
 import { initialState } from './state';
+import { ActiveConversation } from './active-conversation';
 import { ConversationHistory } from './conversation-history';
 import { ConversationStatistics } from './conversation-statistics';
 import { HARNESS_IDS, isHarnessId, type HarnessId } from './harness';
@@ -37,28 +39,48 @@ export function activate(context: vscode.ExtensionContext) {
   return { getState: () => provider.snapshot() };
 }
 
-export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+export class ChatProvider
+  implements vscode.WebviewViewProvider, vscode.Disposable, SessionHost, TurnHost, AttachmentHost
+{
   readonly sessionCoordinator: SessionCoordinator = new SessionCoordinator(this);
   readonly turnCoordinator: TurnCoordinator = new TurnCoordinator(this);
   readonly attachmentCoordinator: AttachmentCoordinator = new AttachmentCoordinator(this);
   lifecycle = new ConversationLifecycle();
   view?: vscode.WebviewView;
   stateEncoder = new StateEncoder();
-  state = initialState();
+  readonly active = new ActiveConversation();
+  get state() {
+    return this.active.state;
+  }
+  get agent() {
+    return this.active.agent;
+  }
+  get cwd() {
+    return this.active.cwd;
+  }
+  get generation() {
+    return this.active.generation;
+  }
+  get contextWindow() {
+    return this.active.contextWindow;
+  }
+  get conversationId() {
+    return this.active.conversationId;
+  }
+  get contextAbort() {
+    return this.active.contextAbort;
+  }
   harness: HarnessId = 'pi';
   harnessAttachments = new Map<HarnessId, ReturnType<typeof initialState>['attachments']>();
   transientSnapshots = new Map<HarnessId, Snapshot>();
-  agent?: Agent;
-  cwd = '';
+
   get replay() {
     return this.lifecycle.replaying;
   }
   set replay(value: boolean) {
     this.lifecycle.replaying = value;
   }
-  generation = 0;
   private timer?: NodeJS.Timeout;
-  private requestInFlight?: { type: UiMessage['type']; pending: boolean };
   get stopping() {
     return this.lifecycle.cancelled;
   }
@@ -88,9 +110,6 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
   private get disposed() {
     return this.lifecycle.disposed;
   }
-  contextWindow?: number;
-  conversationId?: string;
-  contextAbort?: AbortController;
   telemetry: ConversationStatistics;
   private get statistics() {
     return this.telemetry.value;
@@ -116,7 +135,7 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     // The socket decoder preserves unchanged entry identities across state deltas.
     this.state.entries = s.entries;
     this.state.usage = s.usage;
-    this.contextWindow = s.contextWindow ?? s.usage?.size;
+    this.active.replace({ contextWindow: s.contextWindow ?? s.usage?.size });
     this.state.plan = value.plan || [];
     this.state.sessionNumber = s.sessionNumber;
     this.state.configs = s.configs;
@@ -169,7 +188,7 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
           !this.forgottenSessions.has(this.state.sessionId || ''),
       }),
       (value) => {
-        this.contextWindow = value;
+        this.active.replace({ contextWindow: value });
       },
       () => this.emit(),
     );
@@ -281,20 +300,11 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
       visibleModels: this.visibleModels(),
     });
   }
-  start(target: Snapshot | 'new'): Promise<void> {
-    return this.sessionCoordinator.start(target);
-  }
-  createAgent(cwd: string): RemoteAgent {
-    return this.sessionCoordinator.createAgent(cwd);
-  }
   private recordUsage(records: UsageRecord[]) {
     return this.telemetry.record(records);
   }
   refreshTelemetry(settledTurn = false) {
     return this.telemetry.refresh(settledTurn);
-  }
-  cancelPermissions() {
-    this.state.permissions = [];
   }
   disconnect(): void {
     this.sessionCoordinator.disconnect();
@@ -302,49 +312,46 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
   attach(): Promise<void> {
     return this.attachmentCoordinator.attach();
   }
-  private handlers = {
-    switchHarness: (message) => this.sessionCoordinator.onSwitchHarness(message),
-    setVisibleModels: (message) => this.onSetVisibleModels(message),
-    refreshHistory: () => this.onRefreshHistory(),
-    releaseSession: (message) => this.sessionCoordinator.onReleaseSession(message),
-    ready: (message) => this.sessionCoordinator.onReady(message),
-    dismissError: (message) => this.onDismissError(message),
-    deleteHistory: (message) => this.onDeleteHistory(message),
-    clearHistory: (message) => this.onDeleteHistory(message),
-    cancelContext: () => this.onCancelContext(),
-    refreshStatistics: () => this.onRefreshStatistics(),
-    setPrice: (message) => this.onSetPrice(message),
-    logs: () => this.onLogs(),
-    login: (message) => this.sessionCoordinator.onLogin(message),
-    cancel: (message) => this.turnCoordinator.onCancel(message),
-    permission: (message) => this.turnCoordinator.onPermission(message),
-    attachmentError: (message) => this.attachmentCoordinator.onAttachmentError(message),
-    attachImages: (message) => this.attachmentCoordinator.onAttachImages(message),
-    attach: () => this.attachmentCoordinator.onAttach(),
-    removeAttachment: (message) => this.attachmentCoordinator.onRemoveAttachment(message),
-    open: (message) => this.attachmentCoordinator.onOpen(message),
-    diff: (message) => this.attachmentCoordinator.onDiff(message),
-    export: () => this.attachmentCoordinator.onExport(),
-    new: (message) => this.sessionCoordinator.onNew(message),
-    connect: (message) => this.sessionCoordinator.onConnect(message),
-    branchMessage: (message) => this.sessionCoordinator.onBranchMessage(message),
-    resume: (message) => this.sessionCoordinator.onResume(message),
-    preview: (message) => this.sessionCoordinator.onPreview(message),
-    send: (message) => this.turnCoordinator.onSend(message),
-    mode: (message) => this.turnCoordinator.onMode(message),
-    config: (message) => this.turnCoordinator.onConfig(message),
+  private handlers: UiHandlers = {
+    switchHarness: {
+      run: (m) => this.sessionCoordinator.onSwitchHarness(m),
+      gated: true,
+      navigation: true,
+    },
+    setVisibleModels: { run: (m) => this.onSetVisibleModels(m) },
+    refreshHistory: { run: () => this.onRefreshHistory() },
+    releaseSession: { run: (m) => this.sessionCoordinator.onReleaseSession(m), gated: true },
+    ready: { run: (m) => this.sessionCoordinator.onReady(m) },
+    dismissError: { run: (m) => this.onDismissError(m) },
+    deleteHistory: { run: (m) => this.onDeleteHistory(m) },
+    clearHistory: { run: (m) => this.onDeleteHistory(m) },
+    cancelContext: { run: () => this.onCancelContext() },
+    refreshStatistics: { run: () => this.onRefreshStatistics() },
+    setPrice: { run: (m) => this.onSetPrice(m) },
+    logs: { run: () => this.onLogs() },
+    login: { run: (m) => this.sessionCoordinator.onLogin(m) },
+    cancel: { run: (m) => this.turnCoordinator.onCancel(m) },
+    permission: { run: (m) => this.turnCoordinator.onPermission(m) },
+    attachmentError: { run: (m) => this.attachmentCoordinator.onAttachmentError(m) },
+    attachImages: { run: (m) => this.attachmentCoordinator.onAttachImages(m) },
+    attach: { run: () => this.attachmentCoordinator.onAttach() },
+    removeAttachment: { run: (m) => this.attachmentCoordinator.onRemoveAttachment(m) },
+    open: { run: (m) => this.attachmentCoordinator.onOpen(m) },
+    diff: { run: (m) => this.attachmentCoordinator.onDiff(m) },
+    export: { run: () => this.attachmentCoordinator.onExport() },
+    new: { run: (m) => this.sessionCoordinator.onNew(m), gated: true, navigation: true },
+    connect: { run: (m) => this.sessionCoordinator.onConnect(m), gated: true },
+    branchMessage: { run: (m) => this.sessionCoordinator.onBranchMessage(m), gated: true },
+    resume: { run: (m) => this.sessionCoordinator.onResume(m), gated: true, navigation: true },
+    preview: { run: (m) => this.sessionCoordinator.onPreview(m), gated: true },
+    send: { run: (m) => this.turnCoordinator.onSend(m), gated: true },
+    mode: { run: (m) => this.turnCoordinator.onMode(m), gated: true },
+    config: { run: (m) => this.turnCoordinator.onConfig(m), gated: true },
   } satisfies UiHandlers;
   private async onSetVisibleModels(
     message: UiMessage & { type: 'setVisibleModels' },
   ): Promise<void> {
     if (message.harness !== this.harness || !isHarnessId(message.harness)) return;
-    if (
-      message.models !== null &&
-      (!Array.isArray(message.models) ||
-        message.models.length > 10000 ||
-        !message.models.every((id) => typeof id === 'string' && id.length <= 10000))
-    )
-      throw new Error('模型列表格式无效。');
     const catalog = new Set(
       sessionSelectors(this.state)
         .filter((c) => c.kind === 'model')
@@ -406,10 +413,7 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     );
     if (deletesCurrent && this.state === deletedState) {
       this.disconnect();
-      this.cwd = '';
-      this.contextWindow = undefined;
-      this.conversationId = undefined;
-      this.state = { ...initialState(), harness: this.harness };
+      this.active.reset({ harness: this.harness });
       this.telemetry.reset(this.harness);
       this.autoConnectHandled = true;
     }
@@ -430,74 +434,33 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     this.log.show();
   }
   async perform(message: UiMessage): Promise<void> {
-    let gate: { type: UiMessage['type']; pending: boolean } | undefined;
-    let previousGate: typeof gate;
+    let gate: RequestGate | undefined;
     const generation = this.generation;
     try {
-      if (
-        !message ||
-        typeof message !== 'object' ||
-        typeof message.type !== 'string' ||
-        !Object.hasOwn(this.handlers, message.type)
-      )
-        return;
-      const gated = [
-        'new',
-        'connect',
-        'branchMessage',
-        'resume',
-        'preview',
-        'send',
-        'mode',
-        'config',
-        'switchHarness',
-        'releaseSession',
-      ].includes(message.type);
-      const navigation = ['new', 'resume', 'switchHarness'].includes(message.type);
-      // Selecting the current conversation must not replace its live turn's request gate.
-      if (
-        this.state.status === 'busy' &&
-        ((message.type === 'resume' && message.id === this.state.sessionId) ||
-          (message.type === 'switchHarness' && message.harness === this.harness))
-      )
-        return;
-      if (gated) {
-        if (
-          this.requestInFlight &&
-          !(navigation && this.requestInFlight.type === 'send' && this.state.status === 'busy')
-        )
-          return;
-        previousGate = this.requestInFlight;
-        gate = { type: message.type, pending: true };
-        this.requestInFlight = gate;
-      }
+      const parsed = parseUiMessage(message);
+      if (!parsed) return;
+      message = parsed;
+      const policy: UiPolicy = this.handlers[message.type];
+      const acquired = this.lifecycle.acquire(message, policy, {
+        ...this.state,
+        harness: this.harness,
+      });
+      if (acquired === false) return;
+      gate = acquired;
       await this.historyReady;
-      if (this.disposed) return;
-      if (gated) {
-        if (
-          this.transitioning ||
-          (this.state.status === 'busy' && !navigation) ||
-          this.state.status === 'connecting'
-        )
-          return;
-        this.state.error = undefined;
-      }
+      if (!this.lifecycle.allowed(policy, { ...this.state, harness: this.harness })) return;
+      if (policy.gated) this.state.error = undefined;
       await dispatchUi(this.handlers, message);
       this.emit();
     } catch (error) {
-      if (message.type === 'send' && generation !== this.generation) return;
+      if (message?.type === 'send' && generation !== this.generation) return;
       const detail = error instanceof Error ? error.message : String(error);
       this.state.error =
         detail === 'ACP connection closed' && this.state.error ? this.state.error : detail;
       this.log.appendLine(this.state.error);
       this.emit();
     } finally {
-      if (gate) {
-        gate.pending = false;
-        if (this.requestInFlight === gate)
-          this.requestInFlight =
-            previousGate?.pending && generation === this.generation ? previousGate : undefined;
-      }
+      this.lifecycle.release(gate, generation === this.generation);
     }
   }
   dispose() {

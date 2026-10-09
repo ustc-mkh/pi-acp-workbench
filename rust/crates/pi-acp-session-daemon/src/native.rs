@@ -25,20 +25,7 @@ pub fn native_text_key(role: &str, text: &str) -> String {
     format!("{role}:{}", digest(text))
 }
 
-fn js_number_string(value: Option<f64>) -> String {
-    match value {
-        None => "undefined".into(),
-        Some(v) if v.is_nan() => "NaN".into(),
-        Some(v) if v.is_infinite() => {
-            if v > 0.0 {
-                "Infinity".into()
-            } else {
-                "-Infinity".into()
-            }
-        }
-        Some(v) => format!("{v}"),
-    }
-}
+use pi_acp_core::util::js_optional_number_string as js_number_string;
 
 /// Same text encoding as the pinned pi-acp promptToPiMessage; no model or image transformations.
 fn ui_text(entry: &Entry) -> String {

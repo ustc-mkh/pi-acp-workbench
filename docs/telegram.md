@@ -121,6 +121,8 @@ Pi 的启动命令、参数、环境变量和 `maxWorkers` 放在 `sessions.json
 
 #### 可选：工作区别名和目录限制
 
+> **生产环境安全提醒：** 默认 `restrictToWorkspaces:false` 允许白名单用户在服务器账户可访问的任意目录启动 Agent 并执行命令，而不只是在已配置的工作区。生产部署建议设置 `restrictToWorkspaces:true` 并列出允许目录；它只限制会话目录，不是命令执行沙箱，仍需最小权限账户或容器隔离。
+
 默认 `workspaces` 为空、`restrictToWorkspaces` 为 `false`，使用 `/new /服务器上的绝对路径` 即可。若常用某个项目，可添加快捷别名：
 
 ```json

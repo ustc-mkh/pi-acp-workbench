@@ -18,21 +18,21 @@ Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff
 
 Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位于 `src/`；Telegram 模块位于 `rust/crates/pi-acp-telegram-daemon/src/`。
 
-| 模块                                                                               | 职责                                                           |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `server.rs`                                                                        | Unix socket 接入、帧限制、背压、订阅与连接回收                 |
-| `protocol.rs` / `session-protocol.generated.ts`                                    | serde 边界与 ts-rs 生成的客户端协议                            |
-| `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收           |
-| `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                         |
-| `service/turn.rs` / `phase.rs`                                                     | 轮次执行、授权、取消、分支、终态保存                           |
-| `queue.rs` / `journal.rs`                                                          | 会话串行、全局容量、取消代际、持久化防重放收据                 |
-| `history.rs` / `prefs.rs` / `diff.rs`                                              | 服务独占历史、按 harness 偏好、工作区净变化                    |
-| `conversation-session.ts` / `conversation-turn.ts` / `conversation-attachments.ts` | 会话选择与启动、轮次操作、附件与导出协调器；共用 Provider 状态 |
-| `bridge/commands.rs`                                                               | Telegram 命令解析、分发与会话权限检查                          |
-| `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                          |
-| `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务              |
-| `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                       |
-| `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                          |
+| 模块                                                                               | 职责                                                     |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `server.rs`                                                                        | Unix socket 接入、帧限制、背压、订阅与连接回收           |
+| `pi-acp-core/src/protocol.rs` / `session-protocol.generated.ts`                    | serde 边界与 ts-rs 生成的客户端协议                      |
+| `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收     |
+| `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                   |
+| `service/turn.rs` / `phase.rs`                                                     | 轮次执行、授权、取消、分支、终态保存                     |
+| `queue.rs` / `journal.rs`                                                          | 会话串行、全局容量、取消代际、持久化防重放收据           |
+| `history.rs` / `prefs.rs` / `diff.rs`                                              | 服务独占历史、按 harness 偏好、工作区净变化              |
+| `conversation-session.ts` / `conversation-turn.ts` / `conversation-attachments.ts` | 会话选择与启动、轮次操作、附件与导出；依赖本地 Host 接口 |
+| `bridge/commands.rs`                                                               | Telegram 命令解析、分发与会话权限检查                    |
+| `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                    |
+| `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务        |
+| `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                 |
+| `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                    |
 
 ## Telegram 中继的内部边界
 
@@ -75,7 +75,9 @@ Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURICompon
 
 客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。桌面通过可选增量订阅复用未变化条目；Telegram 权限订阅只传授权信息。增量基线失效时重新订阅获得全量状态，不重放任务。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
 
-selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ConversationLifecycle` 管理 idle/transition/turn/disposed 和取消状态。`ChatProvider.perform` 在等待历史初始化前同步保留互斥标记，覆盖发送、创建 / 恢复 / 分支、设置和 harness 切换；finally 释放。取消、授权和状态查询不受此互斥标记阻挡。
+selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ActiveConversation` 集中持有 UI state、agent、cwd、conversationId、contextWindow、generation 和 contextAbort；会话身份通过 reset / replace 更新，统一清理连接和取消资源；迟到的启动 / 分支失败按代际过滤，不会恢复已经删除的会话。Provider 只暴露这些字段的读取视图，协调器不引用 extension.ts。UI 内容仍按现有增量编码流程更新。
+
+`ConversationLifecycle` 管理 idle/transition/turn/disposed、取消和请求门控。handler 表声明 run / gated / navigation；`ChatProvider.perform` 先验证统一参数 schema，再在等待历史初始化前调用 lifecycle.acquire，finally 调用 release。选择当前忙碌会话、后台轮次导航、迟到请求与门控恢复的规则均由 lifecycle 负责；导航失败恢复旧轮次及其取消标记，已完成轮次和旧代际不会被恢复。取消、授权和状态查询不受此互斥标记阻挡。
 
 ## 持久化与偏好
 

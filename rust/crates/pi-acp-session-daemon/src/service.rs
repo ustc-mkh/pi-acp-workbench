@@ -27,16 +27,11 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use pi_acp_core::util::now_ms;
 
 type Rt = Arc<Mutex<Runtime>>;
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
@@ -295,16 +290,7 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
     Ok(())
 }
 
-/// JS truthiness for JSON values (null/false/0/"" are falsy).
-fn js_truthy_value(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64() != Some(0.0),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+use pi_acp_core::util::js_truthy as js_truthy_value;
 
 fn command_session_id(command: &ServiceCommand) -> &str {
     match command {

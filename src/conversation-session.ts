@@ -2,51 +2,54 @@ import * as vscode from 'vscode';
 import type * as acp from '@agentclientprotocol/sdk';
 import { RemoteAgent, type Agent } from './remote-agent';
 import type { ServiceState } from './session-protocol';
-import { initialState, nextId } from './state';
+import { nextId } from './state';
+import { resolvePiCommand } from './pi-command';
 import { HARNESSES, harnessKey, isHarnessId, snapshotHarness, type HarnessId } from './harness';
 import { demoMarkdown } from './demo';
 import type { Snapshot, UiMessage } from './shared';
-import type { ChatProvider } from './extension';
+import type { ActiveConversation } from './active-conversation';
+import type { ConversationLifecycle } from './conversation-lifecycle';
+import type { ConversationHistory } from './conversation-history';
+import type { ConversationStatistics } from './conversation-statistics';
+import type { SessionClient } from './session-wire';
+import type { StateEncoder } from './state-channel';
 
-type SessionCoordinatorHost = Pick<
-  ChatProvider,
-  | 'harness'
-  | 'inspecting'
-  | 'refreshHistory'
-  | 'state'
-  | 'transientSnapshots'
-  | 'harnessAttachments'
-  | 'disconnect'
-  | 'persistence'
-  | 'cwd'
-  | 'contextWindow'
-  | 'conversationId'
-  | 'telemetry'
-  | 'autoConnectHandled'
-  | 'context'
-  | 'emit'
-  | 'transitioning'
-  | 'lifecycle'
-  | 'agent'
-  | 'generation'
-  | 'replay'
-  | 'createAgent'
-  | 'refreshTelemetry'
-  | 'applyServiceState'
-  | 'config'
-  | 'contextAbort'
-  | 'cancelPermissions'
-  | 'forgottenSessions'
-  | 'history'
-  | 'serviceClient'
-  | 'stateEncoder'
-  | 'perform'
-  | 'start'
->;
+/** External ports only; agent creation, start and disconnect belong to this coordinator. */
+export interface SessionHost {
+  readonly active: ActiveConversation;
+  readonly state: ActiveConversation['state'];
+  readonly agent: ActiveConversation['agent'];
+  readonly cwd: string;
+  readonly contextWindow?: number;
+  readonly conversationId?: string;
+  readonly generation: number;
+  readonly contextAbort?: AbortController;
+  harness: HarnessId;
+  autoConnectHandled: boolean;
+  replay: boolean;
+  readonly inspecting: ConversationStatistics['pending'];
+  readonly persistence: Pick<ConversationHistory['persistence'], 'pending'>;
+  readonly telemetry: Pick<ConversationStatistics, 'reset'>;
+  readonly transientSnapshots: Map<HarnessId, Snapshot>;
+  readonly harnessAttachments: Map<HarnessId, ActiveConversation['state']['attachments']>;
+  readonly context: Pick<vscode.ExtensionContext, 'workspaceState'>;
+  readonly config: Pick<vscode.WorkspaceConfiguration, 'get'>;
+  readonly transitioning: boolean;
+  readonly lifecycle: Pick<ConversationLifecycle, 'transition' | 'finishTurn' | 'prompt'>;
+  readonly forgottenSessions: ReadonlySet<string>;
+  readonly history: readonly Snapshot[];
+  readonly serviceClient: Pick<SessionClient, 'call'>;
+  readonly stateEncoder: Pick<StateEncoder, 'reset'>;
+  emit(): void;
+  refreshHistory(): Promise<void>;
+  refreshTelemetry(settledTurn?: boolean): Promise<void>;
+  applyServiceState(state: ServiceState): void;
+  perform(message: UiMessage): Promise<void>;
+}
 
 /** Coordinates session selection, attachment and native branching using the current UI state. */
 export class SessionCoordinator {
-  constructor(private readonly host: SessionCoordinatorHost) {}
+  constructor(private readonly host: SessionHost) {}
 
   async selectHarness(harness: HarnessId) {
     if (harness === this.host.harness) return;
@@ -58,38 +61,36 @@ export class SessionCoordinator {
       if (!this.host.state.readOnly) await this.rememberActive();
     }
     this.host.harnessAttachments.set(this.host.harness, this.host.state.attachments);
-    this.host.disconnect();
+    this.disconnect();
     await this.host.persistence.pending;
     this.host.harness = harness;
-    this.host.cwd = '';
-    this.host.contextWindow = undefined;
-    this.host.conversationId = undefined;
-    this.host.state = {
-      ...initialState(),
+    this.host.active.reset({
       harness,
       attachments: this.host.harnessAttachments.get(harness) || [],
-    };
+    });
     this.host.telemetry.reset(harness);
     this.host.autoConnectHandled = true;
     await this.host.context.workspaceState.update('selectedHarness', harness);
     const previous = this.lastSnapshot() || this.host.transientSnapshots.get(harness);
     if (previous) {
       const snapshot = previous.stored ? await this.readSnapshot(previous) : previous;
-      this.host.cwd = snapshot.cwd;
-      this.host.contextWindow = snapshot.contextWindow;
-      this.host.conversationId = snapshot.conversationId;
-      this.host.state = {
-        ...this.host.state,
-        sessionId: snapshot.id,
-        sessionNumber: snapshot.sessionNumber,
-        entries: structuredClone(snapshot.entries),
-        configs: snapshot.configs,
-        modes: snapshot.modes,
-        contextComplete: snapshot.contextComplete,
-        usage: snapshot.usage,
-        readOnly: true,
-        connectionAttempted: true,
-      };
+      this.host.active.replace({
+        cwd: snapshot.cwd,
+        contextWindow: snapshot.contextWindow,
+        conversationId: snapshot.conversationId,
+        state: {
+          ...this.host.state,
+          sessionId: snapshot.id,
+          sessionNumber: snapshot.sessionNumber,
+          entries: structuredClone(snapshot.entries),
+          configs: snapshot.configs,
+          modes: snapshot.modes,
+          contextComplete: snapshot.contextComplete,
+          usage: snapshot.usage,
+          readOnly: true,
+          connectionAttempted: true,
+        },
+      });
     }
     this.host.emit();
   }
@@ -124,7 +125,6 @@ export class SessionCoordinator {
       await this.host.refreshHistory();
       this.parkActive();
       snapshot = await this.readSnapshot(snapshot);
-      this.host.cwd = cwd;
       this.showReadOnlySnapshot(snapshot, '只读查看：请打开此会话对应的工作区后再继续对话。');
       this.host.emit();
       return;
@@ -136,24 +136,23 @@ export class SessionCoordinator {
         ? this.host.state.attachments
         : [];
     this.parkActive();
-    const generation = this.host.generation;
-    this.host.cwd = cwd;
-    this.host.contextWindow = snapshot?.contextWindow;
-    this.host.state = {
-      ...initialState(),
+    this.host.active.reset({
+      harness: this.host.harness,
       status: 'connecting',
       connectionAttempted: true,
       attachments,
       usage: snapshot?.usage,
-    };
+    });
+    this.host.active.replace({ cwd, contextWindow: snapshot?.contextWindow });
+    const generation = this.host.generation;
     this.host.replay = !!snapshot;
     this.host.emit();
     try {
-      const agent = this.host.createAgent(cwd);
-      this.host.agent = agent;
+      const agent = this.createAgent(cwd);
+      this.host.active.replace({ agent });
       const info = await agent.initialize();
       if (snapshot && this.host.harness !== 'pi' && !info.agentCapabilities?.loadSession) {
-        this.host.disconnect();
+        this.disconnect();
         this.showReadOnlySnapshot(
           snapshot,
           '当前 ACP 适配器未声明 session/load 能力，仅查看本地记录。需要继续时请显式新建会话；不会自动重放历史。',
@@ -163,7 +162,9 @@ export class SessionCoordinator {
       }
       const session = await agent.createSession(snapshot?.id);
       if (generation !== this.host.generation) return;
-      this.host.conversationId = snapshot?.conversationId || snapshot?.id || session.sessionId;
+      this.host.active.replace({
+        conversationId: snapshot?.conversationId || snapshot?.id || session.sessionId,
+      });
       this.host.state.sessionId = session.sessionId;
       this.host.state.sessionNumber = snapshot?.sessionNumber;
       this.host.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
@@ -180,7 +181,8 @@ export class SessionCoordinator {
       await this.host.refreshHistory();
       this.host.emit();
     } catch (error) {
-      this.host.disconnect();
+      if (generation !== this.host.generation) return;
+      this.disconnect();
       this.host.state.status = 'disconnected';
       if (snapshot && this.host.harness !== 'pi') {
         this.host.state.readOnly = true;
@@ -199,11 +201,7 @@ export class SessionCoordinator {
   }
 
   showReadOnlySnapshot(snapshot: Snapshot, error: string) {
-    this.host.cwd = snapshot.cwd;
-    this.host.contextWindow = snapshot.contextWindow;
-    this.host.conversationId = snapshot.conversationId;
-    this.host.state = {
-      ...initialState(),
+    this.host.active.reset({
       harness: this.host.harness,
       sessionId: snapshot.id,
       sessionNumber: snapshot.sessionNumber,
@@ -216,7 +214,12 @@ export class SessionCoordinator {
       readOnly: true,
       connectionAttempted: true,
       error,
-    };
+    });
+    this.host.active.replace({
+      cwd: snapshot.cwd,
+      contextWindow: snapshot.contextWindow,
+      conversationId: snapshot.conversationId,
+    });
   }
 
   createAgent(cwd: string) {
@@ -229,7 +232,7 @@ export class SessionCoordinator {
           this.host.state.status = 'disconnected';
           this.host.state.error = error;
           this.host.state.permissions = [];
-          this.host.agent = undefined;
+          this.host.active.replace({ agent: undefined });
           this.host.emit();
         },
       },
@@ -264,10 +267,13 @@ export class SessionCoordinator {
       oldId = previous.sessionId!,
       generation = this.host.generation;
     this.host.lifecycle.transition(true);
-    this.host.state = { ...previous, status: 'connecting', contextOperation: { kind: 'fork' } };
+    this.host.active.replace({
+      state: { ...previous, status: 'connecting', contextOperation: { kind: 'fork' } },
+    });
     this.host.emit();
-    this.host.contextAbort = new AbortController();
-    const signal = this.host.contextAbort.signal;
+    const controller = new AbortController();
+    this.host.active.replace({ contextAbort: controller });
+    const signal = controller.signal;
     const cancel = () => {
       void source.request('_pi_workbench/cancel_fork', { sessionId: oldId }).catch(() => {});
     };
@@ -289,7 +295,7 @@ export class SessionCoordinator {
       });
       signal.throwIfAborted();
       if (!fork.sessionId || fork.sessionId === oldId) throw new Error('Pi 未返回独立的原生分支。');
-      candidate = this.host.createAgent(this.host.cwd);
+      candidate = this.createAgent(this.host.cwd);
       const info = await candidate.initialize();
       if (
         !(info.agentCapabilities?._meta?.['pi-workbench'] as { nativeFork?: boolean })?.nativeFork
@@ -304,31 +310,35 @@ export class SessionCoordinator {
       signal.throwIfAborted();
     } catch (error) {
       candidate?.dispose();
+      if (generation !== this.host.generation) {
+        this.host.lifecycle.transition(false);
+        this.host.emit();
+        return;
+      }
       try {
       } finally {
         // Restore transcript/settings, but never roll back a connection or lease loss.
-        this.host.state = {
-          ...previous,
-          status: this.host.agent === source && !source.isClosed ? 'ready' : 'disconnected',
-          readOnly: previous.readOnly || this.host.state.readOnly,
-          permissions: [],
-        };
+        this.host.active.replace({
+          state: {
+            ...previous,
+            status: this.host.agent === source && !source.isClosed ? 'ready' : 'disconnected',
+            readOnly: previous.readOnly || this.host.state.readOnly,
+            permissions: [],
+          },
+        });
         this.host.lifecycle.transition(false);
         this.host.emit();
       }
       throw error;
     } finally {
       signal.removeEventListener('abort', cancel);
-      this.host.contextAbort = undefined;
+      this.host.active.replace({ contextAbort: undefined });
       this.host.state.contextOperation = undefined;
     }
     this.parkActive(previous);
-    this.host.agent = candidate;
     this.host.replay = false;
-
-    this.host.conversationId = session.sessionId;
-    this.host.state = {
-      ...initialState(),
+    const cwd = this.host.cwd;
+    this.host.active.reset({
       harness: 'pi',
       status: 'ready',
       connectionAttempted: true,
@@ -340,7 +350,8 @@ export class SessionCoordinator {
       contextComplete: previous.contextComplete,
       configs: session.configOptions || undefined,
       modes: session.modes || undefined,
-    };
+    });
+    this.host.active.replace({ agent: candidate, cwd, conversationId: session.sessionId });
     await (candidate as RemoteAgent).sync();
     try {
       await this.rememberActive();
@@ -353,17 +364,17 @@ export class SessionCoordinator {
   }
 
   parkActive(_state = this.host.state) {
-    this.host.disconnect();
+    this.disconnect();
   }
 
   disconnect() {
-    this.host.generation++;
+    this.host.active.replace({ generation: this.host.generation + 1 });
     this.host.contextAbort?.abort();
-    this.host.cancelPermissions();
+    this.host.state.permissions = [];
     this.host.lifecycle.finishTurn();
     this.host.lifecycle.prompt(false);
     this.host.agent?.dispose();
-    this.host.agent = undefined;
+    this.host.active.replace({ agent: undefined, contextAbort: undefined });
   }
 
   async rememberActive() {
@@ -480,7 +491,7 @@ export class SessionCoordinator {
     this.host.lifecycle.transition(true);
     try {
       await this.host.refreshHistory();
-      this.host.disconnect();
+      this.disconnect();
       await this.host.persistence.pending;
       this.host.state.status = 'disconnected';
       this.host.state.readOnly = true;
@@ -504,12 +515,12 @@ export class SessionCoordinator {
   }
 
   async onNew(message: UiMessage & { type: 'new' }): Promise<void> {
-    await this.host.start('new');
+    await this.start('new');
   }
 
   async onConnect(message: UiMessage & { type: 'connect' }): Promise<void> {
     const snapshot = this.currentSnapshot();
-    if (snapshot) await this.host.start(snapshot);
+    if (snapshot) await this.start(snapshot);
   }
 
   async onBranchMessage(message: UiMessage & { type: 'branchMessage' }): Promise<void> {
@@ -518,19 +529,19 @@ export class SessionCoordinator {
 
   async onResume(message: UiMessage & { type: 'resume' }): Promise<void> {
     const snapshot = this.host.history.find((s) => s.id === message.id);
-    if (snapshot) await this.host.start(snapshot);
+    if (snapshot) await this.start(snapshot);
   }
 
   async onPreview(message: UiMessage & { type: 'preview' }): Promise<void> {
     this.host.lifecycle.transition(true);
     try {
       await this.host.refreshHistory();
-      this.host.disconnect();
-      this.host.state = {
-        ...initialState(),
+      this.disconnect();
+      this.host.active.reset({
+        harness: this.host.harness,
         preview: true,
         entries: [{ id: nextId(), role: 'assistant', text: demoMarkdown }],
-      };
+      });
       await vscode.commands.executeCommand('piAcp.chat.focus');
     } finally {
       this.host.lifecycle.transition(false);
@@ -541,7 +552,7 @@ export class SessionCoordinator {
     const cwd = await this.workspaceCwd();
     const shellPath =
       this.host.harness === 'pi'
-        ? process.env.PI_ACP_PI_COMMAND || 'pi'
+        ? await resolvePiCommand(process.env.PI_ACP_PI_COMMAND, cwd)
         : this.host.config.get(
             this.host.harness + '.loginCommand',
             this.host.harness === 'codex' ? 'codex' : 'claude-agent-acp',

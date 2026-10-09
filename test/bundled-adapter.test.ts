@@ -38,6 +38,7 @@ it.each(['user-bin', 'npm-prefix/bin', 'stale-override', 'managed-install'])(
             installation === 'stale-override' ? join(dir, 'old-home', 'bin', 'pi') : '',
           PI_ACP_WORKBENCH_STATE_DIR: join(dir, 'adapter-state'),
           PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
+          PI_MANAGED_INSTALL_ROOT: '',
           PI_TEST_AUDIT: join(dir, 'audit.jsonl'),
         },
         update: () => {},
@@ -95,6 +96,7 @@ it('exposes and toggles Fast mode through the bundled ACP config API', async () 
         PI_ACP_WORKBENCH_STATE_DIR: join(dir, 'adapter-state'),
         PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
         PI_TEST_FAST_MODE: '1',
+        PI_TEST_MODEL_RESETS_THINKING: '1',
       },
       update: () => {},
       permission: async () => ({ outcome: { outcome: 'cancelled' } }),
@@ -111,6 +113,27 @@ it('exposes and toggles Fast mode through the bundled ACP config API', async () 
         value,
       });
       expect(response.configOptions.find((c) => c.id === 'fast-mode')?.currentValue).toBe(value);
+      const thinking = session.configOptions?.find((c) => c.category === 'thought_level');
+      const model = session.configOptions?.find((c) => c.category === 'model');
+      expect(thinking).toBeTruthy();
+      expect(model).toBeTruthy();
+      await agent.request('session/set_config_option', {
+        sessionId: session.sessionId,
+        configId: thinking!.id,
+        value: 'high',
+      });
+      for (let i = 0; i < 3; i++) {
+        const changed = await agent.request<{ configOptions: acp.SessionConfigOption[] }>(
+          'session/set_config_option',
+          {
+            sessionId: session.sessionId,
+            configId: model!.id,
+            value: model!.currentValue,
+          },
+        );
+        expect(changed.configOptions.find((c) => c.id === thinking!.id)?.currentValue).toBe('high');
+        expect(changed.configOptions.find((c) => c.id === 'fast-mode')?.currentValue).toBe(value);
+      }
     }
   } finally {
     await agent?.stop();

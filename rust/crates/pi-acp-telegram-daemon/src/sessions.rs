@@ -4,6 +4,7 @@
 //! `state` events for permission prompts.
 use crate::task_scope::OwnedTask;
 use pi_acp_core::wire::{WireClient, WireError};
+use pi_acp_core::{protocol::ServiceState, types::Snapshot};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -48,17 +49,17 @@ pub struct Sessions {
 }
 
 fn stub(value: &Value) -> Option<SessionStub> {
+    let snapshot: Snapshot = serde_json::from_value(value.clone()).ok()?;
+    if snapshot.id.is_empty() || snapshot.cwd.is_empty() {
+        return None;
+    }
     Some(SessionStub {
-        id: value.get("id")?.as_str()?.to_string(),
-        cwd: value.get("cwd")?.as_str()?.to_string(),
-        title: value.get("title")?.as_str()?.to_string(),
-        session_number: value.get("sessionNumber").and_then(Value::as_u64),
-        harness: value
-            .get("harness")
-            .and_then(Value::as_str)
-            .unwrap_or("pi")
-            .into(),
-        updated: value.get("updated").and_then(Value::as_u64).unwrap_or(0),
+        id: snapshot.id,
+        cwd: snapshot.cwd,
+        title: snapshot.title,
+        session_number: snapshot.session_number,
+        harness: snapshot.harness.unwrap_or_else(|| "pi".into()),
+        updated: snapshot.updated,
     })
 }
 
@@ -243,32 +244,22 @@ impl Sessions {
 
     /// `{busy, permissions, text, error}` exactly like TelegramSessions.status().
     pub async fn status(&self, id: &str) -> Result<Value, WireError> {
-        let state = self.state(id).await?;
-        let entries = state
-            .pointer("/snapshot/entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let last_user = entries
-            .iter()
-            .rposition(|e| e.get("role").and_then(Value::as_str) == Some("user"));
+        let state: ServiceState = serde_json::from_value(self.state(id).await?)
+            .map_err(|_| WireError::Protocol("state response"))?;
+        let entries = state.snapshot.entries;
+        let last_user = entries.iter().rposition(|e| e.role == "user");
         let text = entries
             .iter()
             .skip(last_user.map(|i| i + 1).unwrap_or(0))
-            .filter(|e| {
-                matches!(
-                    e.get("role").and_then(Value::as_str),
-                    Some("assistant" | "diff")
-                )
-            })
-            .filter_map(|e| e.get("text").and_then(Value::as_str))
+            .filter(|e| matches!(e.role.as_str(), "assistant" | "diff"))
+            .filter_map(|e| e.text.as_deref())
             .collect::<Vec<_>>()
             .join("\n\n");
         Ok(json!({
-            "busy": state.get("busy").and_then(Value::as_bool).unwrap_or(false),
-            "permissions": state.get("permissions").cloned().unwrap_or(json!([])),
+            "busy": state.busy,
+            "permissions": state.permissions,
             "text": text,
-            "error": state.get("error").cloned().unwrap_or(Value::Null),
+            "error": state.error,
         }))
     }
 

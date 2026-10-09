@@ -4,9 +4,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
-}
+use crate::util::utf16_cmp;
 
 /// JSON.stringify-equivalent escaping: only `"`, `\`, and control characters
 /// are escaped; non-ASCII stays raw (UTF-8). Lone surrogates cannot appear in

@@ -59,6 +59,19 @@ export async function buildAdapter() {
   );
   source = replaceExactlyOnce(
     source,
+    '      await setSessionModel(session.proc, params.value);',
+    `      const previous = await session.proc.getState();
+      const fast = await getWorkbenchFastOptions(session.proc);
+      await setSessionModel(session.proc, params.value);
+      const levels = await session.proc.getAvailableThinkingLevels();
+      if (typeof previous.thinkingLevel === "string" && levels.includes(previous.thinkingLevel))
+        await session.proc.setThinkingLevel(previous.thinkingLevel);
+      const currentFast = await getWorkbenchFastOptions(session.proc);
+      if (fast[0] && currentFast[0] && fast[0].currentValue !== currentFast[0].currentValue)
+        await setFastConfig(session.proc, fast[0].currentValue);`,
+  );
+  source = replaceExactlyOnce(
+    source,
     '    db.sessions[entry.sessionId] = {\n      sessionId: entry.sessionId,',
     '    db.sessions[entry.sessionId] = {\n      ...db.sessions[entry.sessionId],\n      ...entry,\n      sessionId: entry.sessionId,',
   );

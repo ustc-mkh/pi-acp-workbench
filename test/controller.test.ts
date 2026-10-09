@@ -106,8 +106,9 @@ let launchFile: string;
 // UI tests use the production socket path. Only the upstream ACP worker is mocked.
 const activate = (context: TestContext) => {
   activateExtension(context as vscode.ExtensionContext);
-  const create = host.provider.createAgent.bind(host.provider);
-  vi.spyOn(host.provider, 'createAgent').mockImplementation((...args) => {
+  const coordinator = host.provider.sessionCoordinator;
+  const create = coordinator.createAgent.bind(coordinator);
+  vi.spyOn(coordinator, 'createAgent').mockImplementation((...args) => {
     writeFileSync(launchFile, JSON.stringify(host.config));
     return create(...args);
   });
@@ -176,7 +177,7 @@ it('switches harness without auto-creating a session and isolates identical IDs,
     { id: 'private', name: 'Pi context', uri: 'file:///private', text: 'do not transfer' },
   ];
   const pi = host.provider.snapshot();
-  const create = vi.spyOn(host.provider, 'createAgent');
+  const create = vi.spyOn(host.provider.sessionCoordinator, 'createAgent');
   create.mockClear();
   await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
   expect(create).not.toHaveBeenCalled();
@@ -308,6 +309,28 @@ it('allows Codex fast mode and keeps collaboration default on creation and load'
   await host.provider.perform({ type: 'config', id: 'collaboration_mode', value: 'plan' });
   expect(host.provider.snapshot().error).toContain('默认协作模式');
 });
+it('uses trusted Pi discovery for login even with a workspace-relative PATH entry', async () => {
+  const { mkdirSync, symlinkSync } = await import('node:fs');
+  const root = mkdtempSync(resolve(tmpdir(), 'pi-login-security-'));
+  const cwd = resolve(root, 'repo');
+  const bin = resolve(root, 'trusted');
+  mkdirSync(cwd);
+  mkdirSync(bin);
+  symlinkSync(resolve('test/mock-pi.mjs'), resolve(cwd, 'pi'));
+  symlinkSync(resolve('test/mock-pi.mjs'), resolve(bin, 'pi'));
+  const previous = host.cwd;
+  try {
+    host.cwd = cwd;
+    vi.stubEnv('PATH', ':' + bin + ':.');
+    vi.stubEnv('PI_ACP_PI_COMMAND', undefined);
+    await host.provider.perform({ type: 'login' });
+    expect(host.terminals.at(-1)).toMatchObject({ shellPath: resolve(bin, 'pi'), cwd });
+  } finally {
+    host.cwd = previous;
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 it('uses harness-specific login commands and never copies Pi profile environment overrides', async () => {
   host.config.env = { PI_ONLY: 'secret' };
   mockHarness('codex');
@@ -325,6 +348,33 @@ it('uses harness-specific login commands and never copies Pi profile environment
     shellPath: 'claude-agent-acp',
     shellArgs: ['--cli', '/login'],
   });
+});
+it('honors cancel before prompt submission even after navigation fails', async () => {
+  await contextAgent();
+  mockHarness('codex');
+  let release!: () => void;
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  vi.spyOn(host.provider, 'refreshHistory')
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          entered();
+        }),
+    )
+    .mockRejectedValueOnce(new Error('navigation failed'));
+  const sending = host.provider.perform({ type: 'send', text: 'must not be sent' });
+  await waiting;
+  await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
+  expect(host.provider.snapshot().error).toBe('navigation failed');
+  await host.provider.perform({ type: 'cancel' });
+  release();
+  await sending;
+  expect(host.provider.snapshot()).toMatchObject({ harness: 'pi', status: 'ready', entries: [] });
+  expect(wire().some((r) => r.method === 'session/prompt')).toBe(false);
 });
 it('locks preview before awaiting persistence', async () => {
   await host.provider.perform({ type: 'new' });
@@ -501,7 +551,7 @@ it('clears usage titles while preserving billed records and prices', async () =>
   expect(host.provider.statistics.prices).toEqual(prices);
 });
 it('does not create a session on ready, reconnect, or send; only explicit new does', async () => {
-  const start = vi.spyOn(host.provider, 'start');
+  const start = vi.spyOn(host.provider.sessionCoordinator, 'start');
   await Promise.all([
     host.provider.perform({ type: 'ready' }),
     host.provider.perform({ type: 'ready' }),
@@ -943,6 +993,37 @@ it('cancels native branch preparation without discarding the original connection
   });
   expect(host.provider.agent).toBe(agent);
   expect(wire().some((r) => r.method === '_pi_workbench/summarize')).toBe(false);
+});
+it('does not resurrect a deleted conversation when a native branch fails late', async () => {
+  await contextAgent('context-native');
+  await host.provider.perform({ type: 'send', text: 'original' });
+  const provider = host.provider;
+  const before = provider.snapshot();
+  const agent = required(provider.agent);
+  const request = agent.request.bind(agent);
+  let rejectFork!: (error: Error) => void;
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  vi.spyOn(agent, 'request').mockImplementation((method, params) => {
+    if (method !== '_pi_workbench/fork') return request(method, params);
+    return new Promise((_, reject) => {
+      rejectFork = reject;
+      entered();
+    });
+  });
+  const branch = edit('branchMessage', before.entries[1].id);
+  await waiting;
+  await provider.perform({ type: 'clearHistory' });
+  rejectFork(new Error('stale branch failure'));
+  await branch;
+  expect(provider.snapshot()).toMatchObject({ status: 'disconnected', entries: [] });
+  expect(provider.snapshot().sessionId).toBeUndefined();
+  expect(provider.snapshot().error).toBeUndefined();
+  expect(provider.cwd).toBe('');
+  expect(provider.conversationId).toBeUndefined();
+  expect(provider.contextAbort).toBeUndefined();
 });
 it('keeps a source disconnect during native branching disconnected and reconnectable', async () => {
   await contextAgent('context-native');

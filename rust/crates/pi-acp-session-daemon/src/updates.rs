@@ -17,15 +17,7 @@ pub fn initial_state() -> ChatState {
     ChatState::default()
 }
 
-fn js_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+use pi_acp_core::util::js_truthy;
 
 /// Merge text into the last entry of the same role (except notices), honoring messageId.
 pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Option<&Value>) {
@@ -75,34 +67,9 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                 "assistant"
             };
             let content = update.get("content").cloned().unwrap_or(Value::Null);
-            let ctype = content
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let text = match ctype {
-                "text" => content
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                "resource_link" => format!(
-                    "[{}]({})",
-                    content
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    content
-                        .get("uri")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                ),
-                "resource" => content
-                    .pointer("/resource/text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("[二进制资源]")
-                    .to_string(),
-                other => format!("[{other} 内容]"),
-            };
+            let decoded = pi_acp_core::acp::MessageContent::decode(&content);
+            let ctype = decoded.kind.as_str();
+            let text = decoded.display_text();
             append_text(state, role, &text, update.get("messageId"));
             if ctype != "text" {
                 if let Some(entry) = state.entries.last_mut() {

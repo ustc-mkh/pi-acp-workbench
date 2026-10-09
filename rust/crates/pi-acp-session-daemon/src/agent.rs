@@ -131,16 +131,7 @@ fn js_display(value: Option<&Value>) -> String {
     }
 }
 
-/// JS truthiness for `agentCapabilities?.loadSession` (false/0/''/null → falsy).
-fn js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64() != Some(0.0),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+use pi_acp_core::util::js_truthy;
 
 /// jsonrpc.js isJsonRpcId: null | string | finite number.
 fn is_json_rpc_id(value: &Value) -> bool {

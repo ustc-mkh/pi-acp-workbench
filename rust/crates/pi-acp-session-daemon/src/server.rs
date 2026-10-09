@@ -501,15 +501,7 @@ fn encode_fragment(units: &[u16]) -> String {
 
 /// JS `||` truthiness for `snapshot?.id || notification?.sessionId`
 /// (null/false/0/'' are falsy; objects are always truthy).
-fn js_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+use pi_acp_core::util::js_truthy;
 
 /// Keep the socket private throughout bind/chmod and clean failed publication.
 struct PrivateSocket {

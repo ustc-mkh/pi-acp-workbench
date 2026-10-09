@@ -4,16 +4,22 @@ import { openWorkspaceLink } from './workspace-documents';
 import { validateImage, MAX_ATTACHMENT_IMAGE_BYTES } from './images';
 import { nextId } from './state';
 import type { UiMessage } from './shared';
-import type { ChatProvider } from './extension';
+import type { ActiveConversation } from './active-conversation';
+import type { HarnessId } from './harness';
+import type { DiffDocuments } from './workspace-documents';
 
-type AttachmentCoordinatorHost = Pick<
-  ChatProvider,
-  'config' | 'state' | 'emit' | 'harness' | 'attach' | 'cwd' | 'documents'
->;
+export interface AttachmentHost {
+  readonly config: Pick<vscode.WorkspaceConfiguration, 'get'>;
+  readonly state: ActiveConversation['state'];
+  readonly harness: HarnessId;
+  readonly cwd: string;
+  readonly documents: Pick<DiffDocuments, 'open'>;
+  emit(): void;
+}
 
 /** Coordinates attachments, previews and conversation export using the current UI state. */
 export class AttachmentCoordinator {
-  constructor(private readonly host: AttachmentCoordinatorHost) {}
+  constructor(private readonly host: AttachmentHost) {}
 
   async attach() {
     try {
@@ -84,7 +90,7 @@ export class AttachmentCoordinator {
   }
 
   async onAttach(): Promise<void> {
-    await this.host.attach();
+    await this.attach();
   }
 
   async onRemoveAttachment(message: UiMessage & { type: 'removeAttachment' }): Promise<void> {
