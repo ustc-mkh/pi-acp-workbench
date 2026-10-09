@@ -85,6 +85,8 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。原生历史仍由各上游适配器管理，备份需要保留原生会话和 daemon 数据目录。
 
+计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格单独持久化并优先于 Pi 默认价，恢复默认删除覆盖；缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
+
 ## 异常隔离
 
 release 使用 `panic = "unwind"`。同步短临界区通过 `pi-acp-core::sync::MutexExt::lock_unpoisoned()` 取得锁，锁中毒不会让后续访问再次 panic；Tokio 异步锁沿用其自身语义。取回锁不等于修复状态，恢复由相应操作边界负责。worker 更新、授权回调和会话操作边界捕获 panic，关闭对应 worker，不自动重放任务；持锁异常恢复该会话最近已提交快照。ACP 响应进入可变状态前检查结构，配置、历史索引、偏好与 Telegram 状态使用 serde 类型校验。此保护针对 worker 操作，不保证任意进程级故障都可恢复。

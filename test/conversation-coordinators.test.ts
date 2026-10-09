@@ -5,6 +5,7 @@ import { ClientOperations } from '../src/conversation-history';
 import { initialState } from '../src/state';
 import type { Agent } from '../src/remote-agent';
 import type { Snapshot } from '../src/shared';
+import { groupUsage, type Price } from '../src/telemetry';
 const storage = () => {
   const values = new Map<string, unknown>();
   return {
@@ -165,6 +166,98 @@ it('statistics discards late responses and errors from detached sessions', async
   expect(stats.value.note).toBeUndefined();
   expect(stats.pending).toBeUndefined();
   expect(stats.value.records).toEqual([]);
+});
+it('uses current Pi prices, persists user overrides, and restores the latest Pi defaults', async () => {
+  const model = 'anthropic/claude-sonnet-4-6';
+  const state = { ...initialState(), sessionId: 'one', status: 'ready' as const };
+  const record = {
+    id: 'call',
+    sessionId: 'one',
+    model,
+    timestamp: 1,
+    kind: 'inference',
+    input: 1000000,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  const piPrice = { input: 7, output: 20, cacheRead: 0.7, cacheWrite: 8, source: 'Pi 模型配置' };
+  let prices: Record<string, Price> = { [model]: piPrice };
+  const request = vi.fn().mockImplementation(async () => ({ records: [record], prices }));
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
+    harness: 'pi',
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    request,
+  };
+  const store = storage();
+  const create = () =>
+    new ConversationStatistics(
+      store,
+      new ClientOperations(),
+      () => ({ state, agent, harness: 'pi', retained: true }),
+      () => {},
+      () => {},
+    );
+  let stats = create();
+  expect(stats.value.prices).toEqual({}); // No frozen built-in price table.
+  await stats.refresh();
+  expect(stats.value.prices[model]).toEqual(piPrice);
+  expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].cost).toBe(7);
+  const custom = { ...piPrice, input: 2 };
+  await stats.setPrice(model, custom);
+  stats = create();
+  prices = { [model]: { ...piPrice, input: 9 } };
+  await stats.refresh();
+  expect(stats.value.prices[model]).toMatchObject({ input: 2, source: '用户设置' });
+  expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].cost).toBe(2);
+  await stats.setPrice(model);
+  expect(stats.value.prices[model]).toEqual(prices[model]);
+  expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].cost).toBe(9);
+  expect(store.get('prices')).toEqual({});
+  prices = {};
+  await stats.refresh();
+  expect(stats.value.prices[model]).toBeUndefined();
+  expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].unpriced).toBe(1);
+});
+it('gives legacy bare model user prices precedence over Pi without applying them to resellers', async () => {
+  const model = 'claude-sonnet-4-6';
+  const direct = `anthropic/${model}`,
+    reseller = `reseller/${model}`;
+  const piPrice = { input: 7, output: 20, cacheRead: 0.7, cacheWrite: 8 };
+  const store = storage();
+  await store.update('prices', { [model]: { ...piPrice, input: 2, source: '用户设置' } });
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
+    harness: 'pi',
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    request: vi.fn().mockResolvedValue({
+      records: [],
+      prices: {
+        [direct]: piPrice,
+        [reseller]: piPrice,
+        invalid: { ...piPrice, input: -1 },
+        zero: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    }),
+  };
+  const state = { ...initialState(), sessionId: 'one', status: 'ready' as const };
+  const stats = new ConversationStatistics(
+    store,
+    new ClientOperations(),
+    () => ({ state, agent, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+  );
+  await stats.refresh();
+  expect(stats.value.prices[direct].input).toBe(2);
+  expect(stats.value.prices[reseller].input).toBe(7);
+  expect(stats.value.prices.invalid).toBeUndefined();
+  expect(stats.value.prices.zero.input).toBe(0);
+  await stats.setPrice(direct, { ...piPrice, input: 1 });
+  expect(stats.value.prices[direct].input).toBe(1);
+  await stats.setPrice(direct);
+  expect(stats.value.prices[direct].input).toBe(2);
+  await stats.setPrice(model);
+  expect(stats.value.prices[direct].input).toBe(7);
 });
 it('coalesces slow history polls, preserves the index, and only reports a continuing outage once', async () => {
   vi.useFakeTimers();

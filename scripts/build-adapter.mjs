@@ -19,6 +19,21 @@ export async function buildAdapter() {
   const entry = resolve('node_modules/pi-acp/dist/index.js');
   let source = await readFile(entry, 'utf8');
   assertRequestErrorBinding(source);
+  source = replaceExactlyOnce(
+    source,
+    'return override ?? defaultPiCommand();',
+    'return resolvePiCommand(override);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    'const cmd = getPiCommand(params.piCommand);',
+    'const cmd = await resolvePiCommand(params.piCommand, params.cwd);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    'const cmd = getPiCommand(process.env.PI_ACP_PI_COMMAND);',
+    'const cmd = await getPiCommand(process.env.PI_ACP_PI_COMMAND);',
+  );
   const factory = 'new PiAcpAgent(conn)',
     args = 'const args = ["--mode", "rpc", "--no-themes"];';
   source = replaceExactlyOnce(
@@ -157,6 +172,8 @@ export async function buildAdapter() {
   );
   source = source.replace(/^#!.*\n/, '');
 
+  source =
+    `import {resolvePiCommand} from ${JSON.stringify(resolve('src/pi-command.ts'))};\n` + source;
   source =
     `import {fastConfig, setFastConfig, restoreEmptyFastConfig} from ${JSON.stringify(resolve('src/pi-fast-config.ts'))};
 import {fileURLToPath as workbenchFileURLToPath} from 'node:url';

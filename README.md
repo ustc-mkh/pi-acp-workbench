@@ -42,10 +42,10 @@ cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 
 编辑两个文件：
 
-- `sessions.json`：默认从服务的 PATH 查找 `pi`，无需填写安装路径；Pi 的代理变量放在 `env` 中。只有需要指定某个 Pi 安装时才设置 `env.PI_ACP_PI_COMMAND`。
+- `sessions.json`：启动时动态查找 `pi`，无需填写安装路径：优先 PATH，再查找当前账户的 Pi 托管安装、Node 所在目录和 npm 实际全局 prefix；Pi 的代理变量放在 `env` 中。需要指定某个 Pi 安装时设置 `env.PI_ACP_PI_COMMAND`，有效覆盖优先，失效路径自动回退并记录提示。
 - `pi-sessions.service`：将仓库的占位路径替换为实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。该目录同时包含 JS 适配器；Node 必须在服务的 PATH 中，否则在 `sessions.json` 显式设置 Node `command` 和适配器 `args`。
 
-示例 unit 的 PATH 包含 `%h/.local/bin` 和常用系统安装目录，`%h` 由 systemd 展开为运行账户的 home。使用 nvm、Volta 或自定义 npm prefix 时，将其 Node / Pi 所在目录加入该 unit 的 PATH；systemd 不会读取交互式 shell 的启动文件。不要把某台机器的 Pi 绝对路径复制到其他机器。
+示例 unit 的 PATH 包含 `%h/.local/bin` 和常用系统安装目录，`%h` 由 systemd 展开为运行账户的 home。适配器也支持从 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）或 `PI_MANAGED_INSTALL_ROOT` 推导托管启动器位置。使用 nvm、Volta 时仍需确保服务可以启动 Node；systemd 不会读取交互式 shell 的启动文件。不要把某台机器的 Pi 绝对路径复制到其他机器。
 
 ```bash
 chmod 600 ~/.config/pi-acp-workbench/sessions.json
@@ -64,6 +64,8 @@ systemctl --user enable --now pi-sessions
 历史列表默认显示最新 4 个会话，底部可展开更多或收回。打开后会一直保持展开，选择会话、刷新、发送消息或重新连接均不会收起；再次点击历史记录按钮才会关闭。
 
 Pi 的 `/compact` 成功后只显示压缩成功，不输出内部上下文摘要。压缩后的上下文占用暂时显示等待更新，下一次模型回复后恢复实际占用。
+
+计费统计的默认价格直接读取 Pi 返回的模型配置，更新 Pi 或模型价格后刷新统计即可使用最新单价。模型价格设置中的用户自定义价格优先；“恢复默认”移除该项覆盖并使用 Pi 的最新价格。没有 Pi 默认价或自定义价格的模型显示未定价，不套用静态价格表。
 
 Telegram 可在仓库执行 `npm run telegram:setup`，按向导输入 token、在话题群发送配对码，即可完成配置和用户级自启动，无需 sudo。详见 [Telegram 配置](docs/telegram.md#一键配置推荐)。
 

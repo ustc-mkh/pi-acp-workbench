@@ -3,7 +3,6 @@ import type { Agent } from './remote-agent';
 import type { ChatState } from './shared';
 import type { ClientOperations } from './conversation-history';
 import { HARNESSES, type HarnessId } from './harness';
-import { presetPrices } from './prices';
 import {
   mergeUsage,
   validPrice,
@@ -52,7 +51,7 @@ export class ConversationStatistics {
     this.overrides = storage.get('prices', {});
     this.value = {
       records: mergeUsage([], storage.get('usageRecords', [])),
-      prices: { ...presetPrices, ...this.overrides },
+      prices: this.prices(),
       titles: storage.get('usageTitles', {}),
       available: false,
     };
@@ -85,6 +84,15 @@ export class ConversationStatistics {
   persistTitles() {
     return this.storage.update('usageTitles', this.value.titles);
   }
+  private prices() {
+    const prices = { ...this.modelPrices, ...this.overrides };
+    // Older user settings can use a bare model ID. They still outrank Pi's defaults.
+    for (const model of Object.keys(this.modelPrices)) {
+      const override = priceFor(model, this.overrides);
+      if (override) prices[model] = override;
+    }
+    return prices;
+  }
   async setPrice(model: string, price?: Price) {
     if (
       typeof model !== 'string' ||
@@ -106,7 +114,7 @@ export class ConversationStatistics {
     }
     this.value = {
       ...this.value,
-      prices: { ...presetPrices, ...this.modelPrices, ...this.overrides },
+      prices: this.prices(),
     };
     await this.storage.update('prices', this.overrides);
   }
@@ -170,16 +178,16 @@ export class ConversationStatistics {
             note = data.note;
             if (data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow > 0)
               this.contextWindow(data.contextWindow);
-            for (const [key, value] of Object.entries(data.prices || {}))
-              if (
-                validPrice(value) &&
-                !priceFor(key, presetPrices) &&
-                !['__proto__', 'constructor', 'prototype'].includes(key)
-              )
-                this.modelPrices[key] = value;
+            if (data.prices !== undefined)
+              this.modelPrices = Object.fromEntries(
+                Object.entries(data.prices).filter(
+                  ([key, value]) =>
+                    validPrice(value) && !['__proto__', 'constructor', 'prototype'].includes(key),
+                ),
+              );
             this.value = {
               ...this.value,
-              prices: { ...presetPrices, ...this.modelPrices, ...this.overrides },
+              prices: this.prices(),
             };
           }
           if (

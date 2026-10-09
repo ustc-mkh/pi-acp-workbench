@@ -15,7 +15,7 @@ export default defineConfig({
       '**/rust/Cargo.*',
       '**/test/mock-*.mjs',
       '**/src/{pi-enhancements,pi-native-fork,native-branch}.ts',
-      '**/src/{adapter-store,adapter-errors}.ts',
+      '**/src/{adapter-store,adapter-errors,pi-command}.ts',
     ],
   },
 });

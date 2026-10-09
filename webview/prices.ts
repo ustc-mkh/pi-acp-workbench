@@ -40,7 +40,7 @@ export class PricesPage {
     root.append(
       text(
         'p',
-        '当前 Agent 已配置的模型 · USD / 百万 token。保存后重算统计；实际账单可能受订阅、长上下文及缓存时长影响。',
+        '当前 Agent 已配置的模型 · USD / 百万 token。默认单价由 Pi 提供，自定义价格优先；恢复默认后使用 Pi 的最新单价。保存后重算统计；实际账单可能受订阅、长上下文及缓存时长影响。',
         'stats-caption',
       ),
     );
@@ -126,7 +126,9 @@ export class PricesPage {
         card.source.textContent = price
           ? price.source === '用户设置'
             ? '已保存 · 自定义单价'
-            : '默认单价'
+            : price.source === 'Pi 模型配置'
+              ? 'Pi 默认单价'
+              : '默认单价'
           : '暂无默认单价，请填写四项价格。';
       }
     }

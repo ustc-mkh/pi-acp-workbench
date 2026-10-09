@@ -2,7 +2,7 @@ import { it, expect, beforeAll, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, delimiter } from 'node:path';
+import { join, resolve, delimiter, dirname } from 'node:path';
 import { AgentProcess } from './support/acp-client';
 import type { Inspection } from '../src/telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
@@ -17,14 +17,15 @@ beforeAll(() => {
     { cwd: process.cwd(), stdio: 'pipe' },
   );
 });
-it.each(['user-bin', 'npm-prefix/bin'])(
-  'starts Pi from PATH in %s without an executable override',
+it.each(['user-bin', 'npm-prefix/bin', 'stale-override', 'managed-install'])(
+  'discovers and starts Pi in %s',
   async (installation) => {
     const dir = await mkdtemp(join(tmpdir(), 'pi-path-test-'));
     let agent: AgentProcess | undefined;
     vi.stubEnv('PI_ACP_PI_COMMAND', undefined);
     try {
-      const bin = join(dir, installation);
+      const managed = installation === 'managed-install';
+      const bin = managed ? join(dir, 'pi-data', 'bin') : join(dir, installation);
       await mkdir(bin, { recursive: true });
       await symlink(resolve('test/mock-pi.mjs'), join(bin, 'pi'));
       agent = new AgentProcess({
@@ -32,7 +33,9 @@ it.each(['user-bin', 'npm-prefix/bin'])(
         args: [resolve('dist/pi-adapter.mjs')],
         cwd: dir,
         env: {
-          PATH: bin + delimiter + (process.env.PATH || ''),
+          PATH: (managed ? dirname(process.execPath) : bin) + delimiter + dirname(process.execPath),
+          PI_ACP_PI_COMMAND:
+            installation === 'stale-override' ? join(dir, 'old-home', 'bin', 'pi') : '',
           PI_ACP_WORKBENCH_STATE_DIR: join(dir, 'adapter-state'),
           PI_CODING_AGENT_DIR: join(dir, 'pi-data'),
           PI_TEST_AUDIT: join(dir, 'audit.jsonl'),
@@ -52,6 +55,33 @@ it.each(['user-bin', 'npm-prefix/bin'])(
     }
   },
 );
+it('uses dynamic discovery for terminal login when an old explicit path is missing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-login-path-'));
+  try {
+    const bin = join(dir, 'bin');
+    await mkdir(bin);
+    await writeFile(join(bin, 'pi'), '#!/usr/bin/env node\nconsole.log("pi-login-discovered");\n', {
+      mode: 0o755,
+    });
+    const result = execFileSync(
+      process.execPath,
+      [resolve('dist/pi-adapter.mjs'), '--terminal-login'],
+      {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: bin + delimiter + dirname(process.execPath),
+          PI_ACP_PI_COMMAND: join(dir, 'missing', 'pi'),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    expect(result).toContain('pi-login-discovered');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 it('exposes and toggles Fast mode through the bundled ACP config API', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-fast-adapter-'));
   let agent: AgentProcess | undefined;
@@ -175,6 +205,13 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
     });
     expect(data.context).toContain('压缩后的历史摘要');
     expect(data.contextWindow).toBe(200000);
+    expect(data.prices?.['anthropic/claude-sonnet-4-6']).toMatchObject({
+      input: 3,
+      output: 15,
+      cacheRead: 0.3,
+      cacheWrite: 3.75,
+      source: 'Pi 模型配置',
+    });
     expect((await inspect()).records.map((r) => r.id)).toEqual(data.records.map((r) => r.id));
     await expect(agent.prompt(sessionId, [{ type: 'text', text: 'MODEL_ERROR' }])).rejects.toThrow(
       '模型服务返回网页错误',

@@ -15,9 +15,11 @@ cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
 cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 ```
 
-Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。默认配置不指定 Pi 路径，由适配器从服务的 PATH 查找 `pi`；编辑 unit 中仓库绝对路径，指向 `service-dist/pi-acp-session-daemon`。凭据继续由 Pi 管理。代理变量和模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。`env.PI_ACP_PI_COMMAND` 仅作为可选的显式覆盖，它优先于 PATH；跨机器复制配置时应删除过期的覆盖，而不是替换为另一台机器的固定路径。
+Pi 可以在当前账户有权限访问的任意目录运行，无需配置目录白名单。默认配置不指定 Pi 路径，由适配器每次启动动态查找 `pi`；编辑 unit 中仓库绝对路径，指向 `service-dist/pi-acp-session-daemon`。凭据继续由 Pi 管理。代理变量和模型环境变量放在 `sessions.json` 的 `env` 中，并给配置设置 0600 权限；不要提交真实配置。`env.PI_ACP_PI_COMMAND` 是可选显式覆盖，有效时优先于 PATH；路径失效时自动回退并向服务日志写入选用的路径，不修改原配置。已有覆盖文件的权限错误仍正常报错。
 
-示例 unit 使用 `Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`，兼容用户目录及常见系统安装；`%h` 按运行账户展开，不绑定用户名。使用 nvm、Volta 或自定义 npm prefix 时，将实际 Node / Pi 所在目录加入 unit 的 PATH。systemd 不读取 `.bashrc` 等交互式 shell 配置；修改后执行 `systemctl --user daemon-reload` 并重启服务。
+查找顺序：有效显式覆盖 → 服务 PATH → `PI_MANAGED_INSTALL_ROOT` 推导的托管启动器、`PI_CODING_AGENT_DIR/bin/pi`（默认账户的 `~/.pi/agent/bin/pi`）→ Node 所在目录 → `npm_config_prefix` / `NPM_CONFIG_PREFIX` 和 `npm prefix -g` 返回的全局目录。查找结果不跨启动缓存，因此可跟随安装迁移或升级；不会执行交互式 shell 配置。托管安装使用稳定启动器，不绑定某个 Pi 发布版本目录。找不到 Pi 时仍返回安装错误。
+
+示例 unit 使用 `Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`，兼容用户目录及常见系统安装；`%h` 按运行账户展开，不绑定用户名。托管安装和 npm 全局 prefix 即使不在 PATH 中也可被检索；使用 nvm、Volta 时仍需将实际 Node 所在目录加入 unit 的 PATH。systemd 不读取 `.bashrc` 等交互式 shell 配置；修改后执行 `systemctl --user daemon-reload` 并重启服务。
 
 `npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs`、`pi-fast-mode.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；标准 ACP 适配器即可；原生会话加载、图片、选择器与 Pi 分支按实际能力启用。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
 

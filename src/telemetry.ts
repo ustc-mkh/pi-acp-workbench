@@ -86,7 +86,7 @@ function estimateCost(r: TokenUsage, p?: Price) {
     : undefined;
 }
 export function priceFor(model: string, prices: Record<string, Price>) {
-  // Provider-specific overrides win. Generic presets only apply to direct providers.
+  // Bare model IDs in user settings only apply to direct providers.
   if (Object.hasOwn(prices, model)) return prices[model];
   const [provider, ...name] = model.split('/');
   if (
