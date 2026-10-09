@@ -327,10 +327,19 @@ try {
       async () => (await client.call('state', { sessionId: scratchId })).busy,
       'held prompt',
     );
+    assert.equal(
+      (await client.call('list')).find((s) => s.id === scratchId)?.busy,
+      true,
+      'background held session must be busy in history',
+    );
     await prompt(phoneId, `soak-${n}`, `soak-request-${n}`);
     await sample(n === 1 ? 'startup-load' : 'load');
     await client.call('cancel', { sessionId: scratchId });
     await pending;
+    await until(
+      async () => (await client.call('list')).find((s) => s.id === scratchId)?.busy === false,
+      'history busy clears after cancellation',
+    );
     counters.prompts++;
     counters.cancellations++;
     await until(() => delivered(`echo: soak-${n}`), 'desktop outbox delivery');

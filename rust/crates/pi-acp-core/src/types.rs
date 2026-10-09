@@ -59,6 +59,20 @@ pub struct NativeBranchTarget {
     pub hash: String,
 }
 
+/// Live history metadata. Busy is derived from the daemon runtime, never persisted.
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryItem {
+    #[serde(flatten)]
+    pub snapshot: Snapshot,
+    pub busy: bool,
+}
+impl std::ops::Deref for HistoryItem {
+    type Target = Snapshot;
+    fn deref(&self) -> &Snapshot {
+        &self.snapshot
+    }
+}
+
 // serde(default) at struct level: index.json stubs may legally omit fields
 // (data-formats.md §4) — TS only checks the array shape, so deserialize
 // leniently and let validate() do the semantic gatekeeping.

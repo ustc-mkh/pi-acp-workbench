@@ -64,7 +64,7 @@
 
 `events.ack` 参数为 `{id:string,token:string}`，返回 boolean；仅删除与 token 匹配的版本，并同步目录。不存在或版本已更新返回 false。relay 先 durable 保存投递记录再确认，连接失败后重试，不重新执行模型任务。该队列当前供单个 Telegram relay 消费，不提供多个独立订阅者的投递保证；socket 权限边界与其他方法相同。
 
-v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`；usageInspection 对 Codex / Claude 为 true，对 Pi 为 false，Pi 使用其增强适配器的 inspect 能力。缺省 harness 为 Pi。`list` 返回所有 harness；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
+v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`；usageInspection 对 Codex / Claude 为 true，对 Pi 为 false，Pi 使用其增强适配器的 inspect 能力。缺省 harness 为 Pi。`list` 返回所有 harness，并为每条历史记录附带来自当前运行时的 `busy:boolean`（不写入历史文件；冷会话及重启后为 false），客户端可据此监控非当前会话；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
 
 `historyRemove` 带 sessionId 删除单个会话，不带则清空全部 harness；先处置运行时，再提交 tombstone。多个客户端可同时订阅/提交同一会话，服务按会话串行化，无客户端文件租约。
 

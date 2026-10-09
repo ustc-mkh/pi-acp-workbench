@@ -387,6 +387,29 @@ test('cancel resolves a held prompt as cancelled', async () => {
   assert.equal(result.stopReason, 'cancelled');
 });
 
+test('list reports all concurrently running sessions and clears busy after cancellation', async () => {
+  const c = state.client;
+  const ids = (await c.call('list')).slice(0, 2).map((s) => s.id);
+  assert.equal(ids.length, 2);
+  const pending = ids.map((sessionId) =>
+    c.call('prompt', { sessionId, prompt: [{ type: 'text', text: 'wait' }] }, { timeout: 0 }),
+  );
+  try {
+    let list;
+    for (let i = 0; i < 100; i++) {
+      list = await c.call('list');
+      if (ids.every((id) => list.find((s) => s.id === id)?.busy === true)) break;
+      await delay(50);
+    }
+    assert(ids.every((id) => list.find((s) => s.id === id)?.busy === true));
+  } finally {
+    await Promise.all(ids.map((sessionId) => c.call('cancel', { sessionId })));
+    await Promise.all(pending);
+  }
+  const done = await c.call('list');
+  assert(ids.every((id) => done.find((s) => s.id === id)?.busy === false));
+});
+
 test('duplicate request id returns the original result without re-executing', async () => {
   const c = state.client;
   const id = randomUUID();

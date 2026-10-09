@@ -215,6 +215,14 @@ try {
   await page.waitForTimeout(100);
   assert(await page.locator('#bottom').isVisible());
   await page.locator('#input').fill('推导这个公式');
+  const sendShape = await page.locator('#send').evaluate((b) => ({
+    width: b.getBoundingClientRect().width,
+    height: b.getBoundingClientRect().height,
+    radius: getComputedStyle(b).borderRadius,
+  }));
+  assert.equal(sendShape.width, 30);
+  assert.equal(sendShape.height, 30);
+  assert.equal(sendShape.radius, '50%');
   await page.locator('#input').press('Enter');
   assert(
     (await page.evaluate(() => window.messages)).some(
@@ -253,6 +261,17 @@ try {
       (m) => m.type === 'permission' && m.optionId === 'deny-1',
     ),
   );
+  for (const id of ['stop']) {
+    const shape = await page.locator(`#${id}`).evaluate((b) => ({
+      width: b.getBoundingClientRect().width,
+      height: b.getBoundingClientRect().height,
+      radius: getComputedStyle(b).borderRadius,
+    }));
+    assert.equal(shape.width, 30);
+    assert.equal(shape.height, 30);
+    assert.equal(shape.radius, '50%');
+  }
+  assert.equal((await page.locator('#stop').textContent()).trim(), '■');
   await page.locator('#stop').click();
   assert((await page.evaluate(() => window.messages)).some((m) => m.type === 'cancel'));
   state.permissions = [];
@@ -362,7 +381,7 @@ try {
   state.nativeForks = { 'native-answer': { entryId: 'native-node', hash: 'verified' } };
   state.history = [
     { id: 's1', sessionNumber: 1, title: '相同标题', cwd: '/project', updated: 2 },
-    { id: 's2', sessionNumber: 2, title: '相同标题', cwd: '/project', updated: 1 },
+    { id: 's2', sessionNumber: 2, title: '相同标题', cwd: '/project', updated: 1, busy: true },
   ];
   state.sessionId = 's1';
   state.sessionNumber = 1;
@@ -375,7 +394,7 @@ try {
   ]);
   assert.equal(await page.locator('#session-number').textContent(), '#001');
   state.history.push(
-    ...Array.from({ length: 5 }, (_, i) => ({
+    ...Array.from({ length: 23 }, (_, i) => ({
       id: `older${i}`,
       sessionNumber: i + 3,
       title: `更早的会话 ${i}`,
@@ -386,8 +405,24 @@ try {
   state.status = 'busy';
   await emit(state);
   assert.equal(await page.locator('#history-items .history-row').count(), 4);
+  assert.equal(await page.locator('#history-items .session-indicator.running').count(), 2);
   await page.locator('.history-more').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 7);
+  assert.equal(await page.locator('#history-items .history-row').count(), 10);
+  await page.locator('.history-more').click();
+  assert.equal(await page.locator('#history-items .history-row').count(), 20);
+  assert(await page.locator('.history-more').isDisabled());
+  for (const selector of ['.history-more', '.history-less']) {
+    const shape = await page.locator(selector).evaluate((b) => ({
+      width: b.getBoundingClientRect().width,
+      height: b.getBoundingClientRect().height,
+      radius: getComputedStyle(b).borderRadius,
+      border: getComputedStyle(b).borderStyle,
+    }));
+    assert.equal(shape.width, 30);
+    assert.equal(shape.height, 30);
+    assert.equal(shape.radius, '50%');
+    assert.equal(shape.border, 'solid');
+  }
   await page.screenshot({ path: resolve(artifacts, 'preview-history-expanded.png') });
   await page.locator('#history-items [data-id="older4"] .history-open').click();
   assert(await page.locator('#history').isVisible());
@@ -399,13 +434,18 @@ try {
   state.status = 'connecting';
   await emit(state);
   assert(await page.locator('#history').isVisible());
-  assert.equal(await page.locator('#history-items .history-row').count(), 7);
+  assert.equal(await page.locator('#history-items .history-row').count(), 20);
   state.status = 'ready';
   await emit(state);
-  await page.locator('.history-more').click();
+  assert.equal(await page.locator('#history-items .session-indicator.running').count(), 1);
+  await page.locator('.history-less').click();
+  assert.equal(await page.locator('#history-items .history-row').count(), 10);
+  await page.locator('.history-less').click();
   assert.equal(await page.locator('#history-items .history-row').count(), 4);
   assert(await page.locator('#history').isVisible());
-  await page.locator('#history-toggle').click();
+  await page.locator('.history-less').click();
+  assert(await page.locator('#history').isHidden());
+  assert.equal(await page.locator('#history-toggle').getAttribute('aria-expanded'), 'false');
   state.commands = [];
   await emit(state);
   await page.locator('#input').fill('/');

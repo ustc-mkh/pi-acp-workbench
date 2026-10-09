@@ -31,6 +31,8 @@ export interface ContextUsage {
   size: number;
 }
 export interface Snapshot {
+  /** Live list metadata only; absent in persisted snapshots and older daemons. */
+  busy?: boolean;
   commands?: acp.AvailableCommand[];
   nativeForks?: Record<string, NativeBranchTarget>;
   harness?: HarnessId;

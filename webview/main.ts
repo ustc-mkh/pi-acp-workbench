@@ -22,6 +22,7 @@ interface UiState {
   activityExpanded?: boolean;
   historyOpen?: boolean;
   historyExpanded?: boolean;
+  historyLimit?: number;
 }
 declare function acquireVsCodeApi(): {
   postMessage(message: UiMessage): void;
@@ -186,10 +187,17 @@ app.innerHTML = /* HTML */ `<header>
                 />
               </svg>
             </div>
-            <button id="stop" hidden>■ 停止</button
+            <button
+              id="stop"
+              class="circle-button"
+              aria-label="停止输出"
+              data-tooltip="停止输出"
+              hidden
+            >
+              <span aria-hidden="true">■</span></button
             ><button
               id="send"
-              class="primary"
+              class="primary circle-button"
               aria-label="发送消息"
               data-tooltip="Enter 发送 · Shift+Enter 换行"
             >
@@ -364,8 +372,13 @@ el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden)
 const historyList = new HistoryList(
   el('history-items'),
   send,
-  vscode.getState()?.historyExpanded,
-  (expanded) => saveUi({ historyExpanded: expanded }),
+  vscode.getState()?.historyLimit ?? vscode.getState()?.historyExpanded,
+  (limit) => saveUi({ historyLimit: limit }),
+  () => {
+    el('history').hidden = true;
+    el('history-toggle').setAttribute('aria-expanded', 'false');
+    saveUi({ historyOpen: false });
+  },
 );
 el('history-toggle').onclick = () => {
   if (statisticsOpen) showStatistics(false);

@@ -168,6 +168,35 @@ function mockHarness(harness: 'codex' | 'claude', mode = '') {
   host.config[harness + '.command'] = process.execPath;
   host.config[harness + '.args'] = [resolve('test/mock-agent.mjs'), mode];
 }
+it('publishes busy history metadata for concurrent foreground and background sessions', async () => {
+  mockHarness('codex');
+  await host.provider.perform({ type: 'new' });
+  const pi = required(host.provider.state.sessionId);
+  const first = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(async () =>
+    expect((await service.call('state', { sessionId: pi })).busy).toBe(true),
+  );
+  await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
+  await first;
+  await host.provider.perform({ type: 'new' });
+  const codex = required(host.provider.state.sessionId);
+  const second = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(async () =>
+    expect((await service.call('state', { sessionId: codex })).busy).toBe(true),
+  );
+  await host.provider.refreshHistory();
+  await vi.waitFor(() => expect(host.provider.state.history.filter((s) => s.busy)).toHaveLength(2));
+  await host.provider.perform({ type: 'cancel' });
+  await second;
+  await vi.waitFor(() =>
+    expect(host.provider.state.history.filter((s) => s.busy).map((s) => s.id)).toEqual([pi]),
+  );
+  await service.call('cancel', { sessionId: pi });
+  await vi.waitFor(async () => {
+    await host.provider.refreshHistory();
+    expect(host.provider.state.history.some((s) => s.busy)).toBe(false);
+  });
+});
 it('switches harness without auto-creating a session and isolates identical IDs, histories and attachments', async () => {
   mockHarness('codex');
   mockHarness('claude');

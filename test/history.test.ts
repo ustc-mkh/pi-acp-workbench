@@ -75,7 +75,7 @@ it('expands older sessions, preserves expansion during updates and selection, an
     container = document.createElement('div');
   parent.append(container);
   const messages: UiMessage[] = [],
-    expanded: boolean[] = [];
+    expanded: number[] = [];
   const list = new HistoryList(
     container,
     (message) => messages.push(message),
@@ -85,7 +85,7 @@ it('expands older sessions, preserves expansion during updates and selection, an
   const state = { history, status: 'busy' as const, sessionId: '0' };
   list.update(state);
   const more = parent.querySelector<HTMLButtonElement>('.history-more')!;
-  expect(more.textContent).toContain('还有 3 个');
+  expect(more.getAttribute('aria-label')).toBe('展开至 10 条会话');
   more.click();
   expect(container.children).toHaveLength(7);
   const open = container.querySelector<HTMLButtonElement>('[data-id="6"] .history-open')!;
@@ -95,7 +95,61 @@ it('expands older sessions, preserves expansion during updates and selection, an
   list.update({ ...state, status: 'ready' });
   expect(container.children).toHaveLength(7);
   expect(more.getAttribute('aria-expanded')).toBe('true');
-  more.click();
+  parent.querySelector<HTMLButtonElement>('.history-less')!.click();
   expect(container.children).toHaveLength(4);
-  expect(expanded).toEqual([true, false]);
+  expect(expanded).toEqual([10, 4]);
+});
+it('shows every busy session, including background sessions across harnesses', () => {
+  const container = document.createElement('div');
+  const list = new HistoryList(container, () => {});
+  const items = history.slice(0, 3).map((s, i) => ({
+    ...s,
+    busy: i < 2,
+    harness: i === 1 ? ('codex' as const) : ('pi' as const),
+  }));
+  list.update({ history: items, sessionId: '2', status: 'ready' });
+  expect(container.querySelectorAll('.running')).toHaveLength(2);
+  list.update({
+    history: items.map((s) => ({ ...s, busy: false })),
+    sessionId: '2',
+    status: 'ready',
+  });
+  expect(container.querySelectorAll('.running')).toHaveLength(0);
+});
+it('steps 4 → 10 → 20 and back to closure, never renders more than 20', () => {
+  const parent = document.createElement('section');
+  const container = document.createElement('div');
+  parent.append(container);
+  let closed = 0;
+  const limits: number[] = [];
+  const list = new HistoryList(
+    container,
+    () => {},
+    4,
+    (n) => limits.push(n),
+    () => closed++,
+  );
+  const state = {
+    history: Array.from({ length: 25 }, (_, i) => ({ ...history[0], id: String(i) })),
+    status: 'ready' as const,
+  };
+  list.update(state);
+  const down = parent.querySelector<HTMLButtonElement>('.history-more')!;
+  const up = parent.querySelector<HTMLButtonElement>('.history-less')!;
+  expect(container.children).toHaveLength(4);
+  down.click();
+  expect(container.children).toHaveLength(10);
+  down.click();
+  expect(container.children).toHaveLength(20);
+  expect(down.disabled).toBe(true);
+  down.click();
+  list.update(state);
+  expect(container.children).toHaveLength(20);
+  up.click();
+  expect(container.children).toHaveLength(10);
+  up.click();
+  expect(container.children).toHaveLength(4);
+  up.click();
+  expect(closed).toBe(1);
+  expect(limits).toEqual([10, 20, 10, 4]);
 });

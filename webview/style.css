@@ -440,14 +440,28 @@ button.primary {
 button.primary:hover {
   background: var(--vscode-button-hoverBackground, #428f7e);
 }
+.circle-button {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
 #send {
   font-size: 19px;
-  width: 30px;
-  padding: 0;
 }
 #stop {
-  color: #ee8787;
-  border: 1px solid var(--border);
+  color: #fff;
+  background: #c43838;
+  border: none;
+  font-size: 14px;
+}
+#stop:hover {
+  background: #a92d2d;
 }
 select {
   font-size: 10px;
@@ -573,12 +587,25 @@ select {
 #history-items.expanded {
   max-height: min(280px, 35vh);
 }
-.history-more {
-  display: block;
-  width: 100%;
-  font-size: 11px;
-  color: var(--muted);
+.history-controls {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
   margin-top: 4px;
+}
+.history-controls button {
+  font-size: 19px;
+  color: var(--muted);
+  background: var(--input);
+  border: 1px solid var(--border);
+}
+.history-controls button:not(:disabled):hover {
+  background: var(--border);
+  color: var(--fg);
+}
+.history-controls button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 #bottom {
   position: absolute;

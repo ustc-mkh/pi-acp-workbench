@@ -148,7 +148,7 @@ export class ChatProvider
     this.state.error = value.error;
     if (this.config.get('persistHistory', true) && !this.forgottenSessions.has(s.id))
       this.history = [
-        { ...s, entries: [], stored: true },
+        { ...s, entries: [], stored: true, busy: value.busy },
         ...this.history.filter((h) => h.id !== s.id),
       ];
     this.emit();
@@ -266,13 +266,14 @@ export class ChatProvider
       this.timer = undefined;
       this.state.harness = this.harness;
       this.state.history = this.history.map(
-        ({ id, cwd, title, updated, sessionNumber, harness }) => ({
+        ({ id, cwd, title, updated, sessionNumber, harness, busy }) => ({
           id,
           cwd,
           title,
           updated,
           sessionNumber,
           harness,
+          busy,
         }),
       );
       this.telemetry.models(this.state);

@@ -10,6 +10,8 @@ const chat =
 export class HistoryList {
   private state?: Pick<ChatState, 'history' | 'sessionId' | 'status'>;
   private more = document.createElement('button');
+  private less = document.createElement('button');
+  private limit: 4 | 10 | 20;
   private rows = new Map<
     string,
     {
@@ -24,27 +26,50 @@ export class HistoryList {
   constructor(
     private container: HTMLElement,
     private send: (message: UiMessage) => void,
-    private expanded = false,
-    private onExpand: (expanded: boolean) => void = () => {},
+    initialLimit: number | boolean = 4,
+    private onExpand: (limit: number) => void = () => {},
+    private onClose: () => void = () => {},
   ) {
-    this.more.type = 'button';
-    this.more.className = 'history-more';
-    this.more.onclick = () => {
-      this.expanded = !this.expanded;
-      this.onExpand(this.expanded);
+    this.limit = initialLimit === 20 ? 20 : initialLimit === 10 || initialLimit === true ? 10 : 4;
+    const controls = document.createElement('div');
+    controls.className = 'history-controls';
+    for (const [button, className, arrow] of [
+      [this.less, 'history-less', '↑'],
+      [this.more, 'history-more', '↓'],
+    ] as const) {
+      button.type = 'button';
+      button.className = `${className} circle-button`;
+      button.textContent = arrow;
+      controls.append(button);
+    }
+    const resize = (limit: 4 | 10 | 20) => {
+      this.limit = limit;
+      this.onExpand(limit);
       if (this.state) this.update(this.state);
     };
-    this.container.after(this.more);
+    this.more.onclick = () => {
+      if (this.limit < 20) resize(this.limit === 4 ? 10 : 20);
+    };
+    this.less.onclick = () => {
+      if (this.limit === 4) this.onClose();
+      else resize(this.limit === 20 ? 10 : 4);
+    };
+    this.container.after(controls);
   }
   update(state: Pick<ChatState, 'history' | 'sessionId' | 'status'>) {
     this.state = state;
-    const visible = this.expanded ? state.history : state.history.slice(0, 4);
-    this.more.hidden = state.history.length <= 4;
-    this.more.textContent = this.expanded
-      ? '收回（仅显示最新 4 个）'
-      : `展开更多（还有 ${state.history.length - 4} 个）`;
-    this.more.setAttribute('aria-expanded', String(this.expanded));
-    this.container.classList.toggle('expanded', this.expanded);
+    const visible = state.history.slice(0, this.limit);
+    this.more.disabled = this.limit === 20 || state.history.length <= this.limit;
+    const moreLabel =
+      this.limit === 20 ? '最多显示 20 条会话' : `展开至 ${this.limit === 4 ? 10 : 20} 条会话`;
+    const lessLabel =
+      this.limit === 4 ? '关闭历史会话' : `收回至 ${this.limit === 20 ? 10 : 4} 条会话`;
+    this.more.setAttribute('aria-label', moreLabel);
+    this.less.setAttribute('aria-label', lessLabel);
+    this.more.dataset.tooltip = moreLabel;
+    this.less.dataset.tooltip = lessLabel;
+    this.more.setAttribute('aria-expanded', String(this.limit > 4));
+    this.container.classList.toggle('expanded', this.limit > 4);
     const ids = new Set(visible.map((item) => item.id));
     for (const [id, entry] of this.rows)
       if (!ids.has(id)) {
@@ -87,7 +112,7 @@ export class HistoryList {
         this.rows.set(item.id, entry);
       }
       const current = state.sessionId === item.id,
-        running = current && state.status === 'busy';
+        running = item.busy === true || (current && state.status === 'busy');
       const profile = HARNESSES[item.harness || 'pi'];
       entry.harness.textContent = profile?.name || '未知 Harness';
       entry.harness.hidden = !item.harness || item.harness === 'pi';

@@ -3,12 +3,23 @@ use super::*;
 use pi_acp_core::sync::MutexExt;
 
 impl SessionService {
-    pub async fn list(&self) -> Result<Vec<Snapshot>, String> {
-        self.store.list().await
+    pub async fn list(&self) -> Result<Vec<pi_acp_core::types::HistoryItem>, String> {
+        let snapshots = self.store.list().await?;
+        let runtimes = self.runtimes.lock_unpoisoned().clone();
+        Ok(snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let busy = runtimes
+                    .get(&snapshot.id)
+                    .is_some_and(|rt| rt.lock_unpoisoned().phase.busy());
+                pi_acp_core::types::HistoryItem { snapshot, busy }
+            })
+            .collect())
     }
 
     pub(super) async fn index(&self, id: &str) -> Result<Snapshot, String> {
-        self.list()
+        self.store
+            .list()
             .await?
             .into_iter()
             .find(|s| s.id == id)
