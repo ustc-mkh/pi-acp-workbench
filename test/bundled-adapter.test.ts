@@ -143,10 +143,20 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
           update.content.type === 'text' &&
           update.content.text.includes('手动压缩后的上下文'),
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(updates).toContainEqual({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '上下文压缩成功。' },
+    });
+    expect(updates).toContainEqual({
+      sessionUpdate: 'session_info_update',
+      _meta: { 'pi-workbench-context': { used: null, size: 200000 } },
+    });
+    updates.length = 0;
     await expect(
       agent.prompt(sessionId, [{ type: 'text', text: '/compact fail' }]),
     ).rejects.toThrow('compaction model unavailable');
+    expect(updates.some((update) => update.sessionUpdate === 'agent_message_chunk')).toBe(false);
     const inspect = () =>
       agent!.connection.agent.request<Inspection>('_pi_workbench/inspect', { sessionId });
     const data = await inspect();
@@ -169,9 +179,11 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
     await expect(agent.prompt(sessionId, [{ type: 'text', text: 'MODEL_ERROR' }])).rejects.toThrow(
       '模型服务返回网页错误',
     );
+    updates.length = 0;
     expect(await agent.prompt(sessionId, [{ type: 'text', text: 'recovered' }])).toMatchObject({
       stopReason: 'end_turn',
     });
+    expect(updates).toContainEqual({ sessionUpdate: 'usage_update', used: 1020, size: 200000 });
   } finally {
     agent?.dispose();
     await rm(dir, { recursive: true, force: true });

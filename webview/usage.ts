@@ -1,5 +1,7 @@
 import type { ChatState } from '../src/shared';
 export function contextUsage(usage: ChatState['usage']) {
+  if (usage?.used === null && Number.isFinite(usage.size) && usage.size > 0)
+    return { known: false, percent: 0, label: '等待下一次模型回复更新上下文占用' };
   if (
     !usage ||
     usage.used === null ||

@@ -72,6 +72,25 @@ export async function buildAdapter() {
     'const timeoutMs = opts?.timeoutMs;',
     'const timeoutMs = opts?.timeoutMs ?? (cmd.type === "compact" ? undefined : 30000);',
   );
+  const compactStart = source.indexOf('      if (cmd === "compact") {');
+  const compactEnd = source.indexOf('      if (cmd === "session") {', compactStart);
+  if (compactStart < 0 || compactEnd < compactStart)
+    throw new Error('pi-acp integration seam changed: compact command');
+  source = replaceExactlyOnce(
+    source,
+    source.slice(compactStart, compactEnd),
+    `      if (cmd === "compact") {
+        const customInstructions = args.join(" ").trim() || undefined;
+        await session.proc.compact(customInstructions);
+        await session.publishContextUsage();
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "上下文压缩成功。" } }
+        });
+        return { stopReason: "end_turn" };
+      }
+`,
+  );
   // Upstream treats exhausted model retries as a successful end_turn. Preserve the final failure.
   source = replaceExactlyOnce(
     source,

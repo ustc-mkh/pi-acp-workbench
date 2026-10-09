@@ -68,6 +68,7 @@ export class TurnCoordinator {
     this.host.emit();
     try {
       await this.host.refreshHistory();
+      if (generation !== this.host.generation) return;
       await this.host.view?.webview.postMessage({ type: 'sent' });
       if (this.host.stopping || generation !== this.host.generation) {
         if (generation === this.host.generation) {
@@ -81,7 +82,7 @@ export class TurnCoordinator {
         if (!this.host.stopping && generation === this.host.generation)
           await agent.prompt(this.host.state.sessionId!, prompt);
       } finally {
-        this.host.lifecycle.prompt(false);
+        if (generation === this.host.generation) this.host.lifecycle.prompt(false);
       }
       await (agent as RemoteAgent).sync();
     } catch (error) {

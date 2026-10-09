@@ -20,6 +20,8 @@ interface UiState {
   drafts?: Partial<Record<HarnessId, string>>;
   composerHeight?: number;
   activityExpanded?: boolean;
+  historyOpen?: boolean;
+  historyExpanded?: boolean;
 }
 declare function acquireVsCodeApi(): {
   postMessage(message: UiMessage): void;
@@ -357,15 +359,19 @@ el('models-toggle').onclick = () => {
 el('statistics-toggle').onclick = () => showStatistics(pricesOpen || !statisticsOpen);
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
-const closeHistory = () => {
-  el('history').hidden = true;
-  el('history-toggle').setAttribute('aria-expanded', 'false');
-};
-const historyList = new HistoryList(el('history-items'), send, closeHistory);
+el('history').hidden = !vscode.getState()?.historyOpen;
+el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden));
+const historyList = new HistoryList(
+  el('history-items'),
+  send,
+  vscode.getState()?.historyExpanded,
+  (expanded) => saveUi({ historyExpanded: expanded }),
+);
 el('history-toggle').onclick = () => {
   if (statisticsOpen) showStatistics(false);
   el('history').hidden = !el('history').hidden;
   el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden));
+  saveUi({ historyOpen: !el('history').hidden });
   if (!el('history').hidden) send({ type: 'refreshHistory' });
 };
 el('bottom').onclick = () => {
@@ -428,7 +434,7 @@ function paint() {
   const harness = state.harness || 'pi',
     profile = HARNESSES[harness];
   el<HTMLSelectElement>('harness-switch').value = harness;
-  el<HTMLSelectElement>('harness-switch').disabled = busy || connecting || pasting;
+  el<HTMLSelectElement>('harness-switch').disabled = connecting || pasting;
   el('harness-logo').textContent = harness === 'pi' ? 'π' : harness === 'codex' ? '>_' : 'C';
   el('harness-help').hidden = harness === 'pi';
   el('harness-help-title').textContent = `${profile.name} · ACP 部分支持 / 安装与登录`;
@@ -462,7 +468,7 @@ function paint() {
     `会话 ${sessionLabel(state.sessionNumber, state.sessionId)}\nSession ID: ${state.sessionId || ''}`;
   el('connect').hidden = !reconnect;
   el<HTMLButtonElement>('connect').disabled = connecting;
-  el<HTMLButtonElement>('new').disabled = busy || connecting;
+  el<HTMLButtonElement>('new').disabled = connecting;
   el('stop').hidden = !busy;
   el('send').hidden = busy;
   el('working').hidden = !busy;

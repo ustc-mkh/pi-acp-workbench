@@ -637,7 +637,7 @@ impl AgentProcess {
                     "initialize",
                     json!({
                         "protocolVersion": 1,
-                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.11.0"},
+                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.11.1"},
                         "clientCapabilities": {},
                     }),
                 ),

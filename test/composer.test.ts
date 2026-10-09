@@ -2,6 +2,14 @@
 import { expect, it } from 'vitest';
 import { createSessionSelector, type SessionSelector } from '../webview/selectors';
 import { contextUsage } from '../webview/usage';
+
+it('labels occupancy as awaiting the next reply after compaction rather than displaying stale tokens or zero', () => {
+  expect(contextUsage({ used: null, size: 200000 })).toEqual({
+    known: false,
+    percent: 0,
+    label: '等待下一次模型回复更新上下文占用',
+  });
+});
 it('shows short model names without altering full menu labels or submitted IDs', () => {
   const control: SessionSelector = {
     label: 'Model',

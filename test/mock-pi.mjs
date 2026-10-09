@@ -17,7 +17,8 @@ const model = {
   cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 };
 let messages = [],
-  thinking = 'off';
+  thinking = 'off',
+  contextTokens = 1020;
 const fastEntries = [];
 writeFileSync(
   file,
@@ -82,7 +83,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'get_session_stats':
       reply({
         tokens: { input: 100, output: 20, cacheRead: 800, cacheWrite: 100, total: 1020 },
-        contextUsage: { tokens: 1020, contextWindow: 200000, percent: 0.51 },
+        contextUsage: {
+          tokens: contextTokens,
+          contextWindow: 200000,
+          percent: contextTokens === null ? null : contextTokens / 2000,
+        },
         cost: 0.01,
       });
       break;
@@ -95,7 +100,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           success: false,
           error: 'compaction model unavailable',
         });
-      } else reply({ tokensBefore: 1020, summary: '手动压缩后的上下文' });
+      } else {
+        contextTokens = null;
+        reply({ tokensBefore: 1020, summary: '手动压缩后的上下文' });
+      }
       break;
     case 'abort':
       reply({});
@@ -103,6 +111,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({ type: 'agent_settled' });
       break;
     case 'prompt': {
+      contextTokens = 1020;
       if (process.env.PI_TEST_FAST_MODE && cmd.message.startsWith('/workbench-fast ')) {
         const entry = {
           type: 'custom',

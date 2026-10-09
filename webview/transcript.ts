@@ -3,12 +3,43 @@ export type TranscriptBlock =
   | { kind: 'message'; entry: Entry }
   | { kind: 'activity'; id: string; entries: Entry[] };
 
-/** Keep the final answer visible; earlier narration, thoughts and tools form one execution trace. */
-export function transcriptBlocks(entries: Entry[]): TranscriptBlock[] {
+/** Stream narration in the live turn; fold adjacent tools/thoughts, then the settled trace. */
+export function transcriptBlocks(entries: Entry[], busy = false): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   let turn: Entry[] = [];
-  const flush = () => {
+  const flush = (running = false) => {
+    if (running) {
+      let steps: Entry[] = [];
+      const flushSteps = () => {
+        if (steps.length) blocks.push({ kind: 'activity', id: steps[0].id, entries: steps });
+        steps = [];
+      };
+      for (const entry of turn) {
+        if (entry.role === 'tool' || entry.role === 'thought') steps.push(entry);
+        else {
+          flushSteps();
+          blocks.push({ kind: 'message', entry });
+        }
+      }
+      flushSteps();
+      turn = [];
+      return;
+    }
     let last = -1;
+    const lastAnswer = [...turn].reverse().findIndex((entry) => entry.role === 'assistant');
+    const answer = lastAnswer < 0 ? -1 : turn.length - 1 - lastAnswer;
+    if (answer >= 0) {
+      const activity = turn.filter(
+        (entry, i) =>
+          i < answer || (i > answer && (entry.role === 'tool' || entry.role === 'thought')),
+      );
+      if (activity.length) blocks.push({ kind: 'activity', id: activity[0].id, entries: activity });
+      for (const entry of turn.slice(answer))
+        if (entry.role !== 'tool' && entry.role !== 'thought')
+          blocks.push({ kind: 'message', entry });
+      turn = [];
+      return;
+    }
     turn.forEach((entry, i) => {
       if (entry.role === 'tool' || entry.role === 'thought') last = i;
     });
@@ -23,7 +54,7 @@ export function transcriptBlocks(entries: Entry[]): TranscriptBlock[] {
       blocks.push({ kind: 'message', entry });
     } else turn.push(entry);
   }
-  flush();
+  flush(busy);
   return blocks;
 }
 
@@ -36,10 +67,11 @@ function reconcile(parent: HTMLElement, children: HTMLElement[]) {
 }
 
 export class TranscriptView {
+  private runningEntries = new Set<string>();
   private messages = new Map<string, { entry: Entry; node: HTMLElement }>();
   private groups = new Map<
     string,
-    { node: HTMLDetailsElement; summary: HTMLElement; body: HTMLElement }
+    { node: HTMLDetailsElement; summary: HTMLElement; body: HTMLElement; running: boolean }
   >();
   constructor(
     private root: HTMLElement,
@@ -79,11 +111,14 @@ export class TranscriptView {
       }
       return cached.node;
     };
-    const blocks = transcriptBlocks(entries),
+    const blocks = transcriptBlocks(entries, busy),
       active = new Set<string>();
     const nodes = blocks.map((block, index) => {
       if (block.kind === 'message') return message(block.entry);
       active.add(block.id);
+      const running =
+        busy &&
+        !blocks.slice(index + 1).some((b) => b.kind === 'message' && b.entry.role === 'user');
       let group = this.groups.get(block.id);
       if (!group) {
         const node = document.createElement('details');
@@ -93,14 +128,17 @@ export class TranscriptView {
           body = document.createElement('div');
         body.className = 'activity-body';
         node.append(summary, body);
-        group = { node, summary, body };
+        group = { node, summary, body, running };
         this.groups.set(block.id, group);
       }
       const tools = block.entries.filter((e) => e.role === 'tool').length,
         thoughts = block.entries.filter((e) => e.role === 'thought').length;
-      const running =
-        busy &&
-        !blocks.slice(index + 1).some((b) => b.kind === 'message' && b.entry.role === 'user');
+      if (
+        !running &&
+        (group.running || block.entries.some((entry) => this.runningEntries.has(entry.id)))
+      )
+        group.node.open = false;
+      group.running = running;
       group.summary.textContent = `${running ? '处理中' : '执行过程'} · ${tools} 次工具调用${thoughts ? ` · ${thoughts} 段思考` : ''}`;
       group.node.classList.toggle('running', running);
       reconcile(group.body, block.entries.map(message));
@@ -112,5 +150,12 @@ export class TranscriptView {
         this.groups.delete(id);
       }
     reconcile(this.root, nodes);
+    this.runningEntries = new Set(
+      busy
+        ? entries
+            .slice(entries.map((entry) => entry.role).lastIndexOf('user') + 1)
+            .map((entry) => entry.id)
+        : [],
+    );
   }
 }

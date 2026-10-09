@@ -108,14 +108,14 @@ export class SessionCoordinator {
 
   async startSession(target: Snapshot | 'new') {
     let snapshot = target === 'new' ? undefined : target;
-    if (this.host.state.status === 'busy' || this.host.state.status === 'connecting') return;
+    if (this.host.state.status === 'connecting') return;
     if (snapshot && snapshotHarness(snapshot) !== this.host.harness)
       await this.selectHarness(snapshotHarness(snapshot));
     if (
       snapshot?.id === this.host.state.sessionId &&
       this.host.agent &&
       !this.host.agent.isClosed &&
-      this.host.state.status === 'ready'
+      (this.host.state.status === 'ready' || this.host.state.status === 'busy')
     )
       return;
     const cwd = snapshot?.cwd || (await this.workspaceCwd());
@@ -441,11 +441,7 @@ export class SessionCoordinator {
 
   async onSwitchHarness(message: UiMessage & { type: 'switchHarness' }): Promise<void> {
     if (!isHarnessId(message.harness)) throw new Error('未知 harness。');
-    if (
-      this.host.transitioning ||
-      this.host.state.status === 'busy' ||
-      this.host.state.status === 'connecting'
-    ) {
+    if (this.host.transitioning || this.host.state.status === 'connecting') {
       this.host.emit();
       return;
     }
@@ -453,6 +449,8 @@ export class SessionCoordinator {
       this.host.emit();
       return;
     }
+    const previousStatus = this.host.state.status,
+      previousAgent = this.host.agent;
     this.host.lifecycle.transition(true);
     this.host.state.status = 'connecting';
     this.host.emit();
@@ -460,7 +458,12 @@ export class SessionCoordinator {
       await this.selectHarness(message.harness);
     } finally {
       if (this.host.state.status === 'connecting')
-        this.host.state.status = this.host.agent ? 'ready' : 'disconnected';
+        this.host.state.status =
+          this.host.agent && this.host.agent === previousAgent
+            ? previousStatus
+            : this.host.agent
+              ? 'ready'
+              : 'disconnected';
       this.host.lifecycle.transition(false);
       this.host.emit();
     }

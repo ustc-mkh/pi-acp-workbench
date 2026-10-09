@@ -257,6 +257,43 @@ try {
   assert((await page.evaluate(() => window.messages)).some((m) => m.type === 'cancel'));
   state.permissions = [];
   state.entries = [
+    { id: 'live-user', role: 'user', text: '检查代码' },
+    { id: 'live-narration', role: 'assistant', text: '我先检查实现。' },
+    { id: 'live-thought', role: 'thought', text: '思考' },
+    {
+      id: 'live-tool',
+      role: 'tool',
+      tool: { toolCallId: 'read', title: 'Read', status: 'completed' },
+    },
+    { id: 'live-next', role: 'assistant', text: '已找到原因，正在修复。' },
+    {
+      id: 'live-tool2',
+      role: 'tool',
+      tool: { toolCallId: 'edit2', title: 'Edit', status: 'in_progress' },
+    },
+  ];
+  await emit(state);
+  assert.equal(await page.locator('#messages > .message.assistant:visible').count(), 2);
+  assert.equal(await page.locator('#messages > .activity-group').count(), 2);
+  assert(await page.locator('#new').isEnabled());
+  assert(await page.locator('#harness-switch').isEnabled());
+  await page.screenshot({ path: resolve(artifacts, 'preview-live-flow.png') });
+  state.entries.push({ id: 'live-final', role: 'assistant', text: '修复完成。' });
+  state.status = 'ready';
+  await emit(state);
+  assert.equal(await page.locator('#messages > .activity-group').count(), 1);
+  assert.equal(
+    await page.locator('#messages > .activity-group').evaluate((node) => node.open),
+    false,
+  );
+  assert.equal(await page.locator('#messages > .message.assistant:visible').count(), 1);
+  assert.equal(
+    (await page.locator('#messages > .message.assistant:visible .markdown').textContent()).trim(),
+    '修复完成。',
+  );
+  await page.screenshot({ path: resolve(artifacts, 'preview-settled-flow.png') });
+  state.status = 'busy';
+  state.entries = [
     {
       id: 'tool',
       role: 'tool',
@@ -337,6 +374,37 @@ try {
     '#002',
   ]);
   assert.equal(await page.locator('#session-number').textContent(), '#001');
+  state.history.push(
+    ...Array.from({ length: 5 }, (_, i) => ({
+      id: `older${i}`,
+      sessionNumber: i + 3,
+      title: `更早的会话 ${i}`,
+      cwd: '/project',
+      updated: -i,
+    })),
+  );
+  state.status = 'busy';
+  await emit(state);
+  assert.equal(await page.locator('#history-items .history-row').count(), 4);
+  await page.locator('.history-more').click();
+  assert.equal(await page.locator('#history-items .history-row').count(), 7);
+  await page.screenshot({ path: resolve(artifacts, 'preview-history-expanded.png') });
+  await page.locator('#history-items [data-id="older4"] .history-open').click();
+  assert(await page.locator('#history').isVisible());
+  assert(
+    (await page.evaluate(() => window.messages)).some(
+      (m) => m.type === 'resume' && m.id === 'older4',
+    ),
+  );
+  state.status = 'connecting';
+  await emit(state);
+  assert(await page.locator('#history').isVisible());
+  assert.equal(await page.locator('#history-items .history-row').count(), 7);
+  state.status = 'ready';
+  await emit(state);
+  await page.locator('.history-more').click();
+  assert.equal(await page.locator('#history-items .history-row').count(), 4);
+  assert(await page.locator('#history').isVisible());
   await page.locator('#history-toggle').click();
   state.commands = [];
   await emit(state);
@@ -470,7 +538,7 @@ try {
   state.status = 'busy';
   await emit(state);
   assert.equal(await page.locator('#input').inputValue(), 'Codex private draft');
-  assert(await page.locator('#harness-switch').isDisabled());
+  assert(await page.locator('#harness-switch').isEnabled());
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   state.status = 'ready';
   await emit(state);

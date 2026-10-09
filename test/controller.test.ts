@@ -211,7 +211,7 @@ it('switches harness without auto-creating a session and isolates identical IDs,
   expect(host.stored.get('activeSession')).toBe(pi.sessionId);
   expect(host.stored.get('harness.codex.activeSession')).toBe(codex.sessionId);
 });
-it('keeps model preferences separate and rejects switching during an active prompt', async () => {
+it('keeps model preferences separate while switching away from an active prompt', async () => {
   await contextAgent();
   await host.provider.perform({ type: 'config', id: 'model', value: 'other' });
   mockHarness('codex', 'context');
@@ -222,13 +222,18 @@ it('keeps model preferences separate and rejects switching during an active prom
   );
   await host.provider.perform({ type: 'config', id: 'thinking', value: 'high' });
   expect(preferences()).not.toEqual(preferences('codex'));
+  const id = host.provider.snapshot().sessionId;
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  await vi.waitFor(() =>
+    expect(host.provider.snapshot().entries.some((entry) => entry.role === 'user')).toBe(true),
+  );
   await host.provider.perform({ type: 'switchHarness', harness: 'claude' });
-  expect(host.provider.snapshot().harness).toBe('codex');
-  await host.provider.perform({ type: 'cancel' });
+  expect(host.provider.snapshot().harness).toBe('claude');
   await turn;
-  const id = host.provider.snapshot().sessionId;
+  await host.provider.perform({ type: 'resume', id: required(id) });
+  await host.provider.perform({ type: 'cancel' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('ready'));
   await host.provider.perform({
     type: 'branchMessage',
     sessionId: required(id),
@@ -623,17 +628,97 @@ it('rejects forged permission option IDs and accepts the displayed option', asyn
   expect(host.provider.snapshot().permissions).toHaveLength(0);
   expect(host.provider.snapshot().status).toBe('ready');
 });
-it('blocks concurrent prompts and new sessions during an active turn', async () => {
-  await host.provider.perform({ type: 'new' });
+it('creates and switches sessions while the original turn keeps running in the daemon', async () => {
+  await contextAgent();
+  const original = host.provider.snapshot().sessionId!;
   const turn = host.provider.perform({ type: 'send', text: 'wait' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
-  await host.provider.perform({ type: 'new' });
-  await host.provider.perform({ type: 'send', text: 'second' });
   await vi.waitFor(() =>
-    expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1),
+    expect(host.provider.snapshot().entries.some((entry) => entry.role === 'user')).toBe(true),
   );
+  await host.provider.perform({ type: 'resume', id: original });
+  expect(host.provider.snapshot()).toMatchObject({ sessionId: original, status: 'busy' });
+  await host.provider.perform({ type: 'new' });
+  const second = host.provider.snapshot().sessionId!;
+  expect(second).not.toBe(original);
+  expect(host.provider.snapshot().status).toBe('ready');
+  await turn;
+  expect(
+    (await host.provider.serviceClient.call<{ busy: boolean }>('state', { sessionId: original }))
+      .busy,
+  ).toBe(true);
+  await host.provider.perform({ type: 'send', text: 'second' });
+  expect(host.provider.snapshot().entries).toContainEqual(
+    expect.objectContaining({ role: 'user', text: 'second' }),
+  );
+  await host.provider.perform({ type: 'resume', id: original });
+  expect(host.provider.snapshot()).toMatchObject({ sessionId: original, status: 'busy' });
+  await host.provider.perform({ type: 'send', text: 'blocked overlap' });
+  expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1);
+  await host.provider.perform({ type: 'resume', id: second });
+  expect(host.provider.snapshot()).toMatchObject({
+    sessionId: second,
+    status: 'ready',
+    error: undefined,
+  });
+  await host.provider.perform({ type: 'resume', id: original });
+  await host.provider.perform({ type: 'cancel' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('ready'));
+});
+it('switches harness during a live turn without cancelling it or retaining the old request gate', async () => {
+  await host.provider.perform({ type: 'new' });
+  const original = host.provider.snapshot().sessionId!;
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
+  await vi.waitFor(() =>
+    expect(host.provider.snapshot().entries.some((entry) => entry.role === 'user')).toBe(true),
+  );
+  await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
+  await turn;
+  expect(host.provider.snapshot().harness).toBe('codex');
+  expect(
+    (await host.provider.serviceClient.call<{ busy: boolean }>('state', { sessionId: original }))
+      .busy,
+  ).toBe(true);
+  await host.provider.perform({ type: 'new' });
+  await host.provider.perform({ type: 'send', text: 'codex second' });
+  expect(host.provider.snapshot()).toMatchObject({
+    harness: 'codex',
+    status: 'ready',
+    error: undefined,
+  });
+  await host.provider.perform({ type: 'resume', id: original });
+  expect(host.provider.snapshot()).toMatchObject({
+    harness: 'pi',
+    sessionId: original,
+    status: 'busy',
+  });
+  await host.provider.perform({ type: 'cancel' });
+  await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('ready'));
+});
+it('retains the busy session and original request gate when navigation fails before detaching', async () => {
+  await contextAgent();
+  const original = host.provider.snapshot().sessionId!;
+  const turn = host.provider.perform({ type: 'send', text: 'wait' });
+  await vi.waitFor(() =>
+    expect(host.provider.snapshot().entries.some((entry) => entry.role === 'user')).toBe(true),
+  );
+  const refresh = vi
+    .spyOn(host.provider, 'refreshHistory')
+    .mockRejectedValueOnce(new Error('history unavailable'));
+  await host.provider.perform({ type: 'switchHarness', harness: 'codex' });
+  expect(host.provider.snapshot()).toMatchObject({
+    sessionId: original,
+    harness: 'pi',
+    status: 'busy',
+    error: 'history unavailable',
+  });
+  refresh.mockRestore();
+  await host.provider.perform({ type: 'send', text: 'blocked overlap' });
+  expect(host.provider.snapshot().entries.filter((entry) => entry.role === 'user')).toHaveLength(1);
   await host.provider.perform({ type: 'cancel' });
   await turn;
+  expect(host.provider.snapshot().status).toBe('ready');
 });
 it('keeps the daemon connected after worker failure and surfaces an actionable error', async () => {
   await host.provider.perform({ type: 'new' });

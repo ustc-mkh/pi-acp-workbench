@@ -48,7 +48,7 @@ it('keeps groups folded by default, preserves toggles while streaming, and suppo
   view.update([user, answer], false);
   expect(root.querySelector('details')).toBeNull();
 });
-it('moves interim assistant messages into the trace when a later tool arrives', () => {
+it('keeps live narration visible between folded runs of tools and thoughts, then folds the whole turn', () => {
   const root = document.createElement('div');
   const view = new TranscriptView(root, (entry) => {
     const node = document.createElement('article');
@@ -58,5 +58,60 @@ it('moves interim assistant messages into the trace when a later tool arrives', 
   view.update([user, thought, answer], true);
   const existing = root.querySelector('[data-id=a]');
   view.update([user, thought, answer, tool], true);
+  expect(root.querySelector(':scope > [data-id=a]')).toBe(existing);
+  expect(root.querySelectorAll(':scope > details')).toHaveLength(2);
+  expect([...root.querySelectorAll('details')].every((node) => !node.open)).toBe(true);
+  const final: Entry = { ...answer, id: 'final', text: 'finished' };
+  view.update([user, thought, answer, tool, final], false);
+  expect(root.querySelectorAll(':scope > details')).toHaveLength(1);
   expect(root.querySelector('.activity-body [data-id=a]')).toBe(existing);
+  expect(root.querySelector('details')!.open).toBe(false);
+  expect(root.lastElementChild?.getAttribute('data-id')).toBe('final');
+});
+it('folds narration without tools at completion and only streams the latest turn', () => {
+  const narration: Entry = { ...answer, id: 'n', text: 'next step' };
+  expect(transcriptBlocks([user, narration, answer], true).map((block) => block.kind)).toEqual([
+    'message',
+    'message',
+    'message',
+  ]);
+  expect(transcriptBlocks([user, narration, answer]).map((block) => block.kind)).toEqual([
+    'message',
+    'activity',
+    'message',
+  ]);
+  const blocks = transcriptBlocks(
+    [
+      user,
+      thought,
+      narration,
+      tool,
+      answer,
+      { ...user, id: 'u2' },
+      { ...thought, id: 't2' },
+      { ...answer, id: 'a2' },
+    ],
+    true,
+  );
+  expect(blocks[1]).toMatchObject({ kind: 'activity', entries: [thought, narration, tool] });
+  expect(blocks.at(-1)).toMatchObject({ kind: 'message', entry: { id: 'a2' } });
+});
+it('automatically folds a finished turn even after expanding activity while it was running', () => {
+  const root = document.createElement('div');
+  const view = new TranscriptView(root, () => document.createElement('article'), true);
+  const narration: Entry = { ...answer, id: 'n' };
+  view.update([user, narration, thought, tool, answer], true);
+  view.update([user, narration, thought, tool, answer], false);
+  const group = root.querySelector('details')!;
+  expect(group.open).toBe(false);
+  group.open = true;
+  view.update([user, narration, thought, tool, answer], false);
+  expect(group.open).toBe(true);
+});
+it('folds progress notices while retaining the final answer even when trailing tools arrive', () => {
+  const notice: Entry = { id: 'notice', role: 'notice', text: 'progress' };
+  const blocks = transcriptBlocks([user, thought, notice, answer, tool]);
+  expect(blocks.map((block) => block.kind)).toEqual(['message', 'activity', 'message']);
+  expect(blocks[1]).toMatchObject({ entries: [thought, notice, tool] });
+  expect(blocks[2]).toMatchObject({ entry: answer });
 });

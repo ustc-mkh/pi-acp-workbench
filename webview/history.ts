@@ -8,6 +8,8 @@ const chat =
 
 /** Keep rows and the scroll position stable while token updates stream in. */
 export class HistoryList {
+  private state?: Pick<ChatState, 'history' | 'sessionId' | 'status'>;
+  private more = document.createElement('button');
   private rows = new Map<
     string,
     {
@@ -22,10 +24,28 @@ export class HistoryList {
   constructor(
     private container: HTMLElement,
     private send: (message: UiMessage) => void,
-    private onOpen: () => void,
-  ) {}
+    private expanded = false,
+    private onExpand: (expanded: boolean) => void = () => {},
+  ) {
+    this.more.type = 'button';
+    this.more.className = 'history-more';
+    this.more.onclick = () => {
+      this.expanded = !this.expanded;
+      this.onExpand(this.expanded);
+      if (this.state) this.update(this.state);
+    };
+    this.container.after(this.more);
+  }
   update(state: Pick<ChatState, 'history' | 'sessionId' | 'status'>) {
-    const ids = new Set(state.history.map((item) => item.id));
+    this.state = state;
+    const visible = this.expanded ? state.history : state.history.slice(0, 4);
+    this.more.hidden = state.history.length <= 4;
+    this.more.textContent = this.expanded
+      ? '收回（仅显示最新 4 个）'
+      : `展开更多（还有 ${state.history.length - 4} 个）`;
+    this.more.setAttribute('aria-expanded', String(this.expanded));
+    this.container.classList.toggle('expanded', this.expanded);
+    const ids = new Set(visible.map((item) => item.id));
     for (const [id, entry] of this.rows)
       if (!ids.has(id)) {
         entry.row.remove();
@@ -36,7 +56,7 @@ export class HistoryList {
       return;
     }
     if (!this.rows.size) this.container.replaceChildren();
-    state.history.forEach((item, index) => {
+    visible.forEach((item, index) => {
       let entry = this.rows.get(item.id);
       if (!entry) {
         const row = document.createElement('div');
@@ -57,7 +77,6 @@ export class HistoryList {
         open.type = 'button';
         open.onclick = () => {
           this.send({ type: 'resume', id: item.id });
-          this.onOpen();
         };
         const number = document.createElement('span');
         number.className = 'session-number';
@@ -84,7 +103,7 @@ export class HistoryList {
       else entry.open.removeAttribute('aria-current');
       if (entry.open.textContent !== item.title) entry.open.textContent = item.title;
       entry.open.dataset.tooltip = `${profile?.name || '未知 Harness'} · ${label} ${item.title}\nSession ID: ${item.id}\n${item.cwd}\n${new Date(item.updated).toLocaleString()}`;
-      entry.open.disabled = state.status === 'busy' || state.status === 'connecting';
+      entry.open.disabled = state.status === 'connecting';
       if (this.container.children[index] !== entry.row)
         this.container.insertBefore(entry.row, this.container.children[index] || null);
     });

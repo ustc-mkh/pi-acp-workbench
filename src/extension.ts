@@ -58,7 +58,7 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
   }
   generation = 0;
   private timer?: NodeJS.Timeout;
-  private requestInFlight = false;
+  private requestInFlight?: { type: UiMessage['type']; pending: boolean };
   get stopping() {
     return this.lifecycle.cancelled;
   }
@@ -430,7 +430,9 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
     this.log.show();
   }
   async perform(message: UiMessage): Promise<void> {
-    let ownsGate = false;
+    let gate: { type: UiMessage['type']; pending: boolean } | undefined;
+    let previousGate: typeof gate;
+    const generation = this.generation;
     try {
       if (
         !message ||
@@ -451,17 +453,30 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
         'switchHarness',
         'releaseSession',
       ].includes(message.type);
+      const navigation = ['new', 'resume', 'switchHarness'].includes(message.type);
+      // Selecting the current conversation must not replace its live turn's request gate.
+      if (
+        this.state.status === 'busy' &&
+        ((message.type === 'resume' && message.id === this.state.sessionId) ||
+          (message.type === 'switchHarness' && message.harness === this.harness))
+      )
+        return;
       if (gated) {
-        if (this.requestInFlight) return;
-        this.requestInFlight = true;
-        ownsGate = true;
+        if (
+          this.requestInFlight &&
+          !(navigation && this.requestInFlight.type === 'send' && this.state.status === 'busy')
+        )
+          return;
+        previousGate = this.requestInFlight;
+        gate = { type: message.type, pending: true };
+        this.requestInFlight = gate;
       }
       await this.historyReady;
       if (this.disposed) return;
       if (gated) {
         if (
           this.transitioning ||
-          this.state.status === 'busy' ||
+          (this.state.status === 'busy' && !navigation) ||
           this.state.status === 'connecting'
         )
           return;
@@ -470,13 +485,19 @@ export class ChatProvider implements vscode.WebviewViewProvider, vscode.Disposab
       await dispatchUi(this.handlers, message);
       this.emit();
     } catch (error) {
+      if (message.type === 'send' && generation !== this.generation) return;
       const detail = error instanceof Error ? error.message : String(error);
       this.state.error =
         detail === 'ACP connection closed' && this.state.error ? this.state.error : detail;
       this.log.appendLine(this.state.error);
       this.emit();
     } finally {
-      if (ownsGate) this.requestInFlight = false;
+      if (gate) {
+        gate.pending = false;
+        if (this.requestInFlight === gate)
+          this.requestInFlight =
+            previousGate?.pending && generation === this.generation ? previousGate : undefined;
+      }
     }
   }
   dispose() {
