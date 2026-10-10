@@ -6,9 +6,9 @@
 
 ## 0.11.6 验收 — 2026-10-10（Asia/Hong_Kong）
 
-本轮完成 Telegram 菜单位置隔离、移除 `/settings`、General 同步与全局开关、Topic 最近消息同步，以及图片 multipart 上传。最终 `TEST_JOBS=1 npm run verify` 通过：TS 45 文件 / 262 项、Rust 103 项（core 14 / session 57 / relay 32）、会话契约 22 项、Telegram 契约 36 项、集成、资源、runner、clippy 与浏览器。新增覆盖 General / Topic / 未绑定话题及旧回调边界、16px 发送 SVG、本轮图片 entry ID 捕获、图片 multipart 字节与静音、部分图片失败后重启继续且不重复已发送内容、429、GIF / WebP、照片尺寸失败回退文件、本地 / 内嵌 / ACP 历史图片及重复同步、越界 / 符号链接 / 无效签名 / 大小限制。
+本轮完成 Telegram 菜单位置隔离、移除 `/settings`、General 同步与全局开关、Topic 最近消息同步，以及图片 multipart 上传。最终默认并发的 `npm run verify` 通过：TS 45 文件 / 262 项、Rust 103 项（core 14 / session 57 / relay 32）、会话契约 22 项、Telegram 契约 36 项、集成、资源、runner、clippy 与浏览器。新增覆盖 General / Topic / 未绑定话题及旧回调边界、16px 发送 SVG、本轮图片 entry ID 捕获、图片 multipart 字节与静音、部分图片失败后重启继续且不重复已发送内容、429、GIF / WebP、照片尺寸失败回退文件、本地 / 内嵌 / ACP 历史图片及重复同步、越界 / 符号链接 / 无效签名 / 大小限制。
 
-日志在 `.test-results/release-0.11.6/`。首轮并发回归有一项 TS 5 秒超时和一项 Rust 本地 HTTP fixture 请求超时，保留于 `first-regression/`；未跳过用例或放宽阈值，以单任务调度完整重跑通过。生产 GNU 当前产物另行构建和 smoke；musl 以 main / 标签 CI 和发布附件为准。**本轮未重复浸泡**；真实 Telegram API 上传及客户端图片显示、实际 VS Code Extension Host、付费模型和真实群组未验证，图片行为由隔离 Bot API / ACP 契约验证。
+日志在 `.test-results/release-0.11.6/`。首轮并发回归有一项 TS 5 秒超时和一项 Rust 本地 HTTP fixture 请求超时，保留于 `first-regression/`；未跳过用例或放宽阈值，以单任务调度完整重跑通过，后续默认并发末轮也通过。首个未发布标签 CI `38054574300` 的菜单分页测试失败，定位为测试在新卡片到达前选中了另一 Topic 的旧卡片；面板等待现要求本次操作后的消息、正确话题和消息 ID，未修改生产逻辑，诊断结果保留于 `ci-first-failure.json`。修正后重新执行完整回归与 main / tag CI，不绕过失败项。生产 GNU 当前产物构建和 smoke 通过；musl 以 main / 标签 CI 和发布附件为准。**本轮未重复浸泡**；真实 Telegram API 上传及客户端图片显示、实际 VS Code Extension Host、付费模型和真实群组未验证，图片行为由隔离 Bot API / ACP 契约验证。
 
 ## 0.11.5 验收 — 2026-10-10（Asia/Hong_Kong）
 

@@ -75,7 +75,15 @@ async function publishEvent(id, text, extra = {}) {
 function pushUpdate(body) {
   telegram.updates.push({ update_id: ++telegram.updateId, ...body });
 }
+let panelFloor = 0;
+let panelThread;
+let panelMessage;
 function message(text, { user = USER, thread, chat = CHAT, reply } = {}) {
+  if (/^\/(?:menu|new|open|help|commands|start)(?:\s|@|$)/.test(text)) {
+    panelFloor = telegram.inbox.length;
+    panelThread = thread === 1 ? undefined : thread;
+    panelMessage = undefined;
+  }
   pushUpdate({
     message: {
       message_id: telegram.messageId++,
@@ -136,7 +144,17 @@ const panels = () =>
 async function panelWith(text) {
   let panel;
   await waitUntil(() => {
-    panel = panels().findLast((c) => c.params.text.includes(text));
+    panel = telegram.inbox
+      .slice(panelFloor)
+      .findLast(
+        (c) =>
+          c.params.text?.includes(text) &&
+          c.params.reply_markup?.inline_keyboard
+            ?.flat()
+            .some((b) => b.callback_data?.startsWith('ui:')) &&
+          c.params.message_thread_id === panelThread &&
+          (panelMessage === undefined || c.messageId === panelMessage),
+      );
     return panel;
   }, `no panel containing ${text}`);
   return panel;
@@ -146,6 +164,9 @@ function click(panel, label, options = {}) {
     .flat()
     .find((b) => (typeof label === 'string' ? b.text === label : label.test(b.text)));
   assert(button, `missing button ${label} on ${panel.params.text}`);
+  panelFloor = telegram.inbox.length;
+  panelThread = panel.params.message_thread_id;
+  panelMessage = panel.messageId;
   callback(button.callback_data, {
     thread: panel.params.message_thread_id,
     messageId: panel.messageId,
