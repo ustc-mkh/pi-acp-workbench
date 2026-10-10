@@ -220,9 +220,15 @@ try {
     height: b.getBoundingClientRect().height,
     radius: getComputedStyle(b).borderRadius,
   }));
-  assert.equal(sendShape.width, 30);
-  assert.equal(sendShape.height, 30);
+  assert.equal(sendShape.width, 26);
+  assert.equal(sendShape.height, 26);
   assert.equal(sendShape.radius, '50%');
+  assert.equal(await page.locator('#send svg').getAttribute('viewBox'), '0 0 16 16');
+  assert.equal(await page.locator('#send path').getAttribute('d'), 'M3 7l5-5 5 5M8 2v12');
+  assert.equal(
+    await page.locator('#send svg').evaluate((n) => n.getBoundingClientRect().width),
+    24,
+  );
   await page.locator('#input').press('Enter');
   assert(
     (await page.evaluate(() => window.messages)).some(
@@ -267,11 +273,31 @@ try {
       height: b.getBoundingClientRect().height,
       radius: getComputedStyle(b).borderRadius,
     }));
-    assert.equal(shape.width, 30);
-    assert.equal(shape.height, 30);
+    assert.equal(shape.width, 26);
+    assert.equal(shape.height, 26);
     assert.equal(shape.radius, '50%');
   }
-  assert.equal((await page.locator('#stop').textContent()).trim(), '■');
+  const stopColors = await page.locator('#stop').evaluate((n) => {
+    const send = document.querySelector('#send');
+    const square = n.querySelector('.stop-square');
+    const rect = n.getBoundingClientRect(),
+      box = square.getBoundingClientRect();
+    return {
+      sameBackground:
+        getComputedStyle(n).backgroundColor === getComputedStyle(send).backgroundColor,
+      sameColor: getComputedStyle(square).backgroundColor === getComputedStyle(send).color,
+      squareWidth: box.width,
+      centered:
+        Math.abs(box.left + box.right - (rect.left + rect.right)) < 1 &&
+        Math.abs(box.top + box.bottom - (rect.top + rect.bottom)) < 1,
+    };
+  });
+  assert.deepEqual(stopColors, {
+    sameBackground: true,
+    sameColor: true,
+    squareWidth: 10,
+    centered: true,
+  });
   await page.locator('#stop').click();
   assert((await page.evaluate(() => window.messages)).some((m) => m.type === 'cancel'));
   state.permissions = [];
@@ -409,7 +435,7 @@ try {
   await page.locator('.history-more').click();
   assert.equal(await page.locator('#history-items .history-row').count(), 10);
   await page.locator('.history-more').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 20);
+  assert.equal(await page.locator('#history-items .history-row').count(), 16);
   assert(await page.locator('.history-more').isDisabled());
   for (const selector of ['.history-more', '.history-less']) {
     const shape = await page.locator(selector).evaluate((b) => ({
@@ -418,11 +444,57 @@ try {
       radius: getComputedStyle(b).borderRadius,
       border: getComputedStyle(b).borderStyle,
     }));
-    assert.equal(shape.width, 30);
-    assert.equal(shape.height, 30);
+    assert.equal(shape.width, 20);
+    assert.equal(shape.height, 20);
     assert.equal(shape.radius, '50%');
     assert.equal(shape.border, 'solid');
   }
+  assert.equal(await page.locator('#history-items [data-tooltip]').count(), 0);
+  assert.equal(
+    await page.locator('.history-controls').evaluate((n) => getComputedStyle(n).gap),
+    '12px',
+  );
+  const historyViewport = page.viewportSize();
+  const historyInputHeight = await page.locator('#input').evaluate((n) => n.style.height);
+  for (const [height, composerHeight] of [
+    [480, 180],
+    [360, 65],
+  ]) {
+    await page.setViewportSize({ width: 320, height });
+    await page.locator('#input').evaluate((n, h) => {
+      n.style.height = `${h}px`;
+    }, composerHeight);
+    await page.locator('#history-items .history-row').last().scrollIntoViewIfNeeded();
+    const layout = await page.evaluate(() => {
+      const list = document.getElementById('history-items');
+      const last = list.lastElementChild.getBoundingClientRect();
+      const box = list.getBoundingClientRect();
+      const controls = document.querySelector('.history-controls').getBoundingClientRect();
+      const footer = document.querySelector('footer').getBoundingClientRect();
+      return {
+        rows: list.children.length,
+        height: list.clientHeight,
+        overflow: list.scrollHeight > list.clientHeight,
+        lastBottom: last.bottom,
+        listBottom: box.bottom,
+        controlsBottom: controls.bottom,
+        footerBottom: footer.bottom,
+        viewport: innerHeight,
+      };
+    });
+    assert.equal(layout.rows, 16);
+    assert(layout.height > 0 && layout.overflow, JSON.stringify(layout));
+    assert(layout.lastBottom <= layout.listBottom + 1, JSON.stringify(layout));
+    assert(
+      layout.controlsBottom <= layout.viewport && layout.footerBottom <= layout.viewport + 1,
+      JSON.stringify(layout),
+    );
+    await page.screenshot({ path: resolve(artifacts, `preview-history-${height}.png`) });
+  }
+  await page.setViewportSize(historyViewport);
+  await page.locator('#input').evaluate((n, h) => {
+    n.style.height = h;
+  }, historyInputHeight);
   await page.screenshot({ path: resolve(artifacts, 'preview-history-expanded.png') });
   await page.locator('#history-items [data-id="older4"] .history-open').click();
   assert(await page.locator('#history').isVisible());
@@ -434,7 +506,7 @@ try {
   state.status = 'connecting';
   await emit(state);
   assert(await page.locator('#history').isVisible());
-  assert.equal(await page.locator('#history-items .history-row').count(), 20);
+  assert.equal(await page.locator('#history-items .history-row').count(), 16);
   state.status = 'ready';
   await emit(state);
   assert.equal(await page.locator('#history-items .session-indicator.running').count(), 1);
@@ -679,6 +751,50 @@ try {
   await emit(state);
   assert.equal(await terminal.evaluate((node) => node.scrollTop), 0);
   await page.screenshot({ path: resolve(artifacts, 'preview-terminal.png') });
+  // Actual decoded output images, plus a host-mediated local Markdown image.
+  const outputPng = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 280;
+    canvas.height = 120;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#edf5f2';
+    ctx.fillRect(0, 0, 280, 120);
+    ctx.fillStyle = '#408777';
+    [45, 75, 100].forEach((h, i) => ctx.fillRect(35 + i * 75, 110 - h, 45, h));
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  state.status = 'ready';
+  state.entries = [
+    {
+      id: 'output-images',
+      role: 'assistant',
+      text: `输出图片：\n\n![本地预览](./preview.png)\n\n![内嵌预览](data:image/png;base64,${outputPng})\n\n![远程图片](https://tracker.invalid/pixel.png)`,
+      contextBlocks: [{ type: 'image', mimeType: 'image/png', data: outputPng }],
+    },
+  ];
+  await emit(state);
+  const outputRequest = (await page.evaluate(() => window.messages)).findLast(
+    (m) => m.type === 'readOutputImage',
+  );
+  assert.equal(outputRequest.url, './preview.png');
+  await page.evaluate(
+    ({ id, data }) =>
+      window.postMessage(
+        { type: 'outputImage', id, image: { name: 'preview.png', mimeType: 'image/png', data } },
+        '*',
+      ),
+    { id: outputRequest.id, data: outputPng },
+  );
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll('#messages img').length === 3 &&
+      [...document.querySelectorAll('#messages img')].every(
+        (img) => img.complete && img.naturalWidth === 280,
+      ),
+  );
+  assert.equal(await page.locator('#messages img[src^="http"]').count(), 0);
+  assert.equal(await page.locator('#messages .image-placeholder').count(), 1);
+  await page.screenshot({ path: resolve(artifacts, 'preview-output-images.png') });
   assert.deepEqual(errors, []);
   console.log(
     'Browser smoke passed: lazy Mermaid under CSP, dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, per-tool/per-turn diffs, model visibility, Fast mode, following terminal output, no runtime errors.',

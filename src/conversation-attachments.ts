@@ -3,7 +3,8 @@ import * as path from 'node:path';
 import { openWorkspaceLink } from './workspace-documents';
 import { validateImage, MAX_ATTACHMENT_IMAGE_BYTES } from './images';
 import { nextId } from './state';
-import type { UiMessage } from './shared';
+import type { UiMessage, OutputImageReply } from './shared';
+import { readOutputImage } from './output-image';
 import type { ActiveConversation } from './active-conversation';
 import type { HarnessId } from './harness';
 import type { DiffDocuments } from './workspace-documents';
@@ -13,6 +14,8 @@ export interface AttachmentHost {
   readonly state: ActiveConversation['state'];
   readonly harness: HarnessId;
   readonly cwd: string;
+  readonly generation: number;
+  postOutputImage(reply: OutputImageReply): void;
   readonly documents: Pick<DiffDocuments, 'open'>;
   emit(): void;
 }
@@ -96,6 +99,50 @@ export class AttachmentCoordinator {
   async onRemoveAttachment(message: UiMessage & { type: 'removeAttachment' }): Promise<void> {
     this.host.state.attachments = this.host.state.attachments.filter((a) => a.id !== message.id);
     this.host.emit();
+  }
+
+  private imageReads = 0;
+  async onReadOutputImage(message: UiMessage & { type: 'readOutputImage' }): Promise<void> {
+    const { generation, cwd, harness } = this.host;
+    if (message.harness !== harness || message.sessionId !== this.host.state.sessionId) return;
+    if (!vscode.workspace.isTrusted || this.imageReads >= 4) {
+      this.host.postOutputImage({
+        type: 'outputImage',
+        id: message.id,
+        error: '工作区未受信任或图片加载过多。',
+      });
+      return;
+    }
+    this.imageReads++;
+    let reply: OutputImageReply;
+    try {
+      reply = {
+        type: 'outputImage',
+        id: message.id,
+        image: await readOutputImage(cwd, message.url),
+      };
+    } catch {
+      reply = {
+        type: 'outputImage',
+        id: message.id,
+        error: '图片不可用：需为当前工作目录内、不超过 3 MB 的 PNG / JPEG / WebP / GIF。',
+      };
+    } finally {
+      this.imageReads--;
+    }
+    if (
+      generation === this.host.generation &&
+      harness === this.host.harness &&
+      cwd === this.host.cwd &&
+      message.sessionId === this.host.state.sessionId
+    )
+      this.host.postOutputImage(reply);
+    else
+      this.host.postOutputImage({
+        type: 'outputImage',
+        id: message.id,
+        error: '会话已切换，请重试。',
+      });
   }
 
   async onOpen(message: UiMessage & { type: 'open' }): Promise<void> {

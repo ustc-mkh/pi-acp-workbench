@@ -1,6 +1,6 @@
 import type { Entry, UiMessage } from '../src/shared';
 import { turnDiffTitle } from '../src/turn-diff';
-import { imagePreview } from './image-paste';
+import { contentImage, hydrateInlineImages } from './output-images';
 import { messageActions } from './message-actions';
 
 const button = (text: string, action: () => void, className?: string) => {
@@ -113,6 +113,7 @@ export function createMessageRenderer(
   renderMarkdown: (text: string) => string,
   sessionId: () => string | undefined,
   send: (message: UiMessage) => void,
+  hydrateImages: (node: HTMLElement) => void = hydrateInlineImages,
 ) {
   return (entry: Entry): HTMLElement => {
     if (entry.role === 'diff') return turnDiffNode(entry, send);
@@ -167,6 +168,11 @@ export function createMessageRenderer(
           after.textContent = content.newText.slice(0, 4000);
           body.append(before, after);
         } else if (content.type === 'content') {
+          const image = contentImage(content.content);
+          if (image) {
+            body.append(image);
+            return;
+          }
           const text =
             content.content.type === 'text' ? content.content.text : `[${content.content.type}]`;
           const markdown = document.createElement('div');
@@ -221,15 +227,14 @@ export function createMessageRenderer(
       body.className = 'markdown';
       body.innerHTML = renderMarkdown(entry.text);
       node.append(body);
-      if (entry.role === 'user')
-        for (const block of entry.contextBlocks || [])
-          if (block.type === 'image') {
-            const img = imagePreview(block.mimeType, block.data, '消息图片');
-            if (img) node.append(img);
-          }
+      for (const block of entry.contextBlocks || []) {
+        const image = contentImage(block, '消息图片');
+        if (image) node.append(image);
+      }
     }
     if (entry.role === 'assistant' || entry.role === 'user' || entry.role === 'tool')
       node.append(messageActions(entry, sessionId, send));
+    hydrateImages(node);
     return node;
   };
 }

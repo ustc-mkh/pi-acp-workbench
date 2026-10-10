@@ -313,6 +313,9 @@ export class ChatProvider
   attach(): Promise<void> {
     return this.attachmentCoordinator.attach();
   }
+  postOutputImage(reply: import('./shared').OutputImageReply): void {
+    void this.view?.webview.postMessage(reply).then(undefined, () => {});
+  }
   private handlers: UiHandlers = {
     switchHarness: {
       run: (m) => this.sessionCoordinator.onSwitchHarness(m),
@@ -338,6 +341,7 @@ export class ChatProvider
     attach: { run: () => this.attachmentCoordinator.onAttach() },
     removeAttachment: { run: (m) => this.attachmentCoordinator.onRemoveAttachment(m) },
     open: { run: (m) => this.attachmentCoordinator.onOpen(m) },
+    readOutputImage: { run: (m) => this.attachmentCoordinator.onReadOutputImage(m) },
     diff: { run: (m) => this.attachmentCoordinator.onDiff(m) },
     export: { run: () => this.attachmentCoordinator.onExport() },
     new: { run: (m) => this.sessionCoordinator.onNew(m), gated: true, navigation: true },

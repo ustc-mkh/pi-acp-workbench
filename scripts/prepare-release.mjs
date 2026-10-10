@@ -67,6 +67,6 @@ const notes = section
   .trim();
 await writeFile(
   join(output, 'release-notes.md'),
-  `升级时请配套更新 VSIX、会话 daemon 和 Telegram relay，并备份数据；新旧 socket 客户端不可混用。服务包适用于 Linux x86_64，采用静态 musl；服务器仍需 Node.js 22+ 和相应 Agent 命令。\n\n${notes}\n\n### 验证范围\n\n本标签通过 CI 的 Rust / npm 审计、格式与 clippy、完整服务回归、浏览器冒烟以及实际 musl 生产包 smoke / 契约。附件下载后通过 SHA-256 复核。本地 2 小时浸泡结果及所用产物见随包 docs/rust-acceptance.md（不是 CI 的检查项）；本次未验证实际 VS Code Extension Host、真实付费模型或真实 Telegram 群组。\n`,
+  `升级时请配套更新 VSIX、会话 daemon 和 Telegram relay，并备份数据；新旧 socket 客户端不可混用。服务包适用于 Linux x86_64，采用静态 musl；服务器仍需 Node.js 22+ 和相应 Agent 命令。\n\n${notes}\n\n### 验证范围\n\n本标签通过 CI 的 Rust / npm 审计、格式与 clippy、完整服务回归、浏览器冒烟以及实际 musl 生产包 smoke / 契约。附件下载后通过 SHA-256 复核。已完成的历史 2 小时浸泡批次及所用版本、产物见随包 docs/rust-acceptance.md；浸泡为按需专项，不是每次发布或 CI 的必跑项，历史结果不代表本标签重新执行；本次未验证实际 VS Code Extension Host、真实付费模型或真实 Telegram 群组。\n`,
 );
 console.log(`Verified release v${version}: ${assets.join(', ')}`);

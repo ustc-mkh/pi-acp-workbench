@@ -54,17 +54,26 @@ sha256sum -c SHA256SUMS
 
 ## 验收入口
 
+常规发布执行对应回归、CI 和当前产物校验：
+
 ```bash
 npm run verify
-npm run test:native-fork
-npm run test:service:rollback
-npm run test:contract:telegram
-PI_SOAK_SECONDS=7200 npm run test:service:soak
 npm run test:service:artifact -- --dir service-dist
 npm run format:check
 ```
 
-浸泡默认 2 小时，使用生产会话 daemon、测试 relay 和模拟 ACP/Bot；每轮检查实际 worker 上限，定期观察空闲 RSS/FD，覆盖取消、授权、重复请求、连接轮换、会话删除、relay 离线投递及双服务重启。环境变量 `PI_SOAK_SESSION_DAEMON` / `PI_SOAK_RELAY_DAEMON` 可指定产物；mock relay 需单独启用 `contract-test`。详细结果见 [Rust 验收报告](rust-acceptance.md)。
+**完整 2 小时浸泡已在 0.11.3、0.11.4 完成，不是每次发布的必跑项或发布门槛。** 后续 UI、文档及普通修复发布默认不重复浸泡，也不因发布新版本自动启动长时间测试。仅在用户明确要求，或重大服务生命周期 / 并发 / 资源管理改动经维护者确认需要专项验收时重新执行。历史结果保留其对应版本和二进制范围，不宣称新版本重新完成了浸泡。
+
+以下为按需专项入口，不应作为每次发布的固定清单：
+
+```bash
+npm run test:native-fork
+npm run test:service:rollback
+npm run test:contract:telegram
+PI_SOAK_SECONDS=7200 npm run test:service:soak
+```
+
+手动启动浸泡时默认 2 小时，使用生产会话 daemon、测试 relay 和模拟 ACP/Bot；每轮检查实际 worker 上限，定期观察空闲 RSS/FD，覆盖取消、授权、重复请求、连接轮换、会话删除、relay 离线投递及双服务重启。环境变量 `PI_SOAK_SESSION_DAEMON` / `PI_SOAK_RELAY_DAEMON` 可指定产物；mock relay 需单独启用 `contract-test`。详细结果见 [Rust 验收报告](rust-acceptance.md)。
 
 ## 证据与包内文档
 

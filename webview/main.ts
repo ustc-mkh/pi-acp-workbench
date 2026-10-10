@@ -9,6 +9,7 @@ import { PricesPage } from './prices';
 import { installImagePaste, imagePreview } from './image-paste';
 import { StatisticsPage } from './statistics';
 import { createMessageRenderer } from './messages';
+import { OutputImages } from './output-images';
 import type { ChatState, UiMessage } from '../src/shared';
 import { applyStatePatch } from '../src/state-channel';
 import { sessionLabel } from '../src/session-numbers';
@@ -176,12 +177,12 @@ app.innerHTML = /* HTML */ `<header>
           <div class="composer-actions">
             <div id="usage" role="img" tabindex="0" aria-label="上下文占用">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <circle class="usage-track" cx="12" cy="12" r="8" />
+                <circle class="usage-track" cx="12" cy="12" r="9.5" />
                 <circle
                   id="usage-fill"
                   cx="12"
                   cy="12"
-                  r="8"
+                  r="9.5"
                   pathLength="100"
                   transform="rotate(-90 12 12)"
                 />
@@ -189,19 +190,19 @@ app.innerHTML = /* HTML */ `<header>
             </div>
             <button
               id="stop"
-              class="circle-button"
+              class="primary circle-button"
               aria-label="停止输出"
               data-tooltip="停止输出"
               hidden
             >
-              <span aria-hidden="true">■</span></button
+              <span class="stop-square" aria-hidden="true"></span></button
             ><button
               id="send"
               class="primary circle-button"
               aria-label="发送消息"
               data-tooltip="Enter 发送 · Shift+Enter 换行"
             >
-              ↑
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7l5-5 5 5M8 2v12" /></svg>
             </button>
           </div>
         </div>
@@ -239,9 +240,12 @@ installImagePaste(
 );
 let paintPending = false;
 let activityExpanded = vscode.getState()?.activityExpanded || false;
+const outputImages = new OutputImages(send, () => {
+  if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
+});
 const transcriptView = new TranscriptView(
   el('messages'),
-  createMessageRenderer(renderMarkdown, () => state?.sessionId, send),
+  createMessageRenderer(renderMarkdown, () => state?.sessionId, send, outputImages.hydrate),
   activityExpanded,
 );
 const updateActivityButton = () => {
@@ -612,6 +616,10 @@ function paint() {
   slashCommands.update(state.commands, state.status);
 }
 window.addEventListener('message', (event) => {
+  if (event.data.type === 'outputImage') {
+    outputImages.receive(event.data);
+    return;
+  }
   if (event.data.type === 'sent') {
     input.value = '';
     saveDraft();
@@ -632,6 +640,7 @@ window.addEventListener('message', (event) => {
     stateRevision = event.data.revision || 0;
   } else return;
   const nextHarness = state?.harness || 'pi';
+  outputImages.setScope(nextHarness, state?.sessionId);
   if (nextHarness !== draftHarness) {
     saveDraft();
     draftHarness = nextHarness;

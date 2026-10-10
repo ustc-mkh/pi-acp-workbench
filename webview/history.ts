@@ -11,7 +11,7 @@ export class HistoryList {
   private state?: Pick<ChatState, 'history' | 'sessionId' | 'status'>;
   private more = document.createElement('button');
   private less = document.createElement('button');
-  private limit: 4 | 10 | 20;
+  private limit: 4 | 10 | 16;
   private rows = new Map<
     string,
     {
@@ -30,40 +30,46 @@ export class HistoryList {
     private onExpand: (limit: number) => void = () => {},
     private onClose: () => void = () => {},
   ) {
-    this.limit = initialLimit === 20 ? 20 : initialLimit === 10 || initialLimit === true ? 10 : 4;
+    // Migrate the previously persisted 20-row tier to the new 16-row maximum.
+    this.limit =
+      initialLimit === 16 || initialLimit === 20
+        ? 16
+        : initialLimit === 10 || initialLimit === true
+          ? 10
+          : 4;
     const controls = document.createElement('div');
     controls.className = 'history-controls';
     for (const [button, className, arrow] of [
-      [this.less, 'history-less', '↑'],
-      [this.more, 'history-more', '↓'],
+      [this.less, 'history-less', 'M4 10l4-4 4 4'],
+      [this.more, 'history-more', 'M4 6l4 4 4-4'],
     ] as const) {
       button.type = 'button';
       button.className = `${className} circle-button`;
-      button.textContent = arrow;
+      button.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="${arrow}"/></svg>`;
       controls.append(button);
     }
-    const resize = (limit: 4 | 10 | 20) => {
+    const resize = (limit: 4 | 10 | 16) => {
       this.limit = limit;
       this.onExpand(limit);
       if (this.state) this.update(this.state);
     };
     this.more.onclick = () => {
-      if (this.limit < 20) resize(this.limit === 4 ? 10 : 20);
+      if (this.limit < 16) resize(this.limit === 4 ? 10 : 16);
     };
     this.less.onclick = () => {
       if (this.limit === 4) this.onClose();
-      else resize(this.limit === 20 ? 10 : 4);
+      else resize(this.limit === 16 ? 10 : 4);
     };
     this.container.after(controls);
   }
   update(state: Pick<ChatState, 'history' | 'sessionId' | 'status'>) {
     this.state = state;
     const visible = state.history.slice(0, this.limit);
-    this.more.disabled = this.limit === 20 || state.history.length <= this.limit;
+    this.more.disabled = this.limit === 16 || state.history.length <= this.limit;
     const moreLabel =
-      this.limit === 20 ? '最多显示 20 条会话' : `展开至 ${this.limit === 4 ? 10 : 20} 条会话`;
+      this.limit === 16 ? '最多显示 16 条会话' : `展开至 ${this.limit === 4 ? 10 : 16} 条会话`;
     const lessLabel =
-      this.limit === 4 ? '关闭历史会话' : `收回至 ${this.limit === 20 ? 10 : 4} 条会话`;
+      this.limit === 4 ? '关闭历史会话' : `收回至 ${this.limit === 16 ? 10 : 4} 条会话`;
     this.more.setAttribute('aria-label', moreLabel);
     this.less.setAttribute('aria-label', lessLabel);
     this.more.dataset.tooltip = moreLabel;
@@ -91,7 +97,6 @@ export class HistoryList {
         remove.className = 'history-delete';
         remove.type = 'button';
         remove.innerHTML = trash;
-        remove.dataset.tooltip = '删除此会话的历史记录';
         remove.onclick = () => this.send({ type: 'deleteHistory', id: item.id });
         const status = document.createElement('span');
         status.className = 'session-indicator';
@@ -118,7 +123,6 @@ export class HistoryList {
       entry.harness.hidden = !item.harness || item.harness === 'pi';
       const label = sessionLabel(item.sessionNumber, item.id);
       entry.number.textContent = label;
-      entry.number.dataset.tooltip = `${label}\nSession ID: ${item.id}`;
       entry.open.setAttribute('aria-label', `${label} ${item.title}`);
       entry.remove.setAttribute('aria-label', `删除会话：${label} ${item.title}`);
       entry.status.classList.toggle('running', running);
@@ -127,7 +131,6 @@ export class HistoryList {
       if (current) entry.open.setAttribute('aria-current', 'true');
       else entry.open.removeAttribute('aria-current');
       if (entry.open.textContent !== item.title) entry.open.textContent = item.title;
-      entry.open.dataset.tooltip = `${profile?.name || '未知 Harness'} · ${label} ${item.title}\nSession ID: ${item.id}\n${item.cwd}\n${new Date(item.updated).toLocaleString()}`;
       entry.open.disabled = state.status === 'connecting';
       if (this.container.children[index] !== entry.row)
         this.container.insertBefore(entry.row, this.container.children[index] || null);

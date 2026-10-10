@@ -15,6 +15,12 @@ export type Entry = Readonly<
   | { id: string; role: 'tool'; tool: acp.ToolCall; terminal?: TerminalOutput }
   | { id: string; role: 'diff'; text: string; diff: TurnDiff }
 >;
+export interface OutputImageReply {
+  type: 'outputImage';
+  id: string;
+  image?: import('./images').PastedImage;
+  error?: string;
+}
 export type Attachment =
   | { kind?: 'text'; id: string; name: string; uri: string; text: string }
   | { kind: 'image'; id: string; name: string; mimeType: string; data: string };
@@ -102,6 +108,7 @@ export type UiMessage =
       images: import('./images').PastedImage[];
     }
   | { type: 'attachmentError'; harness?: HarnessId; sessionId?: string; error: string }
+  | { type: 'readOutputImage'; id: string; url: string; harness: HarnessId; sessionId?: string }
   | { type: 'switchHarness'; harness: HarnessId }
   | { type: 'setPrice'; model: string; price?: Price }
   | { type: 'send'; text: string }

@@ -45,7 +45,8 @@ it('distinguishes identical titles with persistent numbers independently of row 
   expect(container.querySelector('[data-id=parent] .session-number')?.textContent).toBe('#007');
   expect(
     (container.querySelector('[data-id=branch] .history-open') as HTMLElement).dataset.tooltip,
-  ).toContain('Session ID: branch');
+  ).toBeUndefined();
+  expect(container.querySelector('[data-tooltip]')).toBeNull();
 });
 it('preserves row identity and scroll position during output and updates busy indicators', () => {
   const container = document.createElement('div');
@@ -116,7 +117,7 @@ it('shows every busy session, including background sessions across harnesses', (
   });
   expect(container.querySelectorAll('.running')).toHaveLength(0);
 });
-it('steps 4 → 10 → 20 and back to closure, never renders more than 20', () => {
+it('steps 4 → 10 → 16 and back to closure, never renders more than 16', () => {
   const parent = document.createElement('section');
   const container = document.createElement('div');
   parent.append(container);
@@ -140,16 +141,32 @@ it('steps 4 → 10 → 20 and back to closure, never renders more than 20', () =
   down.click();
   expect(container.children).toHaveLength(10);
   down.click();
-  expect(container.children).toHaveLength(20);
+  expect(container.children).toHaveLength(16);
   expect(down.disabled).toBe(true);
   down.click();
   list.update(state);
-  expect(container.children).toHaveLength(20);
+  expect(container.children).toHaveLength(16);
   up.click();
   expect(container.children).toHaveLength(10);
   up.click();
   expect(container.children).toHaveLength(4);
   up.click();
   expect(closed).toBe(1);
-  expect(limits).toEqual([10, 20, 10, 4]);
+  expect(limits).toEqual([10, 16, 10, 4]);
+});
+it('migrates a saved 20-row tier to 16 and uses shaftless chevrons', () => {
+  const parent = document.createElement('section');
+  const container = document.createElement('div');
+  parent.append(container);
+  const list = new HistoryList(container, () => {}, 20);
+  list.update({
+    history: Array.from({ length: 25 }, (_, i) => ({ ...history[0], id: String(i) })),
+    status: 'ready',
+  });
+  expect(container.children).toHaveLength(16);
+  const down = parent.querySelector<HTMLButtonElement>('.history-more')!;
+  expect(down.disabled).toBe(true);
+  expect(down.getAttribute('aria-label')).toBe('最多显示 16 条会话');
+  expect(parent.querySelector('.history-less path')?.getAttribute('d')).toBe('M4 10l4-4 4 4');
+  expect(down.querySelector('path')?.getAttribute('d')).toBe('M4 6l4 4 4-4');
 });

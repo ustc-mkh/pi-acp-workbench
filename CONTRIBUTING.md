@@ -98,7 +98,7 @@ Rust 依赖漏洞检查：安装 `cargo install cargo-audit --locked --version 0
 
 CI Actions 固定到官方仓库的 commit SHA；更新时核对 release/tag 对应 SHA，并保持版本注释。JS 依赖与 dist 在 javascript job 准备一次，通过同次 workflow 的 tar artifact 共享给三个 Linux x64 job，保留可执行权限；Rust 测试与 musl 生产构建分别缓存。
 
-维护者发布时先更新版本与 CHANGELOG，推送提交并确认 CI 通过，再推送同版本标签。标签 CI 自动生成并验证 VSIX / musl 附件，下载复核后发布 GitHub Release；详见 [发布步骤](docs/testing.md#发布步骤)。不要把本地历史 service-dist 当作新版本附件。
+维护者发布时先更新版本与 CHANGELOG，推送提交并确认 CI 通过，再推送同版本标签。标签 CI 自动生成并验证 VSIX / musl 附件，下载复核后发布 GitHub Release；详见 [发布步骤](docs/testing.md#发布步骤)。不要把本地历史 service-dist 当作新版本附件。0.11.3、0.11.4 已完成完整 2 小时浸泡，后续常规发布默认不重复、不自动启动浸泡；按需专项触发条件见 [服务验收入口](docs/service-release.md#验收入口)，常规回归和产物校验仍须执行。
 
 ## 本地缓存与测试日志
 

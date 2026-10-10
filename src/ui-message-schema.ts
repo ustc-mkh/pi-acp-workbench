@@ -43,6 +43,7 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
   releaseSession: {},
   refreshHistory: {},
   attachImages: { harness: optional(harness), sessionId: optional(text), images },
+  readOutputImage: { id: text, url: text, harness, sessionId: optional(text) },
   attachmentError: { harness: optional(harness), sessionId: optional(text), error: text },
   switchHarness: { harness },
   setPrice: { model: text, price: optional(price) },
