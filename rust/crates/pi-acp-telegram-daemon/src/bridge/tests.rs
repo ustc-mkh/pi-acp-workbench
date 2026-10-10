@@ -185,6 +185,7 @@ async fn failed_delivery_ack_retains_the_event_without_rerunning_or_resending_in
         updated: 1,
         pending_permissions: 0,
         non_text_blocks: 0,
+        image_entry_ids: vec![],
     };
     let mut wrong = event.clone();
     wrong.cwd = "/forbidden".into();
@@ -221,7 +222,7 @@ async fn failed_switch_dispatch_has_no_menu_or_live_side_effects_and_expired_tic
     tokio::fs::create_dir(&f.bridge.shared.opts.state_file)
         .await
         .unwrap();
-    let update = json!({"callback_query":{"id":"toggle","from":{"id":42},"data":"notify:off","message":{"chat":{"id":-100},"message_thread_id":101}}});
+    let update = json!({"callback_query":{"id":"toggle","from":{"id":42},"data":"notify:off","message":{"chat":{"id":-100}}}});
     assert!(f.bridge.dispatch(&update).await.is_err());
     assert!(f.bridge.shared.store.notifications.load(Ordering::SeqCst));
     assert!(bot.calls.lock().unwrap().is_empty());

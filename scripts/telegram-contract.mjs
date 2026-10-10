@@ -156,11 +156,32 @@ function click(panel, label, options = {}) {
 
 async function startTelegramMock() {
   const server = createHttpServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
+    const parts = [];
+    req.on('data', (c) => parts.push(c));
     req.on('end', async () => {
       const method = req.url.replace(/^\//, '');
-      const params = JSON.parse(body || '{}');
+      const body = Buffer.concat(parts);
+      let params;
+      if (req.headers['content-type']?.startsWith('multipart/form-data')) {
+        params = {};
+        const form = await new Request('http://localhost/', {
+          method: 'POST',
+          headers: { 'content-type': req.headers['content-type'] },
+          body,
+        }).formData();
+        for (const [key, value] of form) {
+          params[key] =
+            typeof value === 'string'
+              ? ['chat_id', 'message_thread_id', 'disable_notification'].includes(key)
+                ? JSON.parse(value)
+                : value
+              : {
+                  name: value.name,
+                  mimeType: value.type,
+                  data: Buffer.from(await value.arrayBuffer()).toString('base64'),
+                };
+        }
+      } else params = JSON.parse(body.toString() || '{}');
       const reply = (result) => res.end(JSON.stringify({ ok: true, result }));
       telegram.attempts.push({ method, params, at: Date.now() });
       const failure = telegram.failures.findIndex((rule) => rule.match(method, params));
@@ -200,6 +221,9 @@ async function startTelegramMock() {
           telegram.topics.push(threadId);
           return reply({ message_thread_id: threadId });
         }
+        case 'sendPhoto':
+        case 'sendAnimation':
+        case 'sendDocument':
         case 'sendMessage':
         case 'editMessageText': {
           const messageId = method === 'editMessageText' ? params.message_id : telegram.messageId++;
@@ -662,11 +686,11 @@ test('a new prompt after stop still executes, while the discarded queued prompt 
 });
 
 test('/notifications toggles persist and suppress outbox delivery', async () => {
-  message('/notifications', { thread: state.threadId });
+  message('/notifications');
   const menu = await waitSent('sendMessage', {
     reply_markup: (m) => !!m && JSON.stringify(m).includes('notify:off'),
   });
-  callback('notify:off', { thread: state.threadId });
+  callback('notify:off');
   await waitSent('answerCallbackQuery', { text: '已暂停全部会话推送' });
   const before = sent('sendMessage').length;
   const s = [...sessions.list.values()][0];
@@ -684,7 +708,7 @@ test('/notifications toggles persist and suppress outbox delivery', async () => 
   const saved = JSON.parse(await readFile(stateFile(), 'utf8'));
   assert.equal(saved.notifications, false);
   assert.ok(saved.delivered.length >= 1);
-  callback('notify:on', { thread: state.threadId });
+  callback('notify:on');
   await waitSent('answerCallbackQuery', { text: '已开启全部会话推送' });
 });
 
@@ -710,7 +734,7 @@ test('duplicate update IDs are checkpointed once and never execute two prompts',
 });
 
 test('silence is persisted independently of delivery, and desktop input is not duplicated', async () => {
-  callback('silent:on', { thread: state.threadId });
+  callback('silent:on');
   await waitSent('answerCallbackQuery', { text: '已开启静音发送' });
   assert.equal((await savedState()).notifications, true);
   assert.equal((await savedState()).silent, true);
@@ -739,7 +763,7 @@ test('silence is persisted independently of delivery, and desktop input is not d
     }
   }, 'duplicate event was not removed');
   assert.equal(sent('sendMessage', { text: (t) => t.includes?.('desktop question') }).length, 1);
-  callback('silent:off', { thread: state.threadId });
+  callback('silent:off');
   await waitSent('answerCallbackQuery', { text: '已关闭静音发送' });
 });
 
@@ -747,7 +771,7 @@ test('a live stream observes silence changes made after its preview was created'
   const id = 'live-silence';
   await publishEvent(id, 'live preview', { status: 'running' });
   await waitSent('sendMessage', { text: 'live preview' });
-  callback('silent:on', { thread: state.threadId });
+  callback('silent:on');
   await waitSent('answerCallbackQuery', { text: '已开启静音发送' });
   await publishEvent(id, 'full live answer');
   await waitUntil(
@@ -760,7 +784,7 @@ test('a live stream observes silence changes made after its preview was created'
     true,
   );
   assert.equal(sent('editMessageText', { text: 'full live answer' }).length, 1);
-  callback('silent:off', { thread: state.threadId });
+  callback('silent:off');
   await waitSent('answerCallbackQuery', { text: '已关闭静音发送' });
 });
 
@@ -862,7 +886,7 @@ test('history sync checkpoints 100-entry batches and skips exported entries on r
   );
   await waitSent('sendMessage', { text: (t) => t.startsWith?.('已同步 1 条历史消息') });
   const before = sent('sendMessage', { text: (t) => t.includes?.('history-entry-') }).length;
-  message('/sync', { thread: state.threadId });
+  message('/sync');
   await waitSent('sendMessage', { text: (t) => t.startsWith?.('已同步 0 个会话') });
   assert.equal(before, 101);
   assert.equal(sent('sendMessage', { text: (t) => t.includes?.('history-entry-') }).length, before);
@@ -900,14 +924,14 @@ test('/sync creates a topic once and retries failed history without importing it
   telegram.failures.push({
     match: (method, p) => method === 'sendMessage' && p.text === 'Pi：\nnew-topic-history',
   });
-  message('/sync', { thread: state.threadId });
+  message('/sync');
   await waitUntil(
     () => telegram.failures.length === 0,
     'new-topic history failure was not exercised',
   );
   assert((await savedState()).topics.some((t) => t.sessionId === s.id));
   assert.equal((await savedState()).historySent[s.id]?.length || 0, 0);
-  message('/sync', { thread: state.threadId });
+  message('/sync');
   await waitUntil(
     async () => (await savedState()).historySent[s.id]?.length === 1,
     'new topic history retry did not commit',
@@ -915,7 +939,7 @@ test('/sync creates a topic once and retries failed history without importing it
   await waitSent('sendMessage', { text: (t) => t.startsWith?.('已同步 1 个会话') });
   assert.equal(telegram.topics.length, topics + 1);
   assert.equal(sent('sendMessage', { text: 'Pi：\nnew-topic-history' }).length, 1);
-  message('/sync', { thread: state.threadId });
+  message('/sync');
   await waitSent('sendMessage', { text: (t) => t.startsWith?.('已同步 0 个会话') });
   assert.equal(sent('sendMessage', { text: 'Pi：\nnew-topic-history' }).length, 1);
 });
@@ -976,7 +1000,6 @@ test('/help and /commands list all relay routes without executing prompts', asyn
     'open',
     'sync',
     'menu',
-    'settings',
     'history',
     'status',
     'stop',
@@ -988,6 +1011,7 @@ test('/help and /commands list all relay routes without executing prompts', asyn
     'start',
   ])
     assert(help.includes('/' + route));
+  assert(!help.includes('/settings'));
   assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, count);
 });
 
@@ -1071,7 +1095,7 @@ test('canonical allowed directory aliases create sessions and repeated /open reu
 test('inline model pagination updates actual settings, refreshes effort, and rejects stale or misplaced buttons', async () => {
   const session = [...sessions.list.values()][0];
   const count = sessions.calls.filter((c) => c.method === 'request').length;
-  message('/settings', { thread: state.threadId });
+  message('/menu', { thread: state.threadId });
   const settings = await panelWith('Harness：pi');
   const original = settings.params.reply_markup.inline_keyboard
     .flat()
@@ -1143,17 +1167,17 @@ test('settings buttons reject changes during a task and preserve the active prom
 test('new-session wizard accepts a directory reply, selects Codex, and consumes duplicate create clicks once', async () => {
   const before = sessions.list.size;
   const prompts = sessions.calls.filter((c) => c.method === 'prompt').length;
-  message('/new', { thread: state.threadId });
+  message('/new');
   const projects = await panelWith('选择项目');
   click(projects, '输入其他目录');
   const [prompt] = await waitSent('sendMessage', {
     text: (t) => t.startsWith?.('请输入服务器上的绝对目录路径'),
   });
   assert.equal(prompt.params.reply_markup.force_reply, true);
-  message(workspace, { thread: state.threadId, reply: prompt });
+  message(workspace, { reply: prompt });
   const harness = await panelWith('选择 Harness');
   const data = click(harness, /Codex$/);
-  callback(data, { thread: state.threadId, messageId: harness.messageId });
+  callback(data, { messageId: harness.messageId });
   await waitUntil(() => sessions.list.size === before + 1, 'Codex session was not created');
   await waitUntil(
     async () => ((await savedState()).inbox || []).length === 0,
@@ -1165,7 +1189,7 @@ test('new-session wizard accepts a directory reply, selects Codex, and consumes 
   assert.equal(sessions.list.size, before + 1);
   assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, prompts);
   await waitSent('sendMessage', { text: (t) => t.includes?.('Harness：codex') });
-  message(workspace, { thread: state.threadId, reply: prompt });
+  message(workspace, { reply: prompt });
   await waitSent('sendMessage', { text: (t) => t.includes?.('目录输入已失效') });
   assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, prompts);
 });
@@ -1179,6 +1203,254 @@ test('a cancelled wizard creates no session', async () => {
     'wizard was not cancelled',
   );
   assert.equal(sessions.list.size, before);
+});
+
+test('General and session menus are isolated, include sync controls, and retire /settings', async () => {
+  const openMenu = async (thread) => {
+    const start = telegram.inbox.length;
+    message('/menu', { thread });
+    let result;
+    await waitUntil(
+      () =>
+        (result = telegram.inbox
+          .slice(start)
+          .findLast((c) =>
+            c.params.reply_markup?.inline_keyboard
+              ?.flat()
+              .some((b) => b.callback_data?.startsWith('ui:')),
+          )),
+      'new menu missing',
+    );
+    return result;
+  };
+  const general = await openMenu(1);
+  const rows = general.params.reply_markup.inline_keyboard;
+  assert.deepEqual(
+    rows[0].map((b) => b.text),
+    ['➕ 新建会话', '📂 已有会话'],
+  );
+  assert(rows.flat().some((b) => b.text === '同步历史摘要'));
+  assert(rows.flat().some((b) => b.text === '自动推送：开启'));
+  assert(!rows.flat().some((b) => b.text === '停止任务'));
+  click(general, '自动推送：开启');
+  await waitUntil(async () => (await savedState()).notifications === false, 'menu mute missing');
+  click(await panelWith('已暂停全部会话推送'), '自动推送：关闭');
+  await waitUntil(async () => (await savedState()).notifications === true, 'menu unmute missing');
+  const topic = await openMenu(state.threadId);
+  const labels = topic.params.reply_markup.inline_keyboard.flat().map((b) => b.text);
+  assert(labels.includes('同步最近的消息'));
+  assert(labels.includes('刷新面板'));
+  assert(!labels.some((t) => /主菜单|管理菜单|新建|已有会话|更多历史|推送|静音/.test(t)));
+  const s = [...sessions.list.values()][0];
+  s.entries.push({ id: 'topic-menu-recent', role: 'assistant', text: 'topic-menu-recent' });
+  click(topic, '同步最近的消息');
+  await waitSent('sendMessage', {
+    text: 'Pi：\ntopic-menu-recent',
+    message_thread_id: state.threadId,
+  });
+  const prompts = sessions.calls.filter((c) => c.method === 'prompt').length;
+  message('/settings', { thread: state.threadId });
+  await waitSent('sendMessage', { text: '/settings 已移除，请使用 /menu。' });
+  message('/new', { thread: state.threadId });
+  await waitSent('sendMessage', { text: (t) => t.includes?.('请在 General 使用 /menu') });
+  message('/menu', { thread: 999999 });
+  await waitSent('sendMessage', { text: (t) => t.includes?.('此话题未绑定会话') });
+  callback('notify:off', { thread: state.threadId });
+  await waitSent('answerCallbackQuery', { text: (t) => t.includes?.('全局开关仅可在 General') });
+  assert.equal((await savedState()).notifications, true);
+  assert.equal(sessions.calls.filter((c) => c.method === 'prompt').length, prompts);
+  const g = await openMenu();
+  click(g, '同步历史摘要');
+  await waitSent('sendMessage', {
+    text: (t) => t.startsWith?.('正在同步：'),
+    message_thread_id: (t) => t === undefined,
+  });
+  const last = telegram.updateId;
+  await waitUntil(async () => {
+    const saved = await savedState();
+    return saved.offset > last && !(saved.inbox || []).some((i) => i.id === last);
+  }, 'menu sync did not finish');
+});
+
+test('output photos use multipart bytes, immutable turn references, durable retry checkpoints and silence', async () => {
+  const png =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
+  const second = Buffer.concat([Buffer.from(png, 'base64'), Buffer.from('second')]).toString(
+    'base64',
+  );
+  const s = [...sessions.list.values()][0];
+  const entries = s.entries;
+  s.entries = [
+    ...entries,
+    {
+      id: 'excluded-old-image',
+      role: 'assistant',
+      text: 'old',
+      contextBlocks: [
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: Buffer.concat([Buffer.from(png, 'base64'), Buffer.from('old')]).toString('base64'),
+        },
+      ],
+    },
+    {
+      id: 'photo-one',
+      role: 'assistant',
+      text: 'image-one',
+      contextBlocks: [{ type: 'image', mimeType: 'image/png', data: png }],
+    },
+    {
+      id: 'photo-two',
+      role: 'tool',
+      tool: {
+        content: [
+          { type: 'content', content: { type: 'image', mimeType: 'image/png', data: second } },
+        ],
+      },
+    },
+  ];
+  callback('silent:on');
+  await waitUntil(async () => (await savedState()).silent === true, 'silent missing');
+  const before = sent('sendPhoto').length;
+  telegram.failures.push({
+    match: (method, p) => method === 'sendPhoto' && p.photo.data === second,
+    description: `upload ${TOKEN}`,
+  });
+  await publishEvent('output-photo-turn', 'output-photo-text', {
+    imageEntryIds: ['photo-one', 'photo-two'],
+  });
+  await waitUntil(
+    () => telegram.failures.length === 0 && sent('sendPhoto').length === before + 1,
+    'partial photo failure missing',
+  );
+  await waitUntil(
+    () => daemon.logs.includes('upload [redacted]'),
+    'multipart error was not redacted',
+  );
+  assert(!daemon.logs.includes(TOKEN));
+  await stopDaemon(daemon);
+  daemon = startDaemon();
+  await ready(daemon);
+  await waitUntil(
+    async () => (await savedState()).delivered.includes('output-photo-turn'),
+    'photo turn not delivered after restart',
+  );
+  const photos = sent('sendPhoto').slice(before);
+  assert.equal(photos.length, 2);
+  assert.deepEqual(
+    photos.map((p) => p.params.photo.data),
+    [png, second],
+  );
+  assert(
+    photos.every(
+      (p) =>
+        p.params.message_thread_id === state.threadId && p.params.disable_notification === true,
+    ),
+  );
+  assert.equal(sent('sendMessage', { text: 'output-photo-text' }).length, 1);
+  assert.equal(
+    telegram.attempts.filter((p) => p.method === 'sendPhoto' && p.params.photo.data === second)
+      .length,
+    2,
+  );
+  assert(!daemon.logs.includes(TOKEN));
+  callback('notify:off');
+  await waitUntil(async () => (await savedState()).notifications === false, 'mute missing');
+  await publishEvent('muted-photo-turn', 'muted-photo-text', { imageEntryIds: ['photo-one'] });
+  await waitUntil(
+    async () => (await savedState()).delivered.includes('muted-photo-turn'),
+    'muted photo not acked',
+  );
+  assert.equal(sent('sendPhoto').length, before + 2);
+  callback('notify:on');
+  callback('silent:off');
+  await waitUntil(
+    async () =>
+      (await savedState()).notifications === true && (await savedState()).silent === false,
+    'reset toggles missing',
+  );
+  s.entries = entries;
+});
+
+test('recent-message sync sends local, inline and ACP images silently, skips unsafe URLs and deduplicates retries', async () => {
+  const png =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
+  await writeFile(join(workspace, 'tg-preview.png'), Buffer.from(png, 'base64'));
+  const s = [...sessions.list.values()][0];
+  const entries = s.entries;
+  s.entries = [
+    {
+      id: 'history-photo',
+      role: 'assistant',
+      text: `![local](./tg-preview.png) ![inline](data:image/png;base64,${png}) ![remote](https://tracker.invalid/a.png) ![svg](data:image/svg+xml;base64,PHN2Zy8+)`,
+      contextBlocks: [{ type: 'image', mimeType: 'image/png', data: png }],
+    },
+  ];
+  const before = sent('sendPhoto').length;
+  telegram.failures.push({ match: (method) => method === 'sendPhoto', code: 429 });
+  message('/history', { thread: state.threadId });
+  await waitUntil(() => sent('sendPhoto').length === before + 2, 'history photos missing');
+  await waitUntil(
+    async () =>
+      (await savedState()).historySent[s.id].length > 0 &&
+      ((await savedState()).inbox || []).length === 0,
+    'history completion missing',
+  );
+  assert(
+    sent('sendPhoto')
+      .slice(before)
+      .every((p) => p.params.photo.data === png && p.params.disable_notification === true),
+  );
+  message('/history', { thread: state.threadId });
+  const last = telegram.updateId;
+  await waitUntil(async () => {
+    const saved = await savedState();
+    return saved.offset > last && !(saved.inbox || []).some((i) => i.id === last);
+  }, 'repeat history incomplete');
+  await delay(100);
+  assert.equal(sent('sendPhoto').length, before + 2);
+  s.entries = entries;
+});
+
+test('GIF and WebP uploads use media methods and rejected photo geometry falls back to a document', async () => {
+  const gif = Buffer.from('GIF89a-output').toString('base64');
+  const webp = Buffer.from('RIFF1234WEBP-output').toString('base64');
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString('base64');
+  const s = [...sessions.list.values()][0],
+    entries = s.entries;
+  s.entries = [
+    {
+      id: 'formats',
+      role: 'assistant',
+      text: 'formats',
+      contextBlocks: [
+        { type: 'image', mimeType: 'image/gif', data: gif },
+        { type: 'image', mimeType: 'image/webp', data: webp },
+        { type: 'image', mimeType: 'image/png', data: png },
+      ],
+    },
+  ];
+  const animations = sent('sendAnimation').length,
+    documents = sent('sendDocument').length;
+  telegram.failures.push({
+    match: (method, p) => method === 'sendPhoto' && p.photo.data === png,
+    code: 400,
+    description: 'PHOTO_INVALID_DIMENSIONS',
+  });
+  await publishEvent('media-formats', 'media-formats-text', { imageEntryIds: ['formats'] });
+  await waitUntil(
+    async () => (await savedState()).delivered.includes('media-formats'),
+    'formats not delivered',
+  );
+  assert.equal(sent('sendAnimation').length, animations + 1);
+  assert.deepEqual(
+    sent('sendDocument')
+      .slice(documents)
+      .map((p) => p.params.document.data),
+    [webp, png],
+  );
+  s.entries = entries;
 });
 
 test('setup uses the same ten/two preview sync and normal restarts do not sync', async () => {

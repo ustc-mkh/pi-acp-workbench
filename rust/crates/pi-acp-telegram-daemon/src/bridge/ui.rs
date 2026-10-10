@@ -10,6 +10,7 @@ const DIRECTORY_PROMPT: &str = "请输入服务器上的绝对目录路径，回
 #[derive(Clone)]
 pub(super) enum View {
     Menu,
+    Unbound,
     Settings(String),
     Workspaces,
     Harness {
@@ -41,7 +42,9 @@ enum Action {
         value: String,
     },
     Open(String),
-    NewHere(String),
+    Notifications(bool),
+    Silent(bool),
+    Help,
     Status(String),
     Stop(String),
     History(String),
@@ -71,6 +74,51 @@ impl Panel {
 }
 
 impl Bridge {
+    pub(super) fn general(thread: Option<i64>) -> bool {
+        thread.is_none() || thread == Some(1)
+    }
+    async fn session_bound(&self, id: &str, thread: Option<i64>) -> bool {
+        !Self::general(thread)
+            && self
+                .shared
+                .store
+                .read()
+                .await
+                .topics
+                .iter()
+                .any(|t| Some(t.thread_id) == thread && t.session_id == id)
+    }
+    async fn view_allowed(&self, view: &View, thread: Option<i64>) -> bool {
+        match view {
+            View::Settings(id) | View::Options { session: id, .. } => {
+                self.session_bound(id, thread).await
+            }
+            View::Unbound => {
+                !Self::general(thread)
+                    && !self
+                        .shared
+                        .store
+                        .read()
+                        .await
+                        .topics
+                        .iter()
+                        .any(|t| Some(t.thread_id) == thread)
+            }
+            View::Closed => true,
+            _ => Self::general(thread),
+        }
+    }
+    async fn action_allowed(&self, action: &Action, thread: Option<i64>) -> bool {
+        match action {
+            Action::Show(view) => self.view_allowed(view, thread).await,
+            Action::Set { session: id, .. }
+            | Action::Status(id)
+            | Action::Stop(id)
+            | Action::History(id) => self.session_bound(id, thread).await,
+            Action::Close => true,
+            _ => Self::general(thread),
+        }
+    }
     pub(super) async fn menu_view(&self, thread: Option<i64>) -> View {
         self.shared
             .store
@@ -80,7 +128,13 @@ impl Bridge {
             .iter()
             .find(|topic| Some(topic.thread_id) == thread)
             .map(|topic| View::Settings(topic.session_id.clone()))
-            .unwrap_or(View::Menu)
+            .unwrap_or_else(|| {
+                if Self::general(thread) {
+                    View::Menu
+                } else {
+                    View::Unbound
+                }
+            })
     }
 
     pub(super) async fn open_panel(
@@ -89,6 +143,9 @@ impl Bridge {
         thread: Option<i64>,
         view: View,
     ) -> Result<(), String> {
+        if !self.view_allowed(&view, thread).await {
+            return Err("请在 General 中管理会话和全局开关；会话话题只能控制对应 Session。".into());
+        }
         let key = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
         let mut panel = Panel {
             key: key.clone(),
@@ -123,7 +180,26 @@ impl Bridge {
                     panel.button("📂 已有会话", Action::Show(View::Sessions(0))),
                 ]);
                 rows.push(vec![panel.button("同步历史摘要", Action::Sync)]);
-                "Pi Workbench\n点击按钮创建或打开会话；进入对应话题后直接发文字即可对话。".into()
+                let notifications = self.shared.store.notifications.load(Ordering::SeqCst);
+                let silent = self.shared.store.silent.load(Ordering::SeqCst);
+                rows.push(vec![panel.button(
+                    if notifications {
+                        "自动推送：开启"
+                    } else {
+                        "自动推送：关闭"
+                    },
+                    Action::Notifications(!notifications),
+                )]);
+                rows.push(vec![panel.button(
+                    if silent {
+                        "静音发送：开启"
+                    } else {
+                        "静音发送：关闭"
+                    },
+                    Action::Silent(!silent),
+                )]);
+                rows.push(vec![panel.button("命令帮助", Action::Help)]);
+                "Pi Workbench · 管理菜单\n点击按钮创建或打开会话；进入对应话题后直接发文字即可对话。\n自动推送与静音开关作用于所有会话。".into()
             }
             View::Settings(id) => {
                 let state = self
@@ -182,20 +258,25 @@ impl Bridge {
                 if !controls.iter().any(|c| c.kind == "thinking") {
                     body.push_str("\n当前模型未提供思考强度选项");
                 }
+                body.push_str(
+                    if state.get("busy").and_then(Value::as_bool) == Some(true) {
+                        "\n状态：正在执行"
+                    } else {
+                        "\n状态：空闲"
+                    },
+                );
                 if state.get("busy").and_then(Value::as_bool) == Some(true) {
                     body.push_str("\n正在执行任务；结束后可修改设置。");
                 }
                 rows.push(vec![
                     panel.button("状态", Action::Status(id.clone())),
                     panel.button("停止任务", Action::Stop(id.clone())),
-                    panel.button("更多历史", Action::History(id.clone())),
                 ]);
                 rows.push(vec![
-                    panel.button("用其他 Harness 新建", Action::NewHere(id.clone()))
+                    panel.button("同步最近的消息", Action::History(id.clone()))
                 ]);
                 rows.push(vec![
-                    panel.button("刷新设置", Action::Show(View::Settings(id))),
-                    panel.button("主菜单", Action::Show(View::Menu)),
+                    panel.button("刷新面板", Action::Show(View::Settings(id)))
                 ]);
                 body
             }
@@ -291,7 +372,7 @@ impl Bridge {
                         rows.push(navigation);
                     }
                     rows.push(vec![
-                        panel.button("返回设置", Action::Show(View::Settings(session)))
+                        panel.button("返回会话菜单", Action::Show(View::Settings(session)))
                     ]);
                     format!(
                         "选择{} · 第 {}/{} 页\n当前：{}",
@@ -303,7 +384,7 @@ impl Bridge {
                 } else {
                     panel.view = View::Settings(session.clone());
                     rows.push(vec![
-                        panel.button("刷新设置", Action::Show(View::Settings(session)))
+                        panel.button("刷新面板", Action::Show(View::Settings(session)))
                     ]);
                     "选项已变化，请刷新设置。".into()
                 }
@@ -344,10 +425,24 @@ impl Bridge {
                 )
             }
             View::Connect(id) => {
-                rows.push(vec![panel.button("连接已创建的会话", Action::Open(id))]);
-                rows.push(vec![panel.button("主菜单", Action::Show(View::Menu))]);
-                "会话已创建。点击连接按钮打开对应话题。".into()
+                if let Some(topic) = self
+                    .shared
+                    .store
+                    .read()
+                    .await
+                    .topics
+                    .iter()
+                    .find(|t| t.session_id == id)
+                {
+                    let chat = self.shared.opts.chat_id.to_string();
+                    if let Some(chat) = chat.strip_prefix("-100") {
+                        rows.push(vec![json!({"text":"进入会话 Topic", "url":format!("https://t.me/c/{chat}/{}", topic.thread_id)})]);
+                    }
+                }
+                rows.push(vec![panel.button("返回管理菜单", Action::Show(View::Menu))]);
+                "会话已连接。进入对应话题后使用 /menu 控制该会话。".into()
             }
+            View::Unbound => "此话题未绑定会话。请前往 General，使用 /menu 创建或打开会话。".into(),
             View::Closed => "已取消。使用 /menu 重新打开面板。".into(),
         };
         let body = if note.is_empty() {
@@ -462,18 +557,39 @@ impl Bridge {
                 self.connect_panel_session(panel, &session.id).await?;
             }
             Action::Open(id) => self.connect_panel_session(panel, &id).await?,
-            Action::NewHere(id) => {
-                let state = self
-                    .shared
-                    .host
-                    .state(&id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let cwd = state
-                    .pointer("/snapshot/cwd")
-                    .and_then(Value::as_str)
-                    .ok_or("会话缺少目录")?;
-                self.select_workspace(panel, cwd).await?;
+            Action::Notifications(on) => {
+                self.persist(|s| s.notifications = Some(on)).await?;
+                if !on {
+                    self.shared.streams.lock().await.clear();
+                    self.shared.touched.lock().await.clear();
+                }
+                panel.view = View::Menu;
+                return Ok(if on {
+                    "已开启全部会话推送"
+                } else {
+                    "已暂停全部会话推送"
+                }
+                .into());
+            }
+            Action::Silent(on) => {
+                self.persist(|s| s.silent = Some(on)).await?;
+                panel.view = View::Menu;
+                return Ok(if on {
+                    "已开启静音发送"
+                } else {
+                    "已关闭静音发送"
+                }
+                .into());
+            }
+            Action::Help => {
+                self.send(
+                    super::commands::HELP,
+                    panel.thread,
+                    json!({"disable_notification":true}),
+                )
+                .await
+                .map_err(|e| e.message)?;
+                panel.view = View::Menu;
             }
             Action::Set {
                 session,
@@ -586,7 +702,8 @@ impl Bridge {
         let mut panel = cell.lock().await;
         let thread = callback
             .pointer("/message/message_thread_id")
-            .and_then(Value::as_i64);
+            .and_then(Value::as_i64)
+            .filter(|id| *id != 1);
         if parts.len() != 4
             || panel.expires < now_ms()
             || panel.user != callback["from"]["id"].as_i64().unwrap_or(0)
@@ -599,6 +716,12 @@ impl Bridge {
             return Ok(());
         }
         let action = panel.actions[index].clone();
+        if !self.view_allowed(&panel.view, panel.thread).await
+            || !self.action_allowed(&action, panel.thread).await
+        {
+            self.answer_callback(callback_id, invalid()).await;
+            return Ok(());
+        }
         panel.revision += 1; // consume before awaiting: repeated clicks cannot create two sessions
         self.answer_callback(callback_id, "正在处理…").await;
         let note = match self.perform_action(&mut panel, action).await {

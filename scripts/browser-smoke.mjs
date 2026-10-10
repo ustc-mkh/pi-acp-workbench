@@ -227,7 +227,7 @@ try {
   assert.equal(await page.locator('#send path').getAttribute('d'), 'M3 7l5-5 5 5M8 2v12');
   assert.equal(
     await page.locator('#send svg').evaluate((n) => n.getBoundingClientRect().width),
-    24,
+    16,
   );
   await page.locator('#input').press('Enter');
   assert(

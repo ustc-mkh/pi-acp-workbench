@@ -35,6 +35,9 @@ pub struct TurnEvent {
     pub pending_permissions: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub non_text_blocks: usize,
+    /// Immutable entry references for this turn's output images; bytes stay in the snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_entry_ids: Vec<String>,
 }
 fn is_zero(value: &usize) -> bool {
     *value == 0

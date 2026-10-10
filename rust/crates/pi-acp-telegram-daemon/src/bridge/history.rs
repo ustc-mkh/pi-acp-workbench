@@ -92,7 +92,7 @@ impl Bridge {
         }
         let result = async {
             self.send(
-                "正在同步：最新 5 个会话各取最后 10 条，其余会话各取最后 2 条文字历史。",
+                "正在同步：最新 5 个会话各取最后 10 条，其余会话各取最后 2 条消息（含支持的图片）。",
                 thread_id,
                 json!({ "disable_notification": true }),
             )
@@ -125,7 +125,7 @@ impl Bridge {
                 processed += 1;
             }
             self.send(
-                &format!("已同步 {processed} 个会话，其中新建 {created} 个话题。最新 5 个会话各取最后 10 条，其余各取最后 2 条；已同步内容自动跳过。在会话话题手动执行 /history 获取更多消息，/history all 分批获取完整历史。"),
+                &format!("已同步 {processed} 个会话，其中新建 {created} 个话题。最新 5 个会话各取最后 10 条，其余各取最后 2 条（含支持的图片）；已同步内容自动跳过。在会话话题手动执行 /history 获取更多消息，/history all 分批获取完整历史。"),
                 thread_id,
                 json!({ "disable_notification": true }),
             )
@@ -144,7 +144,7 @@ impl Bridge {
         &self,
         session_id: &str,
         limit: Option<usize>,
-    ) -> Result<Vec<(String, String)>, String> {
+    ) -> Result<Vec<(String, String, Value)>, String> {
         let entries: Vec<Value> = self
             .shared
             .host
@@ -156,7 +156,7 @@ impl Bridge {
                 matches!(
                     e.get("role").and_then(Value::as_str),
                     Some("user" | "assistant" | "diff")
-                )
+                ) || (e["role"] == "tool" && !crate::images::sources(e).is_empty())
             })
             .collect();
         let sent: Vec<String> = self
@@ -179,23 +179,31 @@ impl Bridge {
             .filter_map(|e| {
                 let role = e.get("role").and_then(Value::as_str)?;
                 let text = e.get("text").and_then(Value::as_str).unwrap_or_default();
-                let key = hex::encode(Sha256::digest(
+                let mut hash = Sha256::new();
+                hash.update(
                     format!(
                         "{}\0{text}",
                         e.get("id").and_then(Value::as_str).unwrap_or_default()
                     )
                     .as_bytes(),
-                ));
+                );
+                let sources = crate::images::sources(&e);
+                if !sources.is_empty() {
+                    hash.update(serde_json::to_vec(&sources).unwrap_or_default());
+                }
+                let key = hex::encode(hash.finalize());
                 let who = if role == "user" {
                     "你"
                 } else if role == "diff" {
                     "修改汇总"
+                } else if role == "tool" {
+                    "工具图片"
                 } else {
                     "Pi"
                 };
-                Some((key, format!("{who}：\n{text}")))
+                Some((key, format!("{who}：\n{text}"), e))
             })
-            .filter(|(key, _)| !sent.contains(key))
+            .filter(|(key, _, _)| !sent.contains(key))
             .take(HISTORY_MAX)
             .collect())
     }
@@ -218,14 +226,32 @@ impl Bridge {
         }
         let result = async {
             let selected = self.pending_history(session_id, limit).await?;
-            for (key, body) in &selected {
-                self.send(
-                    body,
-                    Some(thread_id),
-                    json!({ "disable_notification": true }),
-                )
-                .await
-                .map_err(|e| e.message)?;
+            let sessions = self.shared.host.list().await.map_err(|e| e.to_string())?;
+            let cwd = sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .ok_or("会话不可用")?
+                .cwd
+                .clone();
+            for (key, body, entry) in &selected {
+                let scope = format!("history:{session_id}:{key}");
+                let text_key = format!("text:{scope}");
+                if !self.shared.store.read().await.delivered.contains(&text_key) {
+                    self.send(
+                        body,
+                        Some(thread_id),
+                        json!({ "disable_notification": true }),
+                    )
+                    .await
+                    .map_err(|e| e.message)?;
+                    self.persist(|s| {
+                        s.delivered.push(text_key);
+                        trim(&mut s.delivered, DELIVERED_KEEP);
+                    })
+                    .await?;
+                }
+                self.send_entry_images(&scope, &cwd, std::slice::from_ref(entry), thread_id, true)
+                    .await?;
                 let key = key.clone();
                 let sid = session_id.to_string();
                 self.persist(|s| {

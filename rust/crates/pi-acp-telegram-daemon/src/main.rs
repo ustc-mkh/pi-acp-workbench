@@ -5,6 +5,7 @@
 mod api;
 mod bridge;
 mod config;
+mod images;
 mod markdown;
 mod sessions;
 mod stream;

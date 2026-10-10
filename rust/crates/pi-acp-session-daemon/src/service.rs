@@ -147,6 +147,7 @@ impl SessionService {
                             updated: now_ms(),
                             pending_permissions: 0,
                             non_text_blocks: 0,
+                            image_entry_ids: vec![],
                         };
                         let _ = service.events.write(&event).await;
                     }

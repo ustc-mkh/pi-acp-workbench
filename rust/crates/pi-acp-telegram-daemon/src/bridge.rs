@@ -33,6 +33,7 @@ mod commands;
 mod delivery;
 mod history;
 mod inbox;
+mod media;
 mod permissions;
 mod routing;
 mod settings;
@@ -108,6 +109,7 @@ fn thread_of(update: &Value) -> Option<i64> {
         .pointer("/callback_query/message/message_thread_id")
         .or_else(|| update.pointer("/message/message_thread_id"))
         .and_then(Value::as_i64)
+        .filter(|id| *id != 1)
 }
 
 impl Bridge {

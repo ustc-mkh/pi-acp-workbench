@@ -196,7 +196,7 @@ impl Bridge {
         let text = if let Some(input) = &event.input_text {
             let attachments = if event.non_text_blocks > 0 {
                 format!(
-                    "\n[附带 {} 个非文本内容，请在 VS Code 查看]",
+                    "\n[附带 {} 个非文本内容；支持的图片将在下方显示，其余请在 VS Code 查看]",
                     event.non_text_blocks
                 )
             } else {
@@ -239,13 +239,54 @@ impl Bridge {
             .as_ref()
             .map(|e| format!("\n{}", utf16_head(e, 700)))
             .unwrap_or_default();
-        if let Err(error) = stream
-            .finish(text, format!("{label}{number}{suffix}"))
-            .await
-        {
-            self.drop_stream(&event.id).await;
-            self.report(&error.message).await;
-            return false; // durable event remains for retry
+        let text_key = format!("text:{}", event.id);
+        if !self.shared.store.read().await.delivered.contains(&text_key) {
+            if let Err(error) = stream
+                .finish(text, format!("{label}{number}{suffix}"))
+                .await
+            {
+                self.drop_stream(&event.id).await;
+                self.report(&error.message).await;
+                return false;
+            }
+            if self
+                .persist(|s| {
+                    s.delivered.push(text_key);
+                    trim(&mut s.delivered, DELIVERED_KEEP);
+                })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        if !event.image_entry_ids.is_empty() {
+            let entries = match self.shared.host.history(&event.session_id).await {
+                Ok(entries) => entries
+                    .into_iter()
+                    .filter(|e| {
+                        e["id"].as_str().is_some_and(|id| {
+                            event.image_entry_ids.iter().any(|wanted| wanted == id)
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(_) => return false,
+            };
+            let silent = self.shared.store.silent.load(Ordering::SeqCst);
+            if let Err(error) = self
+                .send_entry_images(
+                    &format!("turn:{}", event.id),
+                    &event.cwd,
+                    &entries,
+                    thread_id,
+                    silent,
+                )
+                .await
+            {
+                self.drop_stream(&event.id).await;
+                self.report(&error).await;
+                return false;
+            }
         }
         let id = event.id.clone();
         if self

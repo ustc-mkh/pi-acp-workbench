@@ -11,6 +11,25 @@ impl Bridge {
         thread_id: Option<i64>,
         text: &str,
     ) -> Result<(), String> {
+        if command == Some("settings") {
+            return self
+                .send_plain("/settings 已移除，请使用 /menu。", thread_id)
+                .await
+                .map_err(|e| e.message);
+        }
+        if matches!(
+            command,
+            Some("new" | "open" | "sessions" | "sync" | "silent" | "notifications")
+        ) && !Self::general(thread_id)
+        {
+            return self
+                .send_plain(
+                    "请在 General 使用 /menu 管理会话、同步摘要和全局开关。",
+                    thread_id,
+                )
+                .await
+                .map_err(|e| e.message);
+        }
         // Session-bound commands share one policy gate. Sessions also checks
         // at RPC boundaries so callbacks and queued work cannot bypass it.
         if !matches!(
@@ -24,7 +43,6 @@ impl Bridge {
                     | "sessions"
                     | "sync"
                     | "menu"
-                    | "settings"
                     | "silent"
                     | "notifications"
             )
@@ -40,7 +58,7 @@ impl Bridge {
         match command {
             Some("start" | "help" | "commands") => self
                 .help_panel(user_id, thread_id).await,
-            Some("menu" | "settings") => self.open_panel(user_id, thread_id, self.menu_view(thread_id).await).await,
+            Some("menu") => self.open_panel(user_id, thread_id, self.menu_view(thread_id).await).await,
             Some("silent") => self.silent_menu(thread_id).await.map_err(|e| e.message),
             Some("notifications") => self
                 .notification_menu(thread_id)
@@ -255,21 +273,21 @@ impl Bridge {
     }
 }
 
-const HELP: &str = "会话与历史
-/menu 或 /settings — 打开按钮面板，选择模型和思考强度
-/new [绝对路径或工作区名] — 打开新建向导，选择项目和 Harness
-/sessions — 列出最近 50 个会话
-/open 编号或 Session ID — 打开已有会话话题
-/sync — 最新 5 个会话各同步最后 10 条文字消息，其余各同步最后 2 条
-/history — 补充本话题最近 20 条文字历史
-/history all — 补充本话题完整文字历史，每次最多 100 条
+pub(super) const HELP: &str = "会话与历史
+/menu — General：管理会话与全局开关；会话 Topic：模型、思考强度和本会话控制
+/new [绝对路径或工作区名] — General 中打开新建向导，选择项目和 Harness
+/sessions — General 中列出最近 50 个会话
+/open 编号或 Session ID — General 中打开已有会话话题
+/sync — General 中同步摘要：最新 5 个会话各取最后 10 条，其余各取最后 2 条（含图片）
+/history — 同步本话题最近 20 条消息（含支持的图片）
+/history all — 同步本话题完整历史，每次最多 100 条
 
 任务控制
 /status — 查看本话题状态、当前回复和待授权操作
 /stop — 停止本话题任务并取消排队消息
 /interrupt 新消息 — 停止当前任务后发送新指令
-/notifications — 自动投递总开关（默认开启）；关闭后暂停自动回复和授权卡片
-/silent — 静音发送开关（默认关闭）；保留消息，仅关闭通知声音
+/notifications — General 中调整自动投递总开关（默认开启）；关闭后暂停自动回复和授权卡片
+/silent — General 中调整静音发送（默认关闭）；保留消息，仅关闭通知声音
 
 帮助
 /help 或 /commands — 显示全部服务命令
@@ -316,6 +334,15 @@ impl Bridge {
                         )
                         .await;
                 }
+                return Ok(());
+            }
+            if matches!(
+                data,
+                "notify:on" | "notify:off" | "silent:on" | "silent:off"
+            ) && !Self::general(thread_id)
+            {
+                self.answer_callback(callback_id, "全局开关仅可在 General 操作，请使用 /menu。")
+                    .await;
                 return Ok(());
             }
             match data {

@@ -167,6 +167,7 @@ impl TurnPublication {
                     updated: now_ms(),
                     pending_permissions: 0,
                     non_text_blocks: 0,
+                    image_entry_ids: vec![],
                 },
                 pending: None,
                 writer_active: false,
@@ -290,6 +291,40 @@ impl TurnPublication {
             .map(|e| e.text().to_string())
             .collect::<Vec<_>>()
             .join("\n\n");
+        let start = if shared.source_desktop {
+            shared.start.saturating_sub(1)
+        } else {
+            shared.start
+        };
+        s.event.image_entry_ids = entries
+            .iter()
+            .skip(start)
+            .filter(|e| {
+                matches!(e.role.as_str(), "assistant" | "tool")
+                    || (shared.source_desktop && e.role == "user")
+            })
+            .filter(|e| {
+                let block_has_image =
+                    |b: &Value| matches!(b["type"].as_str(), Some("image" | "resource"));
+                e.text().contains("![")
+                    || e.context_blocks
+                        .as_ref()
+                        .is_some_and(|blocks| blocks.iter().any(block_has_image))
+                    || e.tool
+                        .as_ref()
+                        .and_then(|t| t["content"].as_array())
+                        .is_some_and(|items| {
+                            items.iter().any(|item| {
+                                block_has_image(&item["content"])
+                                    || item["content"]["text"]
+                                        .as_str()
+                                        .is_some_and(|t| t.contains("!["))
+                            })
+                        })
+            })
+            .take(256)
+            .map(|e| e.id.clone())
+            .collect();
         s.event.pending_permissions = permissions;
         s.event.updated = now_ms();
     }
@@ -498,6 +533,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captures_only_this_turn_image_entry_references() {
+        let dir = test_dir();
+        let mut input = entry("user", "new question");
+        input.context_blocks = Some(vec![
+            serde_json::json!({"type":"image","mimeType":"image/png","data":"AAAA"}),
+        ]);
+        let output = entry("assistant", "![preview](./preview.png)");
+        let ids = vec![input.id.clone(), output.id.clone()];
+        let entries = vec![
+            entry("assistant", "![old](./old.png)"),
+            input,
+            output,
+            entry("thought", "![private](./thought.png)"),
+        ];
+        let (report, _) = report_sink();
+        let turn = TurnPublication::new(
+            Arc::new(TaskOutbox::new(dir.clone())),
+            accessor(entries, 0),
+            "/work".into(),
+            2,
+            "image-turn".into(),
+            "desktop".into(),
+            PublicationControl {
+                report,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        turn.finish(None, Some("end_turn")).await.unwrap();
+        let file = dir.join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(b"image-turn"))
+        ));
+        let event: TurnEvent =
+            serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(event.image_entry_ids, ids);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn writes_running_then_terminal_event() {
         let dir = test_dir();
         let events = Arc::new(TaskOutbox::new(dir.clone()));
@@ -629,6 +703,7 @@ mod tests {
                     updated: 0,
                     pending_permissions: 0,
                     non_text_blocks: 0,
+                    image_entry_ids: vec![],
                 },
                 pending: None,
                 writer_active: false,

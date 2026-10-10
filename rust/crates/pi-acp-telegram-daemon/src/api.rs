@@ -7,7 +7,22 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-const PACED: &[&str] = &["sendMessage", "editMessageText", "createForumTopic"];
+const PACED: &[&str] = &[
+    "sendMessage",
+    "editMessageText",
+    "createForumTopic",
+    "sendPhoto",
+    "sendDocument",
+    "sendAnimation",
+];
+
+#[derive(Clone)]
+pub struct Upload {
+    pub field: &'static str,
+    pub filename: String,
+    pub mime: &'static str,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
 const QUEUE_LIMIT: usize = 64;
 
 #[derive(Debug)]
@@ -111,8 +126,19 @@ impl TelegramApi {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        self.call_inner(method, params, None).await
+    }
+    pub async fn upload(&self, method: &str, params: Value, upload: Upload) -> Result<Value> {
+        self.call_inner(method, params, Some(upload)).await
+    }
+    async fn call_inner(
+        &self,
+        method: &str,
+        params: Value,
+        upload: Option<Upload>,
+    ) -> Result<Value> {
         if !PACED.contains(&method) {
-            return self.request(method, params).await;
+            return self.request(method, params, upload).await;
         }
         if self.queued.fetch_add(1, Ordering::SeqCst) >= QUEUE_LIMIT {
             self.queued.fetch_sub(1, Ordering::SeqCst);
@@ -130,7 +156,7 @@ impl TelegramApi {
             if self.stop.is_cancelled() {
                 return err("Telegram 已停止。");
             }
-            let result = self.request(method, params).await;
+            let result = self.request(method, params, upload).await;
             pace.next_send = Instant::now() + self.interval;
             result
         }
@@ -139,7 +165,7 @@ impl TelegramApi {
         result
     }
 
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+    async fn request(&self, method: &str, params: Value, upload: Option<Upload>) -> Result<Value> {
         let url = format!("{}/{}", self.base, method);
         let timeout = if method == "getUpdates" {
             Duration::from_secs(40)
@@ -149,13 +175,26 @@ impl TelegramApi {
         for attempt in 0.. {
             let body: Value = {
                 let pending = async {
-                    let response = self
-                        .http
-                        .post(&url)
-                        .timeout(timeout)
-                        .json(&params)
-                        .send()
-                        .await?;
+                    let request = self.http.post(&url).timeout(timeout);
+                    let request = if let Some(upload) = &upload {
+                        let mut form = reqwest::multipart::Form::new();
+                        if let Some(fields) = params.as_object() {
+                            for (key, value) in fields {
+                                let text = value
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| value.to_string());
+                                form = form.text(key.clone(), text);
+                            }
+                        }
+                        let part = reqwest::multipart::Part::bytes(upload.bytes.as_ref().clone())
+                            .file_name(upload.filename.clone())
+                            .mime_str(upload.mime)?;
+                        request.multipart(form.part(upload.field, part))
+                    } else {
+                        request.json(&params)
+                    };
+                    let response = request.send().await?;
                     response.json::<Value>().await
                 };
                 tokio::select! {
