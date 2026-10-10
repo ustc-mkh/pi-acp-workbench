@@ -1094,6 +1094,22 @@ it('keeps a source disconnect during native branching disconnected and reconnect
   await provider.perform({ type: 'connect' });
   expect(provider.snapshot()).toMatchObject({ status: 'ready', sessionId: before.sessionId });
 });
+it('explicit statistics refresh and restoring prices request a live Pi catalogue without prompting the model', async () => {
+  await contextAgent('context-native');
+  await host.provider.perform({ type: 'refreshStatistics' });
+  expect(
+    wire()
+      .filter((r) => r.method === '_pi_workbench/inspect')
+      .at(-1).params.force,
+  ).toBe(true);
+  await host.provider.perform({ type: 'setPrice', model: 'openai/m' });
+  expect(
+    wire()
+      .filter((r) => r.method === '_pi_workbench/inspect')
+      .at(-1).params.force,
+  ).toBe(true);
+  expect(wire().some((r) => r.method === 'session/prompt')).toBe(false);
+});
 it('persists custom prices, rejects invalid numbers and restores defaults', async () => {
   await host.provider.perform({
     type: 'setPrice',

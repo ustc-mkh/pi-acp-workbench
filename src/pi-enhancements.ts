@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branch';
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
+import { refreshPiModels } from './pi-context-config';
 export function usageRecord(
   id: string,
   sessionId: string,
@@ -74,6 +75,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
       const session = await this.restoreSession(params.sessionId);
       session.cancelRequested = false;
+      await refreshPiModels(session.proc);
       let refreshing: Promise<void> | undefined;
       const refresh = () =>
         (refreshing ??= session.publishContextUsage().finally(() => {
@@ -233,6 +235,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       }
     }
     private async inspect(session: PiSession, params: WorkbenchParams): Promise<Inspection> {
+      if (!params.cursor) await refreshPiModels(session.proc);
       const state = await session.proc.getState();
       const model = state.model,
         modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : 'unknown';
@@ -329,6 +332,14 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           }
         }
         const available = await session.proc.getAvailableModels();
+        result.modelContexts = Object.fromEntries(
+          (available?.models || [])
+            .filter(
+              (m) =>
+                m.provider && m.id && Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0,
+            )
+            .map((m) => [`${m.provider}/${m.id}`, m.contextWindow!]),
+        );
         result.prices = Object.fromEntries(
           (available?.models || [])
             .filter(

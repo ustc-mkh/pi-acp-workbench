@@ -36,6 +36,7 @@ export interface Inspection {
   cursor?: number;
   context?: string;
   contextWindow?: number;
+  modelContexts?: Record<string, number>;
   model?: string;
   prices?: Record<string, Price>;
 }

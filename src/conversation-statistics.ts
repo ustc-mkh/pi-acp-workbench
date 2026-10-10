@@ -39,6 +39,7 @@ function metadataDeadline<T>(request: Promise<T>): Promise<T> {
 export class ConversationStatistics {
   value: Statistics;
   pending?: Promise<void>;
+  private pendingForce = false;
   private overrides: Record<string, Price>;
   private modelPrices: Record<string, Price> = {};
   constructor(
@@ -101,8 +102,26 @@ export class ConversationStatistics {
       ['__proto__', 'constructor', 'prototype'].includes(model)
     )
       throw new Error('模型标识无效。');
-    if (price === undefined) delete this.overrides[model];
-    else {
+    if (price === undefined) {
+      // Legacy bare IDs can otherwise keep shadowing a qualified model after reset.
+      const bare = model.split('/').slice(1).join('/');
+      const legacy = Object.hasOwn(this.overrides, bare) ? this.overrides[bare] : undefined;
+      if (legacy && priceFor(model, { [bare]: legacy })) {
+        const known = new Set([
+          ...Object.keys(this.modelPrices),
+          ...(this.value.models || []).map((m) => m.id),
+        ]);
+        for (const other of known)
+          if (
+            other !== model &&
+            !Object.hasOwn(this.overrides, other) &&
+            priceFor(other, { [bare]: legacy })
+          )
+            this.overrides[other] = legacy;
+        delete this.overrides[bare];
+      }
+      delete this.overrides[model];
+    } else {
       if (!validPrice(price)) throw new Error('价格必须为非负有限数值。');
       this.overrides[model] = {
         input: price.input,
@@ -117,6 +136,8 @@ export class ConversationStatistics {
       prices: this.prices(),
     };
     await this.storage.update('prices', this.overrides);
+    // Cold sessions have no live model catalogue until explicitly inspected.
+    if (price === undefined) await this.refresh(this.current().state.status !== 'busy');
   }
   async record(records: UsageRecord[]) {
     const { state, conversationId, retained } = this.current(),
@@ -137,8 +158,14 @@ export class ConversationStatistics {
       await this.persistTitles();
     });
   }
-  async refresh(settledTurn = false) {
-    if (this.pending) return this.pending;
+  async refresh(settledTurn = false): Promise<void> {
+    if (this.pending) {
+      const forced = this.pendingForce;
+      await this.pending;
+      if (!settledTurn || forced) return;
+      // An earlier cached/cold read must not swallow an explicit refresh.
+      return this.refresh(true);
+    }
     const { agent, state, harness } = this.current(),
       sessionId = state.sessionId;
     const meta = agent?.info?.agentCapabilities?._meta?.['pi-workbench'] as
@@ -159,6 +186,7 @@ export class ConversationStatistics {
       const now = this.current();
       return now.agent === agent && now.state === state && now.state.sessionId === sessionId;
     };
+    this.pendingForce = settledTurn;
     this.pending = (async () => {
       try {
         let cursor: number | undefined;
@@ -176,6 +204,15 @@ export class ConversationStatistics {
           records.push(...(data.records || []));
           if (!cursor) {
             note = data.note;
+            if (data.modelContexts !== undefined)
+              state.modelContexts = Object.fromEntries(
+                Object.entries(data.modelContexts).filter(
+                  ([key, value]) =>
+                    !['__proto__', 'constructor', 'prototype'].includes(key) &&
+                    Number.isSafeInteger(value) &&
+                    value > 0,
+                ),
+              );
             if (data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow > 0)
               this.contextWindow(data.contextWindow);
             if (data.prices !== undefined)
@@ -213,6 +250,7 @@ export class ConversationStatistics {
       await this.pending;
     } finally {
       this.pending = undefined;
+      this.pendingForce = false;
     }
   }
 }

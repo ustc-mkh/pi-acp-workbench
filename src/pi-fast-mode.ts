@@ -1,4 +1,5 @@
 // Pi extension: keep the fast setting on the native branch, outside model context.
+import { installContextConfig, type ContextModel } from './pi-context-mode';
 export const FAST_ENTRY = 'pi-acp-workbench/fast-mode';
 export const FAST_COMMAND = 'workbench-fast';
 export interface FastModel {
@@ -40,6 +41,9 @@ export interface FastContext {
   sessionManager: { getBranch(): { type: string; customType?: string; data?: unknown }[] };
 }
 export interface FastExtensionApi {
+  setModel?(model: ContextModel): Promise<boolean>;
+  getThinkingLevel?(): string;
+  setThinkingLevel?(value: string): void;
   on(
     event: 'before_provider_request',
     handler: (event: { payload: unknown }, context: FastContext) => unknown,
@@ -54,6 +58,7 @@ export interface FastExtensionApi {
   appendEntry(type: string, data: unknown): void;
 }
 export default function fastMode(pi: FastExtensionApi) {
+  installContextConfig(pi);
   pi.on('before_provider_request', ({ payload }, context) => {
     if (!supportsFast(context.model) || !fastEnabled(context.sessionManager.getBranch())) return;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload))

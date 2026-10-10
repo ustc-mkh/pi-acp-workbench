@@ -74,6 +74,7 @@ export interface ChatState {
   plan: acp.PlanEntry[];
   usage?: ContextUsage;
   visibleModels?: string[];
+  modelContexts?: Record<string, number>;
   history: Omit<Snapshot, 'entries'>[];
   permissions: { id: string; request: acp.RequestPermissionRequest }[];
   showThoughts: boolean;
@@ -117,6 +118,14 @@ export type UiMessage =
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }
   | { type: 'setVisibleModels'; harness: HarnessId; models: string[] | null }
+  | { type: 'refreshModelContexts'; harness: HarnessId; sessionId: string }
+  | {
+      type: 'setModelContext';
+      harness: HarnessId;
+      sessionId: string;
+      model: string;
+      contextWindow: number | null;
+    }
   | { type: 'resume' | 'removeAttachment' | 'deleteHistory'; id: string }
   | { type: 'branchMessage'; id: string; sessionId: string }
   | { type: 'diff'; id: string; index: number }

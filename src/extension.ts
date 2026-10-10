@@ -189,6 +189,7 @@ export class ChatProvider
       }),
       (value) => {
         this.active.replace({ contextWindow: value });
+        if (this.state.usage) this.state.usage = { ...this.state.usage, size: value };
       },
       () => this.emit(),
     );
@@ -352,6 +353,21 @@ export class ChatProvider
     send: { run: (m) => this.turnCoordinator.onSend(m), gated: true },
     mode: { run: (m) => this.turnCoordinator.onMode(m), gated: true },
     config: { run: (m) => this.turnCoordinator.onConfig(m), gated: true },
+    setModelContext: { run: (m) => this.turnCoordinator.onModelContext(m), gated: true },
+    refreshModelContexts: {
+      run: async (m) => {
+        if (
+          m.harness !== 'pi' ||
+          this.harness !== 'pi' ||
+          m.sessionId !== this.state.sessionId ||
+          this.state.status !== 'ready'
+        )
+          return;
+        await this.refreshTelemetry(true);
+        this.emit();
+      },
+      gated: true,
+    },
   } satisfies UiHandlers;
   private async onSetVisibleModels(
     message: UiMessage & { type: 'setVisibleModels' },
@@ -428,7 +444,7 @@ export class ChatProvider
     this.contextAbort?.abort(new Error('已取消操作，原会话保留。'));
   }
   private async onRefreshStatistics(): Promise<void> {
-    await this.refreshTelemetry();
+    await this.refreshTelemetry(this.state.status !== 'busy');
     this.emit();
   }
   private async onSetPrice(message: UiMessage & { type: 'setPrice' }): Promise<void> {

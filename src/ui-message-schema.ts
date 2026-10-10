@@ -57,6 +57,14 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
     models: (v) =>
       v === null || (Array.isArray(v) && v.length <= 10000 && Array.from(v).every(text)),
   },
+  refreshModelContexts: { harness, sessionId: text },
+  setModelContext: {
+    harness,
+    sessionId: text,
+    model: text,
+    contextWindow: (v) =>
+      v === null || (typeof v === 'number' && Number.isSafeInteger(v) && v > 0 && v <= 100000000),
+  },
   resume: { id: text },
   removeAttachment: { id: text },
   deleteHistory: { id: text },

@@ -4,6 +4,12 @@
 
 0.11.3、0.11.4 已分别完成完整 2 小时浸泡，下方记录为已完成的历史验收证据。**后续常规发布不需要每次重复浸泡，不将其作为发布门槛，也不自动重新运行。** 新版本继续执行对应回归、CI 和当前产物校验；只有用户明确要求或维护者确认需要专项长时间验证时才再次浸泡，触发条件见 [服务发布](service-release.md#验收入口)。历史结果仅覆盖记录中的版本、二进制与模拟传输范围，不等于后续版本本轮重新验收。下方早期未完成批次的描述不构成当前待办。
 
+## 0.11.7 验收 — 2026-10-10（Asia/Hong_Kong）
+
+本轮修复 Pi context 配置热重载及圆环分母同步，模型管理页支持 context 长度设置 / 恢复默认；修复冷会话默认价格未加载、恢复默认不重新获取 Pi 价格及旧版裸模型 ID 覆盖残留。默认并发 `npm run verify` 通过：TS 46 文件 / 275 项、Rust 103 项、会话 / Telegram 契约、集成、资源、runner、clippy 和浏览器。新增覆盖配置字段保留、原子写入、无效 JSON 不覆盖、目录与 home 展开、busy 禁止修改、thinking 保留、内部命令注册与错误检查点、冷会话强制获取价格、并发普通读取不吞掉强制刷新、零价格与恢复默认。
+
+证据保存于 `.test-results/release-0.11.7/`，此前功能验证在 `.test-results/model-context/`、`.test-results/model-prices/`。本机 Pi 1.1.0 使用隔离配置目录、占位 key、offline 模式验证 context 外部配置重载、保存、恢复默认及无效配置的错误传播，不发送模型请求、不操作真实 daemon。GNU 生产构建 / 当前产物检查及 main / 标签 CI、musl 发布包摘要按发布流程核验；以相应日志与附件实际结果为准。**本轮未重复浸泡**；实际 VS Code Extension Host、付费模型、真实 Telegram API / 群组仍未验证。
+
 ## 0.11.6 验收 — 2026-10-10（Asia/Hong_Kong）
 
 本轮完成 Telegram 菜单位置隔离、移除 `/settings`、General 同步与全局开关、Topic 最近消息同步，以及图片 multipart 上传。最终默认并发的 `npm run verify` 通过：TS 45 文件 / 262 项、Rust 103 项（core 14 / session 57 / relay 32）、会话契约 22 项、Telegram 契约 36 项、集成、资源、runner、clippy 与浏览器。新增覆盖 General / Topic / 未绑定话题及旧回调边界、16px 发送 SVG、本轮图片 entry ID 捕获、图片 multipart 字节与静音、部分图片失败后重启继续且不重复已发送内容、429、GIF / WebP、照片尺寸失败回退文件、本地 / 内嵌 / ACP 历史图片及重复同步、越界 / 符号链接 / 无效签名 / 大小限制。

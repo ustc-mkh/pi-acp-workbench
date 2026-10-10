@@ -167,6 +167,51 @@ it('statistics discards late responses and errors from detached sessions', async
   expect(stats.pending).toBeUndefined();
   expect(stats.value.records).toEqual([]);
 });
+it('loads defaults when resetting a cold session and does not lose a forced refresh behind a cached read', async () => {
+  const model = 'openai/m',
+    price = { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 0 };
+  const state = { ...initialState(), sessionId: 'cold', status: 'ready' as const };
+  let finish!: (data: { records: never[] }) => void;
+  const request = vi.fn().mockImplementation((_method: string, params: { force: boolean }) =>
+    params.force
+      ? Promise.resolve({ records: [], prices: { [model]: price } })
+      : new Promise((resolve) => {
+          finish = resolve;
+        }),
+  );
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
+    harness: 'pi',
+    info: {
+      protocolVersion: 1,
+      agentCapabilities: { _meta: { 'session-service': { usageInspection: true } } },
+    },
+    request,
+  };
+  const stats = new ConversationStatistics(
+    storage(),
+    new ClientOperations(),
+    () => ({ state, agent, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+  );
+  const cached = stats.refresh();
+  const forced = stats.refresh(true);
+  finish({ records: [] });
+  await Promise.all([cached, forced]);
+  expect(request.mock.calls.map(([, params]) => params.force)).toEqual([false, true]);
+  expect(stats.value.prices[model]).toEqual(price);
+  const cold = new ConversationStatistics(
+    storage(),
+    new ClientOperations(),
+    () => ({ state, agent, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+  );
+  expect(cold.value.prices).toEqual({});
+  await cold.setPrice(model);
+  expect(cold.value.prices[model]).toEqual(price);
+  expect(request.mock.calls.at(-1)?.[1].force).toBe(true);
+});
 it('uses current Pi prices, persists user overrides, and restores the latest Pi defaults', async () => {
   const model = 'anthropic/claude-sonnet-4-6';
   const state = { ...initialState(), sessionId: 'one', status: 'ready' as const };
@@ -255,7 +300,8 @@ it('gives legacy bare model user prices precedence over Pi without applying them
   await stats.setPrice(direct, { ...piPrice, input: 1 });
   expect(stats.value.prices[direct].input).toBe(1);
   await stats.setPrice(direct);
-  expect(stats.value.prices[direct].input).toBe(2);
+  expect(stats.value.prices[direct].input).toBe(7);
+  expect(store.get<Record<string, Price>>('prices')?.[model]).toBeUndefined();
   await stats.setPrice(model);
   expect(stats.value.prices[direct].input).toBe(7);
 });

@@ -25,6 +25,7 @@ export class PricesPage {
   private cards = new Map<string, Card>();
   private list: HTMLElement;
   private empty: HTMLElement;
+  private note: HTMLElement;
   constructor(
     root: HTMLElement,
     private send: (message: UiMessage) => void,
@@ -35,7 +36,10 @@ export class PricesPage {
       button = text('button', '返回统计') as HTMLButtonElement;
     button.type = 'button';
     button.onclick = back;
-    header.append(text('h2', '模型价格设置'), button);
+    const refresh = text('button', '刷新默认价格') as HTMLButtonElement;
+    refresh.type = 'button';
+    refresh.onclick = () => this.send({ type: 'refreshStatistics' });
+    header.append(text('h2', '模型价格设置'), refresh, button);
     root.append(header);
     root.append(
       text(
@@ -44,11 +48,17 @@ export class PricesPage {
         'stats-caption',
       ),
     );
+    this.note = text('p', '', 'stats-caption');
+    this.note.setAttribute('role', 'status');
+    this.note.hidden = true;
+    root.append(this.note);
     this.empty = text('p', '暂无模型列表，请先连接 Agent。', 'stats-empty');
     this.list = text('div', '', 'model-price-list');
     root.append(this.empty, this.list);
   }
   update(data?: Statistics) {
+    this.note.textContent = data?.note || '';
+    this.note.hidden = !data?.note;
     const models = [...new Map((data?.models || []).map((m) => [m.id, m])).values()];
     this.empty.hidden = !!models.length;
     const ids = new Set(models.map((m) => m.id));
@@ -109,6 +119,7 @@ export class PricesPage {
         };
         reset.onclick = () => {
           selected.pending = true;
+          selected.source.textContent = '正在读取 Pi 默认单价…';
           this.send({ type: 'setPrice', model: model.id });
         };
         node.append(save, reset);
@@ -129,7 +140,7 @@ export class PricesPage {
             : price.source === 'Pi 模型配置'
               ? 'Pi 默认单价'
               : '默认单价'
-          : '暂无默认单价，请填写四项价格。';
+          : '暂无默认单价，请刷新默认价格；若 Pi 未提供，可填写四项价格。';
       }
     }
   }

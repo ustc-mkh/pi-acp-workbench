@@ -55,7 +55,7 @@ export async function buildAdapter() {
   source = replaceExactlyOnce(
     source,
     '    if (configId === MODEL_CONFIG_ID) {',
-    '    if (configId === "fast-mode") {\n      await setFastConfig(session.proc, params.value);\n      const record = this.store.get(session.sessionId);\n      if (record) this.store.upsert({...record, workbenchFastMode: params.value});\n    } else if (configId === MODEL_CONFIG_ID) {',
+    '    if (configId.startsWith("context-window:")) {\n      const value = params.value === "default" ? null : Number(params.value);\n      await refreshPiModels(session.proc, {model: configId.slice(15), contextWindow: value});\n      await session.publishContextUsage();\n    } else if (configId === "fast-mode") {\n      await setFastConfig(session.proc, params.value);\n      const record = this.store.get(session.sessionId);\n      if (record) this.store.upsert({...record, workbenchFastMode: params.value});\n    } else if (configId === MODEL_CONFIG_ID) {',
   );
   source = replaceExactlyOnce(
     source,
@@ -83,7 +83,7 @@ export async function buildAdapter() {
   source = replaceExactlyOnce(
     source,
     '    if (!name) continue;',
-    '    if (!name || name === "workbench-fast") continue;',
+    '    if (!name || name === "workbench-fast" || name === "workbench-context") continue;',
   );
   source = replaceExactlyOnce(
     source,
@@ -195,6 +195,9 @@ async function getWorkbenchFastOptions(proc) { const config = await fastConfig(p
 ` + source;
 
   source =
+    `import {refreshPiModels} from ${JSON.stringify(resolve('src/pi-context-config.ts'))};\n` +
+    source;
+  source =
     `import {enhancePiAgent} from ${JSON.stringify(resolve('src/pi-enhancements.ts'))};\n` + source;
   source =
     `import {mutateAdapterStore} from ${JSON.stringify(resolve('src/adapter-store.ts'))};\n` +
@@ -224,6 +227,9 @@ async function getWorkbenchFastOptions(proc) { const config = await fastConfig(p
     platform: 'node',
     format: 'esm',
     target: 'node22',
+    banner: {
+      js: 'import {createRequire as workbenchCreateRequire} from "node:module"; const require = workbenchCreateRequire(import.meta.url);',
+    },
     sourcemap: true,
   });
   await build({

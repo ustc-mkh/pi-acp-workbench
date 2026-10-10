@@ -351,6 +351,7 @@ const showPrices = (model?: string) => {
   el('chat-page').hidden = true;
   pricesPage.update(state?.statistics);
   pricesPage.focus(model);
+  send({ type: 'refreshStatistics' });
 };
 const statisticsPage = new StatisticsPage(
   el('statistics'),

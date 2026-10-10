@@ -197,7 +197,12 @@ impl SessionService {
                 &r.state.native_forks.clone().unwrap_or_default(),
             ));
             if let Some(cw) = result.get("contextWindow").and_then(Value::as_u64) {
-                r.snapshot.context_window = Some(cw);
+                if cw > 0 {
+                    r.snapshot.context_window = Some(cw);
+                    if let Some(Value::Object(usage)) = &mut r.state.usage {
+                        usage.insert("size".into(), json!(cw));
+                    }
+                }
             }
         }
         if method == "session/set_config_option" {

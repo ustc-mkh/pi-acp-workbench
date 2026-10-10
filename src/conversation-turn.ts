@@ -134,14 +134,45 @@ export class TurnCoordinator {
     if (!config || config.type !== 'select') return;
     const options = config.options.flatMap((o) => ('options' in o ? o.options : [o]));
     if (!options.some((o) => o.value === message.value)) return;
+    await this.applyConfig(message.id, message.value);
+  }
+  async onModelContext(message: UiMessage & { type: 'setModelContext' }): Promise<void> {
+    if (
+      message.harness !== 'pi' ||
+      this.host.harness !== 'pi' ||
+      message.sessionId !== this.host.state.sessionId
+    )
+      throw new Error('会话已切换或当前 Agent 不支持 context 设置。');
+    if (!this.host.agent || this.host.state.status !== 'ready')
+      throw new Error('请等待当前任务结束再修改 context 长度。');
+    const known = this.host.state.configs?.flatMap((c) =>
+      c.type === 'select' && (c.category === 'model' || c.id === 'model')
+        ? c.options.flatMap((o) => ('options' in o ? o.options : [o]))
+        : [],
+    );
+    if (!known?.some((o) => o.value === message.model)) throw new Error('模型不在当前目录中。');
+    if (
+      message.contextWindow !== null &&
+      (!Number.isSafeInteger(message.contextWindow) ||
+        message.contextWindow <= 0 ||
+        message.contextWindow > 100000000)
+    )
+      throw new Error('context 长度必须是正整数。');
+    await this.applyConfig(
+      `context-window:${message.model}`,
+      message.contextWindow === null ? 'default' : String(message.contextWindow),
+    );
+  }
+  private async applyConfig(id: string, value: string): Promise<void> {
+    if (!this.host.agent || !this.host.state.sessionId) return;
     this.host.state.status = 'connecting';
     this.host.emit();
     try {
       const response = await this.host.agent.withTimeout(
         this.host.agent.request('session/set_config_option', {
           sessionId: this.host.state.sessionId,
-          configId: message.id,
-          value: message.value,
+          configId: id,
+          value,
         }),
         15000,
       );
