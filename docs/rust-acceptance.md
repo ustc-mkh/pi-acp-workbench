@@ -8,6 +8,8 @@
 
 本轮修复 Pi context 配置热重载及圆环分母同步，模型管理页支持 context 长度设置 / 恢复默认；修复冷会话默认价格未加载、恢复默认不重新获取 Pi 价格及旧版裸模型 ID 覆盖残留。默认并发 `npm run verify` 通过：TS 46 文件 / 275 项、Rust 103 项、会话 / Telegram 契约、集成、资源、runner、clippy 和浏览器。新增覆盖配置字段保留、原子写入、无效 JSON 不覆盖、目录与 home 展开、busy 禁止修改、thinking 保留、内部命令注册与错误检查点、冷会话强制获取价格、并发普通读取不吞掉强制刷新、零价格与恢复默认。
 
+首轮 main CI `38059388611` 的既有 controller 跨 Harness 模型偏好测试触发 5 秒超时，其他 274 项 TS 用例及生产 / 浏览器检查通过。失败日志保留于 `ci-first-failure.json`，诊断分支同一功能代码的完整 CI 重跑通过；未跳过用例、放宽阈值或修改生产逻辑，最终主分支 / 标签仍须重新通过。
+
 证据保存于 `.test-results/release-0.11.7/`，此前功能验证在 `.test-results/model-context/`、`.test-results/model-prices/`。本机 Pi 1.1.0 使用隔离配置目录、占位 key、offline 模式验证 context 外部配置重载、保存、恢复默认及无效配置的错误传播，不发送模型请求、不操作真实 daemon。GNU 生产构建 / 当前产物检查及 main / 标签 CI、musl 发布包摘要按发布流程核验；以相应日志与附件实际结果为准。**本轮未重复浸泡**；实际 VS Code Extension Host、付费模型、真实 Telegram API / 群组仍未验证。
 
 ## 0.11.6 验收 — 2026-10-10（Asia/Hong_Kong）
