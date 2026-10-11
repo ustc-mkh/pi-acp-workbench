@@ -54,7 +54,7 @@ Fixtures 的角色见 [样例说明](../test/fixtures/README.md)：原生树哈�
 
 ## 有界并行与日志
 
-test:full 先准备一次 debug 和 contract 产物，再有界并行运行独立套件。`TEST_JOBS` 支持 1–8，默认 min(3, availableParallelism)；Vitest worker 数取 min(TEST_JOBS, 4, availableParallelism)，避免内部 worker 与并行服务套件过度争抢 CPU / 内存。独立套件使用不同进程 / 临时目录 / 端口；依赖前序状态的 Telegram 契约内部保持顺序执行。一个套件失败后其余仍运行，最终退出码非零。
+test:full 先准备一次 debug 和 contract 产物，再有界并行运行独立套件。`TEST_JOBS` 支持 1–8，默认 min(3, availableParallelism)；Vitest worker 上限取 min(TEST_JOBS, 4, availableParallelism)，完整验收禁用 TS 文件并行，避免大历史用例与 Extension Host 模拟用例争抢 CPU / 内存；独立 Rust / 契约套件仍有界并行。独立套件使用不同进程 / 临时目录 / 端口；依赖前序状态的 Telegram 契约内部保持顺序执行。一个套件失败后其余仍运行，最终退出码非零。
 
 ```bash
 TEST_JOBS=1 npm run test:full

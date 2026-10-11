@@ -110,6 +110,8 @@ async function runTests() {
         'typescript',
         'node_modules/vitest/vitest.mjs',
         'run',
+        // Avoid overlapping memory-heavy transcripts with timing-sensitive host tests.
+        '--no-file-parallelism',
         '--maxWorkers',
         // Other service suites share the CPU/memory budget with Vitest.
         String(Math.min(jobs, 4, availableParallelism())),

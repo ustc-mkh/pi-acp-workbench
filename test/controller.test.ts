@@ -441,6 +441,10 @@ it('removes usage titles and does not recreate them after forgetting an active c
   await host.provider.perform({ type: 'send', text: 'private message' });
   await host.provider.recordUsage([]);
   expect(host.stored.get('usageTitles')).toEqual({ 'test-session': 'private message' });
+  // Deletion is initiated from the history list; wait for its authoritative refresh,
+  // rather than depending on the background poll having completed during send.
+  await host.provider.refreshHistory();
+  expect(host.provider.history.some((item) => item.id === 'test-session')).toBe(true);
   await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
   await host.provider.recordUsage([]);
   expect(host.stored.get('usageTitles')).toEqual({});
