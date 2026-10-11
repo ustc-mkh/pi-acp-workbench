@@ -54,7 +54,7 @@ Fixtures 的角色见 [样例说明](../test/fixtures/README.md)：原生树哈�
 
 ## 有界并行与日志
 
-test:full 先准备一次 debug 和 contract 产物，再有界并行运行独立套件。`TEST_JOBS` 支持 1–8，默认 min(3, availableParallelism)；Vitest 最多 4 个 worker。独立套件使用不同进程 / 临时目录 / 端口；依赖前序状态的 Telegram 契约内部保持顺序执行。一个套件失败后其余仍运行，最终退出码非零。
+test:full 先准备一次 debug 和 contract 产物，再有界并行运行独立套件。`TEST_JOBS` 支持 1–8，默认 min(3, availableParallelism)；Vitest worker 数取 min(TEST_JOBS, 4, availableParallelism)，避免内部 worker 与并行服务套件过度争抢 CPU / 内存。独立套件使用不同进程 / 临时目录 / 端口；依赖前序状态的 Telegram 契约内部保持顺序执行。一个套件失败后其余仍运行，最终退出码非零。
 
 ```bash
 TEST_JOBS=1 npm run test:full
@@ -64,7 +64,7 @@ npm run test:all -- --maxWorkers=4
 
 单独运行 test:all 时可使用上述 worker 上限；核心很多的主机上默认并发可能使启动多个 daemon 的用例触发 5 秒超时。优先有界运行并定位慢步骤，不直接延长超时掩盖问题。
 
-日志在 `.test-results/run-*/`，默认保留最近 5 次。活动运行的 `.active` PID 标记保护目录；失效标记可在后续运行回收，目录链接及其他目录不参与清理。长期验收证据请单独保存，避免引用已被清理的 run 目录。
+日志在 `.test-results/run-*/`，默认保留最近 5 次。每轮 `failures.json` 记录实际失败套件；CI 只为这些套件输出有界末尾摘要，完整日志仍通过 artifact 保留，不将通过套件标为错误。活动运行的 `.active` PID 标记保护目录；失效标记可在后续运行回收，目录链接及其他目录不参与清理。长期验收证据请单独保存，避免引用已被清理的 run 目录。
 
 不要并行运行两个重建 dist 的 npm 包装命令，例如 test:browser 与 build:services。可先 `npm run build`，再并行执行 `node scripts/browser-smoke.mjs` 和 `node scripts/build-services.mjs`。
 

@@ -111,7 +111,8 @@ async function runTests() {
         'node_modules/vitest/vitest.mjs',
         'run',
         '--maxWorkers',
-        String(Math.min(4, availableParallelism())),
+        // Other service suites share the CPU/memory budget with Vitest.
+        String(Math.min(jobs, 4, availableParallelism())),
       ),
       cargo('rust-unit', 'test'),
       node('service-contract', 'scripts/service-contract.mjs'),
