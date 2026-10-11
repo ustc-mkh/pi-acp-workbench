@@ -317,8 +317,7 @@ el('attach').onclick = () => send({ type: 'attach' });
 el('export').onclick = () => send({ type: 'export' });
 el('cancel-context').onclick = () => send({ type: 'cancelContext' });
 let statisticsOpen = false,
-  modelsOpen = false,
-  settingsFromStatistics = false;
+  modelsOpen = false;
 const showStatistics = (show: boolean) => {
   modelsOpen = false;
   el('models').hidden = true;
@@ -326,6 +325,7 @@ const showStatistics = (show: boolean) => {
   el('statistics').hidden = !show;
   el('chat-page').hidden = show;
   el('statistics-toggle').setAttribute('aria-pressed', String(show));
+  el('models-toggle').setAttribute('aria-pressed', 'false');
   if (show) {
     statisticsPage.update(state?.statistics);
     send({ type: 'refreshStatistics' });
@@ -334,15 +334,16 @@ const showStatistics = (show: boolean) => {
       renderDiagrams(el('messages'));
     });
 };
-const showModelSettings = (model?: string, fromStatistics = true) => {
-  settingsFromStatistics = fromStatistics;
+const showModelSettings = (model?: string) => {
   modelsOpen = true;
-  statisticsOpen = fromStatistics;
+  statisticsOpen = false;
+  el('statistics-toggle').setAttribute('aria-pressed', 'false');
+  el('models-toggle').setAttribute('aria-pressed', 'true');
   el('statistics').hidden = true;
   el('models').hidden = false;
   el('chat-page').hidden = true;
   modelsPage.update(state);
-  modelsPage.focus(model, fromStatistics);
+  modelsPage.focus(model);
 };
 const statisticsPage = new StatisticsPage(
   el('statistics'),
@@ -350,10 +351,11 @@ const statisticsPage = new StatisticsPage(
   () => showStatistics(false),
   showModelSettings,
 );
-const modelsPage = new ModelSettingsPage(el('models'), send, () =>
-  showStatistics(settingsFromStatistics),
-);
-el('models-toggle').onclick = () => showModelSettings(undefined, false);
+const modelsPage = new ModelSettingsPage(el('models'), send, () => showStatistics(false));
+el('models-toggle').onclick = () => {
+  if (modelsOpen) showStatistics(false);
+  else showModelSettings();
+};
 el('statistics-toggle').onclick = () => showStatistics(modelsOpen || !statisticsOpen);
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
@@ -371,7 +373,7 @@ const historyList = new HistoryList(
   },
 );
 el('history-toggle').onclick = () => {
-  if (statisticsOpen) showStatistics(false);
+  if (statisticsOpen || modelsOpen) showStatistics(false);
   el('history').hidden = !el('history').hidden;
   el('history-toggle').setAttribute('aria-expanded', String(!el('history').hidden));
   saveUi({ historyOpen: !el('history').hidden });

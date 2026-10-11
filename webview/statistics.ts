@@ -32,7 +32,7 @@ export class StatisticsPage {
       title = text('h2', '用量统计'),
       close = text('button', '返回对话') as HTMLButtonElement;
     close.type = 'button';
-    close.className = 'floating-page-back';
+    close.className = 'page-back';
     close.onclick = back;
     const refresh = text('button', '刷新') as HTMLButtonElement;
     refresh.type = 'button';

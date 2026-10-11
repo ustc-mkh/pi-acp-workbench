@@ -49,7 +49,12 @@ it('has one compact heading, five fields, a visibility toggle and one save/reset
   expect(card.textContent).not.toContain('默认单价');
   expect(
     [...card.querySelectorAll<HTMLInputElement>('input[type=number]')].map((i) => i.value),
-  ).toEqual(['2', '0', '0', '8', '1000']);
+  ).toEqual(['2', '0', '0', '8', '1']);
+  expect([...root.querySelectorAll('button')].some((b) => b.textContent === '显示全部')).toBe(
+    false,
+  );
+  expect(root.textContent).not.toContain('仅保留当前模型');
+  expect(root.querySelector('.stats-heading .page-back')?.textContent).toBe('返回对话');
 });
 it('saves all five values in one message and preserves drafts until the matching acknowledgement', () => {
   const { card, click, send, page, state } = fixture();
@@ -57,7 +62,7 @@ it('saves all five values in one message and preserves drafts until the matching
   input.value = '4';
   input.dispatchEvent(new Event('input'));
   const context = card.querySelector<HTMLInputElement>('.model-context-field input')!;
-  context.value = '2000';
+  context.value = '2';
   context.dispatchEvent(new Event('input'));
   page.update({
     ...state,
@@ -75,7 +80,7 @@ it('saves all five values in one message and preserves drafts until the matching
   });
   page.update({ ...state, status: 'connecting' });
   expect(input.value).toBe('4');
-  expect(context.value).toBe('2000');
+  expect(context.value).toBe('2');
   expect(card.textContent).toContain('正在保存');
   page.update({
     ...state,
@@ -88,15 +93,30 @@ it('saves all five values in one message and preserves drafts until the matching
   expect(reset).toMatchObject({ type: 'setModelSettings', values: null });
   page.update({ ...state, modelSettingsResult: { id: reset.id, model: 'p/m' } });
   expect(input.value).toBe('2');
-  expect(context.value).toBe('1000');
+  expect(context.value).toBe('1');
+});
+it.each([
+  [256, 256000],
+  [0.001, 1],
+  [1.001, 1001],
+  [100000, 100000000],
+])('converts %s k tokens to %s tokens without changing prices', (k, tokens) => {
+  const { card, click, send, page, state } = fixture();
+  page.update({ ...state, modelContexts: { 'p/m': tokens } });
+  const context = card.querySelector<HTMLInputElement>('.model-context-field input')!;
+  expect(context.value).toBe(String(k));
+  click('保存');
+  expect(send).toHaveBeenLastCalledWith(
+    expect.objectContaining({ values: { price, contextWindow: tokens } }),
+  );
 });
 it('rejects invalid context/price fields and disables changes while busy', () => {
   const { card, click, send, page, state } = fixture();
   const context = card.querySelector<HTMLInputElement>('.model-context-field input')!;
-  context.value = '1.5';
+  context.value = '0.0001';
   click('保存');
   expect(send).not.toHaveBeenCalled();
-  context.value = '1000';
+  context.value = '1';
   card.querySelector<HTMLInputElement>('input[type=number]')!.value = '-1';
   click('保存');
   expect(send).not.toHaveBeenCalled();
@@ -208,5 +228,5 @@ it('selects the title model independently from the conversation model', () => {
   expect(send).toHaveBeenLastCalledWith({ type: 'setTitleModel', model: 'p/m' });
   page.update({ ...state, titleModel: 'p/m' });
   expect(select.value).toBe('p/m');
-  expect(root.querySelector('.floating-page-back')?.textContent).toContain('返回');
+  expect(root.querySelector('.page-back')?.textContent).toContain('返回');
 });

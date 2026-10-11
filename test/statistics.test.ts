@@ -54,6 +54,6 @@ it('switches model/time/session views, filters dates, and links models without h
   expect(root.textContent).not.toContain('Pi 报告费用');
   expect(root.querySelector('input[type=number]')).toBeNull();
   expect(root.textContent).not.toContain('模型设置 →');
-  expect(root.querySelector('.floating-page-back')?.textContent).toBe('返回对话');
+  expect(root.querySelector('.page-back')?.textContent).toBe('返回对话');
   expect(root.querySelector('tbody [data-tooltip], tbody [title]')).toBeNull();
 });

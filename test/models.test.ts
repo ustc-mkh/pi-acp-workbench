@@ -48,8 +48,8 @@ it('edits Pi context limits without changing model visibility', () => {
   };
   page.update(state);
   const context = root.querySelector<HTMLInputElement>('.model-context-field input')!;
-  expect(context.value).toBe('1000');
-  context.value = '2000';
+  expect(context.value).toBe('1');
+  context.value = '2';
   [...root.querySelectorAll('button')].find((b) => b.textContent === '保存')!.click();
   expect(messages.at(-1)).toMatchObject({
     type: 'setModelSettings',
@@ -103,6 +103,8 @@ it('searches the complete catalogue and sends harness-scoped selections', () => 
   expect(
     [...root.querySelectorAll<HTMLElement>('.model-row')].filter((row) => !row.hidden),
   ).toHaveLength(1);
-  [...root.querySelectorAll('button')].find((b) => b.textContent === '显示全部')!.click();
-  expect(messages.at(-1)).toEqual({ type: 'setVisibleModels', harness: 'codex', models: null });
+  expect([...root.querySelectorAll('button')].some((b) => b.textContent === '显示全部')).toBe(
+    false,
+  );
+  expect(root.textContent).not.toContain('仅保留当前模型');
 });

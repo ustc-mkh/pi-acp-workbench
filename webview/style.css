@@ -1019,7 +1019,8 @@ body.vscode-high-contrast-light button {
 .toolbar button {
   padding: 1px 5px;
 }
-#statistics-toggle[aria-pressed='true'] {
+#statistics-toggle[aria-pressed='true'],
+#models-toggle[aria-pressed='true'] {
   background: var(--input);
 }
 #context-operation {
@@ -1299,8 +1300,19 @@ body.vscode-high-contrast-light button {
 }
 .model-context-field input {
   display: block;
-  width: 100%;
+  width: 90px;
+  max-width: 100%;
+  box-sizing: border-box;
   margin-top: 4px;
+}
+.model-price-card input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.model-price-card input[type='number']::-webkit-inner-spin-button,
+.model-price-card input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 .model-settings-buttons {
   display: flex;
@@ -1315,12 +1327,6 @@ body.vscode-high-contrast-light button {
   margin: 5px 0 0;
   font-size: 11px;
   overflow-wrap: anywhere;
-}
-.model-list-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 11px;
 }
 @media (min-width: 420px) {
   .model-price-card .price-grid {
@@ -1641,12 +1647,6 @@ body *::-webkit-scrollbar-button {
   font-family: var(--vscode-editor-font-family, monospace);
 }
 
-#models {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px;
-}
 #models input[type='search'] {
   color: var(--fg);
   background: var(--input);
@@ -1661,19 +1661,16 @@ body *::-webkit-scrollbar-button {
 .selector-fast .selector-label {
   min-width: 60px;
 }
-/* Back navigation stays reachable inside either independently scrolling page. */
+/* Full-width navigation stays reachable inside each independently scrolling page. */
 .statistics-page .stats-heading,
 .prices-page .stats-heading {
-  padding-right: 78px;
-}
-.floating-page-back {
-  position: fixed;
-  top: 52px;
-  right: 16px;
+  position: sticky;
+  top: -12px;
   z-index: 25;
+  margin: -12px -14px 12px;
+  padding: 12px 14px;
   background: var(--bg);
-  border: 1px solid var(--border);
-  box-shadow: 0 2px 8px #0002;
+  border-bottom: 1px solid var(--border);
 }
 .provider-group {
   border: 1px solid var(--border);

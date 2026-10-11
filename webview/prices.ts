@@ -53,9 +53,9 @@ export class ModelSettingsPage {
   ) {
     root.className = 'prices-page';
     const header = text('div', '', 'stats-heading');
-    this.back = text('button', '返回统计') as HTMLButtonElement;
+    this.back = text('button', '返回对话') as HTMLButtonElement;
     this.back.type = 'button';
-    this.back.className = 'floating-page-back';
+    this.back.className = 'page-back';
     this.back.onclick = back;
     const refresh = text('button', '刷新模型配置') as HTMLButtonElement;
     refresh.type = 'button';
@@ -66,23 +66,6 @@ export class ModelSettingsPage {
     this.search.placeholder = '搜索模型或供应商';
     this.search.setAttribute('aria-label', '搜索模型');
     this.search.oninput = () => this.filter();
-    const actions = text('div', '', 'model-list-actions');
-    for (const [label, models] of [
-      ['显示全部', null],
-      ['仅保留当前模型', []],
-    ] as const) {
-      const button = text('button', label) as HTMLButtonElement;
-      button.type = 'button';
-      button.onclick = () => {
-        if (this.state)
-          this.send({
-            type: 'setVisibleModels',
-            harness: this.state.harness || 'pi',
-            models: models === null ? null : [],
-          });
-      };
-      actions.append(button);
-    }
     const titleSettings = text('label', '', 'title-model-setting');
     this.titleModel = document.createElement('select');
     this.titleModel.setAttribute('aria-label', '会话名压缩模型');
@@ -113,7 +96,6 @@ export class ModelSettingsPage {
       ),
       titleSettings,
       this.search,
-      actions,
       this.batchStatus,
       this.note,
       this.count,
@@ -238,15 +220,15 @@ export class ModelSettingsPage {
         }
         const context = document.createElement('input');
         context.type = 'number';
-        context.min = '1';
-        context.max = '100000000';
-        context.step = '1';
+        context.min = '0.001';
+        context.max = '100000';
+        context.step = '0.001';
         context.required = true;
         context.placeholder = '未提供';
-        context.setAttribute('aria-label', `${model.name || model.id} context 长度（tokens）`);
+        context.setAttribute('aria-label', `${model.name || model.id} context 长度（k tokens）`);
         context.oninput = dirty;
         const contextLabel = text('label', '', 'model-context-field');
-        contextLabel.append(text('span', 'Context（tokens）'), context);
+        contextLabel.append(text('span', 'Context（k tokens）'), context);
         const save = text('button', '保存', 'primary') as HTMLButtonElement;
         const reset = text('button', '恢复默认') as HTMLButtonElement;
         save.type = reset.type = 'button';
@@ -285,7 +267,7 @@ export class ModelSettingsPage {
       }
       card.context.disabled = !pi || !editable || !!card.pending;
       card.context.title = pi
-        ? 'Pi context 长度（tokens），不会提高服务商的真实上限'
+        ? 'Pi context 长度（k tokens），1K = 1000 tokens；不会提高服务商的真实上限'
         : '当前 Agent 暂不支持修改 context';
       card.save.disabled = card.reset.disabled = !editable || !!card.pending;
       for (const input of card.fields.values()) input.disabled = !!card.pending || !!this.batch;
@@ -293,7 +275,7 @@ export class ModelSettingsPage {
         const price = priceFor(model.id, state?.statistics?.prices || {});
         for (const [key, input] of card.fields) input.value = price ? String(price[key]) : '';
         card.context.value = state?.modelContexts?.[model.id]
-          ? String(state.modelContexts[model.id])
+          ? String(state.modelContexts[model.id] / 1000)
           : '';
       }
       const provider = modelProvider(model.id);
@@ -396,13 +378,12 @@ export class ModelSettingsPage {
             price: Object.fromEntries(
               [...card.fields].map(([key, input]) => [key, input.valueAsNumber]),
             ) as unknown as Price,
-            ...(pi ? { contextWindow: card.context.valueAsNumber } : {}),
+            ...(pi ? { contextWindow: Math.round(card.context.valueAsNumber * 1000) } : {}),
           },
     });
     this.update(state);
   }
-  focus(model?: string, fromStatistics = false) {
-    this.back.textContent = fromStatistics ? '返回统计' : '返回对话';
+  focus(model?: string) {
     if (model) {
       this.search.value = '';
       this.filter();

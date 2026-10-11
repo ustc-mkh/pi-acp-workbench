@@ -786,20 +786,33 @@ try {
   await page.getByRole('tab', { name: '按模型', exact: true }).click();
   await page.locator('.stats-model-link').click();
   assert(await page.locator('#models').isVisible());
+  assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#statistics-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(
+    await page.locator('#models').getByRole('button', { name: '显示全部', exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page
+      .locator('#models')
+      .getByRole('button', { name: '仅保留当前模型', exact: true })
+      .count(),
+    0,
+  );
   assert.equal(await page.locator('#prices').count(), 0);
   const settingsCard = page.locator('.model-price-card[aria-label="m"]');
   assert.equal(await settingsCard.locator('input[type=number]').count(), 5);
   assert(!(await settingsCard.textContent()).includes('默认单价'));
-  await settingsCard.locator('.model-context-field input').fill('2000');
+  await settingsCard.locator('.model-context-field input').fill('256');
   await settingsCard.getByRole('button', { name: '保存', exact: true }).click();
   const savedSettings = (await page.evaluate(() => window.messages)).findLast(
     (m) => m.type === 'setModelSettings',
   );
   assert.deepEqual(savedSettings.values, {
     price: { input: 2, cacheRead: 0, cacheWrite: 0, output: 8 },
-    contextWindow: 2000,
+    contextWindow: 256000,
   });
-  state.modelContexts = { m: 2000 };
+  state.modelContexts = { m: 256000 };
   state.modelSettingsResult = { id: savedSettings.id, model: 'm' };
   await emit(state);
   await settingsCard.getByRole('button', { name: '恢复默认', exact: true }).click();
@@ -810,7 +823,7 @@ try {
   state.modelSettingsResult = { id: resetSettings.id, model: 'm' };
   state.modelContexts = { m: 1000 };
   await emit(state);
-  assert.equal(await settingsCard.locator('.model-context-field input').inputValue(), '1000');
+  assert.equal(await settingsCard.locator('.model-context-field input').inputValue(), '1');
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.locator('#models').evaluate((node) => {
     node.scrollTop = 0;
@@ -819,10 +832,40 @@ try {
   await page.locator('#models').evaluate((node) => {
     node.scrollTop = node.scrollHeight;
   });
-  const backPosition = await page.locator('#models .floating-page-back').boundingBox();
+  const backPosition = await page.locator('#models .page-back').boundingBox();
   assert(backPosition && backPosition.y >= 0 && backPosition.y < 100);
-  await page.locator('#models').getByRole('button', { name: '返回统计', exact: true }).click();
+  const heading = await page.locator('#models .stats-heading').boundingBox();
+  const modelsWidth = await page.locator('#models').evaluate((node) => node.clientWidth);
+  assert(heading && Math.abs(heading.width - modelsWidth) < 2);
+  const contextWidth = await settingsCard
+    .locator('.model-context-field input')
+    .evaluate((node) => node.getBoundingClientRect().width);
+  assert(contextWidth <= 90);
+  assert.equal(
+    await settingsCard
+      .locator('input[type=number]')
+      .first()
+      .evaluate((node) => getComputedStyle(node).appearance),
+    'textfield',
+  );
+  await page.locator('#models').getByRole('button', { name: '返回对话', exact: true }).click();
+  assert(await page.locator('#chat-page').isVisible());
+  assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(await page.locator('#statistics-toggle').getAttribute('aria-pressed'), 'false');
+  // Both toolbar pages are peers, and history always returns to the conversation.
+  await page.locator('#models-toggle').click();
+  assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'true');
+  await page.locator('#history-toggle').click();
+  assert(await page.locator('#chat-page').isVisible());
+  assert(await page.locator('#history').isVisible());
+  assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'false');
+  await page.locator('#history-toggle').click();
   await page.locator('#statistics-toggle').click();
+  await page.locator('#models-toggle').click();
+  assert.equal(await page.locator('#statistics-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'true');
+  await page.locator('#models-toggle').click();
+  assert(await page.locator('#chat-page').isVisible());
   state.harness = 'codex';
   await emit(state);
   state.entries = state.entries.map((entry) =>
