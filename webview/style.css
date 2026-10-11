@@ -4,9 +4,14 @@
   --fg: var(--vscode-foreground, #dfdfdf);
   --muted: var(--vscode-descriptionForeground, #999);
   --border: var(--vscode-widget-border, #34383d);
-  --accent: var(--vscode-button-background, #387d70);
-  --input: var(--vscode-input-background, #22262a);
-  --focus: var(--vscode-focusBorder, #58bfa2);
+  /* Blend themed highlights toward the conversation background, preserving its hue. */
+  --accent: color-mix(in srgb, var(--vscode-button-background, #387d70) 78%, var(--bg));
+  --accent-hover: color-mix(in srgb, var(--vscode-button-hoverBackground, #428f7e) 78%, var(--bg));
+  --input: color-mix(in srgb, var(--vscode-input-background, #22262a) 35%, var(--bg));
+  --hover: color-mix(in srgb, var(--vscode-toolbar-hoverBackground, #ffffff12) 35%, var(--bg));
+  --code-bg: color-mix(in srgb, var(--vscode-textCodeBlock-background, #101214) 35%, var(--bg));
+  --inline-code-bg: color-mix(in srgb, var(--vscode-input-background, #22262a) 60%, var(--bg));
+  --focus: color-mix(in srgb, var(--vscode-focusBorder, #58bfa2) 68%, var(--bg));
 }
 * {
   box-sizing: border-box;
@@ -32,7 +37,7 @@ button {
   padding: 5px 9px;
 }
 button:hover {
-  background: var(--vscode-toolbar-hoverBackground, #ffffff12);
+  background: var(--hover);
 }
 button:disabled {
   opacity: 0.45;
@@ -276,7 +281,7 @@ h1 {
   font-size: 12px;
   padding: 2px 4px;
   border-radius: 3px;
-  background: var(--vscode-textCodeBlock-background, #8882);
+  background: var(--inline-code-bg);
 }
 .markdown pre,
 .tool-body pre {
@@ -287,7 +292,7 @@ h1 {
   margin: 12px 0;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--vscode-textCodeBlock-background, #101214);
+  background: var(--code-bg);
   tab-size: 4;
   line-height: 1.65;
 }
@@ -443,7 +448,7 @@ button.primary {
   color: var(--vscode-button-foreground, #fff);
 }
 button.primary:hover {
-  background: var(--vscode-button-hoverBackground, #428f7e);
+  background: var(--accent-hover);
 }
 .circle-button {
   width: 30px;
@@ -523,8 +528,8 @@ select {
   overflow-wrap: anywhere;
 }
 #commands button[aria-selected='true'] {
-  background: var(--vscode-list-activeSelectionBackground, #76bfa926);
-  color: var(--vscode-list-activeSelectionForeground, var(--fg));
+  background: var(--input);
+  color: var(--fg);
 }
 .commands-empty {
   padding: 10px;
@@ -652,7 +657,7 @@ select {
   stroke-linejoin: round;
 }
 .history-controls button:not(:disabled):hover {
-  background: var(--border);
+  background: var(--hover);
   color: var(--fg);
 }
 .history-controls button:disabled {
@@ -757,7 +762,7 @@ body.vscode-high-contrast-light button {
   flex: 0 1 auto;
 }
 .selector-control:hover {
-  background: var(--vscode-toolbar-hoverBackground, #ffffff12);
+  background: var(--hover);
 }
 .selector-control:focus-within {
   outline: 1px solid var(--focus);
@@ -888,7 +893,7 @@ body.vscode-high-contrast-light button {
   padding: 8px 12px;
   border: 1px solid var(--vscode-editorHoverWidget-border, var(--border));
   border-radius: 8px;
-  background: var(--vscode-editorHoverWidget-background, var(--input));
+  background: var(--input);
   color: var(--vscode-editorHoverWidget-foreground, var(--fg));
   box-shadow: 0 4px 14px var(--vscode-widget-shadow, #0003);
   font-size: 12px;
@@ -907,7 +912,7 @@ body.vscode-high-contrast-light button {
   padding: 0 3px;
 }
 .history-row.current {
-  background: var(--vscode-list-inactiveSelectionBackground, #ffffff08);
+  background: var(--input);
 }
 .history-delete {
   width: 24px;
@@ -1457,7 +1462,7 @@ body *::-webkit-scrollbar-button {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
-  background: var(--vscode-textCodeBlock-background, var(--input));
+  background: var(--code-bg);
   font-size: 12px;
 }
 .turn-diff-header {

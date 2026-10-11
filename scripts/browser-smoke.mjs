@@ -203,7 +203,7 @@ try {
   await page.emulateMedia({ colorScheme: 'light' });
   await page.addStyleTag({
     content:
-      ':root{--bg:#fafafa;--fg:#242424;--muted:#666;--border:#ddd;--input:#f0f0f0;--vscode-textCodeBlock-background:#f3f3f3}',
+      ':root{--bg:#fafafa;--fg:#242424;--muted:#666;--border:#ddd;--vscode-input-background:#f0f0f0;--vscode-textCodeBlock-background:#f3f3f3}',
   });
   await page.evaluate(() => {
     document.querySelector('#transcript').scrollTop = 0;
@@ -1058,7 +1058,7 @@ try {
   ]) {
     await page.emulateMedia({ colorScheme: theme });
     await page.addStyleTag({
-      content: `:root{--bg:${bg};--fg:${fg};--muted:${muted};--border:${border};--input:${input}}`,
+      content: `:root{--bg:${bg};--fg:${fg};--muted:${muted};--border:${border};--vscode-input-background:${input}}`,
     });
     for (const status of ['ready', 'busy']) {
       state.status = status;
@@ -1080,6 +1080,93 @@ try {
       assert.deepEqual(colors.history, ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
       await page.screenshot({ path: resolve(artifacts, `preview-buttons-${theme}-${status}.png`) });
     }
+  }
+  // Match the reference's dark blue theme and exercise all shared highlight surfaces.
+  state.status = 'ready';
+  state.entries = [
+    { id: 'palette-user', role: 'user', text: '把输入框、用户消息和选中会话的高亮调暗一些。' },
+    {
+      id: 'palette-agent',
+      role: 'assistant',
+      text: '已统一降低高亮背景的亮度，保留文字对比度。\n\n行内代码：`/model`\n\n```bash\npi --provider my-provider\n```',
+    },
+  ];
+  await emit(state);
+  await page.setViewportSize({ width: 520, height: 800 });
+  for (const [theme, bg, fg, input, border] of [
+    ['dark', '#272a3b', '#c6ceef', '#414455', '#363949'],
+    ['light', '#fafafa', '#242424', '#e0e0e0', '#ddd'],
+  ]) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.addStyleTag({
+      content: `:root{--bg:${bg};--fg:${fg};--muted:${fg};--border:${border};--vscode-input-background:${input};--vscode-textCodeBlock-background:${bg};--vscode-button-background:#c99bdf;--vscode-button-hoverBackground:#d4ace5;--vscode-focusBorder:#c99bdf}`,
+    });
+    await page.locator('#input').fill('继续完善这个功能');
+    await page.locator('#input').blur();
+    await page.mouse.move(0, 0);
+    const palette = await page.evaluate(() => {
+      const rgb = (color) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 1, 1);
+        return [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3);
+      };
+      const root = getComputedStyle(document.documentElement);
+      const surfaces = ['.composer', '.message.user', '.history-row.current'].map((selector) =>
+        rgb(getComputedStyle(document.querySelector(selector)).backgroundColor),
+      );
+      return {
+        surfaces,
+        bg: rgb(root.getPropertyValue('--bg')),
+        raw: rgb(root.getPropertyValue('--vscode-input-background')),
+        fg: rgb(root.getPropertyValue('--fg')),
+      };
+    });
+    const expected = palette.raw.map((c, i) => Math.round(c * 0.35 + palette.bg[i] * 0.65));
+    for (const surface of palette.surfaces) {
+      surface.forEach((c, i) => assert(Math.abs(c - expected[i]) <= 1));
+      const luminance = (rgb) =>
+        rgb
+          .map((c) => c / 255)
+          .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+          .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
+      const a = luminance(surface),
+        b = luminance(palette.fg);
+      assert((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) >= 4.5);
+    }
+    await page.screenshot({ path: resolve(artifacts, `preview-muted-highlights-${theme}.png`) });
+    if (theme === 'dark') {
+      const legacy = await page.addStyleTag({
+        content:
+          ':root{--input:var(--vscode-input-background);--accent:var(--vscode-button-background);--focus:var(--vscode-focusBorder)}',
+      });
+      await page.screenshot({ path: resolve(artifacts, 'preview-muted-highlights-before.png') });
+      await legacy.evaluate((node) => node.remove());
+    }
+    // Other pages consume the same softened input and selection colors.
+    await page.locator('#statistics-toggle').click();
+    assert.equal(
+      await page
+        .locator('.stats-filters input')
+        .first()
+        .evaluate((node) => getComputedStyle(node).backgroundColor),
+      await page
+        .locator('.stats-tabs button[aria-selected=true]')
+        .evaluate((node) => getComputedStyle(node).backgroundColor),
+    );
+    await page.locator('#models-toggle').click();
+    assert.equal(
+      await page
+        .locator('#models input[type=search]')
+        .evaluate((node) => getComputedStyle(node).backgroundColor),
+      await page
+        .locator('.model-price-card input[type=number]')
+        .first()
+        .evaluate((node) => getComputedStyle(node).backgroundColor),
+    );
+    await page.locator('#models .page-back').click();
   }
   assert.deepEqual(errors, []);
   console.log(
