@@ -7,6 +7,8 @@ import type { ChatProvider } from '../src/extension';
 import type { RemoteAgentOptions } from '../src/remote-agent';
 import type { DiffDocuments } from '../src/workspace-documents';
 import type { Statistics, UsageRecord } from '../src/telemetry';
+import type { ConversationHistory } from '../src/conversation-history';
+import type { ConversationStatistics } from '../src/conversation-statistics';
 import type { Entry } from '../src/shared';
 const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error('Expected fixture value is missing');
@@ -25,6 +27,8 @@ type TestProvider = Omit<ChatProvider, 'documents'> & {
     previews: Map<string, { documents: Map<string, string>; bytes: number }>;
   };
   historyReady: Promise<void>;
+  historyStore: ConversationHistory;
+  telemetry: ConversationStatistics;
   statistics: Statistics;
   recordUsage(records: UsageRecord[]): Promise<void>;
 };
@@ -445,6 +449,14 @@ it('removes usage titles and does not recreate them after forgetting an active c
   // rather than depending on the background poll having completed during send.
   await host.provider.refreshHistory();
   expect(host.provider.history.some((item) => item.id === 'test-session')).toBe(true);
+  const remove = host.provider.historyStore.remove.bind(host.provider.historyStore);
+  vi.spyOn(host.provider.historyStore, 'remove').mockImplementationOnce(async (id, after) => {
+    // A late authoritative list update must not restore titles during deletion.
+    const metadata = vi.spyOn(host.provider.telemetry, 'sessionMetadata');
+    await host.provider.refreshHistory();
+    await vi.waitFor(() => expect(metadata).toHaveBeenCalledWith(host.provider.history));
+    return remove(id, after);
+  });
   await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
   await host.provider.recordUsage([]);
   expect(host.stored.get('usageTitles')).toEqual({});
@@ -590,6 +602,13 @@ it('clears usage titles while preserving billed records and prices', async () =>
   };
   await host.provider.recordUsage([record]);
   const prices = structuredClone(host.provider.statistics.prices);
+  const remove = host.provider.historyStore.remove.bind(host.provider.historyStore);
+  vi.spyOn(host.provider.historyStore, 'remove').mockImplementationOnce(async (id, after) => {
+    const metadata = vi.spyOn(host.provider.telemetry, 'sessionMetadata');
+    await host.provider.refreshHistory();
+    await vi.waitFor(() => expect(metadata).toHaveBeenCalledWith(host.provider.history));
+    return remove(id, after);
+  });
   await host.provider.perform({ type: 'clearHistory' });
   expect(host.stored.get('usageTitles')).toEqual({});
   expect(host.stored.get('usageRecords')).toEqual([record]);

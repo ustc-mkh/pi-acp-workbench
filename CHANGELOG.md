@@ -19,6 +19,7 @@
 - `npm test` 改为运行全部 Vitest 测试，原按改动选择的行为移至 `npm run test:changed`；`npm run package` 输出到仓库根目录。
 - 适配器测试改为构建到临时目录，不再改写 `dist/`。
 - Rust 非测试路径去除可避免的 `unwrap()`；UI 请求的失败结果回填改由各 handler 的 `fail` 钩子声明。
+- 修复删除/清空历史等待服务确认期间，迟到的历史刷新重新填回用量标题的竞态；确认删除后才清理标题，保留计费记录与价格。
 - 依赖：`@agentclientprotocol/sdk` 1.8.0、`highlight.js` 11.12.0、`mermaid` 12.1.0、`@playwright/test` 1.64。
 
 ## 0.11.7 — 2026-10-10

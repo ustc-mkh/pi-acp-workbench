@@ -463,13 +463,11 @@ export class ChatProvider
       )) !== '删除'
     )
       return;
-    if (message.type === 'deleteHistory') {
-      const forgotten = this.history.find((item) => item.id === message.id);
-      if (!forgotten) return;
-      this.telemetry.forget(forgotten.conversationId || forgotten.id);
-    } else {
-      this.telemetry.forget();
-    }
+    const forgotten =
+      message.type === 'deleteHistory'
+        ? this.history.find((item) => item.id === message.id)
+        : undefined;
+    if (message.type === 'deleteHistory' && !forgotten) return;
     const deletedState = this.state;
     const deletesCurrent =
       message.type === 'clearHistory' ||
@@ -477,6 +475,9 @@ export class ChatProvider
     await this.historyStore.remove(
       message.type === 'deleteHistory' ? message.id : undefined,
       async () => {
+        // The daemon has acknowledged removal and the local index is already pruned.
+        // Clearing earlier lets a late list/emit restore the title while remove awaits.
+        this.telemetry.forget(forgotten ? forgotten.conversationId || forgotten.id : undefined);
         await this.telemetry.persistTitles();
         for (const harness of HARNESS_IDS)
           if (
