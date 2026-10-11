@@ -39,7 +39,13 @@ export class StatisticsPage {
     refresh.onclick = () => send({ type: 'refreshStatistics' });
     heading.append(title, refresh, close);
     root.append(heading);
-    root.append(text('p', '当前工作区 · 时间按本机时区 · 费用单位 USD', 'stats-caption'));
+    root.append(
+      text(
+        'p',
+        '当前工作区 · 仅统计有插件编号的会话 · 时间按本机时区 · 费用单位 USD',
+        'stats-caption',
+      ),
+    );
     this.note = text('p', '', 'stats-note');
     root.append(this.note);
     const filters = text('div', '', 'stats-filters');
@@ -118,7 +124,10 @@ export class StatisticsPage {
     const data = this.data,
       records = (data?.records || []).filter((r) => {
         const day = dayKey(r.timestamp);
+        const sessionNumber = data?.sessionNumbers?.[r.sessionId];
         return (
+          Number.isSafeInteger(sessionNumber) &&
+          Number(sessionNumber) > 0 &&
           (!this.from.value || day >= this.from.value) &&
           (!this.until.value || day <= this.until.value)
         );

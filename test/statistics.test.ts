@@ -33,23 +33,68 @@ it('sorts models by estimated cost and sessions by numeric session number descen
   const names = () =>
     [...root.querySelectorAll('tbody tr td:first-child')].map((td) => td.textContent);
   page.update(data);
-  expect(names()).toEqual(['expensive', 'cheap', 'unpriced']);
+  expect(names()).toEqual(['expensive', 'cheap']);
   const click = (label: string) =>
     [...root.querySelectorAll('button')].find((b) => b.textContent === label)!.click();
   click('按会话');
-  expect(names()).toEqual(['#100 recent', '#20 middle', '#9 old', 'unknown']);
+  expect(names()).toEqual(['#100 recent', '#20 middle', '#9 old']);
   page.update({ ...data, sessionNumbers: { ...data.sessionNumbers, old: 101 } });
-  expect(names()).toEqual(['#101 old', '#100 recent', '#20 middle', 'unknown']);
+  expect(names()).toEqual(['#101 old', '#100 recent', '#20 middle']);
   click('按模型');
   page.update({
     ...data,
     prices: { ...data.prices, cheap: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 } },
   });
-  expect(names()).toEqual(['cheap', 'expensive', 'unpriced']);
+  expect(names()).toEqual(['cheap', 'expensive']);
   const from = root.querySelector<HTMLInputElement>('[aria-label="开始日期"]')!;
   from.value = '2026-10-04';
   from.dispatchEvent(new Event('change'));
   expect(names()).toEqual([]);
+});
+it('excludes external or invalidly numbered sessions from totals and every statistics view without deleting records', () => {
+  const root = document.createElement('main');
+  const page = new StatisticsPage(root, vi.fn(), () => {}, vi.fn());
+  const data: Statistics = {
+    available: true,
+    titles: { external: 'external Pi session' },
+    sessionNumbers: {
+      plugin: 7,
+      zero: 0,
+      negative: -1,
+      fractional: 1.5,
+      unsafe: Number.MAX_SAFE_INTEGER + 1,
+    },
+    prices: { model: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    records: ['plugin', 'external', 'zero', 'negative', 'fractional', 'unsafe'].map(
+      (sessionId, index) => ({
+        id: String(index),
+        sessionId,
+        model: 'model',
+        input: sessionId === 'plugin' ? 1000 : 1000000,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        kind: 'inference' as const,
+        timestamp: new Date(2026, 9, sessionId === 'plugin' ? 3 : 4, 12).getTime(),
+      }),
+    ),
+  };
+  page.update(data);
+  expect(root.querySelector('.stats-totals')?.textContent).toContain('$0.0010');
+  expect(root.querySelector('.stats-totals')?.textContent).not.toContain('$5.0010');
+  const click = (label: string) =>
+    [...root.querySelectorAll('button')].find((b) => b.textContent === label)!.click();
+  click('按会话');
+  expect([...root.querySelectorAll('tbody tr td:first-child')].map((td) => td.textContent)).toEqual(
+    ['#7 plugin'],
+  );
+  click('按时间');
+  expect(root.querySelector('.usage-chart')?.textContent).toContain('2026-10-03');
+  expect(root.querySelector('.usage-chart')?.textContent).not.toContain('2026-10-04');
+  expect(data.records).toHaveLength(6);
+  page.update({ ...data, sessionNumbers: {} });
+  expect(root.textContent).toContain('暂无用量');
+  expect(root.querySelector('.stats-totals')?.textContent).toContain('$0.0000');
 });
 it('switches model/time/session views, filters dates, and links models without hover popups', () => {
   document.body.innerHTML = '<main></main>';

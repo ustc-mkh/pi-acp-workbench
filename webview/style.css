@@ -458,6 +458,7 @@ button.primary:hover {
 }
 #send,
 #stop {
+  color: var(--bg);
   width: 26px;
   height: 26px;
   min-width: 26px;
@@ -615,8 +616,9 @@ select {
   font-size: 11px;
   color: var(--muted);
   max-height: 112px;
-  overflow-y: auto;
+  overflow-y: scroll;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   scrollbar-width: auto;
 }
 #history-items[data-limit='10'] {
@@ -637,8 +639,8 @@ select {
   height: 20px;
   min-width: 20px;
   color: var(--muted);
-  background: var(--input);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: none;
 }
 .history-controls svg {
   width: 16px;
@@ -1426,6 +1428,22 @@ body *::-webkit-scrollbar-button {
   width: 0 !important;
   height: 0 !important;
   background: transparent !important;
+}
+/* Keep history navigation discoverable even with the quiet global scrollbar theme. */
+#history-items::-webkit-scrollbar {
+  width: 10px !important;
+}
+#history-items::-webkit-scrollbar-thumb {
+  background: var(
+    --vscode-scrollbarSlider-background,
+    color-mix(in srgb, var(--fg) 40%, transparent)
+  ) !important;
+}
+#history-items::-webkit-scrollbar-thumb:hover {
+  background: var(
+    --vscode-scrollbarSlider-hoverBackground,
+    color-mix(in srgb, var(--fg) 55%, transparent)
+  ) !important;
 }
 @supports not selector(::-webkit-scrollbar) {
   html,

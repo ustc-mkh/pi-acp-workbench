@@ -158,7 +158,7 @@ try {
       await page
         .locator(selector)
         .evaluate((node) => getComputedStyle(node, '::-webkit-scrollbar').width),
-      '6px',
+      selector === '#history-items' ? '10px' : '6px',
     );
     assert.equal(
       await page
@@ -454,12 +454,21 @@ try {
   );
   state.status = 'busy';
   await emit(state);
-  assert.equal(await page.locator('#history-items .history-row').count(), 4);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
   assert.equal(await page.locator('#history-items .session-indicator.running').count(), 2);
+  assert.equal(await page.locator('#history-items').getAttribute('data-limit'), '4');
+  // Even at the smallest tier, scrolling reaches sessions beyond the old 16-row cutoff.
+  await page.locator('#history-items [data-id="older22"]').scrollIntoViewIfNeeded();
+  assert(await page.locator('#history-items [data-id="older22"]').isVisible());
+  assert.equal(
+    await page.locator('#history-items').evaluate((n) => getComputedStyle(n).overflowY),
+    'scroll',
+  );
   await page.locator('.history-more').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 10);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
+  assert.equal(await page.locator('#history-items').getAttribute('data-limit'), '10');
   await page.locator('.history-more').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 16);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
   assert(await page.locator('.history-more').isDisabled());
   for (const selector of ['.history-more', '.history-less']) {
     const shape = await page.locator(selector).evaluate((b) => ({
@@ -471,7 +480,7 @@ try {
     assert.equal(shape.width, 20);
     assert.equal(shape.height, 20);
     assert.equal(shape.radius, '50%');
-    assert.equal(shape.border, 'solid');
+    assert.equal(shape.border, 'none');
   }
   assert.equal(await page.locator('#history-items [data-tooltip]').count(), 0);
   assert.equal(
@@ -495,7 +504,8 @@ try {
     bottom: n.getBoundingClientRect().bottom,
   }));
   assert.equal(expandedLayout.height, 448);
-  assert(expandedLayout.lastBottom <= expandedLayout.bottom + 1, JSON.stringify(expandedLayout));
+  assert(expandedLayout.lastBottom > expandedLayout.bottom, JSON.stringify(expandedLayout));
+  await page.locator('#history-items .history-row').last().scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(artifacts, 'preview-history-compact.png') });
   const historyInputHeight = await page.locator('#input').evaluate((n) => n.style.height);
   for (const [height, composerHeight] of [
@@ -524,7 +534,7 @@ try {
         viewport: innerHeight,
       };
     });
-    assert.equal(layout.rows, 16);
+    assert.equal(layout.rows, 25);
     assert(layout.height > 0 && layout.overflow, JSON.stringify(layout));
     assert(layout.lastBottom <= layout.listBottom + 1, JSON.stringify(layout));
     assert(
@@ -548,14 +558,16 @@ try {
   state.status = 'connecting';
   await emit(state);
   assert(await page.locator('#history').isVisible());
-  assert.equal(await page.locator('#history-items .history-row').count(), 16);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
   state.status = 'ready';
   await emit(state);
   assert.equal(await page.locator('#history-items .session-indicator.running').count(), 1);
   await page.locator('.history-less').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 10);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
+  assert.equal(await page.locator('#history-items').getAttribute('data-limit'), '10');
   await page.locator('.history-less').click();
-  assert.equal(await page.locator('#history-items .history-row').count(), 4);
+  assert.equal(await page.locator('#history-items .history-row').count(), 25);
+  assert.equal(await page.locator('#history-items').getAttribute('data-limit'), '4');
   assert(await page.locator('#history').isVisible());
   await page.locator('.history-less').click();
   assert(await page.locator('#history').isHidden());
@@ -812,6 +824,13 @@ try {
         model: 'cheap',
         input: 1000000,
       },
+      {
+        ...originalStatistics.records[0],
+        id: 'external',
+        sessionId: '01a11b7b-7834-779e-bb78-025000000000',
+        model: 'external-model',
+        input: 10000000,
+      },
     ],
   };
   await emit(state);
@@ -820,6 +839,7 @@ try {
   assert.deepEqual(await rowNames(), ['#100 latest', '#14 改进模型设置']);
   await page.getByRole('tab', { name: '按模型', exact: true }).click();
   assert.deepEqual(await rowNames(), ['m', 'cheap']);
+  assert(!(await page.locator('.stats-totals').textContent()).includes('未定价'));
   state.statistics = originalStatistics;
   await emit(state);
   await page.locator('.stats-model-link').click();
@@ -1003,6 +1023,64 @@ try {
   assert.equal(await page.locator('#messages img[src^="http"]').count(), 0);
   assert.equal(await page.locator('#messages .image-placeholder').count(), 1);
   await page.screenshot({ path: resolve(artifacts, 'preview-output-images.png') });
+  // Render button previews in both themes and verify glyph/background colors.
+  await page.setViewportSize({ width: 440, height: 640 });
+  state.harness = 'pi';
+  state.permissions = [];
+  state.entries = [
+    {
+      id: 'button-preview',
+      role: 'assistant',
+      text: '按钮样式预览：发送箭头与终止方块使用对话背景色，历史上下按钮使用透明背景。',
+    },
+  ];
+  state.history = Array.from({ length: 12 }, (_, i) => ({
+    id: `preview-${i}`,
+    sessionNumber: 12 - i,
+    title: `示例会话 ${12 - i}`,
+    cwd: '/project',
+    updated: 12 - i,
+  }));
+  state.sessionId = 'preview-0';
+  state.sessionNumber = 12;
+  await emit(state);
+  if (await page.locator('#history').isHidden()) await page.locator('#history-toggle').click();
+  await page.locator('#history-items').evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await page.locator('#input').evaluate((node) => {
+    node.style.height = '80px';
+  });
+  await page.locator('#input').fill('继续完善这个功能');
+  for (const [theme, bg, fg, muted, border, input] of [
+    ['dark', '#151719', '#dfdfdf', '#999', '#34383d', '#22262a'],
+    ['light', '#fafafa', '#242424', '#666', '#ddd', '#f0f0f0'],
+  ]) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.addStyleTag({
+      content: `:root{--bg:${bg};--fg:${fg};--muted:${muted};--border:${border};--input:${input}}`,
+    });
+    for (const status of ['ready', 'busy']) {
+      state.status = status;
+      await emit(state);
+      await page.mouse.move(0, 0);
+      const colors = await page.evaluate(() => {
+        const bg = getComputedStyle(document.body).backgroundColor;
+        return {
+          send: getComputedStyle(document.querySelector('#send svg')).stroke,
+          stop: getComputedStyle(document.querySelector('#stop .stop-square')).backgroundColor,
+          bg,
+          history: [...document.querySelectorAll('.history-controls button')].map(
+            (node) => getComputedStyle(node).backgroundColor,
+          ),
+        };
+      });
+      assert.equal(colors.send, colors.bg);
+      assert.equal(colors.stop, colors.bg);
+      assert.deepEqual(colors.history, ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+      await page.screenshot({ path: resolve(artifacts, `preview-buttons-${theme}-${status}.png`) });
+    }
+  }
   assert.deepEqual(errors, []);
   console.log(
     'Browser smoke passed: lazy Mermaid under CSP, dark/light math, narrow viewport, incremental state, resynchronization, streamed math, activity folding, separator drag, quiet scrollbars, harness selection/draft isolation, unclipped slash commands and keyboard selection, send, permission, cancel, per-tool/per-turn diffs, model visibility, Fast mode, following terminal output, no runtime errors.',

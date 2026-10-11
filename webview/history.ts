@@ -64,10 +64,13 @@ export class HistoryList {
   }
   update(state: Pick<ChatState, 'history' | 'sessionId' | 'status'>) {
     this.state = state;
-    const visible = state.history.slice(0, this.limit);
+    // Tiers change viewport height, never truncate the scrollable catalogue.
+    const visible = state.history;
     this.more.disabled = this.limit === 16 || state.history.length <= this.limit;
     const moreLabel =
-      this.limit === 16 ? '最多显示 16 条会话' : `展开至 ${this.limit === 4 ? 10 : 16} 条会话`;
+      this.limit === 16
+        ? '已展开至 16 条高度，滚动查看全部会话'
+        : `展开至 ${this.limit === 4 ? 10 : 16} 条会话`;
     const lessLabel =
       this.limit === 4 ? '关闭历史会话' : `收回至 ${this.limit === 16 ? 10 : 4} 条会话`;
     this.more.setAttribute('aria-label', moreLabel);

@@ -18,13 +18,14 @@ it('deletes the requested row without opening it and keeps older rows available'
     sessionId: '0',
   };
   list.update(state);
-  expect(container.children).toHaveLength(4);
+  expect(container.children).toHaveLength(7);
   expect(container.firstElementChild?.lastElementChild?.className).toBe('history-delete');
   (container.querySelector('[data-id="3"] .history-delete') as HTMLButtonElement).click();
   expect(messages).toEqual([{ type: 'deleteHistory', id: '3' }]);
   list.update({ ...state, history: history.filter((item) => item.id !== '3') });
   expect(container.querySelector('[data-id="3"]')).toBeNull();
-  expect(container.children).toHaveLength(4);
+  expect(container.children).toHaveLength(6);
+  expect(container.querySelector('[data-id="6"]')).not.toBeNull();
 });
 it('distinguishes identical titles with persistent numbers independently of row order', () => {
   const container = document.createElement('div');
@@ -69,7 +70,7 @@ it('preserves row identity and scroll position during output and updates busy in
   list.update({ ...state, status: 'ready' });
   expect(container.firstElementChild).toBe(row);
   expect(container.querySelectorAll('.running')).toHaveLength(0);
-  expect(container.querySelectorAll('[aria-label="未在输出"]')).toHaveLength(4);
+  expect(container.querySelectorAll('[aria-label="未在输出"]')).toHaveLength(7);
 });
 it('expands older sessions, preserves expansion during updates and selection, and collapses explicitly', () => {
   const parent = document.createElement('section'),
@@ -97,7 +98,7 @@ it('expands older sessions, preserves expansion during updates and selection, an
   expect(container.children).toHaveLength(7);
   expect(more.getAttribute('aria-expanded')).toBe('true');
   parent.querySelector<HTMLButtonElement>('.history-less')!.click();
-  expect(container.children).toHaveLength(4);
+  expect(container.children).toHaveLength(7);
   expect(expanded).toEqual([10, 4]);
 });
 it('shows every busy session, including background sessions across harnesses', () => {
@@ -117,7 +118,7 @@ it('shows every busy session, including background sessions across harnesses', (
   });
   expect(container.querySelectorAll('.running')).toHaveLength(0);
 });
-it('steps 4 → 10 → 16 and back to closure, never renders more than 16', () => {
+it('steps viewport height 4 → 10 → 16 and back to closure, keeping every session scrollable', () => {
   const parent = document.createElement('section');
   const container = document.createElement('div');
   parent.append(container);
@@ -137,23 +138,24 @@ it('steps 4 → 10 → 16 and back to closure, never renders more than 16', () =
   list.update(state);
   const down = parent.querySelector<HTMLButtonElement>('.history-more')!;
   const up = parent.querySelector<HTMLButtonElement>('.history-less')!;
-  expect(container.children).toHaveLength(4);
+  expect(container.children).toHaveLength(25);
+  expect(container.querySelector('[data-id="24"]')).not.toBeNull();
   expect(container.dataset.limit).toBe('4');
   down.click();
-  expect(container.children).toHaveLength(10);
+  expect(container.children).toHaveLength(25);
   expect(container.dataset.limit).toBe('10');
   down.click();
-  expect(container.children).toHaveLength(16);
+  expect(container.children).toHaveLength(25);
   expect(container.dataset.limit).toBe('16');
   expect(down.disabled).toBe(true);
   down.click();
   list.update(state);
-  expect(container.children).toHaveLength(16);
+  expect(container.children).toHaveLength(25);
   up.click();
-  expect(container.children).toHaveLength(10);
+  expect(container.children).toHaveLength(25);
   expect(container.dataset.limit).toBe('10');
   up.click();
-  expect(container.children).toHaveLength(4);
+  expect(container.children).toHaveLength(25);
   expect(container.dataset.limit).toBe('4');
   up.click();
   expect(closed).toBe(1);
@@ -168,10 +170,10 @@ it('migrates a saved 20-row tier to 16 and uses shaftless chevrons', () => {
     history: Array.from({ length: 25 }, (_, i) => ({ ...history[0], id: String(i) })),
     status: 'ready',
   });
-  expect(container.children).toHaveLength(16);
+  expect(container.children).toHaveLength(25);
   const down = parent.querySelector<HTMLButtonElement>('.history-more')!;
   expect(down.disabled).toBe(true);
-  expect(down.getAttribute('aria-label')).toBe('最多显示 16 条会话');
+  expect(down.getAttribute('aria-label')).toBe('已展开至 16 条高度，滚动查看全部会话');
   expect(parent.querySelector('.history-less path')?.getAttribute('d')).toBe('M4 10l4-4 4 4');
   expect(down.querySelector('path')?.getAttribute('d')).toBe('M4 6l4 4 4-4');
 });
