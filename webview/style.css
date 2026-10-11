@@ -1434,22 +1434,6 @@ body *::-webkit-scrollbar-button {
   height: 0 !important;
   background: transparent !important;
 }
-/* Keep history navigation discoverable even with the quiet global scrollbar theme. */
-#history-items::-webkit-scrollbar {
-  width: 10px !important;
-}
-#history-items::-webkit-scrollbar-thumb {
-  background: var(
-    --vscode-scrollbarSlider-background,
-    color-mix(in srgb, var(--fg) 40%, transparent)
-  ) !important;
-}
-#history-items::-webkit-scrollbar-thumb:hover {
-  background: var(
-    --vscode-scrollbarSlider-hoverBackground,
-    color-mix(in srgb, var(--fg) 55%, transparent)
-  ) !important;
-}
 @supports not selector(::-webkit-scrollbar) {
   html,
   body,

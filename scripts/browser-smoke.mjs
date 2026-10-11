@@ -158,7 +158,7 @@ try {
       await page
         .locator(selector)
         .evaluate((node) => getComputedStyle(node, '::-webkit-scrollbar').width),
-      selector === '#history-items' ? '10px' : '6px',
+      '6px',
     );
     assert.equal(
       await page
