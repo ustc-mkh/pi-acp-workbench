@@ -99,6 +99,7 @@ async function runTests() {
     ],
     jobs,
   );
+  let outcomes = prep;
   if (prep.some((r) => !r.ok)) {
     for (const r of prep) if (!r.ok) console.error(r.error);
     process.exitCode = 1;
@@ -122,16 +123,23 @@ async function runTests() {
         '--test',
         'scripts/test-pool.test.mjs',
         'scripts/test-reports.test.mjs',
+        'scripts/ci-failure-diagnostics.test.mjs',
         'scripts/telegram-setup.test.mjs',
       ),
     ];
     const results = await testPool(suites, jobs);
+    outcomes = [...prep, ...results];
     for (const r of results) {
       console.log(`[${r.ok ? 'pass' : 'FAIL'}] ${r.name} ${(r.ms / 1000).toFixed(1)}s`);
       if (!r.ok) console.error(r.error);
     }
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   }
+  await writeFile(
+    resolve(report, 'failures.json'),
+    JSON.stringify(outcomes.filter((r) => !r.ok).map((r) => `${r.name}.log`)) + '\n',
+    { mode: 0o600 },
+  );
   if (abort.signal.aborted) process.exitCode = 130;
   console.log(`Total ${((performance.now() - started) / 1000).toFixed(1)}s; logs: ${report}`);
 }
