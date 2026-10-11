@@ -455,15 +455,18 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
                 if old_text.len() as u64 + new_text.len() as u64 + used > RESULT_BYTES {
                     file.omitted = Some("本轮差异内容超过展示上限".into());
                 } else {
-                    if directory.is_none() {
-                        let dir = std::env::temp_dir()
-                            .join(format!("pi-turn-diff-{}", uuid::Uuid::new_v4().simple()));
-                        tokio::fs::create_dir(&dir)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        directory = Some(dir);
-                    }
-                    let dir = directory.clone().unwrap();
+                    let dir = match &directory {
+                        Some(dir) => dir.clone(),
+                        None => {
+                            let dir = std::env::temp_dir()
+                                .join(format!("pi-turn-diff-{}", uuid::Uuid::new_v4().simple()));
+                            tokio::fs::create_dir(&dir)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            directory = Some(dir.clone());
+                            dir
+                        }
+                    };
                     // writeFile(join(directory,'before'|'after'), text, {mode:0o600})
                     let write_file = |name: &str, text: &str| -> std::io::Result<()> {
                         use std::os::unix::fs::OpenOptionsExt;

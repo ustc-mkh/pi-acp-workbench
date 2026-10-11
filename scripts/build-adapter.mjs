@@ -14,7 +14,8 @@ export function assertRequestErrorBinding(source) {
   )
     throw new Error('pi-acp integration seam changed: RequestError3 import binding');
 }
-export async function buildAdapter() {
+/** Build adapter bundles; tests pass a temporary outdir so they never rewrite dist/. */
+export async function buildAdapter({ outdir = 'dist' } = {}) {
   // Pin upstream and fail closed if its integration seam changes; keep our implementation in src/.
   const entry = resolve('node_modules/pi-acp/dist/index.js');
   let source = await readFile(entry, 'utf8');
@@ -210,7 +211,7 @@ async function getWorkbenchFastOptions(proc) { const config = await fastConfig(p
       resolveDir: resolve('node_modules/pi-acp/dist'),
       sourcefile: 'pi-acp-workbench-adapter.mjs',
     },
-    outfile: 'dist/pi-adapter.mjs',
+    outfile: resolve(outdir, 'pi-adapter.mjs'),
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -222,7 +223,7 @@ async function getWorkbenchFastOptions(proc) { const config = await fastConfig(p
   });
   await build({
     entryPoints: ['src/pi-fast-mode.ts'],
-    outfile: 'dist/pi-fast-mode.mjs',
+    outfile: resolve(outdir, 'pi-fast-mode.mjs'),
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -234,7 +235,7 @@ async function getWorkbenchFastOptions(proc) { const config = await fastConfig(p
   });
   await build({
     entryPoints: ['src/pi-native-fork.ts'],
-    outfile: 'dist/pi-native-fork.mjs',
+    outfile: resolve(outdir, 'pi-native-fork.mjs'),
     bundle: true,
     platform: 'node',
     format: 'esm',

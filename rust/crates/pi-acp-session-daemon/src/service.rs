@@ -379,9 +379,9 @@ fn view_state(r: &Runtime) -> Value {
 
 fn view_state_with_type(r: &Runtime) -> Value {
     let mut v = view_state(r);
-    v.as_object_mut()
-        .unwrap()
-        .insert("type".into(), json!("state"));
+    if let Some(object) = v.as_object_mut() {
+        object.insert("type".into(), json!("state"));
+    }
     v
 }
 

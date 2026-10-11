@@ -157,10 +157,15 @@ function unitQuote(value) {
   return '"' + value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
 }
 
+// The relay never spawns processes; these seccomp/NNP filters work in unprivileged user units.
+// The session daemon is left unrestricted because Pi workers run arbitrary developer tooling.
+const TELEGRAM_HARDENING =
+  'NoNewPrivileges=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictSUIDSGID=yes\nMemoryDenyWriteExecute=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n';
+
 export function serviceUnit(serviceDir, configDir, kind, path = process.env.PATH || '') {
   const telegram = kind === 'telegram';
   const execQuote = (value) => unitQuote(value.replaceAll('$', () => '$$'));
-  return `[Unit]\nDescription=Pi ACP Workbench ${kind}\nAfter=network-online.target${telegram ? ' pi-sessions.service' : ''}\nWants=network-online.target${telegram ? ' pi-sessions.service' : ''}\n\n[Service]\nType=simple\nWorkingDirectory=${serviceDir.replaceAll('%', '%%')}\n${telegram ? `EnvironmentFile=${join(configDir, 'telegram.env').replaceAll('%', '%%')}` : `Environment=${unitQuote('PATH=' + path)}`}\nExecStart=${unitQuote(join(serviceDir, `pi-acp-${telegram ? 'telegram' : 'session'}-daemon`))} --config ${execQuote(join(configDir, `${telegram ? 'telegram' : 'sessions'}.json`))}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=45\nKillMode=control-group\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=Pi ACP Workbench ${kind}\nAfter=network-online.target${telegram ? ' pi-sessions.service' : ''}\nWants=network-online.target${telegram ? ' pi-sessions.service' : ''}\n\n[Service]\nType=simple\nWorkingDirectory=${serviceDir.replaceAll('%', '%%')}\n${telegram ? `EnvironmentFile=${join(configDir, 'telegram.env').replaceAll('%', '%%')}` : `Environment=${unitQuote('PATH=' + path)}`}\nExecStart=${unitQuote(join(serviceDir, `pi-acp-${telegram ? 'telegram' : 'session'}-daemon`))} --config ${execQuote(join(configDir, `${telegram ? 'telegram' : 'sessions'}.json`))}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=45\nKillMode=control-group\nUMask=0077\n${telegram ? TELEGRAM_HARDENING : ''}\n[Install]\nWantedBy=default.target\n`;
 }
 
 async function readOptional(file) {

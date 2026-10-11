@@ -355,6 +355,10 @@ test('locates services through symlinks and quotes Unicode, spaces and systemd s
   assert(unit.includes('100%% $release/pi-acp-telegram-daemon"'));
   assert(unit.includes(`EnvironmentFile=${f.configDir}/telegram.env`));
   assert(!unit.includes('/home/mkh'));
+  assert(unit.includes('NoNewPrivileges=yes\n'));
+  assert(unit.includes('RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n'));
+  const sessions = serviceUnit(f.serviceDir, f.configDir, 'sessions', '/usr/bin');
+  assert(!sessions.includes('NoNewPrivileges'), 'Pi workers must keep normal tool privileges');
   assert.throws(() => serviceUnit('/bad\npath', f.configDir, 'telegram'), /换行/);
 });
 

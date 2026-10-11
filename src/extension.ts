@@ -7,7 +7,7 @@ import { AttachmentCoordinator, type AttachmentHost } from './conversation-attac
 import { ConversationLifecycle, type RequestGate } from './conversation-lifecycle';
 import { parseUiMessage } from './ui-message-schema';
 import type { UiPolicy } from './ui-dispatch';
-import { dispatchUi, type UiHandlers } from './ui-dispatch';
+import { dispatchUi, failUi, type UiHandlers } from './ui-dispatch';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { sessionSelectors } from './session-settings';
@@ -353,7 +353,16 @@ export class ChatProvider
     cancelContext: { run: () => this.onCancelContext() },
     refreshStatistics: { run: () => this.onRefreshStatistics() },
     setPrice: { run: (m) => this.onSetPrice(m) },
-    resetProviderModels: { run: (m) => this.onResetProvider(m), gated: true },
+    resetProviderModels: {
+      run: (m) => this.onResetProvider(m),
+      gated: true,
+      reportRefusal: true,
+      fail: (m, error) => {
+        // Keep a partial-progress result already recorded by onResetProvider.
+        if (this.state.providerSettingsResult?.id !== m.id)
+          this.state.providerSettingsResult = { id: m.id, provider: m.provider, models: [], error };
+      },
+    },
     setTitleModel: {
       run: async (m) => {
         if (this.harness !== 'pi') throw new Error('请切换到 Pi 选择标题模型。');
@@ -369,7 +378,14 @@ export class ChatProvider
       },
       gated: true,
     },
-    setModelSettings: { run: (m) => this.onSetModelSettings(m), gated: true },
+    setModelSettings: {
+      run: (m) => this.onSetModelSettings(m),
+      gated: true,
+      reportRefusal: true,
+      fail: (m, error) => {
+        this.state.modelSettingsResult = { id: m.id, model: m.model, error };
+      },
+    },
     logs: { run: () => this.onLogs() },
     login: { run: (m) => this.sessionCoordinator.onLogin(m) },
     cancel: { run: (m) => this.turnCoordinator.onCancel(m) },
@@ -605,51 +621,34 @@ export class ChatProvider
   }
   async perform(message: UiMessage): Promise<void> {
     let gate: RequestGate | undefined;
+    let parsed: UiMessage | undefined;
     const generation = this.generation;
     try {
-      const parsed = parseUiMessage(message);
+      parsed = parseUiMessage(message);
       if (!parsed) return;
-      message = parsed;
-      const policy: UiPolicy = this.handlers[message.type];
-      const acquired = this.lifecycle.acquire(message, policy, {
+      const policy: UiPolicy = this.handlers[parsed.type];
+      const acquired = this.lifecycle.acquire(parsed, policy, {
         ...this.state,
         harness: this.harness,
       });
       if (acquired === false) {
-        if (message.type === 'setModelSettings' || message.type === 'resetProviderModels')
-          throw new Error('有其他操作正在进行，请稍后保存。');
+        if (policy.reportRefusal) throw new Error('有其他操作正在进行，请稍后保存。');
         return;
       }
       gate = acquired;
       await this.historyReady;
       if (!this.lifecycle.allowed(policy, { ...this.state, harness: this.harness })) {
-        if (message.type === 'setModelSettings' || message.type === 'resetProviderModels')
-          throw new Error('请等待当前任务结束再保存模型设置。');
+        if (policy.reportRefusal) throw new Error('请等待当前任务结束再保存模型设置。');
         return;
       }
       if (policy.gated) this.state.error = undefined;
-      await dispatchUi(this.handlers, message);
+      await dispatchUi(this.handlers, parsed);
       this.emit();
     } catch (error) {
-      if (message?.type === 'send' && generation !== this.generation) return;
+      const stale = generation !== this.generation;
+      if (parsed?.type === 'send' && stale) return;
       const detail = error instanceof Error ? error.message : String(error);
-      if (
-        message?.type === 'setModelSettings' &&
-        typeof message.id === 'string' &&
-        generation === this.generation
-      )
-        this.state.modelSettingsResult = { id: message.id, model: message.model, error: detail };
-      if (
-        message?.type === 'resetProviderModels' &&
-        generation === this.generation &&
-        this.state.providerSettingsResult?.id !== message.id
-      )
-        this.state.providerSettingsResult = {
-          id: message.id,
-          provider: message.provider,
-          models: [],
-          error: detail,
-        };
+      if (parsed && !stale) failUi(this.handlers, parsed, detail);
       this.state.error =
         detail === 'ACP connection closed' && this.state.error ? this.state.error : detail;
       this.log.appendLine(this.state.error);

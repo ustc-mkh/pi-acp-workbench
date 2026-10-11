@@ -13,6 +13,19 @@ RestartSec=10
 TimeoutStopSec=45
 KillMode=control-group
 UMask=0077
+# The relay never spawns processes; these filters need no root or user namespaces.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Optional, if unprivileged user namespaces are available on this host:
+# PrivateTmp=yes
+# ProtectSystem=strict
+# ProtectHome=read-only
+# ReadWritePaths=%h/.pi/pi-acp-workbench
 
 [Install]
 WantedBy=default.target

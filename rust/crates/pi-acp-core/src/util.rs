@@ -27,9 +27,9 @@ pub fn js_optional_number_string(value: Option<f64>) -> String {
         None => "undefined".into(),
         Some(v) if v.is_nan() => "NaN".into(),
         Some(v) if v.is_infinite() => if v > 0.0 { "Infinity" } else { "-Infinity" }.into(),
+        // from_f64 only rejects non-finite values, which the arms above already handle.
         Some(v) => serde_json::Number::from_f64(v)
-            .map(|n| crate::canonical::js_number_string(&n))
-            .unwrap(),
+            .map_or_else(|| "NaN".into(), |n| crate::canonical::js_number_string(&n)),
     }
 }
 

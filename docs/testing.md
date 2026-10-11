@@ -6,8 +6,9 @@
 
 | 场景             | 命令                                                     | 执行范围                                                                        |
 | ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| 日常修改         | `npm test`                                               | 类型检查、构建 debug 服务、按未提交改动选择 TS 测试                             |
-| 全量 TS 回归     | `npm run test:all`                                       | 类型检查、构建 debug 服务、全部 Vitest 测试                                     |
+| 日常修改         | `npm test`                                               | 类型检查、构建 debug 服务、全部 Vitest 测试                                     |
+| 快速迭代         | `npm run test:changed`                                   | 类型检查、构建 debug 服务、按未提交改动选择 TS 测试                             |
+| 全量 TS 回归     | `npm run test:all`                                       | 同 `npm test`（保留别名）                                                       |
 | 完整非浏览器验收 | `npm run test:full`                                      | 类型检查、debug / contract 构建、TS / Rust 单测、协议、集成、内存和 runner 检查 |
 | 提交前完整验证   | `npm run verify`                                         | clippy → test:full → JS 构建与浏览器冒烟                                        |
 | 格式检查         | `npm run format:check`                                   | Prettier 与 rustfmt                                                             |
@@ -22,7 +23,7 @@
 | 协议生成 / 校验  | `npm run generate:protocol` / `npm run check:protocol`   | Rust ts-rs 输出与客户端声明的漂移检查                                           |
 | 原生分支样例导出 | `npm run fixtures`                                       | 有意改变算法时更新冻结样例                                                      |
 
-`npm test` 通过 Vitest 的依赖图选择已暂存、未暂存和未跟踪改动影响的测试；干净工作区可能不运行测试。构建脚本、Rust、锁文件、模拟进程和注入适配器代码等由 forceRerunTriggers 触发完整 TS 回归。干净检出或发布验收使用 test:full / verify；test:all 不包含 Rust 单测、独立契约或浏览器。
+`npm test` 运行全部 Vitest 测试，不会因工作区干净而空跑。`npm run test:changed` 通过 Vitest 的依赖图选择已暂存、未暂存和未跟踪改动影响的测试；干净工作区可能不运行测试。构建脚本、Rust、锁文件、模拟进程和注入适配器代码等由 forceRerunTriggers 触发完整 TS 回归。干净检出或发布验收使用 test:full / verify；test:all 不包含 Rust 单测、独立契约或浏览器。
 
 单独定位 TS 用例时先构建服务：
 
@@ -113,12 +114,12 @@ Pi Fast mode 修改可执行 `npm run test:pi-fast`：需要 PATH 中已安装 P
 
 1. 执行 verify、format:check；涉及上游适配器、宿主或服务包时执行对应按需检查。
 2. 同步 package.json.version、package-lock.json 的根版本和 `rust/crates/pi-acp-session-daemon/src/agent.rs` 中 ACP clientInfo.version，更新 CHANGELOG；VSIX 文件名与服务 manifest 已从包版本生成。
-3. 执行 `npm run package`。VSCE prepublish 会类型检查并构建，输出父目录 `pi-acp-workbench-<version>.vsix`；检查适配器、Webview / 字体、许可证和 README，排除 source map、测试、node_modules、服务二进制与私人配置。
+3. 执行 `npm run package`。VSCE prepublish 会类型检查并构建，输出到仓库根目录 `pi-acp-workbench-<version>.vsix`（已被 .gitignore 忽略）；检查适配器、Webview / 字体、许可证和 README，排除 source map、测试、node_modules、服务二进制与私人配置。
 4. 在独立 VS Code profile 安装 VSIX 验证；服务包同时按 [发布指南](service-release.md) 重新构建、检查和打包，插件与 v4 daemon 配套更新。
 5. 先推送版本提交并确认 main 的 CI 通过，再创建与包版本一致的 vX.Y.Z 标签并推送。标签 CI 在审计、完整回归、浏览器和 musl 生产检查通过后打包 VSIX，核对版本、源码提交、包内容及内外摘要；先上传草稿 Release，下载所有附件复核 SHA-256，再正式发布并设为 latest。普通贡献者提交 PR 即可。
 
 发布流程见 `.github/workflows/ci.yml` 的 release job 与 `scripts/prepare-release.mjs`。发布写权限只授予该 job；分支和 PR 不发布。若上传或下载校验失败，保留草稿供排查，不发布不完整附件；修复前不要复用或移动已发布标签。
 
-使用实际版本替换摘要命令中的占位符：`sha256sum ../pi-acp-workbench-<version>.vsix`。打包本身不运行完整测试；已有历史候选包不能代替当前源码的发布验收。
+使用实际版本替换摘要命令中的占位符：`sha256sum pi-acp-workbench-<version>.vsix`。打包本身不运行完整测试；已有历史候选包不能代替当前源码的发布验收。
 
 Telegram 配置向导通过 `npm run test:runner` 和完整测试入口运行隔离测试：模拟 Bot API / systemd，验证配对授权、文件权限、token 不进入 argv、重复配置备份、失败恢复与 linger 被拒绝的提示；不使用真实 Bot 或修改用户服务。

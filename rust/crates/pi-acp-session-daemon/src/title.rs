@@ -55,7 +55,7 @@ impl TitleStore {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(self.file.parent().unwrap())
+            .create(self.file.parent().ok_or("标题设置文件路径缺少父目录")?)
             .map_err(|e| e.to_string())?;
         write_atomic_json(&self.file, &next, true)
             .await

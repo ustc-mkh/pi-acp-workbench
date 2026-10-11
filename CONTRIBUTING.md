@@ -14,7 +14,8 @@
 git clone https://github.com/ustc-mkh/pi-acp-workbench.git
 cd pi-acp-workbench
 npm ci
-npm test             # 类型检查 + 与未提交改动相关的测试
+npm test             # 类型检查 + 全部 Vitest 测试
+npm run test:changed # 类型检查 + 仅与未提交改动相关的测试（快速迭代）
 npm run build        # 启动调试前构建
 ```
 
@@ -70,7 +71,7 @@ Telegram 修改按 `bridge/` 职责定位：接收与恢复走 `inbox.rs`，命�
 1. 从当前 main 建立聚焦主题的分支；先描述可复现的问题或期望行为。
 2. 保持 `src/shared.ts` 中宿主和 Webview 消息类型一致。在宿主再次验证消息、会话 ID 和附件；不要把 Webview 当可信授权源。
 3. 为生命周期、协议、上下文和数据持久化变更添加行为回归测试。UI 变更检查窄侧栏、暗色/浅色主题、键盘操作和流式输出。
-4. 日常执行 `npm test`；提交前执行 `npm run verify`，一次完成 clippy、完整服务验收、构建和浏览器验证。只需完整非浏览器验收时用 `npm run test:full`。默认 `npm test` 在干净工作区不会运行完整回归。
+4. 日常执行 `npm test`；提交前执行 `npm run verify`，一次完成 clippy、完整服务验收、构建和浏览器验证。只需完整非浏览器验收时用 `npm run test:full`。`npm test` 始终运行全部 TS 测试；只想快速验证未提交改动时用 `npm run test:changed`（干净工作区可能不运行任何测试）。
 5. 更新 README/架构说明及 CHANGELOG。不要提交密钥、Pi 会话文件、node_modules、dist 或本地 VSIX。
 6. PR 写明问题、改变后的行为、验证命令和限制；UI 变更附截图。避免将无关格式化或依赖升级混在同一修复中。
 

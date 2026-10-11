@@ -75,14 +75,17 @@ impl StateStreams {
             while !self.states.is_empty()
                 && (self.bytes + bytes > CACHE_BYTES || self.states.len() >= CACHE_SESSIONS)
             {
-                let oldest = self
+                let Some(oldest) = self
                     .states
                     .iter()
                     .min_by_key(|(_, b)| b.revision)
-                    .unwrap()
-                    .0
-                    .clone();
-                self.bytes -= self.states.remove(&oldest).unwrap().bytes;
+                    .map(|(id, _)| id.clone())
+                else {
+                    break;
+                };
+                if let Some(evicted) = self.states.remove(&oldest) {
+                    self.bytes -= evicted.bytes;
+                }
             }
             self.bytes += bytes;
             self.states.insert(

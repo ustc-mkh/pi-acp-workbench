@@ -7,7 +7,7 @@ import type { Entry } from './shared';
 export async function openWorkspaceLink(cwd: string, url: string, line?: number) {
   if (typeof url !== 'string' || url.length > 10000) return;
   if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
-    await vscode.env.openExternal(vscode.Uri.parse(url));
+    await openExternalLink(url);
     return;
   }
   if (!cwd || (/^[a-z][a-z\d+.-]*:/i.test(url) && !url.startsWith('file:'))) return;
@@ -24,6 +24,32 @@ export async function openWorkspaceLink(cwd: string, url: string, line?: number)
     preview: true,
     selection: row === undefined ? undefined : new vscode.Range(row, 0, row, 0),
   });
+}
+
+/**
+ * Links in transcripts are model output and may come from prompt injection, so show the
+ * normalised target (punycode host, no hidden credentials) and require explicit confirmation.
+ */
+export async function openExternalLink(raw: string) {
+  let target: URL;
+  try {
+    target = new URL(raw);
+  } catch {
+    throw new Error('链接无效。');
+  }
+  if (!['http:', 'https:', 'mailto:'].includes(target.protocol)) return;
+  if (target.username || target.password) throw new Error('不打开包含用户名或密码的链接。');
+  const display = target.href.length > 500 ? target.href.slice(0, 500) + '…' : target.href;
+  const open = '打开链接',
+    copy = '复制链接';
+  const choice = await vscode.window.showWarningMessage(
+    `打开外部链接？${target.protocol === 'mailto:' ? '' : target.host}`,
+    { modal: true, detail: `链接来自 Agent 输出，请确认目标：\n${display}` },
+    open,
+    copy,
+  );
+  if (choice === open) await vscode.env.openExternal(vscode.Uri.parse(target.href, true));
+  else if (choice === copy) await vscode.env.clipboard.writeText(target.href);
 }
 
 /** Bounded virtual documents shared by tool diffs and final per-turn summaries. */

@@ -204,6 +204,11 @@ pub fn undo(cwd: &Path, diff: &TurnDiff, check_only: bool) -> Result<(), String>
     }
     for file in &diff.files {
         let parts: Vec<_> = file.path.split('/').collect();
+        // Already validated above; destructure instead of unwrapping.
+        let (Some(before), Some(after), Some(leaf)) = (&file.before, &file.after, parts.last())
+        else {
+            return Err("快照未保存完整文本".into());
+        };
         let mut parent = root.try_clone().map_err(|e| e.to_string())?;
         let mut absent = false;
         for part in &parts[..parts.len() - 1] {
@@ -234,10 +239,10 @@ pub fn undo(cwd: &Path, diff: &TurnDiff, check_only: bool) -> Result<(), String>
         }
         let target = Target {
             parent,
-            leaf: parts.last().unwrap().to_string(),
+            leaf: leaf.to_string(),
             path: file.path.clone(),
-            before: file.before.clone().unwrap(),
-            after: file.after.clone().unwrap(),
+            before: before.clone(),
+            after: after.clone(),
             old_mode: file.old_mode.unwrap_or(0o100644) as u32,
             new_mode: file.new_mode.map(|m| m as u32),
             deleted: file.status == "deleted",

@@ -1,4 +1,4 @@
-import { it, expect, beforeAll, vi } from 'vitest';
+import { it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,16 +6,23 @@ import { join, resolve, delimiter, dirname } from 'node:path';
 import { AgentProcess } from './support/acp-client';
 import type { Inspection } from '../src/telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
-beforeAll(() => {
+// Build into a private directory: tests must not rewrite dist/ while packaging may read it.
+let adapterDir = '';
+const adapter = () => join(adapterDir, 'pi-adapter.mjs');
+beforeAll(async () => {
+  adapterDir = await mkdtemp(join(tmpdir(), 'pi-adapter-build-'));
   execFileSync(
     process.execPath,
     [
       '--input-type=module',
       '-e',
-      "import {buildAdapter} from './scripts/build-adapter.mjs'; await buildAdapter();",
+      `import {buildAdapter} from './scripts/build-adapter.mjs'; await buildAdapter({ outdir: ${JSON.stringify(adapterDir)} });`,
     ],
     { cwd: process.cwd(), stdio: 'pipe' },
   );
+});
+afterAll(async () => {
+  if (adapterDir) await rm(adapterDir, { recursive: true, force: true });
 });
 it.each(['user-bin', 'npm-prefix/bin', 'stale-override', 'managed-install'])(
   'discovers and starts Pi in %s',
@@ -30,7 +37,7 @@ it.each(['user-bin', 'npm-prefix/bin', 'stale-override', 'managed-install'])(
       await symlink(resolve('test/mock-pi.mjs'), join(bin, 'pi'));
       agent = new AgentProcess({
         command: process.execPath,
-        args: [resolve('dist/pi-adapter.mjs')],
+        args: [adapter()],
         cwd: dir,
         env: {
           PATH: (managed ? dirname(process.execPath) : bin) + delimiter + dirname(process.execPath),
@@ -64,20 +71,16 @@ it('uses dynamic discovery for terminal login when an old explicit path is missi
     await writeFile(join(bin, 'pi'), '#!/usr/bin/env node\nconsole.log("pi-login-discovered");\n', {
       mode: 0o755,
     });
-    const result = execFileSync(
-      process.execPath,
-      [resolve('dist/pi-adapter.mjs'), '--terminal-login'],
-      {
-        cwd: dir,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: bin + delimiter + dirname(process.execPath),
-          PI_ACP_PI_COMMAND: join(dir, 'missing', 'pi'),
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
+    const result = execFileSync(process.execPath, [adapter(), '--terminal-login'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: bin + delimiter + dirname(process.execPath),
+        PI_ACP_PI_COMMAND: join(dir, 'missing', 'pi'),
       },
-    );
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     expect(result).toContain('pi-login-discovered');
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -89,7 +92,7 @@ it('exposes and toggles Fast mode through the bundled ACP config API', async () 
   try {
     agent = new AgentProcess({
       command: process.execPath,
-      args: [resolve('dist/pi-adapter.mjs')],
+      args: [adapter()],
       cwd: dir,
       env: {
         PI_ACP_PI_COMMAND: resolve('test/mock-pi.mjs'),
@@ -149,7 +152,7 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
     const updates: acp.SessionNotification['update'][] = [];
     agent = new AgentProcess({
       command: process.execPath,
-      args: [resolve('dist/pi-adapter.mjs')],
+      args: [adapter()],
       cwd: dir,
       env: {
         PI_ACP_PI_COMMAND: resolve('test/mock-pi.mjs'),

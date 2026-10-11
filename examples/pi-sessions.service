@@ -15,6 +15,8 @@ KillMode=control-group
 MemoryAccounting=yes
 TasksAccounting=yes
 UMask=0077
+# No syscall/privilege filters here: Pi workers run arbitrary developer tooling
+# (compilers, package managers, sudo -n). Add NoNewPrivileges=yes if that suits your host.
 
 [Install]
 WantedBy=default.target
