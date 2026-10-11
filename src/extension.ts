@@ -1,4 +1,7 @@
 import { SessionCoordinator, type SessionHost } from './conversation-session';
+import { mergeTranscript } from './transcript-window';
+import { modelProvider } from './model-provider';
+import { loadEarlier } from './conversation-transcript';
 import { TurnCoordinator, type TurnHost } from './conversation-turn';
 import { AttachmentCoordinator, type AttachmentHost } from './conversation-attachments';
 import { ConversationLifecycle, type RequestGate } from './conversation-lifecycle';
@@ -17,7 +20,7 @@ import { ActiveConversation } from './active-conversation';
 import { ConversationHistory } from './conversation-history';
 import { ConversationStatistics } from './conversation-statistics';
 import { HARNESS_IDS, isHarnessId, type HarnessId } from './harness';
-import type { UsageRecord } from './telemetry';
+import { validPrice, type UsageRecord } from './telemetry';
 import type { Snapshot, UiMessage } from './shared';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -128,16 +131,30 @@ export class ChatProvider
     ];
   }
   serviceClient = new SessionClient();
+  private titleModel = '';
+  private titleModelRevision = 0;
   applyServiceState(value: ServiceState) {
     if (value.snapshot.harness !== this.harness || this.state.sessionId !== value.snapshot.id)
       return;
     const s = value.snapshot;
     // The socket decoder preserves unchanged entry identities across state deltas.
-    this.state.entries = s.entries;
+    const transcript = mergeTranscript(
+      this.state.entries,
+      s.entries,
+      this.state.historyBefore,
+      s.historyBefore,
+    );
+    this.state.entries = transcript.entries;
+    this.state.historyBefore = transcript.before;
     this.state.usage = s.usage;
     this.active.replace({ contextWindow: s.contextWindow ?? s.usage?.size });
     this.state.plan = value.plan || [];
     this.state.sessionNumber = s.sessionNumber;
+    this.state.sessionTitle = s.title;
+    if (this.history.some((item) => item.id === s.id && item.title !== s.title))
+      this.history = this.history.map((item) =>
+        item.id === s.id ? { ...item, title: s.title, sessionNumber: s.sessionNumber } : item,
+      );
     this.state.configs = s.configs;
     this.state.modes = s.modes;
     this.state.nativeForks = s.nativeForks;
@@ -277,7 +294,9 @@ export class ChatProvider
           busy,
         }),
       );
+      this.telemetry.sessionMetadata(this.history);
       this.telemetry.models(this.state);
+      this.state.titleModel = this.titleModel;
       this.state.statistics = this.statistics;
       this.state.showThoughts = this.config.get('showThoughts', true);
       this.state.visibleModels = this.visibleModels();
@@ -300,6 +319,7 @@ export class ChatProvider
       ...this.state,
       harness: this.harness,
       visibleModels: this.visibleModels(),
+      titleModel: this.titleModel,
     });
   }
   private recordUsage(records: UsageRecord[]) {
@@ -333,6 +353,23 @@ export class ChatProvider
     cancelContext: { run: () => this.onCancelContext() },
     refreshStatistics: { run: () => this.onRefreshStatistics() },
     setPrice: { run: (m) => this.onSetPrice(m) },
+    resetProviderModels: { run: (m) => this.onResetProvider(m), gated: true },
+    setTitleModel: {
+      run: async (m) => {
+        if (this.harness !== 'pi') throw new Error('请切换到 Pi 选择标题模型。');
+        const models = sessionSelectors(this.state)
+          .filter((c) => c.kind === 'model')
+          .flatMap((c) => c.options.map((o) => o.id));
+        if (m.model !== '' && m.model !== 'off' && !models.includes(m.model))
+          throw new Error('标题模型不在 Pi 目录中。');
+        this.titleModelRevision++;
+        const settings = await this.serviceClient.call('setTitleModel', { model: m.model });
+        this.titleModel = settings.model;
+        this.emit();
+      },
+      gated: true,
+    },
+    setModelSettings: { run: (m) => this.onSetModelSettings(m), gated: true },
     logs: { run: () => this.onLogs() },
     login: { run: (m) => this.sessionCoordinator.onLogin(m) },
     cancel: { run: (m) => this.turnCoordinator.onCancel(m) },
@@ -344,6 +381,8 @@ export class ChatProvider
     open: { run: (m) => this.attachmentCoordinator.onOpen(m) },
     readOutputImage: { run: (m) => this.attachmentCoordinator.onReadOutputImage(m) },
     diff: { run: (m) => this.attachmentCoordinator.onDiff(m) },
+    undoTurn: { run: (m) => this.attachmentCoordinator.onUndoTurn(m), gated: true },
+    loadEarlier: { run: (m) => loadEarlier(this, m.sessionId), gated: true },
     export: { run: () => this.attachmentCoordinator.onExport() },
     new: { run: (m) => this.sessionCoordinator.onNew(m), gated: true, navigation: true },
     connect: { run: (m) => this.sessionCoordinator.onConnect(m), gated: true },
@@ -444,8 +483,118 @@ export class ChatProvider
     this.contextAbort?.abort(new Error('已取消操作，原会话保留。'));
   }
   private async onRefreshStatistics(): Promise<void> {
+    if (!this.transitioning) {
+      const revision = this.titleModelRevision;
+      const settings = await this.serviceClient.call('titleSettings');
+      if (revision === this.titleModelRevision) this.titleModel = settings.model;
+    }
     await this.refreshTelemetry(this.state.status !== 'busy');
     this.emit();
+  }
+  private async onResetProvider(message: UiMessage & { type: 'resetProviderModels' }) {
+    const generation = this.generation,
+      completed: string[] = [];
+    try {
+      if (message.harness !== this.harness || message.sessionId !== this.state.sessionId)
+        throw new Error('会话已切换。');
+      const models = [
+        ...new Set(
+          sessionSelectors(this.state)
+            .filter((c) => c.kind === 'model')
+            .flatMap((c) => c.options.map((o) => o.id)),
+        ),
+      ].filter((id) => modelProvider(id) === message.provider);
+      if (!models.length) throw new Error('供应商没有可修改的模型。');
+      const choice = await vscode.window.showWarningMessage(
+        `恢复 ${message.provider} 的 ${models.length} 个模型为默认设置？`,
+        {
+          modal: true,
+          detail:
+            '恢复四项价格及 Pi context 长度。显示勾选和标题模型选择不变；逐项执行，失败会报告已完成的项目。',
+        },
+        '全部恢复默认',
+      );
+      if (choice !== '全部恢复默认') {
+        if (generation === this.generation)
+          this.state.providerSettingsResult = {
+            id: message.id,
+            provider: message.provider,
+            models: [],
+            error: '已取消，设置未修改。',
+          };
+        return;
+      }
+      for (const model of models) {
+        if (generation !== this.generation) throw new Error('会话已切换。');
+        await this.onSetModelSettings({
+          type: 'setModelSettings',
+          id: `${message.id}:${model}`,
+          harness: message.harness,
+          sessionId: message.sessionId,
+          model,
+          values: null,
+        });
+        completed.push(model);
+      }
+      this.state.providerSettingsResult = {
+        id: message.id,
+        provider: message.provider,
+        models: completed,
+      };
+    } catch (error) {
+      if (generation === this.generation)
+        this.state.providerSettingsResult = {
+          id: message.id,
+          provider: message.provider,
+          models: completed,
+          error: `${completed.length} 个已恢复；${String(error)}`,
+        };
+      throw error;
+    } finally {
+      if (generation === this.generation) this.emit();
+    }
+  }
+  private async onSetModelSettings(
+    message: UiMessage & { type: 'setModelSettings' },
+  ): Promise<void> {
+    const generation = this.generation;
+    let contextSaved = false;
+    try {
+      if (message.harness !== this.harness || message.sessionId !== this.state.sessionId)
+        throw new Error('会话已切换，请重新打开模型设置。');
+      if (
+        !message.model.trim() ||
+        message.model.length > 300 ||
+        ['__proto__', 'constructor', 'prototype'].includes(message.model)
+      )
+        throw new Error('模型标识无效。');
+      if (message.values && !validPrice(message.values.price))
+        throw new Error('价格必须为非负有限数值。');
+      if (this.harness === 'pi') {
+        if (!this.state.sessionId || (message.values && message.values.contextWindow === undefined))
+          throw new Error('请连接 Pi 并填写 context 长度。');
+        await this.turnCoordinator.onModelContext({
+          type: 'setModelContext',
+          harness: 'pi',
+          sessionId: this.state.sessionId,
+          model: message.model,
+          contextWindow: message.values?.contextWindow ?? null,
+        });
+        contextSaved = true;
+      } else if (message.values?.contextWindow !== undefined) {
+        throw new Error('当前 Agent 不支持修改 context 长度。');
+      }
+      if (generation !== this.generation) throw new Error('会话已切换，设置操作已停止。');
+      await this.telemetry.setPrice(message.model, message.values?.price);
+      this.state.modelSettingsResult = { id: message.id, model: message.model };
+    } catch (error) {
+      const detail = `${contextSaved ? 'Context 已更新，但价格未确认保存；请检查后重试。' : ''}${String(error)}`;
+      if (generation === this.generation)
+        this.state.modelSettingsResult = { id: message.id, model: message.model, error: detail };
+      throw new Error(detail);
+    } finally {
+      if (generation === this.generation) this.emit();
+    }
   }
   private async onSetPrice(message: UiMessage & { type: 'setPrice' }): Promise<void> {
     await this.telemetry.setPrice(message.model, message.price);
@@ -466,16 +615,41 @@ export class ChatProvider
         ...this.state,
         harness: this.harness,
       });
-      if (acquired === false) return;
+      if (acquired === false) {
+        if (message.type === 'setModelSettings' || message.type === 'resetProviderModels')
+          throw new Error('有其他操作正在进行，请稍后保存。');
+        return;
+      }
       gate = acquired;
       await this.historyReady;
-      if (!this.lifecycle.allowed(policy, { ...this.state, harness: this.harness })) return;
+      if (!this.lifecycle.allowed(policy, { ...this.state, harness: this.harness })) {
+        if (message.type === 'setModelSettings' || message.type === 'resetProviderModels')
+          throw new Error('请等待当前任务结束再保存模型设置。');
+        return;
+      }
       if (policy.gated) this.state.error = undefined;
       await dispatchUi(this.handlers, message);
       this.emit();
     } catch (error) {
       if (message?.type === 'send' && generation !== this.generation) return;
       const detail = error instanceof Error ? error.message : String(error);
+      if (
+        message?.type === 'setModelSettings' &&
+        typeof message.id === 'string' &&
+        generation === this.generation
+      )
+        this.state.modelSettingsResult = { id: message.id, model: message.model, error: detail };
+      if (
+        message?.type === 'resetProviderModels' &&
+        generation === this.generation &&
+        this.state.providerSettingsResult?.id !== message.id
+      )
+        this.state.providerSettingsResult = {
+          id: message.id,
+          provider: message.provider,
+          models: [],
+          error: detail,
+        };
       this.state.error =
         detail === 'ACP connection closed' && this.state.error ? this.state.error : detail;
       this.log.appendLine(this.state.error);

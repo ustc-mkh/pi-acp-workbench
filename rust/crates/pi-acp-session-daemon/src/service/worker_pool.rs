@@ -121,7 +121,7 @@ impl SessionService {
             worker.stop().await;
             let mut info = result?;
             info["agentCapabilities"]["_meta"]["session-service"] =
-                json!({ "version": 3, "authoritative": true, "usageInspection": harness != Harness::Pi });
+                json!({ "version": 4, "authoritative": true, "usageInspection": harness != Harness::Pi });
             self.capabilities
                 .lock_unpoisoned()
                 .insert(harness, info.clone());
@@ -174,6 +174,23 @@ impl SessionService {
                             return;
                         }
                         let update = notification.get("update").cloned().unwrap_or(Value::Null);
+                        if update.get("sessionUpdate").and_then(Value::as_str)
+                            == Some("session_info_update")
+                            && r.snapshot.extra.get("titleSource").and_then(Value::as_str)
+                                != Some("generated")
+                        {
+                            if let Some(title) = update
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .map(|s| crate::title::short_title(s, 64))
+                                .filter(|s| !s.is_empty())
+                            {
+                                r.snapshot.title = title;
+                                r.snapshot
+                                    .extra
+                                    .insert("titleSource".into(), json!("agent"));
+                            }
+                        }
                         apply_update(&mut r.state, &update, false);
                         if let Some(publication) = r
                             .phase

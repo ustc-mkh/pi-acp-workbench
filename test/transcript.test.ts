@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { TranscriptView, transcriptBlocks } from '../webview/transcript';
 import type { Entry } from '../src/shared';
 const user: Entry = { id: 'u', role: 'user', text: 'task' };
@@ -24,6 +24,15 @@ it('groups a whole execution trace, preserving the user request and final answer
   expect(
     transcriptBlocks([...entries, { ...user, id: 'u2' }, { ...tool, id: 'tool2' }]),
   ).toHaveLength(5);
+});
+it('does not render folded activity until explicitly expanded', () => {
+  const render = vi.fn(() => document.createElement('article'));
+  const root = document.createElement('div');
+  const view = new TranscriptView(root, render);
+  view.update([user, thought, tool, answer], false);
+  expect(render.mock.calls).toHaveLength(2);
+  view.setExpanded(true);
+  expect(render.mock.calls).toHaveLength(4);
 });
 it('keeps groups folded by default, preserves toggles while streaming, and supports fold-all', () => {
   const root = document.createElement('div');

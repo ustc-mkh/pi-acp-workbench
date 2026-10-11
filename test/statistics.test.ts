@@ -2,7 +2,7 @@
 import { it, expect, vi } from 'vitest';
 import { StatisticsPage } from '../webview/statistics';
 import type { Statistics } from '../src/telemetry';
-it('switches model/day/session views, filters dates, and submits editable prices', () => {
+it('switches model/time/session views, filters dates, and links models without hover popups', () => {
   document.body.innerHTML = '<main></main>';
   HTMLElement.prototype.scrollIntoView = () => {};
   const root = document.querySelector('main')!,
@@ -12,6 +12,7 @@ it('switches model/day/session views, filters dates, and submits editable prices
   const data: Statistics = {
     available: true,
     titles: { s: '数学任务' },
+    sessionNumbers: { s: 14 },
     prices: { 'p/m': { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 } },
     records: [
       {
@@ -32,10 +33,16 @@ it('switches model/day/session views, filters dates, and submits editable prices
   expect(root.querySelector('tbody')?.textContent).toContain('p/m');
   const click = (label: string) =>
     [...root.querySelectorAll('button')].find((b) => b.textContent === label)!.click();
-  click('按天');
-  expect(root.querySelector('tbody')?.textContent).toContain('2026-10-03');
+  click('按时间');
+  expect(root.querySelector('.usage-chart')?.textContent).toContain('2026-10-03');
+  expect(root.querySelector('.usage-chart')?.textContent).toContain('$0.0042');
+  click('按周');
+  expect(root.querySelector('.usage-chart')?.textContent).toContain('2026-09-28');
+  click('按月');
+  expect(root.querySelector('.usage-chart')?.textContent).toContain('2026-10');
   click('按会话');
-  expect(root.querySelector('tbody')?.textContent).toContain('数学任务');
+  expect(root.querySelector('tbody')?.textContent).toContain('#14 数学任务');
+  expect(root.querySelector('tbody [data-tooltip], tbody [title]')).toBeNull();
   const from = root.querySelector<HTMLInputElement>('[aria-label="开始日期"]')!;
   from.value = '2026-10-04';
   from.dispatchEvent(new Event('change'));
@@ -46,6 +53,7 @@ it('switches model/day/session views, filters dates, and submits editable prices
   expect(open).toHaveBeenLastCalledWith('p/m');
   expect(root.textContent).not.toContain('Pi 报告费用');
   expect(root.querySelector('input[type=number]')).toBeNull();
-  click('模型价格设置 →');
-  expect(open).toHaveBeenLastCalledWith();
+  expect(root.textContent).not.toContain('模型设置 →');
+  expect(root.querySelector('.floating-page-back')?.textContent).toBe('返回对话');
+  expect(root.querySelector('tbody [data-tooltip], tbody [title]')).toBeNull();
 });

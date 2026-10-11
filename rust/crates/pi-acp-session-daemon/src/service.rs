@@ -2,6 +2,7 @@
 //! Runtime mutexes never span an await; queue lanes serialize each session.
 use pi_acp_core::sync::MutexExt;
 mod session_ops;
+mod title;
 mod turn;
 mod worker_pool;
 
@@ -86,6 +87,7 @@ pub struct SessionService {
     runtimes: Arc<Mutex<HashMap<String, Rt>>>,
     journal: RequestJournal,
     preferences: SessionPreferences,
+    title_settings: crate::title::TitleStore,
     queue: TaskQueue,
     store: Arc<SharedHistoryStore>,
     events: Arc<TaskOutbox>,
@@ -96,6 +98,7 @@ pub struct SessionService {
     closed: Arc<AtomicBool>,
     sweeping: AtomicBool,
     allocation: tokio::sync::Mutex<()>,
+    workspace_gate: crate::workspace_gate::WorkspaceGate,
 }
 
 impl SessionService {
@@ -111,6 +114,9 @@ impl SessionService {
             capabilities: Mutex::new(HashMap::new()),
             store: Arc::new(SharedHistoryStore::new(root.join("history"))),
             preferences: SessionPreferences::new(root.join("preferences")),
+            title_settings: crate::title::TitleStore::new(
+                root.join("preferences").join("title.json"),
+            ),
             events: Arc::new(TaskOutbox::new(root.join("telegram").join("events"))),
             journal: RequestJournal::new(root.join("service").join("requests")),
             queue: TaskQueue::new(config.max_workers, 100),
@@ -121,12 +127,15 @@ impl SessionService {
             closed: Arc::new(AtomicBool::new(false)),
             sweeping: AtomicBool::new(false),
             allocation: tokio::sync::Mutex::new(()),
+            workspace_gate: crate::workspace_gate::WorkspaceGate::default(),
         });
         service.spawn_idle_sweep();
         service
     }
 
     pub async fn initialize(self: &Arc<Self>) -> Result<(), String> {
+        self.store.recover_orphans().await?;
+        self.title_settings.initialize().await?;
         let service = self.clone();
         self.journal
             .initialize(move |receipt| {
@@ -205,11 +214,38 @@ impl SessionService {
     }
 
     async fn execute(&self, command: &ServiceCommand, request_id: &str) -> Result<Value, String> {
+        // The journal/session lane is acquired first. Workspace conflicts fail
+        // visibly rather than holding global queue slots while waiting.
+        let cwd = match command {
+            ServiceCommand::Create { cwd, .. } => Some(cwd.clone()),
+            ServiceCommand::Prompt { .. }
+            | ServiceCommand::UndoTurn { .. }
+            | ServiceCommand::Request {
+                request:
+                    AgentRequest::Fork { .. }
+                    | AgentRequest::SetMode { .. }
+                    | AgentRequest::SetConfig { .. },
+                ..
+            } => Some(self.index(command_session_id(command)).await?.cwd),
+            _ => None,
+        };
+        let _workspace = match cwd {
+            Some(cwd) => Some(
+                self.workspace_gate
+                    .enter(&cwd, matches!(command, ServiceCommand::UndoTurn { .. }))
+                    .await?,
+            ),
+            None => None,
+        };
         match command {
             ServiceCommand::EventsNext { cursor } => self.events.next(cursor.as_deref()).await,
             ServiceCommand::EventsAck { id, token } => Ok(json!(self.events.ack(id, token).await?)),
             ServiceCommand::Hello { harness } => self.hello(*harness).await,
             ServiceCommand::List => Ok(json!(self.list().await?)),
+            ServiceCommand::TitleSettings {} => Ok(json!(self.title_settings.get().await)),
+            ServiceCommand::SetTitleModel { model } => {
+                Ok(json!(self.title_settings.set(model).await?))
+            }
             ServiceCommand::Create { cwd, harness } => self.create(cwd, *harness).await,
             ServiceCommand::HistoryRemove { session_id } => {
                 self.history_remove(session_id.as_deref()).await?;
@@ -259,14 +295,17 @@ impl SessionService {
 async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String> {
     let snapshot = {
         let r = rt.lock_unpoisoned();
-        let title = r
-            .state
-            .entries
-            .iter()
-            .find(|e| e.is("user"))
-            .map(|e| utf16_head(e.text(), 70))
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| r.snapshot.title.clone());
+        let title = if r.snapshot.extra.contains_key("titleSource") {
+            r.snapshot.title.clone()
+        } else {
+            r.state
+                .entries
+                .iter()
+                .find(|e| e.is("user"))
+                .map(|e| crate::title::short_title(e.text(), 32))
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| r.snapshot.title.clone())
+        };
         Snapshot {
             entries: r.state.entries.clone(),
             configs: r.state.configs.clone(),
@@ -296,6 +335,9 @@ use pi_acp_core::util::js_truthy as js_truthy_value;
 fn command_session_id(command: &ServiceCommand) -> &str {
     match command {
         ServiceCommand::State { session_id }
+        | ServiceCommand::UndoTurn { session_id, .. }
+        | ServiceCommand::TurnDiff { session_id, .. }
+        | ServiceCommand::HistoryPage { session_id, .. }
         | ServiceCommand::Cancel { session_id }
         | ServiceCommand::Remove { session_id }
         | ServiceCommand::Permission { session_id, .. }
@@ -308,8 +350,9 @@ fn command_session_id(command: &ServiceCommand) -> &str {
 
 /// `{snapshot{+entries,configs,modes,nativeForks}, busy, permissions, commands, error?}`
 fn view_state(r: &Runtime) -> Value {
-    let snapshot = Snapshot {
-        entries: r.state.entries.clone(),
+    let (entries, before) = crate::history_page::window(&r.state.entries, r.state.entries.len());
+    let mut snapshot = Snapshot {
+        entries,
         configs: r.state.configs.clone(),
         modes: r.state.modes.clone(),
         native_forks: r.state.native_forks.clone(),
@@ -317,6 +360,7 @@ fn view_state(r: &Runtime) -> Value {
         usage_records: Vec::new(), // Detailed billing is paginated via inspect.
         ..r.snapshot.clone()
     };
+    snapshot.extra.insert("historyBefore".into(), json!(before));
     serde_json::to_value(ServiceState {
         snapshot,
         busy: r.phase.busy(),

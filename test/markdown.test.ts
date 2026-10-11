@@ -20,6 +20,28 @@ describe('Markdown and mathematics', () => {
     expect(d.querySelector('math')).not.toBeNull();
     expect(d.querySelector('.math-fallback')).toBeNull();
   });
+  it.each([
+    ['**加粗**', '加粗'],
+    ['这段**加粗**文字', '加粗'],
+    ['**注意：**这是说明', '注意：'],
+    ['这是**“重点”**文字', '“重点”'],
+    ['**模型（默认）**支持', '模型（默认）'],
+    ['这是**加粗。**后文', '加粗。'],
+  ])('renders strong emphasis in CJK prose: %s', (source, expected) => {
+    expect(doc(source).querySelector('strong')?.textContent).toBe(expected);
+  });
+  it('keeps emphasis escapes, code, nesting and streaming prefixes intact', () => {
+    expect(
+      doc('`**注意：**正文`\n\n```text\n**注意：**正文\n```').querySelector('strong'),
+    ).toBeNull();
+    expect(doc(String.raw`\*\*注意：\*\*正文`).querySelector('strong')).toBeNull();
+    expect(doc('**加粗 *斜体* 与 $x^2$：**正文').querySelector('strong em')?.textContent).toBe(
+      '斜体',
+    );
+    const source = '**注意：**正文';
+    for (let i = 0; i <= source.length; i++) expect(() => render(source.slice(0, i))).not.toThrow();
+    expect(doc('**未结束').querySelector('strong')).toBeNull();
+  });
   it('renders equations in tables and lists', () => {
     const d = doc('| value |\n| --- |\n| $x^2$ |\n\n- \\(x+y\\)');
     expect(d.querySelectorAll('.katex')).toHaveLength(2);

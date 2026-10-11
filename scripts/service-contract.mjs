@@ -169,7 +169,7 @@ test('hello advertises workbench capabilities', async () => {
   const info = await c.call('hello');
   assert.equal(info.protocolVersion, 1);
   assert.equal(info.agentCapabilities?.loadSession, true);
-  assert.equal(info.agentCapabilities?._meta?.['session-service']?.version, 3);
+  assert.equal(info.agentCapabilities?._meta?.['session-service']?.version, 4);
   assert.equal(info.agentCapabilities?._meta?.['session-service']?.authoritative, true);
 });
 

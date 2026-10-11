@@ -105,6 +105,10 @@ pub enum ServiceCommand {
         harness: Harness,
     },
     List,
+    TitleSettings {},
+    SetTitleModel {
+        model: String,
+    },
     Create {
         #[serde(default)]
         #[ts(as = "Option<Harness>", optional)]
@@ -115,6 +119,27 @@ pub enum ServiceCommand {
     State {
         #[serde(deserialize_with = "session_text")]
         session_id: String,
+    },
+    HistoryPage {
+        #[serde(deserialize_with = "session_text")]
+        session_id: String,
+        #[serde(deserialize_with = "entry_text")]
+        before_id: String,
+    },
+    UndoTurn {
+        #[serde(deserialize_with = "session_text")]
+        session_id: String,
+        #[serde(deserialize_with = "entry_text")]
+        entry_id: String,
+        #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
+        check_only: bool,
+    },
+    TurnDiff {
+        #[serde(deserialize_with = "session_text")]
+        session_id: String,
+        #[serde(deserialize_with = "entry_text")]
+        entry_id: String,
     },
     Cancel {
         #[serde(deserialize_with = "session_text")]
@@ -199,8 +224,13 @@ pub fn service_command(method: &str, params: &Value) -> Result<ServiceCommand, S
         "events.next",
         "events.ack",
         "hello",
+        "titleSettings",
+        "setTitleModel",
         "create",
         "state",
+        "historyPage",
+        "undoTurn",
+        "turnDiff",
         "cancel",
         "remove",
         "permission",
@@ -280,6 +310,11 @@ pub fn durable_command(command: &ServiceCommand) -> bool {
     matches!(
         command,
         ServiceCommand::Create { .. }
+            | ServiceCommand::SetTitleModel { .. }
+            | ServiceCommand::UndoTurn {
+                check_only: false,
+                ..
+            }
             | ServiceCommand::Prompt { .. }
             | ServiceCommand::Request {
                 request: AgentRequest::Fork { .. }

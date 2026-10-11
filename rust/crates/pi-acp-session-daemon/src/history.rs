@@ -1,5 +1,7 @@
 //! Daemon-owned history. Transactions and runtime ownership are in-process;
 //! the service singleton lock excludes other writers. Snapshots are immutable revisions.
+mod diff_content;
+mod recovery;
 use crate::types::Snapshot;
 use pi_acp_core::atomic::write_atomic_json;
 use pi_acp_core::canonical::sha256_hex;
@@ -112,10 +114,12 @@ impl SharedHistoryStore {
             .mode(0o700)
             .create(&self.conversations)
             .map_err(|e| e.to_string())?;
-        write_atomic_json(&self.snapshot_file(storage_key), snapshot, true)
+        let mut compact = snapshot.clone();
+        self.compact_entries(&mut compact.entries).await?;
+        write_atomic_json(&self.snapshot_file(storage_key), &compact, true)
             .await
             .map_err(|e| e.to_string())?;
-        let mut stub = snapshot.clone();
+        let mut stub = compact;
         stub.entries = Vec::new();
         stub.native_forks = None;
         stub.usage_records.clear();
@@ -138,7 +142,10 @@ impl SharedHistoryStore {
             return Err(SNAPSHOT_MISMATCH.into());
         }
         validate_snapshot_value(&data)?;
-        serde_json::from_value(data).map_err(|_| FORMAT_UNSUPPORTED.into())
+        let mut snapshot: Snapshot =
+            serde_json::from_value(data).map_err(|_| FORMAT_UNSUPPORTED.to_string())?;
+        self.compact_entries(&mut snapshot.entries).await?;
+        Ok(snapshot)
     }
 
     async fn raw_remove(&self, storage_key: &str) {

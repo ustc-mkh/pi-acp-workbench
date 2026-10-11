@@ -26,6 +26,12 @@ pub struct Entry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnDiff {
+    #[serde(
+        default,
+        rename = "contentRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub content_ref: Option<String>,
     pub status: String, // complete | partial | unavailable
     pub files: Vec<TurnFileDiff>,
     pub warnings: Vec<String>,

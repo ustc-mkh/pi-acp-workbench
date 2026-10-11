@@ -28,7 +28,12 @@ export interface ServiceResponses {
   hello: acp.InitializeResponse;
   list: Snapshot[];
   create: Snapshot;
+  titleSettings: { model: string };
+  setTitleModel: { model: string };
   state: ServiceState;
+  undoTurn: boolean;
+  turnDiff: import('./turn-diff').TurnDiff;
+  historyPage: { entries: Entry[]; remaining: number };
   cancel: boolean;
   remove: void;
   permission: boolean;

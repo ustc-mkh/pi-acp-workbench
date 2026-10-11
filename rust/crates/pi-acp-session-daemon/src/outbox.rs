@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// (session_id, session_number, entries.clone(), permissions.len()) — polled by
+/// (session_id, session_number, entries.clone(), permissions.len(), title) — polled by
 /// capture(); service supplies a Weak<Mutex<Runtime>>-backed accessor so the
 /// publication never owns state.
 pub type StateAccessor =
-    Arc<dyn Fn() -> Option<(String, Option<u64>, Vec<Entry>, usize)> + Send + Sync>;
+    Arc<dyn Fn() -> Option<(String, Option<u64>, Vec<Entry>, usize, Option<String>)> + Send + Sync>;
 
 pub use pi_acp_core::turn_event::TurnEvent;
 
@@ -183,18 +183,22 @@ impl TurnPublication {
     }
 
     fn init_capture(shared: &Shared) {
-        let Some((session_id, session_number, entries, _)) = (shared.accessor)() else {
+        let Some((session_id, session_number, entries, _, title)) = (shared.accessor)() else {
             return;
         };
         let mut s = shared.state.lock_unpoisoned();
         s.needs_init = false;
         s.event.session_id = session_id;
         s.event.session_number = session_number;
-        // title: first user entry's text sliced to 70 UTF-16 units, or 'Pi 任务'.
+        // Prefer the daemon's durable semantic title; retain legacy fallback.
         let first = entries.iter().find(|e| e.role == "user");
-        s.event.title = first
-            .and_then(|e| e.text.as_deref())
-            .map(|t| utf16_head(t, 70))
+        s.event.title = title
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                first
+                    .and_then(|e| e.text.as_deref())
+                    .map(|t| utf16_head(t, 70))
+            })
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "Pi 任务".into());
         if shared.source_desktop {
@@ -282,8 +286,11 @@ impl TurnPublication {
     }
 
     fn capture_shared(shared: &Shared) {
-        let (_, _, entries, permissions) = (shared.accessor)().unwrap_or_default();
+        let (_, _, entries, permissions, title) = (shared.accessor)().unwrap_or_default();
         let mut s = shared.state.lock_unpoisoned();
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            s.event.title = title;
+        }
         s.event.text = entries
             .iter()
             .skip(shared.start)
@@ -411,6 +418,7 @@ mod tests {
                 Some(7),
                 current.lock_unpoisoned().clone(),
                 0,
+                Some("简短标题".into()),
             ))
         });
         let (report, errors) = report_sink();
@@ -515,6 +523,7 @@ mod tests {
                 Some(7u64),
                 entries.clone(),
                 permissions,
+                None,
             ))
         })
     }

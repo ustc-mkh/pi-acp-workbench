@@ -46,7 +46,22 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
   readOutputImage: { id: text, url: text, harness, sessionId: optional(text) },
   attachmentError: { harness: optional(harness), sessionId: optional(text), error: text },
   switchHarness: { harness },
+  setTitleModel: { model: text },
+  resetProviderModels: { id: text, harness, sessionId: optional(text), provider: text },
   setPrice: { model: text, price: optional(price) },
+  setModelSettings: {
+    id: text,
+    harness,
+    sessionId: optional(text),
+    model: text,
+    values: (v) =>
+      v === null ||
+      (object(v) &&
+        price(v.price) &&
+        optional(
+          (n) => typeof n === 'number' && Number.isSafeInteger(n) && n > 0 && n <= 100000000,
+        )(v.contextWindow)),
+  },
   send: { text: (v) => typeof v === 'string' && v.length <= 500000 },
   dismissError: { error: text },
   permission: { id: text, optionId: optional(text) },
@@ -69,6 +84,8 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
   removeAttachment: { id: text },
   deleteHistory: { id: text },
   branchMessage: { id: text, sessionId: text },
+  undoTurn: { id: text, sessionId: text },
+  loadEarlier: { sessionId: text },
   diff: { id: text, index: (v) => typeof v === 'number' && Number.isInteger(v) && v >= -1 },
   open: { url: text, line: optional((v) => number(v) && Number.isInteger(v)) },
 };

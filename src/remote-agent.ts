@@ -63,8 +63,8 @@ export class RemoteAgent implements Agent {
   }
   async initialize() {
     const info = await this.client.call<acp.InitializeResponse>('hello', { harness: this.harness });
-    if ((info.agentCapabilities?._meta?.['session-service'] as { version?: number })?.version !== 3)
-      throw new Error('需要支持统一 harness 的 v3 会话服务，请升级 daemon。');
+    if ((info.agentCapabilities?._meta?.['session-service'] as { version?: number })?.version !== 4)
+      throw new Error('需要支持分页历史与服务端撤回的 v4 会话服务，请升级 daemon。');
     return (this.info = info);
   }
   async sync() {

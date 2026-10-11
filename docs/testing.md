@@ -90,7 +90,7 @@ CHROME_PATH=/absolute/path/to/chromium npm run test:browser
 
 涉及 VS Code API、激活或编辑器上下文时，用仓库的 F5「Run Pi ACP Extension」启动独立 Extension Development Host，连接配置为 mock ACP worker 的会话 daemon，检查激活、预览、显式新建、选区附件、总 Diff 与链接打开。配置与 F5 步骤见 [贡献指南](../CONTRIBUTING.md)。
 
-现有 `test/host.cjs` 仍使用已移除的插件 command / args 设置和宿主直启 ACP 路径，尚未适配 v3 socket 服务；不能将它作为当前自动验收入口。宿主检查采用上述实际调试路径，当前 verify 不包含它。
+现有 `test/host.cjs` 仍使用已移除的插件 command / args 设置和宿主直启 ACP 路径，尚未适配当前 v4 socket 服务；不能将它作为当前自动验收入口。宿主检查采用上述实际调试路径，当前 verify 不包含它。
 
 ## 内存与长时间负载
 
@@ -114,7 +114,7 @@ Pi Fast mode 修改可执行 `npm run test:pi-fast`：需要 PATH 中已安装 P
 1. 执行 verify、format:check；涉及上游适配器、宿主或服务包时执行对应按需检查。
 2. 同步 package.json.version、package-lock.json 的根版本和 `rust/crates/pi-acp-session-daemon/src/agent.rs` 中 ACP clientInfo.version，更新 CHANGELOG；VSIX 文件名与服务 manifest 已从包版本生成。
 3. 执行 `npm run package`。VSCE prepublish 会类型检查并构建，输出父目录 `pi-acp-workbench-<version>.vsix`；检查适配器、Webview / 字体、许可证和 README，排除 source map、测试、node_modules、服务二进制与私人配置。
-4. 在独立 VS Code profile 安装 VSIX 验证；服务包同时按 [发布指南](service-release.md) 重新构建、检查和打包，插件与 v3 daemon 配套更新。
+4. 在独立 VS Code profile 安装 VSIX 验证；服务包同时按 [发布指南](service-release.md) 重新构建、检查和打包，插件与 v4 daemon 配套更新。
 5. 先推送版本提交并确认 main 的 CI 通过，再创建与包版本一致的 vX.Y.Z 标签并推送。标签 CI 在审计、完整回归、浏览器和 musl 生产检查通过后打包 VSIX，核对版本、源码提交、包内容及内外摘要；先上传草稿 Release，下载所有附件复核 SHA-256，再正式发布并设为 latest。普通贡献者提交 PR 即可。
 
 发布流程见 `.github/workflows/ci.yml` 的 release job 与 `scripts/prepare-release.mjs`。发布写权限只授予该 job；分支和 PR 不发布。若上传或下载校验失败，保留草稿供排查，不发布不完整附件；修复前不要复用或移动已发布标签。

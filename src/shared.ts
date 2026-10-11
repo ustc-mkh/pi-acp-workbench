@@ -37,6 +37,8 @@ export interface ContextUsage {
   size: number;
 }
 export interface Snapshot {
+  /** Number of earlier transcript entries available through historyPage. */
+  historyBefore?: number;
   /** Live list metadata only; absent in persisted snapshots and older daemons. */
   busy?: boolean;
   commands?: acp.AvailableCommand[];
@@ -58,6 +60,11 @@ export interface Snapshot {
   modes?: acp.SessionModeState;
 }
 export interface ChatState {
+  sessionTitle?: string;
+  titleModel?: string;
+  providerSettingsResult?: { id: string; provider: string; models: string[]; error?: string };
+  modelSettingsResult?: { id: string; model: string; error?: string };
+  historyBefore?: number;
   status: 'disconnected' | 'connecting' | 'ready' | 'busy';
   harness?: HarnessId;
   connectionAttempted?: boolean;
@@ -111,7 +118,23 @@ export type UiMessage =
   | { type: 'attachmentError'; harness?: HarnessId; sessionId?: string; error: string }
   | { type: 'readOutputImage'; id: string; url: string; harness: HarnessId; sessionId?: string }
   | { type: 'switchHarness'; harness: HarnessId }
+  | { type: 'setTitleModel'; model: string }
+  | {
+      type: 'resetProviderModels';
+      id: string;
+      harness: HarnessId;
+      sessionId?: string;
+      provider: string;
+    }
   | { type: 'setPrice'; model: string; price?: Price }
+  | {
+      type: 'setModelSettings';
+      id: string;
+      harness: HarnessId;
+      sessionId?: string;
+      model: string;
+      values: { price: Price; contextWindow?: number } | null;
+    }
   | { type: 'send'; text: string }
   | { type: 'dismissError'; error: string }
   | { type: 'permission'; id: string; optionId?: string }
@@ -128,5 +151,7 @@ export type UiMessage =
     }
   | { type: 'resume' | 'removeAttachment' | 'deleteHistory'; id: string }
   | { type: 'branchMessage'; id: string; sessionId: string }
+  | { type: 'loadEarlier'; sessionId: string }
+  | { type: 'undoTurn'; id: string; sessionId: string }
   | { type: 'diff'; id: string; index: number }
   | { type: 'open'; url: string; line?: number };

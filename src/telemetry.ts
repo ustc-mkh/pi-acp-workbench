@@ -25,6 +25,7 @@ export interface Statistics {
   records: UsageRecord[];
   prices: Record<string, Price>;
   titles: Record<string, string>;
+  sessionNumbers?: Record<string, number>;
   available: boolean;
   note?: string;
 }
@@ -101,6 +102,12 @@ export function dayKey(timestamp: number) {
   const d = new Date(timestamp);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
+export function timeKey(timestamp: number, unit: 'day' | 'week' | 'month') {
+  const date = new Date(timestamp);
+  if (unit === 'month') return dayKey(timestamp).slice(0, 7);
+  if (unit === 'week') date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return dayKey(date.getTime());
+}
 export interface UsageGroup extends TokenUsage {
   key: string;
   calls: number;
@@ -114,11 +121,12 @@ export interface UsageGroup extends TokenUsage {
 export function groupUsage(
   records: UsageRecord[],
   prices: Record<string, Price>,
-  by: 'model' | 'day' | 'session',
+  by: 'model' | 'day' | 'week' | 'month' | 'session',
 ): UsageGroup[] {
   const groups = new Map<string, UsageGroup>();
   for (const r of records) {
-    const key = by === 'model' ? r.model : by === 'day' ? dayKey(r.timestamp) : r.sessionId;
+    const key =
+      by === 'model' ? r.model : by === 'session' ? r.sessionId : timeKey(r.timestamp, by);
     const g = groups.get(key) || {
       key,
       calls: 0,
@@ -146,6 +154,8 @@ export function groupUsage(
     groups.set(key, g);
   }
   return [...groups.values()].sort((a, b) =>
-    by === 'day' ? b.key.localeCompare(a.key) : b.totalInput + b.output - a.totalInput - a.output,
+    ['day', 'week', 'month'].includes(by)
+      ? b.key.localeCompare(a.key)
+      : b.totalInput + b.output - a.totalInput - a.output,
   );
 }

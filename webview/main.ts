@@ -1,17 +1,18 @@
-import { ModelsPage, visibleModelSelector } from './models';
+import { visibleModelSelector } from './models';
 import { createRenderer } from './markdown';
 import { sessionSelectors, createSessionSelector } from './selectors';
 import { contextUsage } from './usage';
 import { installTooltips } from './tooltips';
 import { HistoryList } from './history';
 import { renderDiagrams } from './diagrams';
-import { PricesPage } from './prices';
+import { ModelSettingsPage } from './prices';
 import { installImagePaste, imagePreview } from './image-paste';
 import { StatisticsPage } from './statistics';
 import { createMessageRenderer } from './messages';
+import { historyPaging } from './history-paging';
 import { OutputImages } from './output-images';
 import type { ChatState, UiMessage } from '../src/shared';
-import { applyStatePatch } from '../src/state-channel';
+import { StateInbox } from './state-inbox';
 import { sessionLabel } from '../src/session-numbers';
 import { HARNESSES, isHarnessId, type HarnessId } from '../src/harness';
 import { TranscriptView } from './transcript';
@@ -57,7 +58,7 @@ app.innerHTML = /* HTML */ `<header>
       >
         ◷</button
       ><button id="export" data-tooltip="导出 Markdown" aria-label="导出 Markdown">↧</button
-      ><button id="models-toggle" data-tooltip="选择显示的模型" aria-label="管理模型">
+      ><button id="models-toggle" data-tooltip="模型设置" aria-label="模型设置">
         <svg viewBox="0 0 20 20" aria-hidden="true">
           <path d="M3 4h14M3 10h14M3 16h14M7 2v4M13 8v4M7 14v4" />
         </svg></button
@@ -100,12 +101,7 @@ app.innerHTML = /* HTML */ `<header>
     </section>
     <div id="connection" hidden>
       <span class="status-dot"></span><span id="session-number" class="session-number" hidden></span
-      ><span id="status" role="status"></span
-      ><button id="release-session" hidden data-tooltip="断开当前界面；服务中的 Pi 任务仍可继续">
-        释放会话</button
-      ><button id="connect" hidden>重新连接</button>
-    </div>
-    <div class="transcript-tools">
+      ><span id="status" role="status"></span><button id="connect" hidden>重新连接</button>
       <button
         id="toggle-activity"
         aria-pressed="false"
@@ -210,8 +206,7 @@ app.innerHTML = /* HTML */ `<header>
     </footer>
   </div>
   <section id="statistics" hidden aria-label="用量统计"></section>
-  <section id="prices" hidden aria-label="模型价格设置"></section>
-  <section id="models" hidden aria-label="显示的模型"></section>`;
+  <section id="models" hidden aria-label="模型设置"></section>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 installTooltips();
 const input = el<HTMLTextAreaElement>('input');
@@ -224,7 +219,7 @@ installComposerResize(el('composer-resizer'), input, vscode.getState()?.composer
 );
 const send = (message: UiMessage) => vscode.postMessage(message);
 let state: ChatState | undefined;
-let stateRevision = 0;
+const stateInbox = new StateInbox();
 let followBottom = true;
 let sending = false;
 let pasting = false;
@@ -243,6 +238,7 @@ let activityExpanded = vscode.getState()?.activityExpanded || false;
 const outputImages = new OutputImages(send, () => {
   if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
 });
+const updateHistoryPaging = historyPaging(el('messages'), send);
 const transcriptView = new TranscriptView(
   el('messages'),
   createMessageRenderer(renderMarkdown, () => state?.sessionId, send, outputImages.hydrate),
@@ -308,7 +304,6 @@ el('send').onclick = submit;
 el('stop').onclick = () => send({ type: 'cancel' });
 el('start-session').onclick = () => send({ type: 'new' });
 el('connect').onclick = () => send({ type: 'connect' });
-el('release-session').onclick = () => send({ type: 'releaseSession' });
 el('refresh-history').onclick = () => send({ type: 'refreshHistory' });
 el('dismiss-error').onclick = () => {
   if (state?.error) send({ type: 'dismissError', error: state.error });
@@ -322,14 +317,12 @@ el('attach').onclick = () => send({ type: 'attach' });
 el('export').onclick = () => send({ type: 'export' });
 el('cancel-context').onclick = () => send({ type: 'cancelContext' });
 let statisticsOpen = false,
-  pricesOpen = false,
-  modelsOpen = false;
+  modelsOpen = false,
+  settingsFromStatistics = false;
 const showStatistics = (show: boolean) => {
   modelsOpen = false;
   el('models').hidden = true;
   statisticsOpen = show;
-  pricesOpen = false;
-  el('prices').hidden = true;
   el('statistics').hidden = !show;
   el('chat-page').hidden = show;
   el('statistics-toggle').setAttribute('aria-pressed', String(show));
@@ -341,35 +334,27 @@ const showStatistics = (show: boolean) => {
       renderDiagrams(el('messages'));
     });
 };
-const showPrices = (model?: string) => {
-  modelsOpen = false;
-  el('models').hidden = true;
-  statisticsOpen = true;
-  pricesOpen = true;
+const showModelSettings = (model?: string, fromStatistics = true) => {
+  settingsFromStatistics = fromStatistics;
+  modelsOpen = true;
+  statisticsOpen = fromStatistics;
   el('statistics').hidden = true;
-  el('prices').hidden = false;
+  el('models').hidden = false;
   el('chat-page').hidden = true;
-  pricesPage.update(state?.statistics);
-  pricesPage.focus(model);
-  send({ type: 'refreshStatistics' });
+  modelsPage.update(state);
+  modelsPage.focus(model, fromStatistics);
 };
 const statisticsPage = new StatisticsPage(
   el('statistics'),
   send,
   () => showStatistics(false),
-  showPrices,
+  showModelSettings,
 );
-const pricesPage = new PricesPage(el('prices'), send, () => showStatistics(true));
-const modelsPage = new ModelsPage(el('models'), send, () => showStatistics(false));
-el('models-toggle').onclick = () => {
-  showStatistics(false);
-  modelsOpen = true;
-  el('models').hidden = false;
-  el('chat-page').hidden = true;
-  modelsPage.update(state);
-  modelsPage.focus();
-};
-el('statistics-toggle').onclick = () => showStatistics(pricesOpen || !statisticsOpen);
+const modelsPage = new ModelSettingsPage(el('models'), send, () =>
+  showStatistics(settingsFromStatistics),
+);
+el('models-toggle').onclick = () => showModelSettings(undefined, false);
+el('statistics-toggle').onclick = () => showStatistics(modelsOpen || !statisticsOpen);
 el('demo').onclick = () => send({ type: 'preview' });
 el('clear-history').onclick = () => send({ type: 'clearHistory' });
 el('history').hidden = !vscode.getState()?.historyOpen;
@@ -467,9 +452,8 @@ function paint() {
     !!state.sessionId &&
     !!state.connectionAttempted &&
     !state.preview;
-  el('connection').hidden = !connecting && !reconnect && !state.preview && !state.sessionId;
-  el('release-session').hidden = !state.sessionId || !!state.readOnly || state.preview;
-  el<HTMLButtonElement>('release-session').disabled = busy || connecting;
+  el('connection').hidden =
+    !connecting && !reconnect && !state.preview && !state.sessionId && !state.entries.length;
   el('status').textContent = state.preview
     ? '渲染预览 · 离线'
     : state.readOnly
@@ -499,10 +483,13 @@ function paint() {
   updateSend();
   const messages = el('messages');
   const visible = state.entries.filter((e) => e.role !== 'thought' || state!.showThoughts);
+  updateHistoryPaging(state);
   transcriptView.update(visible, busy);
   el('toggle-activity').hidden = !visible.some(
     (entry) => entry.role === 'tool' || entry.role === 'thought',
   );
+  for (const undo of messages.querySelectorAll<HTMLButtonElement>('.undo-turn'))
+    undo.disabled = !!undo.dataset.undoUnavailable || busy || connecting || !!state.preview;
   for (const action of messages.querySelectorAll<HTMLButtonElement>('[data-context-action]')) {
     const nativePoint = !!state.nativeForks?.[action.dataset.entryId || ''];
     action.disabled =
@@ -525,8 +512,7 @@ function paint() {
   el('context-progress').textContent =
     state.contextOperation?.kind === 'fork' ? '正在创建原生分支…' : '';
   if (!statisticsOpen) renderDiagrams(messages);
-  if (statisticsOpen && !pricesOpen) statisticsPage.update(state.statistics);
-  if (pricesOpen) pricesPage.update(state.statistics);
+  if (statisticsOpen && !modelsOpen) statisticsPage.update(state.statistics);
   if (modelsOpen) modelsPage.update(state);
   const attachments = el('attachments');
   attachments.replaceChildren();
@@ -628,18 +614,14 @@ window.addEventListener('message', (event) => {
     updateSend();
     return;
   }
-  if (event.data.type === 'statePatch') {
-    if (!state || event.data.revision !== stateRevision + 1) {
-      send({ type: 'ready' });
-      return;
-    }
-    state = applyStatePatch(state, event.data);
-    stateRevision = event.data.revision;
-  } else if (event.data.type === 'state') {
-    if (state?.sessionId !== event.data.state?.sessionId) followBottom = true;
-    state = event.data.state;
-    stateRevision = event.data.revision || 0;
-  } else return;
+  if (event.data.type !== 'statePatch' && event.data.type !== 'state') return;
+  const received = stateInbox.receive(event.data);
+  if (received === 'resync') {
+    send({ type: 'ready' });
+    return;
+  }
+  if (received.switched) followBottom = true;
+  state = received.state;
   const nextHarness = state?.harness || 'pi';
   outputImages.setScope(nextHarness, state?.sessionId);
   if (nextHarness !== draftHarness) {

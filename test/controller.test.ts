@@ -466,11 +466,9 @@ it.each(['codex', 'claude'] as const)(
       expect(state.status).toBe('ready');
       expect(summary.role).toBe('diff');
       if (summary.role !== 'diff') throw new Error('Expected turn diff');
-      expect(summary.diff.files[0]).toMatchObject({
-        path: 'change.txt',
-        before: 'dirty before\n',
-        after: 'agent final\n',
-      });
+      expect(summary.diff.contentRef).toMatch(/^[a-f0-9]{64}$/);
+      expect(summary.diff.files[0]).toMatchObject({ path: 'change.txt' });
+      expect(summary.diff.files[0].before).toBeUndefined();
       await host.provider.perform({ type: 'diff', id: summary.id, index: -1 });
       const previews = [...host.provider.documents.previews.values()] as {
         documents: Map<string, string>;
@@ -1109,6 +1107,148 @@ it('explicit statistics refresh and restoring prices request a live Pi catalogue
       .at(-1).params.force,
   ).toBe(true);
   expect(wire().some((r) => r.method === 'session/prompt')).toBe(false);
+});
+it('saves and resets context and all four prices through one scoped model-settings request', async () => {
+  await host.provider.perform({ type: 'new' });
+  const sessionId = host.provider.snapshot().sessionId;
+  const context = vi
+    .spyOn(host.provider.turnCoordinator, 'onModelContext')
+    .mockResolvedValue(undefined);
+  const price = { input: 2, output: 8, cacheRead: 0, cacheWrite: 0 };
+  await host.provider.perform({
+    type: 'setModelSettings',
+    id: 'settings-save',
+    harness: 'pi',
+    sessionId,
+    model: 'p/m',
+    values: { price, contextWindow: 2000 },
+  });
+  expect(context).toHaveBeenLastCalledWith({
+    type: 'setModelContext',
+    harness: 'pi',
+    sessionId,
+    model: 'p/m',
+    contextWindow: 2000,
+  });
+  expect(host.stored.get('prices')).toMatchObject({ 'p/m': price });
+  expect(host.provider.snapshot().modelSettingsResult).toEqual({
+    id: 'settings-save',
+    model: 'p/m',
+  });
+  await host.provider.perform({
+    type: 'setModelSettings',
+    id: 'settings-reset',
+    harness: 'pi',
+    sessionId,
+    model: 'p/m',
+    values: null,
+  });
+  expect(context).toHaveBeenLastCalledWith({
+    type: 'setModelContext',
+    harness: 'pi',
+    sessionId,
+    model: 'p/m',
+    contextWindow: null,
+  });
+  expect(host.stored.get('prices')).toEqual({});
+  expect(host.provider.snapshot().modelSettingsResult).toEqual({
+    id: 'settings-reset',
+    model: 'p/m',
+  });
+  context.mockRestore();
+});
+it('resets only the chosen provider and reports partial completion', async () => {
+  await host.provider.perform({ type: 'new' });
+  const sessionId = host.provider.snapshot().sessionId;
+  host.provider.state.configs = [
+    {
+      id: 'model',
+      type: 'select',
+      name: 'Model',
+      category: 'model',
+      currentValue: 'p/m',
+      options: [
+        { value: 'p/m', name: 'M' },
+        { value: 'p/n', name: 'N' },
+        { value: 'q/m', name: 'Q' },
+      ],
+    },
+  ];
+  const price = { input: 2, output: 8, cacheRead: 0, cacheWrite: 0 };
+  for (const model of ['p/m', 'p/n', 'q/m']) await host.provider.telemetry.setPrice(model, price);
+  const context = vi
+    .spyOn(host.provider.turnCoordinator, 'onModelContext')
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error('second failed'));
+  const vscode = await import('vscode');
+  vi.mocked(vscode.window.showWarningMessage).mockResolvedValueOnce('全部恢复默认' as never);
+  await host.provider.perform({
+    type: 'resetProviderModels',
+    id: 'batch',
+    harness: 'pi',
+    sessionId,
+    provider: 'p',
+  });
+  expect(context).toHaveBeenCalledTimes(2);
+  expect(host.stored.get('prices')).toMatchObject({ 'p/n': price, 'q/m': price });
+  expect(host.stored.get('prices')).not.toHaveProperty('p/m');
+  expect(host.provider.snapshot().providerSettingsResult).toMatchObject({
+    id: 'batch',
+    provider: 'p',
+    models: ['p/m'],
+    error: expect.stringContaining('second failed'),
+  });
+  context.mockRestore();
+});
+it('stores a separate title model preference without starting a conversation turn', async () => {
+  await host.provider.perform({ type: 'new' });
+  await host.provider.perform({ type: 'setTitleModel', model: 'off' });
+  expect(host.provider.snapshot().titleModel).toBe('off');
+  expect(await host.provider.serviceClient.call('titleSettings')).toEqual({ model: 'off' });
+  await host.provider.perform({ type: 'setTitleModel', model: 'unknown/model' });
+  expect(host.provider.snapshot().titleModel).toBe('off');
+  expect(host.provider.snapshot().error).toContain('不在 Pi 目录');
+});
+it('keeps prices unchanged on context failure and acknowledges stale/busy settings requests', async () => {
+  await host.provider.perform({ type: 'new' });
+  const sessionId = host.provider.snapshot().sessionId;
+  const context = vi
+    .spyOn(host.provider.turnCoordinator, 'onModelContext')
+    .mockRejectedValue(new Error('context write failed'));
+  const request = {
+    type: 'setModelSettings',
+    id: 'settings-fail',
+    harness: 'pi',
+    sessionId,
+    model: 'p/m',
+    values: { price: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 2000 },
+  } as const;
+  const previous = structuredClone(host.stored.get('prices'));
+  await host.provider.perform(request);
+  expect(host.stored.get('prices')).toEqual(previous);
+  expect(host.provider.snapshot().modelSettingsResult).toMatchObject({
+    id: request.id,
+    error: expect.stringContaining('context write failed'),
+  });
+  context.mockClear();
+  await host.provider.perform({ ...request, id: 'stale-settings', sessionId: 'stale' });
+  expect(context).not.toHaveBeenCalled();
+  expect(host.provider.snapshot().modelSettingsResult).toMatchObject({
+    id: 'stale-settings',
+    error: expect.stringContaining('会话已切换'),
+  });
+  const gate = host.provider.lifecycle.acquire(
+    { type: 'new' },
+    { gated: true },
+    { status: 'ready', harness: 'pi', sessionId },
+  );
+  await host.provider.perform({ ...request, id: 'busy-settings' });
+  expect(host.provider.snapshot().modelSettingsResult).toMatchObject({
+    id: 'busy-settings',
+    error: expect.stringContaining('其他操作'),
+  });
+  if (gate) host.provider.lifecycle.release(gate, true);
+  context.mockRestore();
 });
 it('persists custom prices, rejects invalid numbers and restores defaults', async () => {
   await host.provider.perform({

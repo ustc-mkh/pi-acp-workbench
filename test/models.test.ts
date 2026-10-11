@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { expect, it } from 'vitest';
-import { ModelsPage, visibleModelSelector } from '../webview/models';
+import { visibleModelSelector } from '../webview/models';
+import { ModelSettingsPage as ModelsPage } from '../webview/prices';
 import { initialState } from '../src/state';
 it('filters model choices while preserving the current model', () => {
   const control = {
@@ -37,29 +38,33 @@ it('edits Pi context limits without changing model visibility', () => {
   ];
   page.update(state);
   page.focus();
-  expect(messages.at(-1)).toEqual({ type: 'refreshModelContexts', harness: 'pi', sessionId: 's' });
-  const context = root.querySelector<HTMLInputElement>('input[type=number]')!;
+  expect(messages.at(-1)).toEqual({ type: 'refreshStatistics' });
+  state.statistics = {
+    models: [],
+    records: [],
+    prices: { 'p/m': { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } },
+    titles: {},
+    available: true,
+  };
+  page.update(state);
+  const context = root.querySelector<HTMLInputElement>('.model-context-field input')!;
   expect(context.value).toBe('1000');
   context.value = '2000';
   [...root.querySelectorAll('button')].find((b) => b.textContent === '保存')!.click();
-  expect(messages.at(-1)).toEqual({
-    type: 'setModelContext',
+  expect(messages.at(-1)).toMatchObject({
+    type: 'setModelSettings',
     harness: 'pi',
     sessionId: 's',
     model: 'p/m',
-    contextWindow: 2000,
+    values: { contextWindow: 2000, price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } },
   });
+  state.modelSettingsResult = { id: (messages.at(-1) as { id: string }).id, model: 'p/m' };
+  page.update(state);
   [...root.querySelectorAll('button')].find((b) => b.textContent === '恢复默认')!.click();
-  expect(messages.at(-1)).toEqual({
-    type: 'setModelContext',
-    harness: 'pi',
-    sessionId: 's',
-    model: 'p/m',
-    contextWindow: null,
-  });
+  expect(messages.at(-1)).toMatchObject({ type: 'setModelSettings', values: null });
   state.status = 'busy';
   page.update(state);
-  expect(root.querySelector<HTMLInputElement>('input[type=number]')!.disabled).toBe(true);
+  expect(root.querySelector<HTMLInputElement>('.model-context-field input')!.disabled).toBe(true);
 });
 it('searches the complete catalogue and sends harness-scoped selections', () => {
   const root = document.createElement('section'),

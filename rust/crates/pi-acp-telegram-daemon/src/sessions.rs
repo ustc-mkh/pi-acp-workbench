@@ -235,11 +235,42 @@ impl Sessions {
 
     pub async fn history(&self, id: &str) -> Result<Vec<Value>, WireError> {
         let state = self.state(id).await?;
-        Ok(state
+        let mut entries = state
             .pointer("/snapshot/entries")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        let mut remaining = state
+            .pointer("/snapshot/historyBefore")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut pages = Vec::new();
+        while remaining > 0 {
+            let before = entries
+                .first()
+                .and_then(|e| e["id"].as_str())
+                .ok_or(WireError::Protocol("history anchor"))?;
+            let page = self
+                .client
+                .call("historyPage", json!({"sessionId":id,"beforeId":before}))
+                .await?;
+            let next = page["remaining"]
+                .as_u64()
+                .ok_or(WireError::Protocol("history cursor"))?;
+            if next >= remaining {
+                return Err(WireError::Protocol("history cursor did not advance"));
+            }
+            remaining = next;
+            pages.push(entries);
+            entries = page["entries"]
+                .as_array()
+                .cloned()
+                .ok_or(WireError::Protocol("history page"))?;
+        }
+        for page in pages.into_iter().rev() {
+            entries.extend(page);
+        }
+        Ok(entries)
     }
 
     /// `{busy, permissions, text, error}` exactly like TelegramSessions.status().

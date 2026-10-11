@@ -83,6 +83,7 @@ export class SessionCoordinator {
           sessionId: snapshot.id,
           sessionNumber: snapshot.sessionNumber,
           entries: structuredClone(snapshot.entries),
+          historyBefore: snapshot.historyBefore,
           configs: snapshot.configs,
           modes: snapshot.modes,
           contextComplete: snapshot.contextComplete,
@@ -191,6 +192,7 @@ export class SessionCoordinator {
         this.host.state.configs = snapshot.configs;
         this.host.state.modes = snapshot.modes;
         this.host.state.entries = snapshot.entries;
+        this.host.state.historyBefore = snapshot.historyBefore;
         this.host.state.sessionId = snapshot.id;
         this.host.state.sessionNumber = snapshot.sessionNumber;
         this.host.state.contextComplete = snapshot.contextComplete;
@@ -206,6 +208,7 @@ export class SessionCoordinator {
       sessionId: snapshot.id,
       sessionNumber: snapshot.sessionNumber,
       entries: structuredClone(snapshot.entries),
+      historyBefore: snapshot.historyBefore,
       configs: snapshot.configs,
       modes: snapshot.modes,
       nativeForks: snapshot.nativeForks,
@@ -415,6 +418,7 @@ export class SessionCoordinator {
       title: '',
       updated: Date.now(),
       entries: this.host.state.entries,
+      historyBefore: this.host.state.historyBefore,
       contextComplete: this.host.state.contextComplete,
       nativeForks: this.host.state.nativeForks,
       configs: this.host.state.configs,

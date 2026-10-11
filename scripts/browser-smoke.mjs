@@ -189,6 +189,9 @@ try {
   );
   assert.equal(await page.locator('.diagram-error').count(), 0);
   assert((await page.locator('.katex').count()) >= 7);
+  const bold = page.locator('.markdown strong').filter({ hasText: '注意：' });
+  assert.equal(await bold.count(), 1);
+  assert(Number(await bold.evaluate((node) => getComputedStyle(node).fontWeight)) >= 700);
   assert.equal(await page.locator('.math-fallback').count(), 0);
   await page.evaluate(() => {
     document.querySelector('#transcript').scrollTop = 0;
@@ -359,6 +362,9 @@ try {
   assert(
     (await page.evaluate(() => window.messages)).some((m) => m.type === 'diff' && m.index === 0),
   );
+  state.sessionId = 's1';
+  state.preview = false;
+  state.status = 'ready';
   state.entries.push({ id: 'native-answer', role: 'assistant', text: '可原生回溯的回答' });
   state.entries.push({
     id: 'turn-diff',
@@ -383,6 +389,18 @@ try {
   await emit(state);
   assert.equal(await page.locator('#messages > .turn-diff').count(), 1);
   assert.equal(await page.locator('.activity-body .turn-diff').count(), 0);
+  await page.getByRole('button', { name: '撤回本轮修改', exact: true }).click();
+  assert(
+    (await page.evaluate(() => window.messages)).some(
+      (m) => m.type === 'undoTurn' && m.id === 'turn-diff' && m.sessionId === 's1',
+    ),
+  );
+  state.status = 'busy';
+  await emit(state);
+  assert(await page.locator('.undo-turn').isDisabled());
+  state.status = 'ready';
+  await emit(state);
+  assert(await page.locator('.undo-turn').isEnabled());
   await page.getByText('查看总 Diff', { exact: true }).click();
   assert(
     (await page.evaluate(() => window.messages)).some(
@@ -419,6 +437,12 @@ try {
     '#002',
   ]);
   assert.equal(await page.locator('#session-number').textContent(), '#001');
+  assert.equal(await page.locator('#release-session').count(), 0);
+  const sessionBox = await page.locator('#session-number').boundingBox();
+  const activityBox = await page.locator('#connection #toggle-activity').boundingBox();
+  assert(
+    Math.abs(sessionBox.y + sessionBox.height / 2 - activityBox.y - activityBox.height / 2) < 1,
+  );
   state.history.push(
     ...Array.from({ length: 23 }, (_, i) => ({
       id: `older${i}`,
@@ -454,7 +478,25 @@ try {
     await page.locator('.history-controls').evaluate((n) => getComputedStyle(n).gap),
     '12px',
   );
+  const controlSpacing = await page.locator('.history-controls').evaluate((n) => ({
+    top: getComputedStyle(n).marginTop,
+    height: n.getBoundingClientRect().height,
+    bottom: getComputedStyle(document.getElementById('history')).paddingBottom,
+  }));
+  assert.deepEqual(controlSpacing, { top: '-4px', height: 20, bottom: '2px' });
   const historyViewport = page.viewportSize();
+  await page.setViewportSize({ width: 400, height: 1000 });
+  await page.locator('#history-items').evaluate((n) => {
+    n.scrollTop = 0;
+  });
+  const expandedLayout = await page.locator('#history-items').evaluate((n) => ({
+    height: n.clientHeight,
+    lastBottom: n.lastElementChild.getBoundingClientRect().bottom,
+    bottom: n.getBoundingClientRect().bottom,
+  }));
+  assert.equal(expandedLayout.height, 448);
+  assert(expandedLayout.lastBottom <= expandedLayout.bottom + 1, JSON.stringify(expandedLayout));
+  await page.screenshot({ path: resolve(artifacts, 'preview-history-compact.png') });
   const historyInputHeight = await page.locator('#input').evaluate((n) => n.style.height);
   for (const [height, composerHeight] of [
     [480, 180],
@@ -694,6 +736,7 @@ try {
   await page.locator('#models-toggle').click();
   assert(await page.locator('#models').isVisible());
   assert.equal(await page.locator('#models input[type="checkbox"]').count(), 3);
+  assert.equal(await page.locator('#models .provider-group[open]').count(), 0);
   await page.locator('#models input[type="search"]').fill('Hidden');
   assert.equal(await page.locator('#models .model-row:visible').count(), 1);
   await page.locator('#models input[value="hidden"]').check();
@@ -703,7 +746,85 @@ try {
     ),
   );
   await page.screenshot({ path: resolve(artifacts, 'preview-models.png') });
-  await page.locator('#models button').first().click();
+  await page.locator('#models').getByRole('button', { name: '返回对话', exact: true }).click();
+  // Model links open the compact settings page; time costs use columns.
+  state.harness = 'pi';
+  state.modelContexts = { m: 1000 };
+  state.statistics = {
+    available: true,
+    records: [
+      {
+        id: 'chart',
+        sessionId: 'example',
+        model: 'm',
+        timestamp: Date.now(),
+        kind: 'inference',
+        input: 1000,
+        output: 250,
+        cacheRead: 0,
+        cacheWrite: 0,
+      },
+    ],
+    titles: { example: '改进模型设置' },
+    sessionNumbers: { example: 14 },
+    models: [{ id: 'm', name: 'Current Model' }],
+    prices: { m: { input: 2, cacheRead: 0, cacheWrite: 0, output: 8 } },
+  };
+  await emit(state);
+  await page.locator('#statistics-toggle').click();
+  assert.equal(await page.getByRole('button', { name: '模型设置 →', exact: true }).count(), 0);
+  await page.getByRole('tab', { name: '按时间', exact: true }).click();
+  assert.equal(await page.locator('.usage-bar').count(), 1);
+  await page.getByRole('button', { name: '按周', exact: true }).click();
+  await page.getByRole('button', { name: '按月', exact: true }).click();
+  await page.screenshot({ path: resolve(artifacts, 'preview-usage-chart.png') });
+  await page.getByRole('tab', { name: '按会话', exact: true }).click();
+  assert(
+    (await page.locator('.stats-table-wrap tbody').textContent()).includes('#14 改进模型设置'),
+  );
+  assert.equal(await page.locator('.stats-table-wrap tbody [data-tooltip]').count(), 0);
+  await page.getByRole('tab', { name: '按模型', exact: true }).click();
+  await page.locator('.stats-model-link').click();
+  assert(await page.locator('#models').isVisible());
+  assert.equal(await page.locator('#prices').count(), 0);
+  const settingsCard = page.locator('.model-price-card[aria-label="m"]');
+  assert.equal(await settingsCard.locator('input[type=number]').count(), 5);
+  assert(!(await settingsCard.textContent()).includes('默认单价'));
+  await settingsCard.locator('.model-context-field input').fill('2000');
+  await settingsCard.getByRole('button', { name: '保存', exact: true }).click();
+  const savedSettings = (await page.evaluate(() => window.messages)).findLast(
+    (m) => m.type === 'setModelSettings',
+  );
+  assert.deepEqual(savedSettings.values, {
+    price: { input: 2, cacheRead: 0, cacheWrite: 0, output: 8 },
+    contextWindow: 2000,
+  });
+  state.modelContexts = { m: 2000 };
+  state.modelSettingsResult = { id: savedSettings.id, model: 'm' };
+  await emit(state);
+  await settingsCard.getByRole('button', { name: '恢复默认', exact: true }).click();
+  const resetSettings = (await page.evaluate(() => window.messages)).findLast(
+    (m) => m.type === 'setModelSettings',
+  );
+  assert.equal(resetSettings.values, null);
+  state.modelSettingsResult = { id: resetSettings.id, model: 'm' };
+  state.modelContexts = { m: 1000 };
+  await emit(state);
+  assert.equal(await settingsCard.locator('.model-context-field input').inputValue(), '1000');
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('#models').evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await page.screenshot({ path: resolve(artifacts, 'preview-model-settings.png') });
+  await page.locator('#models').evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const backPosition = await page.locator('#models .floating-page-back').boundingBox();
+  assert(backPosition && backPosition.y >= 0 && backPosition.y < 100);
+  await page.locator('#models').getByRole('button', { name: '返回统计', exact: true }).click();
+  await page.locator('#statistics-toggle').click();
+  state.harness = 'codex';
+  await emit(state);
   state.entries = state.entries.map((entry) =>
     entry.role === 'tool'
       ? { ...entry, terminal: { id: 'terminal', output: 'line\n'.repeat(200) } }

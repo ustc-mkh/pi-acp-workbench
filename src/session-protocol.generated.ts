@@ -15,8 +15,13 @@ export type ServiceCommand =
   | { method: 'events.ack'; params: { id: string; token: string } }
   | { method: 'hello'; params: { harness?: Harness } }
   | { method: 'list' }
+  | { method: 'titleSettings'; params: Record<string, never> }
+  | { method: 'setTitleModel'; params: { model: string } }
   | { method: 'create'; params: { harness?: Harness; cwd: string } }
   | { method: 'state'; params: { sessionId: string } }
+  | { method: 'historyPage'; params: { sessionId: string; beforeId: string } }
+  | { method: 'undoTurn'; params: { sessionId: string; entryId: string; checkOnly?: boolean } }
+  | { method: 'turnDiff'; params: { sessionId: string; entryId: string } }
   | { method: 'cancel'; params: { sessionId: string } }
   | { method: 'remove'; params: { sessionId: string } }
   | { method: 'permission'; params: { sessionId: string; permissionId: string; optionId?: string } }

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 interface OutboxRecord {
   id: string;
   sessionId: string;
+  title: string;
+  sessionNumber?: number;
   inputText?: string;
   text: string;
   status: string;

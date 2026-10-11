@@ -1,5 +1,5 @@
 import type { Entry, UiMessage } from '../src/shared';
-import { turnDiffTitle } from '../src/turn-diff';
+import { turnDiffTitle, turnUndoUnavailable } from '../src/turn-diff';
 import { contentImage, hydrateInlineImages } from './output-images';
 import { messageActions } from './message-actions';
 
@@ -13,6 +13,7 @@ const button = (text: string, action: () => void, className?: string) => {
 };
 function turnDiffNode(
   entry: Extract<Entry, { role: 'diff' }>,
+  sessionId: string | undefined,
   send: (message: UiMessage) => void,
 ): HTMLElement {
   const node = document.createElement('article');
@@ -22,10 +23,27 @@ function turnDiffNode(
   const title = document.createElement('strong');
   title.textContent = turnDiffTitle(entry.diff);
   header.append(title);
+  const actions = document.createElement('div');
+  actions.className = 'turn-diff-actions';
   if (entry.diff.files.length)
-    header.append(
+    actions.append(
       button('查看总 Diff', () => send({ type: 'diff', id: entry.id, index: -1 }), 'diff-link'),
     );
+  if (entry.diff.files.length) {
+    const undo = button(
+      '撤回本轮修改',
+      () => {
+        if (sessionId) send({ type: 'undoTurn', id: entry.id, sessionId });
+      },
+      'diff-link undo-turn',
+    );
+    const reason = turnUndoUnavailable(entry.diff) || (!sessionId ? '预览不可撤回。' : undefined);
+    undo.disabled = !!reason;
+    undo.dataset.undoUnavailable = reason || '';
+    undo.dataset.tooltip = reason || '确认后恢复本轮前的文件内容；保留聊天记录';
+    actions.append(undo);
+  }
+  if (actions.childElementCount) header.append(actions);
   node.append(header);
   const files = document.createElement('details');
   files.className = 'turn-diff-files';
@@ -54,7 +72,10 @@ function turnDiffNode(
     details.addEventListener('toggle', () => {
       if (!details.open || rendered) return;
       rendered = true;
-      if (file.before !== undefined && file.after !== undefined)
+      if (
+        !file.omitted &&
+        (entry.diff.contentRef || (file.before !== undefined && file.after !== undefined))
+      )
         details.append(
           button('在编辑器中对比', () => send({ type: 'diff', id: entry.id, index }), 'diff-link'),
         );
@@ -116,7 +137,7 @@ export function createMessageRenderer(
   hydrateImages: (node: HTMLElement) => void = hydrateInlineImages,
 ) {
   return (entry: Entry): HTMLElement => {
-    if (entry.role === 'diff') return turnDiffNode(entry, send);
+    if (entry.role === 'diff') return turnDiffNode(entry, sessionId(), send);
     const node = document.createElement(
       entry.role === 'tool' || entry.role === 'thought' ? 'details' : 'article',
     );
@@ -135,88 +156,98 @@ export function createMessageRenderer(
       badge.textContent = labels[entry.tool.status || 'pending'];
       summary.append(badge);
       node.append(summary);
-      const body = document.createElement('div');
-      body.className = 'tool-body';
-      for (const location of entry.tool.locations || [])
-        body.append(
-          button(
-            `${location.path}${location.line ? ':' + location.line : ''}`,
-            () => send({ type: 'open', url: location.path, line: location.line ?? undefined }),
-            'file-link',
-          ),
-        );
-      const content = [...(entry.tool.content || [])];
-      if (
-        entry.terminal &&
-        !content.some((c) => c.type === 'terminal' && c.terminalId === entry.terminal!.id)
-      )
-        content.push({ type: 'terminal', terminalId: entry.terminal.id });
-      content.forEach((content, index) => {
-        if (content.type === 'diff') {
+      let rendered = false;
+      const renderBody = () => {
+        if (rendered) return;
+        rendered = true;
+        const body = document.createElement('div');
+        body.className = 'tool-body';
+        for (const location of entry.tool.locations || [])
           body.append(
             button(
-              `查看修改 · ${content.path}`,
-              () => send({ type: 'diff', id: entry.id, index }),
-              'diff-link',
+              `${location.path}${location.line ? ':' + location.line : ''}`,
+              () => send({ type: 'open', url: location.path, line: location.line ?? undefined }),
+              'file-link',
             ),
           );
-          const before = document.createElement('pre'),
-            after = document.createElement('pre');
-          before.className = 'diff-before';
-          after.className = 'diff-after';
-          before.textContent = (content.oldText || '').slice(0, 4000);
-          after.textContent = content.newText.slice(0, 4000);
-          body.append(before, after);
-        } else if (content.type === 'content') {
-          const image = contentImage(content.content);
-          if (image) {
-            body.append(image);
-            return;
+        const content = [...(entry.tool.content || [])];
+        if (
+          entry.terminal &&
+          !content.some((c) => c.type === 'terminal' && c.terminalId === entry.terminal!.id)
+        )
+          content.push({ type: 'terminal', terminalId: entry.terminal.id });
+        content.forEach((content, index) => {
+          if (content.type === 'diff') {
+            body.append(
+              button(
+                `查看修改 · ${content.path}`,
+                () => send({ type: 'diff', id: entry.id, index }),
+                'diff-link',
+              ),
+            );
+            const before = document.createElement('pre'),
+              after = document.createElement('pre');
+            before.className = 'diff-before';
+            after.className = 'diff-after';
+            before.textContent = (content.oldText || '').slice(0, 4000);
+            after.textContent = content.newText.slice(0, 4000);
+            body.append(before, after);
+          } else if (content.type === 'content') {
+            const image = contentImage(content.content);
+            if (image) {
+              body.append(image);
+              return;
+            }
+            const text =
+              content.content.type === 'text' ? content.content.text : `[${content.content.type}]`;
+            const markdown = document.createElement('div');
+            markdown.className = 'markdown';
+            markdown.innerHTML = renderMarkdown(text);
+            body.append(markdown);
+          } else {
+            const terminal = entry.terminal?.id === content.terminalId ? entry.terminal : undefined;
+            const pre = document.createElement('pre');
+            pre.className = 'terminal-output';
+            pre.tabIndex = 0;
+            pre.setAttribute('aria-label', '终端输出');
+            pre.textContent =
+              terminal?.output ||
+              (entry.tool.status === 'completed' ? '命令已完成，没有文本输出。' : '等待终端输出…');
+            body.append(pre);
+            if (terminal?.truncated) {
+              const note = document.createElement('p');
+              note.textContent = '输出过长，仅保留最近约 100 万字符。';
+              body.append(note);
+            }
+            if (terminal?.exitCode !== undefined || terminal?.signal) {
+              const status = document.createElement('small');
+              status.textContent = terminal.signal
+                ? `终止信号：${terminal.signal}`
+                : `退出码：${terminal.exitCode ?? '未知'}`;
+              body.append(status);
+            }
           }
-          const text =
-            content.content.type === 'text' ? content.content.text : `[${content.content.type}]`;
-          const markdown = document.createElement('div');
-          markdown.className = 'markdown';
-          markdown.innerHTML = renderMarkdown(text);
-          body.append(markdown);
-        } else {
-          const terminal = entry.terminal?.id === content.terminalId ? entry.terminal : undefined;
-          const pre = document.createElement('pre');
-          pre.className = 'terminal-output';
-          pre.tabIndex = 0;
-          pre.setAttribute('aria-label', '终端输出');
-          pre.textContent =
-            terminal?.output ||
-            (entry.tool.status === 'completed' ? '命令已完成，没有文本输出。' : '等待终端输出…');
-          body.append(pre);
-          if (terminal?.truncated) {
-            const note = document.createElement('p');
-            note.textContent = '输出过长，仅保留最近约 100 万字符。';
-            body.append(note);
-          }
-          if (terminal?.exitCode !== undefined || terminal?.signal) {
-            const status = document.createElement('small');
-            status.textContent = terminal.signal
-              ? `终止信号：${terminal.signal}`
-              : `退出码：${terminal.exitCode ?? '未知'}`;
-            body.append(status);
-          }
+        });
+        if (entry.tool.rawInput != null || entry.tool.rawOutput != null) {
+          const raw = document.createElement('details'),
+            label = document.createElement('summary'),
+            pre = document.createElement('pre');
+          label.textContent = '原始输入 / 输出';
+          pre.textContent = JSON.stringify(
+            { input: entry.tool.rawInput, output: entry.tool.rawOutput },
+            null,
+            2,
+          );
+          raw.append(label, pre);
+          body.append(raw);
         }
+        node.append(body);
+        hydrateImages(body);
+      };
+      node.addEventListener('pi:materialize', renderBody);
+      node.addEventListener('toggle', () => {
+        if ((node as HTMLDetailsElement).open) renderBody();
       });
-      if (entry.tool.rawInput != null || entry.tool.rawOutput != null) {
-        const raw = document.createElement('details'),
-          label = document.createElement('summary'),
-          pre = document.createElement('pre');
-        label.textContent = '原始输入 / 输出';
-        pre.textContent = JSON.stringify(
-          { input: entry.tool.rawInput, output: entry.tool.rawOutput },
-          null,
-          2,
-        );
-        raw.append(label, pre);
-        body.append(raw);
-      }
-      node.append(body);
     } else {
       if (entry.role === 'thought') {
         const summary = document.createElement('summary');

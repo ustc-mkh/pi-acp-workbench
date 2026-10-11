@@ -1,6 +1,6 @@
 import type { Memento } from 'vscode';
 import type { Agent } from './remote-agent';
-import type { ChatState } from './shared';
+import type { ChatState, Snapshot } from './shared';
 import type { ClientOperations } from './conversation-history';
 import { HARNESSES, type HarnessId } from './harness';
 import {
@@ -40,6 +40,7 @@ export class ConversationStatistics {
   value: Statistics;
   pending?: Promise<void>;
   private pendingForce = false;
+  private metadataHistory?: Snapshot[];
   private overrides: Record<string, Price>;
   private modelPrices: Record<string, Price> = {};
   constructor(
@@ -54,6 +55,7 @@ export class ConversationStatistics {
       records: mergeUsage([], storage.get('usageRecords', [])),
       prices: this.prices(),
       titles: storage.get('usageTitles', {}),
+      sessionNumbers: storage.get('usageSessionNumbers', {}),
       available: false,
     };
   }
@@ -64,6 +66,21 @@ export class ConversationStatistics {
       models: [],
       note: harness === 'pi' ? undefined : HARNESSES[harness].note,
     };
+  }
+  sessionMetadata(history: Snapshot[]) {
+    if (history === this.metadataHistory) return;
+    this.metadataHistory = history;
+    const titles = { ...this.value.titles },
+      sessionNumbers = { ...this.value.sessionNumbers };
+    for (const item of history) {
+      if (item.title) titles[item.id] = item.title;
+      if (item.sessionNumber) sessionNumbers[item.id] = item.sessionNumber;
+    }
+    if (
+      JSON.stringify([titles, sessionNumbers]) !==
+      JSON.stringify([this.value.titles, this.value.sessionNumbers])
+    )
+      this.value = { ...this.value, titles, sessionNumbers };
   }
   models(state: ChatState) {
     if (state.status !== 'ready' && state.status !== 'busy') return;
@@ -82,8 +99,9 @@ export class ConversationStatistics {
     if (id) delete titles[id];
     this.value = { ...this.value, titles: id ? titles : {} };
   }
-  persistTitles() {
-    return this.storage.update('usageTitles', this.value.titles);
+  async persistTitles() {
+    await this.storage.update('usageTitles', this.value.titles);
+    await this.storage.update('usageSessionNumbers', this.value.sessionNumbers || {});
   }
   private prices() {
     const prices = { ...this.modelPrices, ...this.overrides };
@@ -149,7 +167,8 @@ export class ConversationStatistics {
     const first = state.entries.find((e) => e.role === 'user');
     if (state.sessionId) {
       const id = conversationId || state.sessionId;
-      if (retained && first?.role === 'user') titles[id] = first.text.slice(0, 70);
+      if (retained && state.sessionTitle) titles[id] = state.sessionTitle;
+      else if (retained && first?.role === 'user') titles[id] = first.text.slice(0, 32);
       else delete titles[id];
     }
     this.value = { ...this.value, records: merged, titles };

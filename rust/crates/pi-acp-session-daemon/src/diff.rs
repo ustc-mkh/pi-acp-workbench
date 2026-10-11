@@ -399,6 +399,7 @@ async fn compare(before: &Capture, after: &Capture) -> Result<TurnDiff, String> 
         }
     }
     let mut diff = TurnDiff {
+        content_ref: None,
         status: if warnings.is_empty() {
             "complete".into()
         } else {
@@ -620,6 +621,7 @@ impl WorkspaceDiff {
     pub async fn finish(&mut self) -> Entry {
         let mut diff = match self.before.take() {
             None => TurnDiff {
+                content_ref: None,
                 status: "unavailable".into(),
                 files: Vec::new(),
                 warnings: vec![self.error.clone().unwrap_or_default()],
@@ -632,6 +634,7 @@ impl WorkspaceDiff {
                 match attempt.await {
                     Ok(diff) => diff,
                     Err(e) => TurnDiff {
+                        content_ref: None,
                         status: "unavailable".into(),
                         files: Vec::new(),
                         warnings: vec![e],
@@ -711,6 +714,7 @@ mod tests {
     #[test]
     fn title_and_text_format() {
         let diff = TurnDiff {
+            content_ref: None,
             status: "complete".into(),
             files: vec![file("a.ts", "modified", 3, 1, None)],
             warnings: vec![],
@@ -722,6 +726,7 @@ mod tests {
         );
 
         let partial = TurnDiff {
+            content_ref: None,
             status: "partial".into(),
             files: vec![file(
                 "b.bin",
@@ -738,6 +743,7 @@ mod tests {
         );
 
         let unavailable = TurnDiff {
+            content_ref: None,
             status: "unavailable".into(),
             files: vec![],
             warnings: vec!["boom".into()],

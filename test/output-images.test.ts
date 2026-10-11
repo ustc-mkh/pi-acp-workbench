@@ -36,6 +36,9 @@ it('renders assistant, thought, tool, embedded resource and inline Markdown rast
       ],
     },
   });
+  expect(tool.querySelectorAll('img')).toHaveLength(0);
+  (tool as HTMLDetailsElement).open = true;
+  tool.dispatchEvent(new Event('toggle'));
   expect(tool.querySelectorAll('img')).toHaveLength(2);
   const inline = message({
     id: 'a',

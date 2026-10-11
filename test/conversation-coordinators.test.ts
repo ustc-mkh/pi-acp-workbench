@@ -410,7 +410,7 @@ it.each(['codex', 'claude'] as const)(
       harness,
       info: {
         protocolVersion: 1,
-        agentCapabilities: { _meta: { 'session-service': { version: 3, usageInspection: true } } },
+        agentCapabilities: { _meta: { 'session-service': { version: 4, usageInspection: true } } },
       },
       request,
     } satisfies Pick<Agent, 'harness' | 'info' | 'request'>;

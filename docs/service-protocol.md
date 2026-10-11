@@ -21,7 +21,7 @@
   - 事件推送 `{"event": <object>}`（无 `id`，不对应任何请求）
   - 分块帧 `{"fragment": "<string>", "last": <boolean>}`（见 §5）
 
-统一服务扩展版本为 v3，通过 `agentCapabilities._meta['session-service'].version` 协商；`hello.protocolVersion:1` 仍指 ACP v1。不存在共享历史委托写入能力。
+统一服务扩展版本为 v4，通过 `agentCapabilities._meta['session-service'].version` 协商；`hello.protocolVersion:1` 仍指 ACP v1。不存在共享历史委托写入能力。
 
 ## 3. 客户端约束（服务端强制执行）
 
@@ -48,7 +48,7 @@
 
 | method          | params                                                              | 返回值                                                                                                                              | 持久化         |
 | --------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `hello`         | `{harness?}`                                                        | 实际 ACP initialize 结果及 v3 session-service 标识                                                                                  | 否             |
+| `hello`         | `{harness?}`                                                        | 实际 ACP initialize 结果及 v4 session-service 标识                                                                                  | 否             |
 | `list`          | `{}`                                                                | `Snapshot[]`（全部 harness，按 `updated` 降序；快照的 `entries` 为空数组）                                                          | 否             |
 | `create`        | `{cwd,harness?}`                                                    | 新 `Snapshot`（含 `sessionNumber`、`revision`、`stored:true`、`entries:[]`）。`cwd` 必须是已存在目录的绝对路径（服务端 `realpath`） | **是**         |
 | `state`         | `{sessionId}`                                                       | `ServiceState = {snapshot, busy, permissions, commands, plan, error?}`；`snapshot` 含完整 `entries`                                 | 否             |
@@ -60,13 +60,25 @@
 | `_watch`        | `{sessionId, enabled:boolean}`                                      | `true`                                                                                                                              | 否             |
 | `historyRemove` | `{sessionId?}`                                                      | `undefined`（响应帧为 `{"id":…}`，无 `value` 键，同 `remove`）                                                                      | 否（排队执行） |
 
+Pi 首条文本输入保存后、正常 `session/prompt` 前，daemon 在适配器声明 `_meta['pi-workbench'].title:true` 时调用私有 `_pi_workbench/title {sessionId,model,text}`（不经公共 request 白名单暴露）。正文最多 1000 个 Unicode 字符、等待最多 20 秒；适配器启动隔离的无工具/no-session Pi JSON 子进程，返回 `{title,records}`。尝试标记先持久化，失败不重试；成功标题及可用计费记录随快照保存，inspect 第一页合并标题用量。没有能力时只使用短文本回退；原生 `session_info_update.title` 也可提供标题，已生成标题不会被普通保存或后续适配器通知覆盖。
+
 `events.next` 参数为 `{cursor?:string}`，返回 `{cursor,event?,token?}` 或队列末尾的 `null`。首次及每轮重试省略 cursor；后续传回上次 cursor。cursor/token 是不透明值，消费方不得推导磁盘路径。损坏或过期记录可返回仅含 cursor 的结果，以便继续扫描；每次最多读取一个事件，保留期与大小限制由服务管理。
 
 0.11.6 起，任务事件可附带 `imageEntryIds:string[]`（缺省为空，不序列化空数组）：最多 256 个本轮图片来源的 entry ID，仅引用快照，不在 outbox 复制图片字节。终态消费方按 ID 从对应 Session 历史解析图片，不得以“最新回复”猜测归属；桌面来源可包括本轮用户图片，思考过程不导出。Telegram 使用文本 / 单张图片的持久发送检查点；检查点写入前崩溃仍可能重复。需配套升级服务和 relay；本字段不改变请求版本或 cursor/token 语义。
 
 `events.ack` 参数为 `{id:string,token:string}`，返回 boolean；仅删除与 token 匹配的版本，并同步目录。不存在或版本已更新返回 false。relay 先 durable 保存投递记录再确认，连接失败后重试，不重新执行模型任务。该队列当前供单个 Telegram relay 消费，不提供多个独立订阅者的投递保证；socket 权限边界与其他方法相同。
 
-v3 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`；usageInspection 对 Codex / Claude 为 true，对 Pi 为 false，Pi 使用其增强适配器的 inspect 能力。缺省 harness 为 Pi。`list` 返回所有 harness，并为每条历史记录附带来自当前运行时的 `busy:boolean`（不写入历史文件；冷会话及重启后为 false），客户端可据此监控非当前会话；`create` 支持同样的可选 harness 参数。客户端必须检查 v3 标识，不能降级为文件写入。`historyWrite` 已移除。
+v4 `hello` 返回所选 harness 的实际 ACP initialize 结果，并添加 `agentCapabilities._meta['session-service']={version:4,authoritative:true,usageInspection:<boolean>}`；usageInspection 对 Codex / Claude 为 true，对 Pi 为 false，Pi 使用其增强适配器的 inspect 能力。缺省 harness 为 Pi。`list` 返回所有 harness，并为每条历史记录附带来自当前运行时的 `busy:boolean`（不写入历史文件；冷会话及重启后为 false），客户端可据此监控非当前会话；`create` 支持同样的可选 harness 参数。客户端必须检查 v4 标识，不能降级为文件写入。`historyWrite` 已移除。
+
+v4 新增方法：
+
+- `titleSettings {}` → `{model:string}`；`setTitleModel {model}` → `{model:string}`。空字符串跟随当前 Pi 模型，`off` 关闭，其他值为 `provider/model`（最多 300 UTF-8 字节，禁止控制字符）。设置由 daemon 全局持久化；set 属于 durable 请求，同 ID 不重复写入。只影响尚未发送首条输入的 Pi 会话。
+
+- `historyPage {sessionId,beforeId}` → `{entries,remaining}`，从 entry ID 锚点之前向前读取最多 100 条，目标正文预算 16 MiB（单条不拆分）。`state.snapshot.historyBefore` 给出实时窗口之前的条目数；state/订阅不再保证包含完整历史。客户端必须显式分页，不能将窗口外条目视为已删除。
+- `turnDiff {sessionId,entryId}` → 完整 TurnDiff。状态中的 `diff.contentRef` 表示正文已移出高频状态；客户端只传 ID，不直接访问内容路径。
+- `undoTurn {sessionId,entryId,checkOnly?}` → `true`。checkOnly 仅预检，不预留工作目录；实际执行必定复核。真正撤回属于 durable 请求，走会话队列及工作目录独占许可，同 ID 重试遵守 journal 防重放。客户端不能自动换 ID 重试。
+
+工作目录被其他任务使用时撤回明确失败。普通任务持共享许可、撤回持独占许可，真实路径相同或父子目录均视为重叠。文件恢复不是多文件事务，详情见 [持久化与恢复契约](persistence-recovery.md)。
 
 `historyRemove` 带 sessionId 删除单个会话，不带则清空全部 harness；先处置运行时，再提交 tombstone。多个客户端可同时订阅/提交同一会话，服务按会话串行化，无客户端文件租约。
 

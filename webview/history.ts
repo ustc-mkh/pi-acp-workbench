@@ -75,7 +75,7 @@ export class HistoryList {
     this.more.dataset.tooltip = moreLabel;
     this.less.dataset.tooltip = lessLabel;
     this.more.setAttribute('aria-expanded', String(this.limit > 4));
-    this.container.classList.toggle('expanded', this.limit > 4);
+    this.container.dataset.limit = String(this.limit);
     const ids = new Set(visible.map((item) => item.id));
     for (const [id, entry] of this.rows)
       if (!ids.has(id)) {

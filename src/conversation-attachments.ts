@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { realpath } from 'node:fs/promises';
+import type { SessionClient } from './session-wire';
+import { exportEntries } from './conversation-transcript';
 import { openWorkspaceLink } from './workspace-documents';
 import { validateImage, MAX_ATTACHMENT_IMAGE_BYTES } from './images';
 import { nextId } from './state';
@@ -17,6 +20,7 @@ export interface AttachmentHost {
   readonly generation: number;
   postOutputImage(reply: OutputImageReply): void;
   readonly documents: Pick<DiffDocuments, 'open'>;
+  readonly serviceClient: Pick<SessionClient, 'call'>;
   emit(): void;
 }
 
@@ -150,19 +154,82 @@ export class AttachmentCoordinator {
   }
 
   async onDiff(message: UiMessage & { type: 'diff' }): Promise<void> {
-    await this.host.documents.open(
-      this.host.state.sessionId,
-      this.host.state.entries.find((e) => e.id === message.id),
-      message.index,
+    const { generation, state } = this.host;
+    let entry = state.entries.find((e) => e.id === message.id);
+    if (entry?.role === 'diff' && entry.diff.contentRef) {
+      const diff = await this.host.serviceClient.call('turnDiff', {
+        sessionId: state.sessionId,
+        entryId: entry.id,
+      });
+      if (generation !== this.host.generation || state.sessionId !== this.host.state.sessionId)
+        return;
+      entry = { ...entry, diff };
+    }
+    await this.host.documents.open(state.sessionId, entry, message.index);
+  }
+
+  async onUndoTurn(message: UiMessage & { type: 'undoTurn' }): Promise<void> {
+    const { generation, cwd, state } = this.host;
+    const entry = state.entries.find((item) => item.id === message.id);
+    if (!entry || entry.role !== 'diff') throw new Error('本轮修改记录已不存在。');
+    const verify = async () => {
+      if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区。');
+      if (
+        state.preview ||
+        !state.sessionId ||
+        message.sessionId !== this.host.state.sessionId ||
+        generation !== this.host.generation ||
+        cwd !== this.host.cwd
+      )
+        throw new Error('会话已切换或处于预览模式，无法撤回。');
+      if (this.host.state.status === 'busy' || this.host.state.status === 'connecting')
+        throw new Error('请等待本轮任务结束后再撤回。');
+      const root = await realpath(cwd);
+      const targets = new Set(entry.diff.files.map((file) => path.resolve(root, file.path)));
+      for (const document of vscode.workspace.textDocuments) {
+        if (!document.isDirty || document.uri.scheme !== 'file') continue;
+        const actual = await realpath(document.uri.fsPath).catch(() =>
+          path.resolve(document.uri.fsPath),
+        );
+        if (targets.has(actual))
+          throw new Error(`文件有未保存的编辑，请先处理后再撤回：${document.uri.fsPath}`);
+      }
+    };
+    await verify();
+    await this.host.serviceClient.call('undoTurn', {
+      sessionId: message.sessionId,
+      entryId: entry.id,
+      checkOnly: true,
+    });
+    const choice = await vscode.window.showWarningMessage(
+      `撤回本轮对 ${entry.diff.files.length} 个文件的修改？`,
+      {
+        modal: true,
+        detail:
+          '仅恢复本卡片所列文件的内容及普通权限，删除本轮新增文件、恢复本轮删除文件；不包含忽略文件。同期手工或其他会话的修改也可能被计入。聊天记录保留，模型上下文不回退。若文件已有后续修改，将拒绝撤回。',
+      },
+      '撤回本轮修改',
     );
+    if (choice !== '撤回本轮修改') return;
+    await verify();
+    await this.host.serviceClient.call(
+      'undoTurn',
+      {
+        sessionId: message.sessionId,
+        entryId: entry.id,
+      },
+      undefined,
+      0,
+    );
+    await vscode.window.showInformationMessage('已撤回本轮文件修改，聊天记录已保留。');
   }
 
   async onExport(): Promise<void> {
     await this.exportChat();
   }
 
-  conversationText() {
-    return this.host.state.entries
+  conversationText(entries = this.host.state.entries) {
+    return entries
       .map((e) =>
         e.role === 'tool'
           ? `### 工具：${e.tool.title}\n\n${JSON.stringify(e.tool, null, 2)}`
@@ -179,7 +246,7 @@ export class AttachmentCoordinator {
       filters: { Markdown: ['md'] },
     });
     if (!uri) return;
-    const text = this.conversationText();
+    const text = this.conversationText(await exportEntries(this.host));
     await vscode.workspace.fs.writeFile(uri, Buffer.from(text));
   }
 }

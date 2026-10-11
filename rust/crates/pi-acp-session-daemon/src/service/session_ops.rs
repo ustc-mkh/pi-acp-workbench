@@ -33,6 +33,7 @@ impl SessionService {
         }
         let mut snapshot = self.store.read(&index).await?;
         snapshot.usage_records.clear();
+        crate::history_page::trim(&mut snapshot);
         let interrupted = self
             .journal
             .last(id)
@@ -79,6 +80,33 @@ impl SessionService {
         }
         match command {
             ServiceCommand::State { .. } => self.state(id).await,
+            ServiceCommand::HistoryPage { before_id, .. } => {
+                let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
+                if let Some(rt) = rt {
+                    return crate::history_page::page(
+                        &rt.lock_unpoisoned().state.entries,
+                        before_id,
+                    );
+                }
+                let snapshot = self.store.read(&index).await?;
+                crate::history_page::page(&snapshot.entries, before_id)
+            }
+            ServiceCommand::TurnDiff { entry_id, .. } => {
+                Ok(json!(self.turn_diff(id, entry_id).await?))
+            }
+            ServiceCommand::UndoTurn {
+                entry_id,
+                check_only,
+                ..
+            } => {
+                let diff = self.turn_diff(id, entry_id).await?;
+                let cwd = std::path::PathBuf::from(index.cwd);
+                let check_only = *check_only;
+                tokio::task::spawn_blocking(move || crate::undo::undo(&cwd, &diff, check_only))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                Ok(json!(true))
+            }
             ServiceCommand::Permission {
                 permission_id,
                 option_id,
@@ -168,8 +196,9 @@ impl SessionService {
                     .is_some_and(|rt| rt.lock_unpoisoned().agent.is_some());
                 if !has_agent {
                     let state = self.state(id).await?;
+                    let snapshot = self.store.read(&index).await?;
                     return Ok(json!({
-                        "records": [],
+                        "records": snapshot.usage_records,
                         "contextWindow": state.pointer("/snapshot/contextWindow").cloned().unwrap_or(Value::Null),
                     }));
                 }
@@ -186,6 +215,20 @@ impl SessionService {
             }
             _ => Err("无效服务操作".into()),
         }
+    }
+
+    async fn turn_diff(&self, id: &str, entry_id: &str) -> Result<crate::types::TurnDiff, String> {
+        // Only daemon-owned history supplies undo content. Clients send IDs,
+        // never paths, snapshots or executable patches.
+        let index = self.index(id).await?;
+        let snapshot = self.store.read(&index).await?;
+        let diff = snapshot
+            .entries
+            .into_iter()
+            .find(|entry| entry.id == entry_id && entry.is("diff"))
+            .and_then(|entry| entry.diff)
+            .ok_or("本轮修改记录不存在")?;
+        self.store.load_diff(&diff).await
     }
 
     pub(super) async fn save_fork(

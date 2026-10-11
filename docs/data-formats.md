@@ -22,14 +22,17 @@
 ├── history/
 │   ├── index.json                     # 共享历史索引（原子 rename 提交）
 │   ├── conversations/
-│   │   └── <sha256(id + ':' + revision)>.json   # 完整快照
+│   │   └── <sha256(id + ':' + revision)>.json   # 完整快照（Diff 正文可通过引用保存）
+│   └── diffs/
+│       └── <sha256(diff-json)>.json     # 不可变 Diff 正文
 ├── telegram/
 │   ├── bot-<botId>.lock/              # bot 单实例锁
 │   ├── bot-<botId>-chat-<chatId>.json # 绑定/游标状态
 │   └── events/
 │       └── <sha256(eventId)>.json     # 桌面→Telegram outbox 事件
 └── preferences/
-    └── <harness>.json                 # pi / codex / claude
+    ├── <harness>.json                 # pi / codex / claude
+    └── title.json                     # {"model":""}，Pi 自动标题模型
 ```
 
 ## 2. 单实例与原子提交
@@ -38,7 +41,7 @@
 
 ## 3. `history/` 共享历史
 
-### 写路径（协议 v3）
+### 写路径（协议 v4）
 
 所有 harness 的 worker 与历史写入都在 daemon 中。客户端通过 socket list/state 读取，通过 historyRemove 删除，不支持委托快照写入或磁盘降级。
 
@@ -56,11 +59,19 @@
 
 完整 `Snapshot`（含 `entries`）。读取时校验 `id`/`cwd`/`entries` 一致性、`harness` 合法且与 ID 命名空间匹配、`contextComplete===true`，且**共享版本必须带 `revision`**；任何不满足即拒绝读取。
 
+自动命名另有可选 `titleAttempted:true`、`titleSource:"generated"|"agent"` 元数据：尝试标记在额外模型调用前提交，避免重启重放；titleSource 让后续保存保留语义标题而非覆盖为首条输入。旧会话不自动补生成。`preferences/title.json` 内容为 `{model:string}`，默认空字符串跟随 Pi 当前模型，`off` 关闭，其余为 provider/model；上限 4 KiB，损坏时拒绝启动且不覆盖原文件。标题模型更新使用 durable 原子写入。
+
 Snapshot 字段（含可选项）：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`、`sessionNumber`、`revision`、`conversationId`（fork 前原会话 id，编号按此归属）、`contextWindow`、`usage`（`{used:number|null,size:number}`，当前 context 占用，非累计计费）、`contextComplete`、`configs`、`modes`、`commands`、`nativeForks`、`usageRecords`、`stored`。未知字段容忍；必需字段缺失即拒绝。
 
 乐观锁：`read` 记录 `seen[id]=revision`；`write` 要求拥有进程内运行时且当前 `revision` 等于 `seen`，写时生成新 `revision`（UUID），旧版本文件在 index commit 后删除。
 
 `sessionNumber` 分配：同一 `conversationId||id` 复用已有编号；否则取 `nextSessionNumber`（缺省 1）与现有最大编号+1 的较大者，写回 `nextSessionNumber=number+1`。
+
+### Diff 正文引用
+
+TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状态、行数、权限和省略原因，before/after/patch 位于 `diffs/<contentRef>.json`。正文以完整 TurnDiff 的 Rust 紧凑 JSON 序列化求 SHA-256，先 durable 写正文，再提交引用快照；读取时验证哈希。单份正文读取上限 32 MiB。旧 inline Diff 继续可读；新提交保存引用格式。
+
+`historyBefore` 只描述 socket 窗口，不是磁盘历史裁剪。删除历史后不可达 Diff 正文在下一次正常启动回收；活跃服务期间不清理尚未提交的内容引用。启动先验证全部已引用快照和正文，失败时保留证据。完整契约见 [持久化与恢复](persistence-recovery.md)。
 
 ## 4. `service/requests/` 任务收据
 
@@ -121,4 +132,4 @@ Snapshot 字段（含可选项）：`id`、`cwd`、`title`、`updated`(ms)、`en
 
 ### Codex / Claude 用量记录
 
-完整会话快照可包含 `usageRecords`（旧快照缺省为空），每条包含 `id/sessionId/model/timestamp/kind/input/output/cacheRead/cacheWrite`。`kind` 为 `acp-turn`；输入、缓存读写和输出分别计数，推理不重复加入输出。记录仅保存适配器返回的数据，缺少可选缓存字段时按协议缺省值 0 汇总，不代表供应商账单完整。记录不写入索引，也不随状态广播发送，通过 `_pi_workbench/inspect` 分页读取。上下文占用仍在独立 `usage.used/size` 中。
+完整会话快照可包含 `usageRecords`（旧快照缺省为空），每条包含 `id/sessionId/model/timestamp/kind/input/output/cacheRead/cacheWrite`。`kind` 为 `acp-turn`，Pi 独立标题调用返回的用量为 `session-title`；输入、缓存读写和输出分别计数，推理不重复加入输出。记录仅保存适配器返回的数据，缺少可选缓存字段时按协议缺省值 0 汇总，不代表供应商账单完整。记录不写入索引，也不随状态广播发送，通过 `_pi_workbench/inspect` 分页读取。上下文占用仍在独立 `usage.used/size` 中。

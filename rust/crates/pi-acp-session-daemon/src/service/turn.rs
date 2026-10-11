@@ -183,10 +183,22 @@ impl SessionService {
             self.save(rt).await?;
             return Ok(result);
         }
-        let result = agent
+        let mut result = agent
             .with_timeout(agent.request(method, outgoing), timeout)
             .await?;
         if method == "_pi_workbench/inspect" {
+            if params.get("cursor").and_then(Value::as_u64).unwrap_or(0) == 0 {
+                if let Some(records) = result.get_mut("records").and_then(Value::as_array_mut) {
+                    records.extend(
+                        rt.lock_unpoisoned()
+                            .state
+                            .usage_records
+                            .iter()
+                            .filter(|r| r.kind == "session-title")
+                            .map(|r| json!(r)),
+                    );
+                }
+            }
             let points: Vec<crate::native::NativeForkPoint> =
                 serde_json::from_value(result.get("forkPoints").cloned().unwrap_or(json!([])))
                     .unwrap_or_default();
@@ -268,6 +280,12 @@ impl SessionService {
             )
             .unwrap_or_default()
         };
+        let first_input = !rt
+            .lock_unpoisoned()
+            .state
+            .entries
+            .iter()
+            .any(|entry| entry.is("user"));
         {
             let mut r = rt.lock_unpoisoned();
             let text = prompt
@@ -284,6 +302,15 @@ impl SessionService {
         let start = rt.lock_unpoisoned().state.entries.len();
         self.emit(rt);
         let cwd = rt.lock_unpoisoned().snapshot.cwd.clone();
+        if first_input {
+            let text = prompt
+                .iter()
+                .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            self.name_first_input(rt, agent, request_id, text).await?;
+        }
         {
             let accessor: StateAccessor = {
                 let weak = Arc::downgrade(rt);
@@ -292,9 +319,10 @@ impl SessionService {
                         let r = rt.lock_unpoisoned();
                         (
                             r.snapshot.id.clone(),
-                            None,
+                            r.snapshot.session_number,
                             r.state.entries.clone(),
                             r.state.permissions.len(),
+                            Some(r.snapshot.title.clone()),
                         )
                     })
                 })
@@ -414,10 +442,13 @@ impl SessionService {
         if agent.is_closed() {
             agent.stop().await;
         }
-        let diff_entry = changes.finish().await;
-        rt.lock_unpoisoned().state.entries.push(diff_entry);
+        let mut diff_entry = changes.finish().await;
         ckpt_cancel.cancel();
         let _ = checkpoint.await;
+        if let Some(diff) = &mut diff_entry.diff {
+            self.store.compact_diff(diff).await?;
+        }
+        rt.lock_unpoisoned().state.entries.push(diff_entry);
         if let Some(error) = rt.lock_unpoisoned().error.clone() {
             result = Err(error);
         }

@@ -22,6 +22,7 @@ function fixture() {
     cwd: '/workspace',
     generation: 1,
     documents: { open: vi.fn() },
+    serviceClient: { call: vi.fn() },
     emit: vi.fn(),
     postOutputImage: vi.fn(),
   };

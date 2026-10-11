@@ -19,7 +19,7 @@
 | [贡献指南](../CONTRIBUTING.md)         | 开发环境、修改入口、适配器升级、缓存清理      |
 | [架构](architecture.md)                | 模块职责、会话状态、持久化与异常隔离          |
 | [测试](testing.md)                     | 日常 / 完整验收、CI、外部集成和发布检查       |
-| [Wire 协议](service-protocol.md)       | v3 方法、帧、订阅、限制与错误语义             |
+| [Wire 协议](service-protocol.md)       | v4 方法、帧、订阅、限制与错误语义             |
 | [磁盘格式](data-formats.md)            | 历史、收据、偏好、Telegram 状态及原生分支哈希 |
 | [Fixtures](../test/fixtures/README.md) | 冻结样例、生成入口及兼容性验证                |
 | [验收记录](rust-acceptance.md)         | 有证据的当前回归、历史产物检查及未完成范围    |

@@ -1,4 +1,5 @@
 import type { Statistics } from '../src/telemetry';
+import { usageChart } from './usage-chart';
 import { groupUsage, dayKey } from '../src/telemetry';
 import type { UiMessage } from '../src/shared';
 const text = (tag: string, value: string, className?: string) => {
@@ -12,7 +13,9 @@ const money = (n: number) =>
   '$' + n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 export class StatisticsPage {
   private data?: Statistics;
-  private by: 'model' | 'day' | 'session' = 'model';
+  private by: 'model' | 'time' | 'session' = 'model';
+  private interval: 'day' | 'week' | 'month' = 'day';
+  private intervals: HTMLElement;
   private from: HTMLInputElement;
   private until: HTMLInputElement;
   private table: HTMLElement;
@@ -29,6 +32,7 @@ export class StatisticsPage {
       title = text('h2', '用量统计'),
       close = text('button', '返回对话') as HTMLButtonElement;
     close.type = 'button';
+    close.className = 'floating-page-back';
     close.onclick = back;
     const refresh = text('button', '刷新') as HTMLButtonElement;
     refresh.type = 'button';
@@ -61,7 +65,7 @@ export class StatisticsPage {
     tabs.setAttribute('role', 'tablist');
     for (const [key, label] of [
       ['model', '按模型'],
-      ['day', '按天'],
+      ['time', '按时间'],
       ['session', '按会话'],
     ] as const) {
       const b = text('button', label) as HTMLButtonElement;
@@ -75,7 +79,27 @@ export class StatisticsPage {
       };
       tabs.append(b);
     }
-    root.append(tabs);
+    this.intervals = text('div', '', 'stats-tabs time-intervals');
+    this.intervals.setAttribute('role', 'group');
+    this.intervals.setAttribute('aria-label', '费用时间粒度');
+    for (const [unit, label] of [
+      ['day', '按天'],
+      ['week', '按周'],
+      ['month', '按月'],
+    ] as const) {
+      const button = text('button', label) as HTMLButtonElement;
+      button.type = 'button';
+      button.setAttribute('aria-pressed', String(unit === this.interval));
+      button.onclick = () => {
+        this.interval = unit;
+        for (const child of this.intervals.children)
+          child.setAttribute('aria-pressed', String(child === button));
+        this.render();
+      };
+      this.intervals.append(button);
+    }
+    this.intervals.hidden = true;
+    root.append(tabs, this.intervals);
     this.table = text('div', '', 'stats-table-wrap');
     root.append(this.table);
     root.append(
@@ -85,10 +109,6 @@ export class StatisticsPage {
         'stats-caption',
       ),
     );
-    const settings = text('button', '模型价格设置 →', 'price-settings-link') as HTMLButtonElement;
-    settings.type = 'button';
-    settings.onclick = () => this.openPrices();
-    root.append(settings);
   }
   update(data?: Statistics) {
     this.data = data;
@@ -107,7 +127,7 @@ export class StatisticsPage {
       data?.note ||
       (!data?.available
         ? '当前连接未提供详细用量；连接内置 Pi ACP 适配器后自动记录。已有统计仍保留。'
-        : '统计来自 Pi 返回的请求用量，费用按模型价格设置估算。');
+        : '统计来自 Pi 返回的请求用量，费用按模型设置中的单价估算。');
     this.totals.replaceChildren();
     const grouped = groupUsage(
       records.map((r) => ({ ...r, model: 'all' })),
@@ -130,17 +150,26 @@ export class StatisticsPage {
       card.append(text('span', label), text('strong', value));
       this.totals.append(card);
     }
-    const rows = groupUsage(records, data?.prices || {}, this.by);
+    const rows = groupUsage(
+      records,
+      data?.prices || {},
+      this.by === 'time' ? this.interval : this.by,
+    );
+    this.intervals.hidden = this.by !== 'time';
     this.table.replaceChildren();
     if (!rows.length) {
       this.table.append(text('p', '此范围暂无用量记录。', 'stats-empty'));
+      return;
+    }
+    if (this.by === 'time') {
+      this.table.append(usageChart(rows, this.interval));
       return;
     }
     const table = document.createElement('table'),
       head = document.createElement('thead'),
       header = document.createElement('tr');
     for (const label of [
-      this.by === 'model' ? '模型' : this.by === 'day' ? '日期' : '会话',
+      this.by === 'model' ? '模型' : '会话',
       '缓存命中',
       '总输入',
       '输出',
@@ -153,9 +182,13 @@ export class StatisticsPage {
     const body = document.createElement('tbody');
     for (const row of rows) {
       const tr = document.createElement('tr');
-      const name = this.by === 'session' ? data?.titles[row.key] || row.key : row.key;
+      const title = data?.titles[row.key] || row.key;
+      const sessionNumber = data?.sessionNumbers?.[row.key];
+      const name =
+        this.by === 'session'
+          ? `${sessionNumber ? '#' + sessionNumber + ' ' : ''}${title}`
+          : row.key;
       const first = text('td', name);
-      first.dataset.tooltip = this.by === 'session' ? `${name}\n${row.key}` : name;
       tr.append(first);
       for (const value of [
         number(row.cacheRead),

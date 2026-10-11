@@ -43,6 +43,34 @@ const md: ReturnType<typeof MarkdownIt> = new MarkdownIt({
 });
 md.use(taskLists, { enabled: false, label: false });
 md.use(footnotes);
+// CommonMark's punctuation flanking rules reject common CJK prose such as
+// **注意：**正文. Relax only double-star boundaries adjacent to CJK text;
+// retain markdown-it's delimiter pairing, nesting, escapes and code handling.
+const cjkBefore = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u;
+const cjkAfter = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+md.inline.ruler.before('emphasis', 'cjk_strong', (state, silent) => {
+  if (silent || !state.src.startsWith('**', state.pos)) return false;
+  const scanned = state.scanDelims(state.pos, true);
+  if (scanned.length !== 2) return false;
+  const before = state.src.slice(Math.max(0, state.pos - 2), state.pos);
+  const after = state.src.slice(state.pos + 2, state.pos + 4);
+  const open = scanned.can_open || (cjkBefore.test(before) && /^\p{P}/u.test(after));
+  const close = scanned.can_close || (/\p{P}$/u.test(before) && cjkAfter.test(after));
+  if (open === scanned.can_open && close === scanned.can_close) return false;
+  for (let i = 0; i < 2; i++) {
+    state.push('text', '', 0).content = '*';
+    state.delimiters.push({
+      marker: 0x2a,
+      length: 2,
+      token: state.tokens.length - 1,
+      end: -1,
+      open,
+      close,
+    });
+  }
+  state.pos += 2;
+  return true;
+});
 const originalFence = md.renderer.rules.fence!;
 md.renderer.rules.fence = (tokens, index, options, env, self) => {
   const token = tokens[index];

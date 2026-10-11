@@ -42,7 +42,7 @@ it('owns every harness through the same socket, namespaces IDs, and persists set
     const remote = agent(harness);
     const info = await remote.initialize();
     expect(info.agentCapabilities?._meta?.['session-service']).toMatchObject({
-      version: 3,
+      version: 4,
       authoritative: true,
     });
     const session = await remote.createSession();

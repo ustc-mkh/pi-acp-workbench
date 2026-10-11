@@ -20,6 +20,7 @@ import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branc
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
 import { refreshPiModels } from './pi-context-config';
+import { generatePiTitle } from './pi-title';
 export function usageRecord(
   id: string,
   sessionId: string,
@@ -68,7 +69,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       result.agentCapabilities ??= {};
       result.agentCapabilities._meta = {
         ...result.agentCapabilities._meta,
-        'pi-workbench': { version: 1, inspect: true, nativeFork: true },
+        'pi-workbench': { version: 1, inspect: true, nativeFork: true, title: true },
       };
       return result;
     }
@@ -121,6 +122,16 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       if (!session) throw new Error('Unknown session');
       if (session.pendingTurn)
         throw new Error('Wait for the current turn to finish before inspecting or branching.');
+      if (method === '_pi_workbench/title') {
+        if (
+          typeof params.text !== 'string' ||
+          params.text.length > 4000 ||
+          typeof params.model !== 'string' ||
+          params.model.length > 300
+        )
+          throw new Error('标题参数无效。');
+        return generatePiTitle(session, params.model, params.text);
+      }
       if (method === '_pi_workbench/fork') return this.forkNative(session, params, Process);
       if (method === '_pi_workbench/inspect') return this.inspect(session, params);
       throw new Error('Unknown workbench method');

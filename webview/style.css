@@ -96,7 +96,8 @@ header {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 14px 10px;
+  padding: 4px 14px;
+  flex-shrink: 0;
   color: var(--muted);
   font-size: 11px;
 }
@@ -209,6 +210,10 @@ h1 {
 }
 .markdown > :last-child {
   margin-bottom: 0;
+}
+.markdown strong,
+.markdown b {
+  font-weight: 700;
 }
 .markdown p {
   margin: 10px 0;
@@ -578,7 +583,7 @@ select {
 }
 #history {
   border-bottom: 1px solid var(--border);
-  padding: 0 12px 6px;
+  padding: 0 12px 2px;
   display: flex;
   flex-direction: column;
   flex: 0 1 auto;
@@ -614,14 +619,18 @@ select {
   overscroll-behavior: contain;
   scrollbar-width: auto;
 }
-#history-items.expanded {
+#history-items[data-limit='10'] {
   max-height: min(280px, 35vh);
+}
+#history-items[data-limit='16'] {
+  max-height: min(448px, 56vh);
 }
 .history-controls {
   display: flex;
   justify-content: center;
   gap: 12px;
-  margin-top: 4px;
+  /* Tuck the controls into the final row's bottom whitespace. */
+  margin-top: -4px;
 }
 .history-controls button {
   width: 20px;
@@ -632,8 +641,8 @@ select {
   border: 1px solid var(--border);
 }
 .history-controls svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
@@ -1238,17 +1247,17 @@ body.vscode-high-contrast-light button {
 }
 .model-price-list {
   display: grid;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 8px;
+  margin-top: 8px;
 }
 .model-price-card {
   border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 12px;
+  border-radius: 7px;
+  padding: 8px;
   min-width: 0;
 }
 .model-price-card h3 {
-  margin: 0 0 5px;
+  margin: 0;
   font-size: 13px;
   font-weight: 500;
   overflow-wrap: anywhere;
@@ -1258,13 +1267,65 @@ body.vscode-high-contrast-light button {
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 5px;
-  padding: 7px;
+  padding: 4px 6px;
   font: inherit;
   min-width: 0;
 }
-.model-price-card > button {
+.model-card-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.model-visibility {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 3px;
   font-size: 11px;
-  margin-right: 6px;
+  color: var(--muted);
+}
+.model-settings-footer {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin-top: 7px;
+}
+.model-context-field {
+  font-size: 11px;
+  color: var(--muted);
+}
+.model-context-field input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+}
+.model-settings-buttons {
+  display: flex;
+  gap: 3px;
+}
+.model-settings-buttons button {
+  font-size: 11px;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+.model-settings-status {
+  margin: 5px 0 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.model-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+}
+@media (min-width: 420px) {
+  .model-price-card .price-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 .pasted-image {
   display: block;
@@ -1382,6 +1443,12 @@ body *::-webkit-scrollbar-button {
 .turn-diff-header strong {
   font-weight: 500;
 }
+.turn-diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
 .turn-diff-notes {
   margin-top: 8px;
   color: var(--muted);
@@ -1432,13 +1499,8 @@ body *::-webkit-scrollbar-button {
   line-height: 1.6;
   margin: 8px 0 0;
 }
-.transcript-tools {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0 14px;
+#toggle-activity {
   flex-shrink: 0;
-}
-.transcript-tools button {
   font-size: 11px;
   color: var(--muted);
   padding: 3px 6px;
@@ -1586,7 +1648,7 @@ body *::-webkit-scrollbar-button {
   padding: 16px;
 }
 #models input[type='search'] {
-  color: var(--text);
+  color: var(--fg);
   background: var(--input);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1596,41 +1658,96 @@ body *::-webkit-scrollbar-button {
   box-sizing: border-box;
   margin-bottom: 12px;
 }
-.models-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
-.model-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-  overflow-wrap: anywhere;
-}
-.model-name {
-  display: flex;
-  align-items: start;
-  gap: 8px;
-  cursor: pointer;
-}
-.model-context {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-}
-.model-context input {
-  width: 100px;
-  min-width: 0;
-  padding: 4px;
-}
-.model-row[hidden] {
-  display: none;
-}
 .selector-fast .selector-label {
   min-width: 60px;
+}
+/* Back navigation stays reachable inside either independently scrolling page. */
+.statistics-page .stats-heading,
+.prices-page .stats-heading {
+  padding-right: 78px;
+}
+.floating-page-back {
+  position: fixed;
+  top: 52px;
+  right: 16px;
+  z-index: 25;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px #0002;
+}
+.provider-group {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+}
+.provider-group > summary {
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0;
+  font-size: 11px;
+}
+.provider-models {
+  display: grid;
+  gap: 8px;
+}
+.title-model-setting {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  font-size: 12px;
+}
+.title-model-setting select {
+  width: 100%;
+  min-width: 0;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px;
+}
+.time-intervals button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--vscode-button-foreground, white);
+}
+.usage-chart {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 12px 4px;
+  min-height: 220px;
+}
+.usage-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 88px;
+  min-width: 88px;
+  align-items: stretch;
+  font-size: 10px;
+  text-align: center;
+}
+.usage-bar-value {
+  min-height: 30px;
+  overflow-wrap: anywhere;
+}
+.usage-bar-track {
+  height: 145px;
+  display: flex;
+  align-items: end;
+  border-bottom: 1px solid var(--border);
+  padding: 0 15%;
+}
+.usage-bar {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
+}
+.usage-bar-label {
+  padding-top: 6px;
+  white-space: nowrap;
+  color: var(--muted);
 }

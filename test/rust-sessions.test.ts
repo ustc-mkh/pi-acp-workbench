@@ -45,6 +45,141 @@ async function fixture(maxWorkers = 2, idleMs = 900000, mode = 'context') {
   cleanup.push(() => client.dispose());
   return { root, service, host, client, socket, audit, restart };
 }
+it('names the first input before its answer, persists the choice/title/usage and never prompts twice', async () => {
+  const { root, host, client, audit, restart } = await fixture(1, 900000, 'context-title');
+  await client.call('setTitleModel', { model: 'p/cheap' });
+  const session = await host.create();
+  const pending = host.run(session.id, 'wait', { permission: () => {} });
+  await vi.waitFor(async () => {
+    const state = await host.status(session.id);
+    expect(state.busy).toBe(true);
+    expect(state.snapshot.title).toBe('合并模型设置页面');
+    expect(state.snapshot.entries.filter((e) => e.role === 'user')).toHaveLength(1);
+    expect(state.snapshot.entries.some((e) => e.role === 'assistant')).toBe(false);
+    expect(
+      (await readFile(audit, 'utf8'))
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .some((r) => r.method === 'session/prompt'),
+    ).toBe(true);
+  });
+  await host.cancel(session.id);
+  await pending;
+  const inspect = await client.call<Inspection>('request', {
+    sessionId: session.id,
+    method: '_pi_workbench/inspect',
+    params: {},
+  });
+  expect(inspect.records).toEqual([
+    expect.objectContaining({ kind: 'session-title', model: 'p/cheap', input: 10 }),
+  ]);
+  await host.run(session.id, 'second task should not rename', { permission: () => {} });
+  const requests = (await readFile(audit, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  expect(requests.filter((r) => r.method === '_pi_workbench/title')).toHaveLength(1);
+  expect(requests.filter((r) => r.method === 'session/prompt')).toHaveLength(2);
+  expect(
+    (await readOutbox(root)).every(
+      (event) =>
+        event.title === '合并模型设置页面' && event.sessionNumber === session.sessionNumber,
+    ),
+  ).toBe(true);
+  expect(requests.find((r) => r.method === '_pi_workbench/title').params).toMatchObject({
+    text: 'wait',
+    model: 'p/cheap',
+  });
+  await restart();
+  expect(await client.call('titleSettings')).toEqual({ model: 'p/cheap' });
+  expect((await host.status(session.id)).snapshot.title).toBe('合并模型设置页面');
+  const cold = await client.call<Inspection>('request', {
+    sessionId: session.id,
+    method: '_pi_workbench/inspect',
+    params: {},
+  });
+  expect(cold.records).toHaveLength(1);
+});
+it('retains a short fallback on title failure and does not repeat the failed billable request', async () => {
+  const { host, audit } = await fixture(1, 900000, 'context-title-fail');
+  const session = await host.create();
+  await host.run(
+    session.id,
+    '请改进模型设置页面，按供应商分组折叠并增加供应商批量操作，让界面简洁易用。',
+    { permission: () => {} },
+  );
+  await host.run(session.id, 'another', { permission: () => {} });
+  const state = await host.status(session.id);
+  expect([...state.snapshot.title].length).toBeLessThanOrEqual(32);
+  expect(state.snapshot.title).toContain('请改进模型设置');
+  expect(
+    (await readFile(audit, 'utf8'))
+      .split('\n')
+      .filter((line) => line.includes('"method":"_pi_workbench/title"')),
+  ).toHaveLength(1);
+});
+it('does not make a billable title call when automatic naming is disabled', async () => {
+  const { host, client, audit } = await fixture(1, 900000, 'context-title');
+  await client.call('setTitleModel', { model: 'off' });
+  const session = await host.create();
+  await host.run(session.id, 'task', { permission: () => {} });
+  expect(
+    (await readFile(audit, 'utf8'))
+      .split('\n')
+      .filter((line) => line.includes('"method":"_pi_workbench/title"')),
+  ).toHaveLength(0);
+});
+it('prefers native adapter titles and keeps them across saves', async () => {
+  const { host } = await fixture(1, 900000, 'context-native-title');
+  const session = await host.create();
+  await host.run(session.id, 'long initial user command', { permission: () => {} });
+  expect((await host.status(session.id)).snapshot.title).toBe('原生会话短标题');
+  await host.run(session.id, 'another', { permission: () => {} });
+  expect((await host.status(session.id)).snapshot.title).toBe('原生会话短标题');
+});
+it('opens and pages a cold transcript larger than the 64 MiB transport limit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-large-history-'));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
+  const entries: Entry[] = Array.from({ length: 70 }, (_, i) => ({
+    id: `entry-${i}`,
+    role: 'assistant',
+    text: 'x'.repeat(1024 * 1024),
+  }));
+  await new SharedHistoryStore(join(root, 'history')).write({
+    id: 'paged',
+    harness: 'pi',
+    cwd: root,
+    title: 'large',
+    updated: 1,
+    contextComplete: true,
+    entries,
+  });
+  const service = await startRustService(root, {
+    command: process.execPath,
+    args: [resolve('test/mock-agent.mjs'), 'context'],
+    maxWorkers: 1,
+    idleMs: 900000,
+  });
+  cleanup.push(() => service.stop());
+  const state = await service.call('state', { sessionId: 'paged' });
+  expect(JSON.stringify(state).length).toBeLessThan(16 * 1024 * 1024);
+  expect(state.snapshot.historyBefore).toBeGreaterThan(0);
+  let page = { entries: state.snapshot.entries, remaining: state.snapshot.historyBefore! };
+  const ids = new Set(page.entries.map((e) => e.id));
+  while (page.remaining > 0) {
+    page = await service.call('historyPage', { sessionId: 'paged', beforeId: page.entries[0].id });
+    for (const entry of page.entries) {
+      expect(ids.has(entry.id)).toBe(false);
+      ids.add(entry.id);
+    }
+  }
+  expect(ids.size).toBe(70);
+  await expect(
+    service.call('historyPage', { sessionId: 'paged', beforeId: 'missing' }),
+  ).rejects.toThrow('锚点');
+}, 30000);
+
 // Workspace policy/alias/symlink coverage belongs to the real Rust relay contract.
 it('rejects unknown service methods through the real Rust socket', async () => {
   const { client } = await fixture();
@@ -349,7 +484,10 @@ it.each(['normal', 'wait', 'crash'])(
       'change.txt',
       'created.txt',
     ]);
-    expect(entry.diff.files[0]).toMatchObject({
+    expect(entry.diff.contentRef).toMatch(/^[a-f0-9]{64}$/);
+    expect(entry.diff.files[0].before).toBeUndefined();
+    const full = await service.call('turnDiff', { sessionId: session.id, entryId: entry.id });
+    expect(full.files[0]).toMatchObject({
       before: 'preexisting dirty contents\n',
       after: 'agent final\n',
       added: 1,
@@ -362,9 +500,49 @@ it.each(['normal', 'wait', 'crash'])(
     expect(event.text).toContain('本轮修改');
     expect(event.text).toContain('change.txt');
     expect(await readFile(join(root, '.git/index'))).toEqual(index);
+    if (outcome === 'normal') {
+      const params = { sessionId: session.id, entryId: entry.id };
+      expect(await service.call('undoTurn', { ...params, checkOnly: true })).toBe(true);
+      expect(await readFile(join(root, 'change.txt'), 'utf8')).toBe('agent final\n');
+      expect(await service.call('undoTurn', params, 'undo-once')).toBe(true);
+      expect(await readFile(join(root, 'change.txt'), 'utf8')).toBe('preexisting dirty contents\n');
+      expect(await service.call('undoTurn', params, 'undo-once')).toBe(true);
+      await expect(service.call('undoTurn', params, 'undo-again')).rejects.toThrow();
+      expect(await readFile(join(root, '.git/index'))).toEqual(index);
+    }
   },
   15000,
 );
+
+it('rejects undo while another session owns a task in the same workspace', async () => {
+  const { root, host, client, service } = await fixture(2, 900000, 'context-diff');
+  const cwd = join(root, 'project');
+  await mkdir(cwd);
+  await promisify(execFile)('git', ['init', '--quiet', cwd]);
+  await writeFile(join(cwd, 'change.txt'), 'before\n');
+  const first = await host.create(cwd);
+  await client.call('prompt', {
+    sessionId: first.id,
+    prompt: [{ type: 'text', text: 'edit-workspace' }],
+  });
+  const entry = (await service.call('state', { sessionId: first.id })).snapshot.entries.at(-1)!;
+  const second = await host.create(cwd);
+  const running = client.call(
+    'prompt',
+    { sessionId: second.id, prompt: [{ type: 'text', text: 'wait' }] },
+    undefined,
+    0,
+  );
+  await vi.waitFor(async () =>
+    expect((await service.call('state', { sessionId: second.id })).busy).toBe(true),
+  );
+  await expect(
+    service.call('undoTurn', { sessionId: first.id, entryId: entry.id }),
+  ).rejects.toThrow('工作目录');
+  expect(await readFile(join(cwd, 'change.txt'), 'utf8')).toBe('agent final\n');
+  await host.cancel(second.id);
+  await running;
+}, 15000);
 
 it('uses arbitrary directories from desktop and Telegram without workspace registration', async () => {
   const { root, client, host } = await fixture();

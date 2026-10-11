@@ -65,6 +65,8 @@ export interface PiAgent {
 }
 export interface WorkbenchParams {
   sessionId: string;
+  model?: string;
+  text?: string;
   entryId?: string;
   hash?: string;
   cursor?: number;

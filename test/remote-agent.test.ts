@@ -8,7 +8,7 @@ const cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
-it.each([undefined, 1, 2])(
+it.each([undefined, 1, 2, 3])(
   'rejects service version %s instead of falling back to local writes',
   async (version) => {
     const root = await mkdtemp(join(tmpdir(), 'pi-protocol-version-'));
@@ -51,7 +51,7 @@ it.each([undefined, 1, 2])(
       socket,
     );
     cleanup.push(() => agent.dispose());
-    await expect(agent.initialize()).rejects.toThrow('v3');
+    await expect(agent.initialize()).rejects.toThrow('v4');
     expect(methods).toEqual(['hello']);
   },
 );

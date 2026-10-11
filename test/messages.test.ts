@@ -46,6 +46,8 @@ it('keeps the final turn diff visible after the answer and outside collapsed act
   expect(root.querySelector('.turn-diff-header strong')?.textContent).toContain('1 个文件 · +1 −1');
   (root.querySelector('.turn-diff-header button') as HTMLButtonElement).click();
   expect(send).toHaveBeenLastCalledWith({ type: 'diff', id: 'changes', index: -1 });
+  (root.querySelector('.undo-turn') as HTMLButtonElement).click();
+  expect(send).toHaveBeenLastCalledWith({ type: 'undoTurn', id: 'changes', sessionId: 'session' });
 });
 it('renders patches lazily as text and opens the saved before/after comparison', () => {
   const send = vi.fn(),
@@ -88,6 +90,45 @@ it('does not call unavailable or partial results a clean workspace', () => {
     diff: { status: 'partial', files: [], warnings: ['files omitted'] },
   });
   expect(partial.textContent).toContain('已采集范围内');
+});
+it('disables undo for partial or incomplete snapshots and previews', () => {
+  for (const [sessionId, diff] of [
+    [undefined, summary.diff],
+    ['session', { ...summary.diff, status: 'partial' as const }],
+    ['session', { ...summary.diff, files: [{ ...summary.diff.files[0], before: undefined }] }],
+  ] satisfies [string | undefined, typeof summary.diff][]) {
+    const send = vi.fn();
+    const node = createMessageRenderer(
+      (text) => text,
+      () => sessionId,
+      send,
+    )({ ...summary, diff });
+    const undo = node.querySelector<HTMLButtonElement>('.undo-turn')!;
+    expect(undo.disabled).toBe(true);
+    expect(undo.dataset.tooltip).toBeTruthy();
+    undo.click();
+    expect(send).not.toHaveBeenCalled();
+  }
+});
+it('loads neither tool Markdown nor raw output until the tool is expanded', () => {
+  const markdown = vi.fn((text: string) => text);
+  const render = createMessageRenderer(markdown, () => 'session', vi.fn());
+  const node = render({
+    id: 'lazy',
+    role: 'tool',
+    tool: {
+      toolCallId: 'lazy',
+      title: 'read',
+      content: [{ type: 'content', content: { type: 'text', text: 'output' } }],
+      rawOutput: { large: 'output' },
+    },
+  }) as HTMLDetailsElement;
+  expect(markdown).not.toHaveBeenCalled();
+  expect(node.querySelector('.tool-body')).toBeNull();
+  node.open = true;
+  node.dispatchEvent(new Event('toggle'));
+  expect(markdown).toHaveBeenCalledTimes(1);
+  expect(node.querySelector('.tool-body')).not.toBeNull();
 });
 it('keeps scope notes inside the all-changes disclosure, including empty turns', () => {
   const node = createMessageRenderer(

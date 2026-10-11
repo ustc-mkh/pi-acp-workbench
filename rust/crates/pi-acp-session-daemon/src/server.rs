@@ -5,7 +5,8 @@ use crate::state_stream::{StateStreams, Subscription};
 use pi_acp_core::sync::MutexExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fmt::Write as _;
+mod codec;
+use codec::{encode, encode_fragment};
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
@@ -443,60 +444,6 @@ async fn emit_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut rx: mpsc::Unbounded
         };
         shared.send(&conn, json!({ "event": event }));
     }
-}
-
-fn encode(value: &Value, limit: usize) -> Option<String> {
-    let mut body = serde_json::to_string(value).ok()?;
-    body.push('\n');
-    (body.len() <= limit).then_some(body)
-}
-
-/// spec §4 / skeleton contract: one UTF-16-unit slice → escaped JSON string
-/// *content* (no surrounding quotes). serde_json refuses lone surrogates, so
-/// the escapes are produced by hand, byte-identical to JSON.stringify: `"` `\\`
-/// and the named control escapes; other <0x20 units and lone surrogates become
-/// lowercase `\uXXXX`; intact surrogate pairs and everything else emit raw.
-fn encode_fragment(units: &[u16]) -> String {
-    let mut out = String::with_capacity(units.len() + units.len() / 8);
-    let mut i = 0;
-    while i < units.len() {
-        let u = units[i];
-        match u {
-            0x22 => out.push_str("\\\""),
-            0x5C => out.push_str("\\\\"),
-            0x08 => out.push_str("\\b"),
-            0x09 => out.push_str("\\t"),
-            0x0A => out.push_str("\\n"),
-            0x0C => out.push_str("\\f"),
-            0x0D => out.push_str("\\r"),
-            0x00..=0x1F => {
-                let _ = write!(out, "\\u{u:04x}");
-            }
-            0xD800..=0xDBFF => {
-                let low = units.get(i + 1).copied().unwrap_or(0);
-                if (0xDC00..=0xDFFF).contains(&low) {
-                    // intact pair — emit the scalar like JSON.stringify does.
-                    let scalar = 0x1_0000 + (((u as u32) - 0xD800) << 10) + (low as u32 - 0xDC00);
-                    out.push(char::from_u32(scalar).unwrap_or('\u{FFFD}'));
-                    i += 1;
-                } else {
-                    // 切片边界上的孤立高代理 — JSON.stringify outputs \uXXXX too.
-                    let _ = write!(out, "\\u{u:04x}");
-                }
-            }
-            // 孤立低代理（切片起点）— same \uXXXX escape.
-            0xDC00..=0xDFFF => {
-                let _ = write!(out, "\\u{u:04x}");
-            }
-            _ => {
-                if let Some(c) = char::from_u32(u as u32) {
-                    out.push(c);
-                }
-            }
-        }
-        i += 1;
-    }
-    out
 }
 
 /// JS `||` truthiness for `snapshot?.id || notification?.sessionId`

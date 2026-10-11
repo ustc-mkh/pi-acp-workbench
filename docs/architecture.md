@@ -10,7 +10,7 @@ Telegram → Rust relay / WireClient ──────────────�
                                                                                    └→ claude-agent-acp
 ```
 
-Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff 的唯一所有者。插件只负责 webview 接线、附件、文档预览、客户端统计和活动会话指针。没有扩展宿主直接启动 ACP worker 的路径，没有 v1/v2 文件写降级路径。插件要求 `session-service.version=3`；升级必须同时更新插件和 daemon。
+Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff 的唯一所有者。插件只负责 webview 接线、附件、文档预览、客户端统计和活动会话指针。没有扩展宿主直接启动 ACP worker 的路径，没有 v1/v2 文件写降级路径。插件要求 `session-service.version=4`；升级必须同时更新插件和 daemon。
 
 `ChatProvider` 使用同一个 `RemoteAgent` 接口，所有会话状态来自服务。原来的 `ConversationBackend`、本地 `AgentProcess`、`SessionCache`、共享历史事务/租约、客户端 Diff 和快照写入已移除。测试中的直接 ACP 客户端及离线数据 fixture 仅用于上游协议与损坏数据测试，不属于生产入口。
 
@@ -59,7 +59,7 @@ Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位�
 
 worker 配置统一放在 `sessions.json`，可用 `harnesses.pi/codex/claude` 分别覆盖 command/args/env。顶层 command/args/env 为 Pi 配置；未配置的 Codex/Claude 分别从服务 PATH 启动 `codex-acp` / `claude-agent-acp`。不自动安装适配器，也不继承 Pi 专属环境覆盖。凭据归上游工具管理，登录按钮仅打开登录终端。
 
-每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `agentCapabilities._meta['session-service']={version:3,authoritative:true,usageInspection:<boolean>}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 原生扩展能力；服务通过 `session-service.usageInspection` 单独声明 Codex / Claude 用量查询支持。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
+每个 harness 的 `hello` 返回实际 ACP `initialize` 结果，并添加 `agentCapabilities._meta['session-service']={version:4,authoritative:true,usageInspection:<boolean>}`。能力首次探测会短暂启动 worker，后续在服务生命周期内缓存；配置更新需重启服务。图片、配置选择器、原生加载按上游声明处理。Pi 的 inspect/nativeFork 扩展只在适配器实际声明时开放；Codex/Claude 不伪造 Pi 原生扩展能力；服务通过 `session-service.usageInspection` 单独声明 Codex / Claude 用量查询支持。Codex collaboration mode 保持 default，fast mode 按上游能力提供。
 
 Codex/Claude 每轮 `session/prompt` 返回的用量由 `usage.rs` 规范化并随完整历史快照持久化。优先读取 `_meta.quota.model_usage`，否则读取 `usage` 或 `_meta.quota.token_count`，两者不累加；输入已排除缓存读取，推理 token 已包含在输出中。Claude 按模型明细可包含子任务，统计范围可能大于主会话汇总。按服务请求 ID 生成稳定记录 ID，重复刷新不重复计数。未知模型标为 `unknown`，非法计数不转为零记录。
 
@@ -88,6 +88,14 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。原生历史仍由各上游适配器管理，备份需要保留原生会话和 daemon 数据目录。
 
 计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格单独持久化并优先于 Pi 默认价，恢复默认删除覆盖；缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
+
+## 历史窗口与服务端撤回
+
+实时状态只含最新历史窗口；`historyPage` 以 entry ID 为锚点加载更早条目。桌面通过 `conversation-transcript.ts` / `transcript-window.ts` 合并显式加载的旧页和实时尾部，迟到回复按会话及代际过滤；Telegram 历史同步也逐页读取。导出会显式读取剩余页，不只导出可见窗口。
+
+`history/diff_content.rs` 将 Diff 全文存为不可变内容对象，快照保留摘要及 contentRef，`turnDiff` 按会话/条目 ID 读取完整对比。`undoTurn` 不接收客户端路径或补丁；daemon 根据已提交历史执行。`workspace_gate.rs` 对普通任务授予共享工作目录许可，对撤回授予独占许可，覆盖真实路径相同及父子目录；独占冲突明确拒绝，不占用全局任务容量等待。普通会话仍可并行运行，外部编辑器/后台进程不受此锁控制。
+
+`undo.rs` 使用非跟随目录描述符、有界读取和预设权限的暂存文件，不调用扩展宿主 Git，也不修改 index。完整快照预检与逐文件发布校验不等于跨文件原子事务。提交顺序、孤立内容清理及兼容边界见 [持久化与恢复](persistence-recovery.md)。
 
 ## 异常隔离
 

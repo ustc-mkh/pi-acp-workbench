@@ -120,8 +120,17 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       agentCapabilities: {
         loadSession: mode !== 'no-load',
         promptCapabilities: { image: mode === 'context-images' || native },
-        ...(native
-          ? { _meta: { 'pi-workbench': { version: 1, inspect: true, nativeFork: true } } }
+        ...(native || mode?.startsWith('context-title')
+          ? {
+              _meta: {
+                'pi-workbench': {
+                  version: 1,
+                  inspect: true,
+                  nativeFork: native,
+                  title: mode?.startsWith('context-title'),
+                },
+              },
+            }
           : {}),
       },
       agentInfo: { name: 'mock' },
@@ -210,7 +219,36 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     reply(r.id, mode === 'context-codex-options' ? { configOptions } : {});
   } else if (native && r.method === '_pi_workbench/cancel_fork') {
     reply(r.id, {});
-  } else if (r.method === '_pi_workbench/inspect' && native) {
+  } else if (r.method === '_pi_workbench/title' && mode?.startsWith('context-title')) {
+    if (mode === 'context-title-fail') {
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: r.id,
+          error: { code: -32603, message: 'title unavailable' },
+        }) + '\n',
+      );
+    } else
+      reply(r.id, {
+        title: '合并模型设置页面',
+        records: [
+          {
+            id: 'title',
+            sessionId,
+            model: r.params.model || 'p/m',
+            timestamp: Date.now(),
+            kind: 'session-title',
+            input: 10,
+            output: 8,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        ],
+      });
+  } else if (
+    r.method === '_pi_workbench/inspect' &&
+    (native || mode?.startsWith('context-title'))
+  ) {
     reply(r.id, {
       records: [],
       contextWindow: 272000,
@@ -240,6 +278,8 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     const text = mode?.startsWith('context')
       ? r.params.prompt.filter((b) => b.type === 'text').at(-1)?.text || ''
       : r.params.prompt[0].text;
+    if (mode === 'context-native-title' || mode === 'context-title')
+      update({ sessionUpdate: 'session_info_update', title: '原生会话短标题' });
     if (native) {
       addPoint('user', text);
       persistNative();

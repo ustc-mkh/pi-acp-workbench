@@ -71,7 +71,13 @@ export class TranscriptView {
   private messages = new Map<string, { entry: Entry; node: HTMLElement }>();
   private groups = new Map<
     string,
-    { node: HTMLDetailsElement; summary: HTMLElement; body: HTMLElement; running: boolean }
+    {
+      node: HTMLDetailsElement;
+      summary: HTMLElement;
+      body: HTMLElement;
+      running: boolean;
+      renderBody: () => void;
+    }
   >();
   constructor(
     private root: HTMLElement,
@@ -80,7 +86,10 @@ export class TranscriptView {
   ) {}
   setExpanded(expanded: boolean) {
     this.expanded = expanded;
-    for (const group of this.groups.values()) group.node.open = expanded;
+    for (const group of this.groups.values()) {
+      group.node.open = expanded;
+      if (expanded) group.renderBody();
+    }
   }
   update(entries: Entry[], busy: boolean) {
     const ids = new Set(entries.map((entry) => entry.id));
@@ -95,6 +104,10 @@ export class TranscriptView {
         const node = this.render(entry);
         if (node instanceof HTMLDetailsElement && cached?.node instanceof HTMLDetailsElement)
           node.open = cached.node.open;
+        // Restored open tools must materialize before reading terminal scroll
+        // geometry; the native toggle event is asynchronous.
+        if (node instanceof HTMLDetailsElement && node.open)
+          node.dispatchEvent(new Event('pi:materialize'));
         const previousOutput = cached?.node.querySelector<HTMLElement>('.terminal-output');
         const nextOutput = node.querySelector<HTMLElement>('.terminal-output');
         const follow =
@@ -128,7 +141,11 @@ export class TranscriptView {
           body = document.createElement('div');
         body.className = 'activity-body';
         node.append(summary, body);
-        group = { node, summary, body, running };
+        group = { node, summary, body, running, renderBody: () => {} };
+        const current = group;
+        node.addEventListener('toggle', () => {
+          if (node.open) current.renderBody();
+        });
         this.groups.set(block.id, group);
       }
       const tools = block.entries.filter((e) => e.role === 'tool').length,
@@ -141,7 +158,17 @@ export class TranscriptView {
       group.running = running;
       group.summary.textContent = `${running ? '处理中' : '执行过程'} · ${tools} 次工具调用${thoughts ? ` · ${thoughts} 段思考` : ''}`;
       group.node.classList.toggle('running', running);
-      reconcile(group.body, block.entries.map(message));
+      const current = group;
+      group.renderBody = () => reconcile(current.body, block.entries.map(message));
+      if (group.node.open) group.renderBody();
+      else
+        reconcile(
+          group.body,
+          block.entries.flatMap((entry) => {
+            const cached = this.messages.get(entry.id);
+            return cached ? [cached.node] : [];
+          }),
+        );
       return group.node;
     });
     for (const [id, group] of this.groups)
