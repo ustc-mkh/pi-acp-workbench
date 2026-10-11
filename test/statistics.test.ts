@@ -2,6 +2,55 @@
 import { it, expect, vi } from 'vitest';
 import { StatisticsPage } from '../webview/statistics';
 import type { Statistics } from '../src/telemetry';
+it('sorts models by estimated cost and sessions by numeric session number descending', () => {
+  const root = document.createElement('main');
+  const page = new StatisticsPage(root, vi.fn(), () => {}, vi.fn());
+  const data: Statistics = {
+    available: true,
+    titles: {},
+    sessionNumbers: { old: 9, recent: 100, middle: 20 },
+    prices: {
+      cheap: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      expensive: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+    records: [
+      ['old', 'cheap', 10000],
+      ['recent', 'expensive', 1000],
+      ['middle', 'cheap', 100],
+      ['unknown', 'unpriced', 100000],
+    ].map(([sessionId, model, input], index) => ({
+      id: String(index),
+      sessionId: String(sessionId),
+      model: String(model),
+      input: Number(input),
+      timestamp: new Date(2026, 9, 3, 12).getTime(),
+      kind: 'inference' as const,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    })),
+  };
+  const names = () =>
+    [...root.querySelectorAll('tbody tr td:first-child')].map((td) => td.textContent);
+  page.update(data);
+  expect(names()).toEqual(['expensive', 'cheap', 'unpriced']);
+  const click = (label: string) =>
+    [...root.querySelectorAll('button')].find((b) => b.textContent === label)!.click();
+  click('按会话');
+  expect(names()).toEqual(['#100 recent', '#20 middle', '#9 old', 'unknown']);
+  page.update({ ...data, sessionNumbers: { ...data.sessionNumbers, old: 101 } });
+  expect(names()).toEqual(['#101 old', '#100 recent', '#20 middle', 'unknown']);
+  click('按模型');
+  page.update({
+    ...data,
+    prices: { ...data.prices, cheap: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 } },
+  });
+  expect(names()).toEqual(['cheap', 'expensive', 'unpriced']);
+  const from = root.querySelector<HTMLInputElement>('[aria-label="开始日期"]')!;
+  from.value = '2026-10-04';
+  from.dispatchEvent(new Event('change'));
+  expect(names()).toEqual([]);
+});
 it('switches model/time/session views, filters dates, and links models without hover popups', () => {
   document.body.innerHTML = '<main></main>';
   HTMLElement.prototype.scrollIntoView = () => {};

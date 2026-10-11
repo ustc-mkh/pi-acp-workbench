@@ -155,6 +155,13 @@ export class StatisticsPage {
       data?.prices || {},
       this.by === 'time' ? this.interval : this.by,
     );
+    if (this.by === 'model') rows.sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key));
+    else if (this.by === 'session')
+      rows.sort(
+        (a, b) =>
+          (data?.sessionNumbers?.[b.key] ?? 0) - (data?.sessionNumbers?.[a.key] ?? 0) ||
+          a.key.localeCompare(b.key),
+      );
     this.intervals.hidden = this.by !== 'time';
     this.table.replaceChildren();
     if (!rows.length) {

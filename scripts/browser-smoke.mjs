@@ -795,7 +795,33 @@ try {
     (await page.locator('.stats-table-wrap tbody').textContent()).includes('#14 改进模型设置'),
   );
   assert.equal(await page.locator('.stats-table-wrap tbody [data-tooltip]').count(), 0);
+  const originalStatistics = state.statistics;
+  state.statistics = {
+    ...originalStatistics,
+    sessionNumbers: { example: 14, latest: 100 },
+    prices: {
+      ...originalStatistics.prices,
+      cheap: { input: 0.001, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+    records: [
+      ...originalStatistics.records,
+      {
+        ...originalStatistics.records[0],
+        id: 'cheap',
+        sessionId: 'latest',
+        model: 'cheap',
+        input: 1000000,
+      },
+    ],
+  };
+  await emit(state);
+  const rowNames = () =>
+    page.locator('.stats-table-wrap tbody tr td:first-child').allTextContents();
+  assert.deepEqual(await rowNames(), ['#100 latest', '#14 改进模型设置']);
   await page.getByRole('tab', { name: '按模型', exact: true }).click();
+  assert.deepEqual(await rowNames(), ['m', 'cheap']);
+  state.statistics = originalStatistics;
+  await emit(state);
   await page.locator('.stats-model-link').click();
   assert(await page.locator('#models').isVisible());
   assert.equal(await page.locator('#models-toggle').getAttribute('aria-pressed'), 'true');
@@ -849,10 +875,16 @@ try {
   const heading = await page.locator('#models .stats-heading').boundingBox();
   const modelsWidth = await page.locator('#models').evaluate((node) => node.clientWidth);
   assert(heading && Math.abs(heading.width - modelsWidth) < 2);
-  const contextWidth = await settingsCard
-    .locator('.model-context-field input')
-    .evaluate((node) => node.getBoundingClientRect().width);
-  assert(contextWidth <= 90);
+  const settingsViewport = page.viewportSize();
+  for (const width of [320, 640]) {
+    await page.setViewportSize({ width, height: 800 });
+    const contextBounds = await settingsCard.locator('.model-context-field input').boundingBox();
+    const priceBounds = await settingsCard.locator('.price-grid input').first().boundingBox();
+    assert(contextBounds && priceBounds);
+    assert(Math.abs(contextBounds.x - priceBounds.x) < 1);
+    assert(Math.abs(contextBounds.width - priceBounds.width) < 1);
+  }
+  await page.setViewportSize(settingsViewport);
   assert.equal(
     await settingsCard
       .locator('input[type=number]')

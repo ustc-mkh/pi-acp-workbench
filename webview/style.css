@@ -1290,7 +1290,7 @@ body.vscode-high-contrast-light button {
 }
 .model-settings-footer {
   display: grid;
-  grid-template-columns: minmax(80px, 1fr) auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
   gap: 8px;
   margin-top: 7px;
@@ -1301,8 +1301,7 @@ body.vscode-high-contrast-light button {
 }
 .model-context-field input {
   display: block;
-  width: 90px;
-  max-width: 100%;
+  width: 100%;
   box-sizing: border-box;
   margin-top: 4px;
 }
@@ -1316,6 +1315,8 @@ body.vscode-high-contrast-light button {
   margin: 0;
 }
 .model-settings-buttons {
+  grid-column: 2 / -1;
+  justify-self: end;
   display: flex;
   gap: 3px;
 }
@@ -1330,7 +1331,8 @@ body.vscode-high-contrast-light button {
   overflow-wrap: anywhere;
 }
 @media (min-width: 420px) {
-  .model-price-card .price-grid {
+  .model-price-card .price-grid,
+  .model-settings-footer {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
