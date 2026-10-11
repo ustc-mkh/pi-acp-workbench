@@ -60,7 +60,19 @@ jobs:
       - run: npm run format:check
       - run: npm run clippy
       # One preparation per target; independent suites overlap, not stateful cases.
-      - run: npm run test:full
+      - run: |
+          if ! npm run test:full; then
+            node --input-type=module <<'NODE'
+            import { readdirSync, readFileSync } from 'node:fs';
+            for (const run of readdirSync('.test-results').filter((name) => name.startsWith('run-'))) {
+              for (const file of readdirSync(`.test-results/${run}`).filter((name) => name.endsWith('.log'))) {
+                const text = readFileSync(`.test-results/${run}/${file}`, 'utf8').split('\n').slice(-60).join('\n');
+                console.log(`::error title=${file}::${text.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+              }
+            }
+            NODE
+            exit 1
+          fi
         env:
           TEST_JOBS: 2
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -106,7 +118,16 @@ jobs:
           workspaces: rust -> target
           key: production-musl
       - run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
-      - run: node scripts/build-services.mjs --target x86_64-unknown-linux-musl
+      - run: |
+          if ! node scripts/build-services.mjs --target x86_64-unknown-linux-musl > /tmp/production-build.log 2>&1; then
+            node --input-type=module <<'NODE'
+            import { readFileSync } from 'node:fs';
+            const text = readFileSync('/tmp/production-build.log', 'utf8').split('\n').slice(-80).join('\n');
+            console.log(`::error title=Production build::${text.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+            NODE
+            exit 1
+          fi
+          tail -40 /tmp/production-build.log
         env:
           CC: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
