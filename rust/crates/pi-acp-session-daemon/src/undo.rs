@@ -132,8 +132,10 @@ impl Target {
             let stage = name(self.stage.as_ref().ok_or("撤回临时文件不存在")?)?;
             // Linux is the supported daemon platform. NOREPLACE protects a file
             // recreated between validation and publication of a deleted file.
+            // Use the syscall: older musl versions do not export renameat2.
             unsafe {
-                libc::renameat2(
+                libc::syscall(
+                    libc::SYS_renameat2,
                     fd,
                     stage.as_ptr(),
                     fd,
@@ -143,7 +145,7 @@ impl Target {
                     } else {
                         0
                     },
-                )
+                ) as libc::c_int
             }
         };
         if result != 0 {
