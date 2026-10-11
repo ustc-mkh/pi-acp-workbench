@@ -877,6 +877,7 @@ body.vscode-high-contrast-light button {
   color: inherit;
 }
 .chat-tooltip {
+  pointer-events: none;
   position: fixed;
   z-index: 1000;
   max-width: min(320px, calc(100vw - 16px));

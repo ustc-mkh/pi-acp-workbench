@@ -715,6 +715,18 @@ try {
   assert.equal(await page.locator('.message.tool').count(), 1);
   state.status = 'ready';
   await emit(state);
+  // Tooltips are not hoverable and dismiss as soon as the pointer leaves the trigger.
+  await page.locator('#models-toggle').hover();
+  const tooltip = page.locator('#chat-tooltip');
+  assert(await tooltip.isVisible());
+  assert.equal(await tooltip.evaluate((node) => getComputedStyle(node).pointerEvents), 'none');
+  const tooltipBounds = await tooltip.boundingBox();
+  assert(tooltipBounds);
+  await page.mouse.move(
+    tooltipBounds.x + tooltipBounds.width / 2,
+    tooltipBounds.y + tooltipBounds.height / 2,
+  );
+  assert(!(await tooltip.isVisible()));
   await page.locator('#selectors select[aria-label="Fast mode"]').selectOption('on');
   assert(
     (await page.locator('.selector-fast').getAttribute('data-tooltip')).includes('可能增加费用'),

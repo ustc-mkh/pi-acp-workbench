@@ -7,9 +7,7 @@ export function installTooltips(doc: Document = document) {
   tip.hidden = true;
   doc.body.append(tip);
   let active: HTMLElement | undefined;
-  let hideTimer: ReturnType<typeof setTimeout> | undefined;
   const hide = () => {
-    if (hideTimer) clearTimeout(hideTimer);
     if (active) {
       const ids = (active.getAttribute('aria-describedby') || '')
         .split(/\s+/)
@@ -39,7 +37,6 @@ export function installTooltips(doc: Document = document) {
       hide();
       return;
     }
-    if (hideTimer) clearTimeout(hideTimer);
     if (active !== target) hide();
     active = target;
     tip.textContent = target.dataset.tooltip;
@@ -54,19 +51,13 @@ export function installTooltips(doc: Document = document) {
   const targetOf = (target: EventTarget | null) =>
     target instanceof Element ? target.closest<HTMLElement>('[data-tooltip]') : null;
   const over = (event: Event) => {
-    if (event.target instanceof Node && tip.contains(event.target)) {
-      if (hideTimer) clearTimeout(hideTimer);
-      return;
-    }
     const target = targetOf(event.target);
     if (target) show(target);
   };
   const out = (event: Event) => {
     const next = (event as MouseEvent).relatedTarget;
-    if (next instanceof Node && (active?.contains(next) || tip.contains(next))) return;
-    // Only dismissal has a short grace period so the floating text is hoverable.
-    if (hideTimer) clearTimeout(hideTimer);
-    hideTimer = setTimeout(hide, 80);
+    if (next instanceof Node && active?.contains(next)) return;
+    hide();
   };
   const key = (event: KeyboardEvent) => {
     if (event.key === 'Escape') hide();

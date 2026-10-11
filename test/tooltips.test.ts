@@ -39,6 +39,37 @@ it('immediately shows a theme tooltip without native titles, stays within the vi
   expect(tip.hidden).toBe(true);
   expect(button.hasAttribute('aria-describedby')).toBe(false);
 });
+it('immediately hides on leaving the trigger, even when moving onto the tooltip', () => {
+  const button = document.querySelector('button')!;
+  const tip = document.querySelector<HTMLElement>('#chat-tooltip')!;
+  button.setAttribute('aria-describedby', 'existing-description');
+  button.dispatchEvent(new Event('pointerover', { bubbles: true }));
+  expect(tip.hidden).toBe(false);
+  button.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: tip }));
+  expect(tip.hidden).toBe(true);
+  expect(button.getAttribute('aria-describedby')).toBe('existing-description');
+  tip.dispatchEvent(new Event('pointerover', { bubbles: true }));
+  expect(tip.hidden).toBe(true);
+  button.dispatchEvent(new Event('pointerover', { bubbles: true }));
+  expect(tip.hidden).toBe(false);
+  button.dispatchEvent(
+    new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body }),
+  );
+  expect(tip.hidden).toBe(true);
+});
+it('keeps the tooltip when moving between descendants of the trigger, but hides on focus leaving', () => {
+  const button = document.querySelector('button')!;
+  const icon = document.createElement('span');
+  button.append(icon);
+  const tip = document.querySelector<HTMLElement>('#chat-tooltip')!;
+  button.dispatchEvent(new Event('pointerover', { bubbles: true }));
+  button.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: icon }));
+  expect(tip.hidden).toBe(false);
+  icon.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: button }));
+  expect(tip.hidden).toBe(false);
+  button.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: document.body }));
+  expect(tip.hidden).toBe(true);
+});
 it('normalizes titles in streamed content and dismisses tooltips whose target disappears', async () => {
   const link = document.createElement('a');
   link.title = '链接说明';
