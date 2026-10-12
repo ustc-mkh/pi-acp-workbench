@@ -136,6 +136,8 @@ export class ChatProvider
         .filter((c) => c.kind === 'model')
         .flatMap((c) => c.options.map((o) => o.id)),
     );
+    // A missing catalogue is unknown, never a request to hide everything.
+    if (!catalog.size) return undefined;
     // Legacy entries stored the checked whitelist; freeze it once into a hidden set.
     const hidden = new Set(
       (Array.isArray(saved)
@@ -458,6 +460,11 @@ export class ChatProvider
         .filter((c) => c.kind === 'model')
         .flatMap((c) => c.options.map((o) => o.id)),
     );
+    // Without a catalogue a submission cannot be trusted; ask the page to resync.
+    if (!catalog.size) {
+      this.emit();
+      return;
+    }
     const saved = {
       ...this.modelStorage.get<Partial<Record<HarnessId, string[] | { hidden: string[] }>>>(
         'visibleModels',

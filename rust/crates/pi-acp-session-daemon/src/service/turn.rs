@@ -219,10 +219,10 @@ impl SessionService {
             }
         }
         if method == "session/set_config_option" {
-            rt.lock_unpoisoned().state.configs = result
-                .get("configOptions")
-                .and_then(Value::as_array)
-                .cloned();
+            // Adapters may return {} — never wipe the catalogue on omission.
+            if let Some(configs) = result.get("configOptions").and_then(Value::as_array) {
+                rt.lock_unpoisoned().state.configs = Some(configs.clone());
+            }
         }
         if method == "session/set_mode" {
             if let Some(Value::Object(modes)) = &mut rt.lock_unpoisoned().state.modes {

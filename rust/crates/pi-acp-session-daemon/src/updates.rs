@@ -157,10 +157,9 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             }
         }
         "config_option_update" => {
-            state.configs = update
-                .get("configOptions")
-                .and_then(Value::as_array)
-                .cloned()
+            if let Some(configs) = update.get("configOptions").and_then(Value::as_array) {
+                state.configs = Some(configs.clone());
+            }
         }
         "usage_update" => {
             if let (Some(used), Some(size)) = (
