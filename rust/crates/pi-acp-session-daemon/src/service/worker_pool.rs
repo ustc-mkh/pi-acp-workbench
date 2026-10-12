@@ -17,17 +17,26 @@ impl SessionService {
                 if service.sweeping.swap(true, Ordering::SeqCst) {
                     continue;
                 }
-                let idle: Vec<(String, Rt)> = {
+                let (idle, ranked) = {
                     let map = service.runtimes.lock_unpoisoned();
-                    map.iter()
-                        .filter(|(_, r)| {
-                            let r = r.lock_unpoisoned();
-                            !r.phase.busy()
-                                && now_ms().saturating_sub(r.used) >= service.config.idle_ms
-                        })
-                        .map(|(id, r)| (id.clone(), r.clone()))
-                        .collect()
+                    let ranked = activity_order(&map);
+                    let now = now_ms();
+                    (
+                        map.iter()
+                            .filter(|(_, r)| !r.lock_unpoisoned().phase.busy())
+                            .map(|(id, r)| (id.clone(), r.clone(), now))
+                            .collect::<Vec<_>>(),
+                        ranked,
+                    )
                 };
+                let idle: Vec<(String, Rt)> = idle
+                    .into_iter()
+                    .filter(|(id, rt, now)| {
+                        let rank = ranked.iter().position(|r| r == id).unwrap_or(usize::MAX);
+                        now.saturating_sub(rt.lock_unpoisoned().used) >= life_tier_ms(rank)
+                    })
+                    .map(|(id, rt, _)| (id, rt))
+                    .collect();
                 {
                     let _guard = service.allocation.lock().await;
                     for (id, rt) in idle {

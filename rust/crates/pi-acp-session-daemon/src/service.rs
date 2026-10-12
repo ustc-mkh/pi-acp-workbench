@@ -35,6 +35,30 @@ use uuid::Uuid;
 use pi_acp_core::util::now_ms;
 
 type Rt = Arc<Mutex<Runtime>>;
+
+/// Worker lifetime tiers by recent activity: the LONG_LIFE_WORKERS most
+/// recently used runtimes may idle LONG_LIFE_MS; the rest only SHORT_LIFE_MS.
+const LONG_LIFE_WORKERS: usize = 8;
+const LONG_LIFE_MS: u64 = 16 * 24 * 60 * 60 * 1000;
+const SHORT_LIFE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Runtime ids ranked most-recently-active first.
+fn activity_order(runtimes: &HashMap<String, Rt>) -> Vec<String> {
+    let mut ranked: Vec<(u64, String)> = runtimes
+        .iter()
+        .map(|(id, rt)| (rt.lock_unpoisoned().used, id.clone()))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.into_iter().map(|(_, id)| id).collect()
+}
+
+fn life_tier_ms(rank: usize) -> u64 {
+    if rank < LONG_LIFE_WORKERS {
+        LONG_LIFE_MS
+    } else {
+        SHORT_LIFE_MS
+    }
+}
 type Report = Arc<dyn Fn(&str) + Send + Sync>;
 type Broadcast = Arc<dyn Fn(Value) + Send + Sync>;
 /// Non-'static boxed future so operations may borrow &self/&command.

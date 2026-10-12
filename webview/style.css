@@ -1648,6 +1648,14 @@ body *::-webkit-scrollbar-button {
   border-radius: 4px;
   padding: 1px 4px;
 }
+.session-number.alive-long {
+  color: var(--vscode-testing-iconPassed, #73c991);
+  border-color: var(--vscode-testing-iconPassed, #73c991);
+}
+.session-number.alive-short {
+  color: var(--vscode-charts-yellow, #e5c07b);
+  border-color: var(--vscode-charts-yellow, #e5c07b);
+}
 
 .terminal-output {
   max-height: 320px;

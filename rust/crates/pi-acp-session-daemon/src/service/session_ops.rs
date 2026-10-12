@@ -6,13 +6,28 @@ impl SessionService {
     pub async fn list(&self) -> Result<Vec<pi_acp_core::types::HistoryItem>, String> {
         let snapshots = self.store.list().await?;
         let runtimes = self.runtimes.lock_unpoisoned().clone();
+        let ranked = activity_order(&runtimes);
         Ok(snapshots
             .into_iter()
             .map(|snapshot| {
-                let busy = runtimes
-                    .get(&snapshot.id)
-                    .is_some_and(|rt| rt.lock_unpoisoned().phase.busy());
-                pi_acp_core::types::HistoryItem { snapshot, busy }
+                let runtime = runtimes.get(&snapshot.id);
+                let busy = runtime.is_some_and(|rt| rt.lock_unpoisoned().phase.busy());
+                let life_days = runtime.map(|_| {
+                    let rank = ranked
+                        .iter()
+                        .position(|id| id == &snapshot.id)
+                        .unwrap_or(usize::MAX);
+                    if life_tier_ms(rank) == LONG_LIFE_MS {
+                        16u8
+                    } else {
+                        1u8
+                    }
+                });
+                pi_acp_core::types::HistoryItem {
+                    snapshot,
+                    busy,
+                    life_days,
+                }
             })
             .collect())
     }

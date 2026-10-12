@@ -81,7 +81,7 @@ fn load_config(path: &str) -> Result<ServiceConfig, String> {
     let invalid = || "工作进程参数无效".to_string();
     let max_workers = raw.max_workers;
     let idle_ms = raw.idle_ms;
-    if !(1..=8).contains(&max_workers) || idle_ms < 1000 {
+    if !(1..=16).contains(&max_workers) || idle_ms < 1000 {
         return Err(invalid());
     }
     for name in raw.harnesses.keys() {

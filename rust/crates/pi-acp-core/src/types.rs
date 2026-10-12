@@ -65,12 +65,18 @@ pub struct NativeBranchTarget {
     pub hash: String,
 }
 
-/// Live history metadata. Busy is derived from the daemon runtime, never persisted.
+/// Live history metadata. Busy/lifetime are derived from the daemon runtime,
+/// never persisted.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoryItem {
     #[serde(flatten)]
     pub snapshot: Snapshot,
     pub busy: bool,
+    /// Worker lifetime tier in days while the session is resident; absent when
+    /// no live worker owns the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub life_days: Option<u8>,
 }
 impl std::ops::Deref for HistoryItem {
     type Target = Snapshot;

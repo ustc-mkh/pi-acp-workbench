@@ -219,7 +219,7 @@ it('shares a running task between desktop and phone; detaching desktop does not 
   await expect(client.call('create', { cwd: '/forbidden' })).rejects.toThrow();
 }, 15000);
 it('deduplicates requests, serializes a session, bounds workers, and reclaims idle Pi', async () => {
-  const { host, client, service, audit } = await fixture(1, 1000);
+  const { root, host, client, service, audit } = await fixture(1, 1000);
   const a = await host.create(),
     b = await host.create();
   const first = client.call(
@@ -264,6 +264,8 @@ it('deduplicates requests, serializes a session, bounds workers, and reclaims id
   ).toHaveLength(1);
   const remaining = await workerPids(service.child.pid!);
   expect(remaining.length).toBeLessThanOrEqual(1);
+  // Lifetime tiers are day-scale; pressure from a new session evicts the idle worker.
+  await client.call('create', { cwd: root });
   await vi.waitFor(async () => expect(await workerPids(service.child.pid!)).toEqual([]), {
     timeout: 6000,
   });

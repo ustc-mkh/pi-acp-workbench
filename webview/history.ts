@@ -126,6 +126,12 @@ export class HistoryList {
       entry.harness.hidden = !item.harness || item.harness === 'pi';
       const label = sessionLabel(item.sessionNumber, item.id);
       entry.number.textContent = label;
+      entry.number.classList.toggle('alive-long', item.lifeDays === 16);
+      entry.number.classList.toggle('alive-short', item.lifeDays === 1);
+      entry.number.setAttribute(
+        'aria-label',
+        item.lifeDays ? `进程驻留中：${item.lifeDays} 天生命周期` : '进程未驻留',
+      );
       entry.open.setAttribute('aria-label', `${label} ${item.title}`);
       entry.remove.setAttribute('aria-label', `删除会话：${label} ${item.title}`);
       entry.status.classList.toggle('running', running);

@@ -76,7 +76,6 @@ impl SessionService {
                 let _ = settle.send(None);
             }
             r.phase = Phase::Idle;
-            r.used = now_ms();
         }
         self.emit(&rt);
         result
@@ -269,6 +268,8 @@ impl SessionService {
         {
             return Err("当前 ACP 适配器不支持图片".into());
         }
+        // Only real user turns count as activity for lifetime ranking.
+        rt.lock_unpoisoned().used = now_ms();
         let prefs_state = rt.lock_unpoisoned().state.clone();
         self.preferences.save(&harness, &prefs_state).await?;
         let settings_before = {

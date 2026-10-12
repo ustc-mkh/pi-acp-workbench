@@ -53,7 +53,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now pi-sessions
 ```
 
-默认最多 3 个 Pi 工作进程，空闲 15 分钟回收；允许在当前账户有权限访问的任意目录运行，无需目录白名单。完整参数见 [会话服务配置](docs/session-service.md)。
+默认最多 3 个 Pi 工作进程（上限 16）；空闲进程按最近活跃度分层回收，前 8 个驻留 16 天、其余 1 天；允许在当前账户有权限访问的任意目录运行，无需目录白名单。完整参数见 [会话服务配置](docs/session-service.md)。
 
 ### 3. 在插件中对话
 

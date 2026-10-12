@@ -41,6 +41,8 @@ export interface Snapshot {
   historyBefore?: number;
   /** Live list metadata only; absent in persisted snapshots and older daemons. */
   busy?: boolean;
+  /** Live worker lifetime tier in days (16 = hot, 1 = cold); absent when not resident. */
+  lifeDays?: number;
   commands?: acp.AvailableCommand[];
   nativeForks?: Record<string, NativeBranchTarget>;
   harness?: HarnessId;

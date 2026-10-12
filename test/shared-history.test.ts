@@ -127,27 +127,30 @@ it.each(['pi', 'codex', 'claude'] as const)(
     });
     cleanup.push(() => service.stop());
     const snapshot = await service.call('create', { cwd: root, harness });
-    // A session without user turns may be recreated once under a fresh adapter id.
+    // A session without assistant output may be recreated once under a fresh
+    // adapter id.
     await service.call('prompt', {
       sessionId: snapshot.id,
       prompt: [{ type: 'text', text: 'seed turn' }],
     });
-    // Idle eviction forces the next prompt through session/load again.
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // Worker pressure (maxWorkers=1) evicts the idle runtime, forcing the next
+    // prompt through session/load again.
+    await service.call('create', { cwd: root, harness });
     await expect(
       service.call('prompt', {
         sessionId: snapshot.id,
         prompt: [{ type: 'text', text: 'never run' }],
       }),
     ).rejects.toThrow();
-    expect((await service.call('list'))[0].id).toBe(snapshot.id);
+    expect((await service.call('list')).map((s) => s.id)).toContain(snapshot.id);
     const entries = (await service.call('state', { sessionId: snapshot.id })).snapshot.entries;
     expect(entries.some((e) => e.role === 'user' && e.text === 'seed turn')).toBe(true);
     const requests = (await readFile(join(root, 'audit'), 'utf8'))
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    expect(requests.filter((r) => r.method === 'session/new')).toHaveLength(2);
+    // create ×2, one adapter-session recreation after the first load failure.
+    expect(requests.filter((r) => r.method === 'session/new')).toHaveLength(3);
     expect(requests.filter((r) => r.method === 'session/load')).toHaveLength(2);
     expect(requests.filter((r) => r.method === 'session/prompt')).toHaveLength(1);
   },
