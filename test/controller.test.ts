@@ -1579,9 +1579,9 @@ it('persists model visibility per harness and rejects stale page submissions', a
     models: ['other', 'invalid', 'other'],
   });
   expect(host.provider.snapshot().visibleModels).toEqual(['other']);
-  expect(host.stored.get('visibleModels')).toEqual({ pi: ['other'] });
+  expect(host.stored.get('visibleModels')).toEqual({ pi: { hidden: ['default'] } });
   await host.provider.perform({ type: 'setVisibleModels', harness: 'codex', models: [] });
-  expect(host.stored.get('visibleModels')).toEqual({ pi: ['other'] });
+  expect(host.stored.get('visibleModels')).toEqual({ pi: { hidden: ['default'] } });
   await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: null });
   expect(host.provider.snapshot().visibleModels).toBeUndefined();
 });

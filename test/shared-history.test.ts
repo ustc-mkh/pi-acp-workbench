@@ -110,7 +110,7 @@ it('rejects cross-harness attachment before any prompt can be submitted', async 
   await expect(claude.createSession(session.sessionId)).rejects.toThrow('当前 harness');
 });
 it.each(['pi', 'codex', 'claude'] as const)(
-  'preserves cold %s history when native loading fails, without fallback new',
+  'preserves cold %s history when native loading fails after the first user turn',
   async (harness) => {
     const root = await mkdtemp(join(tmpdir(), 'pi-load-failure-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -127,6 +127,13 @@ it.each(['pi', 'codex', 'claude'] as const)(
     });
     cleanup.push(() => service.stop());
     const snapshot = await service.call('create', { cwd: root, harness });
+    // A session without user turns may be recreated once under a fresh adapter id.
+    await service.call('prompt', {
+      sessionId: snapshot.id,
+      prompt: [{ type: 'text', text: 'seed turn' }],
+    });
+    // Idle eviction forces the next prompt through session/load again.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     await expect(
       service.call('prompt', {
         sessionId: snapshot.id,
@@ -134,16 +141,15 @@ it.each(['pi', 'codex', 'claude'] as const)(
       }),
     ).rejects.toThrow();
     expect((await service.call('list'))[0].id).toBe(snapshot.id);
-    expect((await service.call('state', { sessionId: snapshot.id })).snapshot.entries).toEqual(
-      snapshot.entries,
-    );
+    const entries = (await service.call('state', { sessionId: snapshot.id })).snapshot.entries;
+    expect(entries.some((e) => e.role === 'user' && e.text === 'seed turn')).toBe(true);
     const requests = (await readFile(join(root, 'audit'), 'utf8'))
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    expect(requests.filter((r) => r.method === 'session/new')).toHaveLength(1);
-    expect(requests.filter((r) => r.method === 'session/load')).toHaveLength(1);
-    expect(requests.filter((r) => r.method === 'session/prompt')).toHaveLength(0);
+    expect(requests.filter((r) => r.method === 'session/new')).toHaveLength(2);
+    expect(requests.filter((r) => r.method === 'session/load')).toHaveLength(2);
+    expect(requests.filter((r) => r.method === 'session/prompt')).toHaveLength(1);
   },
 );
 it('negotiates standard adapter capabilities without advertising Pi extensions', async () => {

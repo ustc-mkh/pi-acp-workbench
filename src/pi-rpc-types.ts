@@ -8,6 +8,7 @@ export interface PiModel {
   api?: string;
   provider?: string;
   id?: string;
+  name?: string;
   contextWindow?: number;
   cost?: Price;
 }
@@ -17,6 +18,7 @@ export interface PiState {
   sessionFile?: string;
   isStreaming?: boolean;
   isCompacting?: boolean;
+  thinkingLevel?: string;
 }
 export interface PiProcess {
   child: ChildProcess;
@@ -36,6 +38,7 @@ export interface PiProcess {
   getState(): Promise<PiState>;
   getMessages(): Promise<{ messages?: NativeMessage[] }>;
   getAvailableModels(): Promise<{ models?: PiModel[] }>;
+  getAvailableThinkingLevels?(): Promise<string[]>;
 }
 export interface PiProcessFactory {
   spawn(options: {
@@ -56,6 +59,9 @@ export interface PiSession {
   wasCancelRequested(): boolean;
 }
 export interface PiAgent {
+  conn?: {
+    sessionUpdate(params: { sessionId: string; update: unknown }): Promise<unknown>;
+  };
   sessions: Map<string, PiSession>;
   store: { upsert(session: { sessionId: string; cwd: string; sessionFile: string }): void };
   restoreSession(id: string): Promise<PiSession>;

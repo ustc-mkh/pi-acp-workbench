@@ -125,10 +125,14 @@ export class ModelSettingsPage {
           .flatMap((c) => c.options)
       : [];
     const configuredIds = new Set(configured.map((m) => m.id));
+    // The title-model list follows the same visibility settings as the chat picker.
+    const visible = configured.filter(
+      (m) => !state?.visibleModels || state.visibleModels.includes(m.id),
+    );
     const choices = [
       { id: '', name: '跟随当前会话模型' },
       { id: 'off', name: '关闭自动命名' },
-      ...(state?.harness === 'pi' ? configured : []),
+      ...(state?.harness === 'pi' ? visible : []),
     ];
     if (state?.titleModel && !choices.some((c) => c.id === state.titleModel))
       choices.push({ id: state.titleModel, name: state.titleModel });

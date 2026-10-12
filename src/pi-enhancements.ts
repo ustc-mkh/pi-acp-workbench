@@ -76,7 +76,8 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
       const session = await this.restoreSession(params.sessionId);
       session.cancelRequested = false;
-      await refreshPiModels(session.proc);
+      if (await refreshPiModels(session.proc))
+        await this.publishConfigOptions(session).catch(() => {});
       let refreshing: Promise<void> | undefined;
       const refresh = () =>
         (refreshing ??= session.publishContextUsage().finally(() => {
@@ -135,6 +136,65 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       if (method === '_pi_workbench/fork') return this.forkNative(session, params, Process);
       if (method === '_pi_workbench/inspect') return this.inspect(session, params);
       throw new Error('Unknown workbench method');
+    }
+    /** Republish the ACP selector catalogue after Pi reloads its model registry. */
+    private async publishConfigOptions(session: PiSession) {
+      const conn = this.conn;
+      if (!conn) return;
+      const [available, state, levels] = await Promise.all([
+        session.proc.getAvailableModels().catch(() => undefined),
+        session.proc.getState().catch(() => undefined),
+        session.proc.getAvailableThinkingLevels?.().catch(() => [] as string[]) ??
+          Promise.resolve([] as string[]),
+      ]);
+      const models = (available?.models || [])
+        .filter((m) => m.provider && m.id)
+        .map((m) => ({
+          value: `${m.provider}/${m.id}`,
+          name: `${m.provider}/${m.name || m.id}`,
+          description: null,
+        }));
+      const thinking =
+        state?.thinkingLevel && levels.includes(state.thinkingLevel)
+          ? state.thinkingLevel
+          : levels[0];
+      const configOptions: Record<string, unknown>[] = [
+        {
+          type: 'select',
+          id: 'thought_level',
+          category: 'thought_level',
+          name: 'Thinking',
+          description: 'Set the reasoning effort for this session',
+          currentValue: thinking,
+          options: levels.map((id) => ({
+            value: id,
+            name: `Thinking: ${id}`,
+            description: null,
+          })),
+        },
+      ];
+      if (models.length)
+        configOptions.unshift({
+          type: 'select',
+          id: 'model',
+          category: 'model',
+          name: 'Model',
+          description: 'Select the model for this session',
+          currentValue:
+            state?.model?.provider && state.model.id
+              ? `${state.model.provider}/${state.model.id}`
+              : models[0].value,
+          options: models,
+        });
+      if (thinking)
+        await conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: { sessionUpdate: 'current_mode_update', currentModeId: thinking },
+        });
+      await conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: { sessionUpdate: 'config_option_update', configOptions },
+      });
     }
     private async forkNative(
       session: PiSession,
@@ -246,7 +306,8 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       }
     }
     private async inspect(session: PiSession, params: WorkbenchParams): Promise<Inspection> {
-      if (!params.cursor) await refreshPiModels(session.proc);
+      if (!params.cursor && (await refreshPiModels(session.proc)))
+        await this.publishConfigOptions(session).catch(() => {});
       const state = await session.proc.getState();
       const model = state.model,
         modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : 'unknown';

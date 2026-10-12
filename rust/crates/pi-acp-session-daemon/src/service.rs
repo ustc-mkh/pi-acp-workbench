@@ -332,6 +332,19 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
 
 use pi_acp_core::util::js_truthy as js_truthy_value;
 
+/// Adapter-side session id; differs from `snapshot.id` when a session without
+/// persisted turns had to be recreated — adapters cannot load unwritten
+/// rollouts (e.g. codex "no rollout found"). Persisted in `snapshot.extra` so
+/// later turns keep resuming the same adapter session.
+fn acp_session_id(r: &Runtime) -> &str {
+    r.snapshot
+        .extra
+        .get("remoteSessionId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&r.snapshot.id)
+}
+
 fn command_session_id(command: &ServiceCommand) -> &str {
     match command {
         ServiceCommand::State { session_id }

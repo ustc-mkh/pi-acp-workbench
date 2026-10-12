@@ -36,7 +36,7 @@ impl SessionService {
             return Ok(());
         }
         let model = self.title_settings.get().await.model;
-        let session_id = rt.lock_unpoisoned().snapshot.id.clone();
+        let session_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
         let result = agent.with_timeout(agent.request("_pi_workbench/title", json!({"sessionId":session_id,"model":model,"text":text.chars().take(1000).collect::<String>()})), 20000).await;
         match result {
             Ok(result) => {

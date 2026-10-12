@@ -113,7 +113,7 @@ impl SessionService {
     ) -> Result<Value, String> {
         let ServiceCommand::Request {
             request,
-            session_id,
+            session_id: _,
         } = command
         else {
             return Err("无效 ACP 操作".into());
@@ -146,7 +146,8 @@ impl SessionService {
         }
         let params = request.params();
         let mut outgoing = params.clone();
-        outgoing["sessionId"] = json!(session_id);
+        let acp_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
+        outgoing["sessionId"] = json!(acp_id);
         let timeout = if method == "_pi_workbench/fork" {
             180_000
         } else {
@@ -242,7 +243,7 @@ impl SessionService {
         &self,
         rt: &Rt,
         agent: &Arc<AgentProcess>,
-        session_id: &str,
+        _session_id: &str,
         prompt: &[Value],
         source: &str,
         request_id: &str,
@@ -377,11 +378,12 @@ impl SessionService {
             } else {
                 return Err("会话操作已结束。".into());
             }
+            let acp_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
             let outcome =
                 if rt.lock_unpoisoned().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
                     Ok(json!({ "stopReason": "cancelled" }))
                 } else {
-                    agent.prompt(session_id, prompt.to_vec()).await
+                    agent.prompt(&acp_id, prompt.to_vec()).await
                 };
             match outcome {
                 Ok(result) => {
@@ -546,7 +548,8 @@ impl SessionService {
         }
         if prompting {
             if let Some(agent) = agent {
-                agent.cancel(id).await;
+                let acp_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
+                agent.cancel(&acp_id).await;
             }
         }
         true

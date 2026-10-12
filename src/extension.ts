@@ -125,10 +125,35 @@ export class ChatProvider
   private get modelStorage() {
     return this.context.globalState || this.context.workspaceState;
   }
+  /** Unchecked models persist as a hidden set so catalogue additions stay visible. */
   private visibleModels() {
-    return this.modelStorage.get<Partial<Record<HarnessId, string[]>>>('visibleModels', {})[
-      this.harness
-    ];
+    const saved = this.modelStorage.get<
+      Partial<Record<HarnessId, string[] | { hidden: string[] }>>
+    >('visibleModels', {})[this.harness];
+    if (!saved) return undefined;
+    const catalog = new Set(
+      sessionSelectors(this.state)
+        .filter((c) => c.kind === 'model')
+        .flatMap((c) => c.options.map((o) => o.id)),
+    );
+    // Legacy entries stored the checked whitelist; freeze it once into a hidden set.
+    const hidden = new Set(
+      (Array.isArray(saved)
+        ? [...catalog].filter((id) => !saved.includes(id))
+        : saved.hidden
+      ).filter((id) => catalog.has(id)),
+    );
+    if (Array.isArray(saved)) {
+      const stored = {
+        ...this.modelStorage.get<Partial<Record<HarnessId, string[] | { hidden: string[] }>>>(
+          'visibleModels',
+          {},
+        ),
+        [this.harness]: { hidden: [...hidden] },
+      };
+      void this.modelStorage.update('visibleModels', stored);
+    }
+    return [...catalog].filter((id) => !hidden.has(id));
   }
   serviceClient = new SessionClient();
   private titleModel = '';
@@ -434,10 +459,18 @@ export class ChatProvider
         .flatMap((c) => c.options.map((o) => o.id)),
     );
     const saved = {
-      ...this.modelStorage.get<Partial<Record<HarnessId, string[]>>>('visibleModels', {}),
+      ...this.modelStorage.get<Partial<Record<HarnessId, string[] | { hidden: string[] }>>>(
+        'visibleModels',
+        {},
+      ),
     };
     if (message.models === null) delete saved[this.harness];
-    else saved[this.harness] = [...new Set(message.models)].filter((id) => catalog.has(id));
+    else {
+      const checked = new Set(message.models);
+      saved[this.harness] = {
+        hidden: [...catalog].filter((id) => !checked.has(id)),
+      };
+    }
     await this.modelStorage.update('visibleModels', saved);
     this.emit();
   }

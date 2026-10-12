@@ -152,14 +152,11 @@ impl SessionService {
                     let Some(rt) = rt.upgrade() else { return };
                     let event = {
                         let mut r = rt.lock_unpoisoned();
-                        if notification.get("sessionId").and_then(Value::as_str)
-                            != Some(r.snapshot.id.as_str())
-                        {
-                            return;
-                        }
                         if r.phase.at(Step::Replaying) {
                             // During session/load replay only commands are accepted;
-                            // the persisted transcript stays authoritative.
+                            // the persisted transcript stays authoritative. The worker
+                            // serves exactly one session and a recreated session
+                            // publishes under a fresh adapter id, so skip the id check.
                             if notification
                                 .pointer("/update/sessionUpdate")
                                 .and_then(Value::as_str)
@@ -171,6 +168,11 @@ impl SessionService {
                                     .cloned()
                                     .unwrap_or_default();
                             }
+                            return;
+                        }
+                        if notification.get("sessionId").and_then(Value::as_str)
+                            != Some(acp_session_id(&r))
+                        {
                             return;
                         }
                         let update = notification.get("update").cloned().unwrap_or(Value::Null);
@@ -360,12 +362,46 @@ impl SessionService {
                 return Err("会话操作已结束。".into());
             }
         }
-        let session_id = rt.lock_unpoisoned().snapshot.id.clone();
+        let session_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
         let agent = self.spawn_agent(rt)?;
         rt.lock_unpoisoned().agent = Some(agent.clone());
         let started = async {
             agent.initialize().await?;
-            let mut session = agent.create_session(Some(&session_id)).await?;
+            let mut session = match agent.create_session(Some(&session_id)).await {
+                Ok(session) => session,
+                Err(load_error) => {
+                    // Adapters cannot load a session that never persisted a turn
+                    // (codex "no rollout found"). A session without user turns
+                    // loses nothing when recreated under a fresh adapter id;
+                    // a session with history must never be silently replaced.
+                    if rt
+                        .lock_unpoisoned()
+                        .state
+                        .entries
+                        .iter()
+                        .any(|e| e.is("user"))
+                    {
+                        return Err(load_error);
+                    }
+                    let session = agent.create_session(None).await?;
+                    let remote = session
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if remote.is_empty() || remote == session_id {
+                        return Err(load_error);
+                    }
+                    rt.lock_unpoisoned()
+                        .snapshot
+                        .extra
+                        .insert("remoteSessionId".into(), json!(remote));
+                    // Persist immediately so later turns resume this adapter
+                    // session even if the worker is evicted before the next save.
+                    self.save(rt).await?;
+                    session
+                }
+            };
             // ACP load responses may omit selectors; retain the persisted selector
             // catalogue so successful settings can be restored through standard RPC.
             {
