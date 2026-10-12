@@ -371,15 +371,16 @@ impl SessionService {
                 Ok(session) => session,
                 Err(load_error) => {
                     // Adapters cannot load a session that never persisted a turn
-                    // (codex "no rollout found"). A session without user turns
-                    // loses nothing when recreated under a fresh adapter id;
-                    // a session with history must never be silently replaced.
+                    // (codex "no rollout found"). A session without assistant
+                    // output loses nothing when recreated under a fresh adapter
+                    // id — the daemon transcript stays authoritative. A session
+                    // with real history must never be silently replaced.
                     if rt
                         .lock_unpoisoned()
                         .state
                         .entries
                         .iter()
-                        .any(|e| e.is("user"))
+                        .any(|e| e.is("assistant"))
                     {
                         return Err(load_error);
                     }
