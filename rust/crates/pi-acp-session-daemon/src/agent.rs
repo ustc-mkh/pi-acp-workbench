@@ -628,7 +628,7 @@ impl AgentProcess {
                     "initialize",
                     json!({
                         "protocolVersion": 1,
-                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.12.10"},
+                        "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "0.12.11"},
                         "clientCapabilities": {},
                     }),
                 ),
@@ -699,7 +699,19 @@ impl AgentProcess {
             });
         if needs_default {
             let result = self.with_timeout(self.request("session/set_config_option", json!({ "sessionId": session["sessionId"], "configId": "collaboration_mode", "value": "default" })), 30_000).await?;
-            session["configOptions"] = result["configOptions"].clone();
+            if let Some(options) = crate::catalogue::merge_catalogue(
+                session
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .cloned(),
+                result
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .cloned(),
+                false,
+            ) {
+                session["configOptions"] = Value::Array(options);
+            }
         }
         Ok(())
     }

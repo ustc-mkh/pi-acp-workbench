@@ -354,8 +354,6 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
     Ok(())
 }
 
-use pi_acp_core::util::js_truthy as js_truthy_value;
-
 /// Adapter-side session id; differs from `snapshot.id` when a session without
 /// persisted turns had to be recreated — adapters cannot load unwritten
 /// rollouts (e.g. codex "no rollout found"). Persisted in `snapshot.extra` so
@@ -390,8 +388,13 @@ fn view_state(r: &Runtime) -> Value {
     let (entries, before) = crate::history_page::window(&r.state.entries, r.state.entries.len());
     let mut snapshot = Snapshot {
         entries,
-        configs: r.state.configs.clone(),
-        modes: r.state.modes.clone(),
+        // Fall back only on omission: a live [] must reach clients unchanged.
+        configs: crate::catalogue::merge_catalogue(
+            r.snapshot.configs.clone(),
+            r.state.configs.clone(),
+            false,
+        ),
+        modes: r.state.modes.clone().or_else(|| r.snapshot.modes.clone()),
         native_forks: r.state.native_forks.clone(),
         usage: r.state.usage.clone(),
         usage_records: Vec::new(), // Detailed billing is paginated via inspect.
@@ -537,6 +540,30 @@ mod recovery_tests {
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+
+    #[test]
+    fn state_views_fall_back_on_omission_but_publish_live_empty_catalogues() {
+        let mut runtime = Runtime {
+            snapshot: Snapshot {
+                configs: Some(vec![json!({"id":"model"})]),
+                ..Default::default()
+            },
+            state: initial_state(),
+            agent: None,
+            phase: Phase::begin(),
+            used: 0,
+            permissions: HashMap::new(),
+            error: None,
+            snapshot_pending: false,
+        };
+        assert_eq!(
+            view_state(&runtime)["snapshot"]["configs"],
+            json!([{"id":"model"}])
+        );
+        runtime.state.configs = Some(vec![]);
+        assert_eq!(view_state(&runtime)["snapshot"]["configs"], json!([]));
+    }
+
     #[tokio::test]
     async fn usage_survives_eviction_and_restart_without_loading_a_worker() {
         let root = std::env::temp_dir().join(format!("pi-usage-{}", Uuid::new_v4()));

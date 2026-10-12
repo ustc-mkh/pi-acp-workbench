@@ -157,9 +157,14 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             }
         }
         "config_option_update" => {
-            if let Some(configs) = update.get("configOptions").and_then(Value::as_array) {
-                state.configs = Some(configs.clone());
-            }
+            state.configs = crate::catalogue::merge_catalogue(
+                state.configs.take(),
+                update
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .cloned(),
+                replay,
+            );
         }
         "usage_update" => {
             if let (Some(used), Some(size)) = (
@@ -237,6 +242,32 @@ fn merge_terminal(previous: Option<Value>, meta: Option<&Value>) -> Option<Value
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn config_catalogues_preserve_omissions_and_only_protect_empty_replays() {
+        let known = vec![json!({"id":"model"})];
+        let mut state = ChatState {
+            configs: Some(known.clone()),
+            ..Default::default()
+        };
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"config_option_update"}),
+            false,
+        );
+        assert_eq!(state.configs, Some(known.clone()));
+        let empty = json!({"sessionUpdate":"config_option_update","configOptions":[]});
+        apply_update(&mut state, &empty, true);
+        assert_eq!(state.configs, Some(known));
+        apply_update(&mut state, &empty, false);
+        assert_eq!(state.configs, Some(vec![]));
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"config_option_update","configOptions":[{"id":"thinking"}]}),
+            false,
+        );
+        assert_eq!(state.configs, Some(vec![json!({"id":"thinking"})]));
+    }
+
     #[test]
     fn chunks_respect_message_ids_roles_and_tool_boundaries() {
         let mut state = initial_state();

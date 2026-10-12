@@ -280,11 +280,24 @@ impl SessionService {
         .await;
         fork.stop().await;
         let settings = settings?;
-        snapshot.configs = settings
-            .get("configOptions")
-            .and_then(Value::as_array)
-            .cloned();
-        snapshot.modes = settings.get("modes").cloned();
+        // A missing catalogue in the fork handshake means unknown — keep the
+        // parent's persisted one rather than erasing it.
+        snapshot.configs = crate::catalogue::merge_catalogue(
+            snapshot.configs.take(),
+            settings
+                .get("configOptions")
+                .and_then(Value::as_array)
+                .cloned(),
+            true,
+        );
+        snapshot.modes = crate::catalogue::merge_catalogue(
+            snapshot.modes.take(),
+            settings
+                .get("modes")
+                .filter(|value| value.is_object())
+                .cloned(),
+            true,
+        );
         snapshot.title = snapshot
             .entries
             .iter()
@@ -388,10 +401,14 @@ impl SessionService {
                             None => vec![],
                         },
                         commands: Some(commands_cache.clone()),
-                        configs: session
-                            .get("configOptions")
-                            .and_then(Value::as_array)
-                            .cloned(),
+                        configs: crate::catalogue::merge_catalogue(
+                            None,
+                            session
+                                .get("configOptions")
+                                .and_then(Value::as_array)
+                                .cloned(),
+                            true,
+                        ),
                         modes: session.get("modes").cloned(),
                         context_complete: Some(true),
                         ..Default::default()

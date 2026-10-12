@@ -6,6 +6,7 @@
 //! runtime directory; custom workers require explicit command/args.
 mod acp_validation;
 mod agent;
+mod catalogue;
 mod diff;
 mod error;
 mod harness;

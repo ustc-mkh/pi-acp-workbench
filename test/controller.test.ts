@@ -1585,6 +1585,58 @@ it('persists model visibility per harness and rejects stale page submissions', a
   await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: null });
   expect(host.provider.snapshot().visibleModels).toBeUndefined();
 });
+it('preserves configs on omitted setting responses and accepts explicit live clears', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  const previous = host.provider.state.configs!;
+  const request = vi.spyOn(host.provider.agent!, 'request');
+  request.mockResolvedValueOnce({});
+  await host.provider.turnCoordinator.onConfig({ type: 'config', id: 'model', value: 'other' });
+  expect(host.provider.state.configs).toBe(previous);
+  request.mockResolvedValueOnce({ configOptions: [] });
+  await host.provider.turnCoordinator.onConfig({ type: 'config', id: 'model', value: 'other' });
+  expect(host.provider.state.configs).toEqual([]);
+});
+
+it('preserves omitted service catalogues but applies explicit empty ones', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  const snapshot = host.provider.sessionCoordinator.currentSnapshot()!;
+  const value = {
+    snapshot: { ...snapshot, configs: undefined, modes: undefined },
+    busy: false,
+    permissions: [],
+    commands: [],
+    plan: [],
+  };
+  host.provider.applyServiceState(value);
+  expect(host.provider.state.configs).toEqual(snapshot.configs);
+  expect(host.provider.state.modes).toEqual(snapshot.modes);
+  host.provider.applyServiceState({ ...value, snapshot: { ...snapshot, configs: [] } });
+  expect(host.provider.state.configs).toEqual([]);
+});
+
+it('restores snapshot selectors when a load handshake returns an empty catalogue', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  const snapshot = host.provider.sessionCoordinator.currentSnapshot()!;
+  host.provider.sessionCoordinator.disconnect();
+  const coordinator = host.provider.sessionCoordinator;
+  const create = vi.mocked(coordinator.createAgent).getMockImplementation()!;
+  vi.spyOn(coordinator, 'createAgent').mockImplementation((cwd) => {
+    const candidate = create.call(coordinator, cwd);
+    const load = candidate.createSession.bind(candidate);
+    vi.spyOn(candidate, 'createSession').mockImplementation(async (id) => ({
+      ...(await load(id)),
+      configOptions: [],
+    }));
+    vi.spyOn(candidate, 'sync').mockResolvedValue(undefined);
+    return candidate;
+  });
+  await coordinator.start(snapshot);
+  expect(host.provider.state.configs).toEqual(snapshot.configs);
+});
+
 it('restores locally persisted context occupancy after extension restart', async () => {
   host.config.args = [resolve('test/mock-agent.mjs'), 'context-live'];
   await host.provider.perform({ type: 'new' });

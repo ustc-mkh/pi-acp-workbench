@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type * as acp from '@agentclientprotocol/sdk';
 import { RemoteAgent, type Agent } from './remote-agent';
 import type { ServiceState } from './session-protocol';
+import { mergeCatalogue } from './catalogue';
 import { nextId } from './state';
 import { resolvePiCommand } from './pi-command';
 import { HARNESSES, harnessKey, isHarnessId, snapshotHarness, type HarnessId } from './harness';
@@ -169,8 +170,8 @@ export class SessionCoordinator {
       this.host.state.sessionId = session.sessionId;
       this.host.state.sessionNumber = snapshot?.sessionNumber;
       this.host.state.agent = info.agentInfo?.title || info.agentInfo?.name || 'ACP Agent';
-      this.host.state.modes = session.modes || snapshot?.modes;
-      this.host.state.configs = session.configOptions || snapshot?.configs;
+      this.host.state.modes = mergeCatalogue(snapshot?.modes, session.modes, 'cold');
+      this.host.state.configs = mergeCatalogue(snapshot?.configs, session.configOptions, 'cold');
       this.host.state.nativeForks = snapshot?.nativeForks;
       if (snapshot) this.host.state.entries = structuredClone(snapshot.entries);
       this.host.state.contextComplete = true;
@@ -351,8 +352,8 @@ export class SessionCoordinator {
       entries: structuredClone(previous.entries.slice(0, index + 1)),
       nativeForks: previous.nativeForks,
       contextComplete: previous.contextComplete,
-      configs: session.configOptions || undefined,
-      modes: session.modes || undefined,
+      configs: mergeCatalogue(previous.configs, session.configOptions, 'cold'),
+      modes: mergeCatalogue(previous.modes, session.modes, 'cold'),
     });
     this.host.active.replace({ agent: candidate, cwd, conversationId: session.sessionId });
     await (candidate as RemoteAgent).sync();

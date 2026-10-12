@@ -227,7 +227,7 @@ it('uses current Pi prices, persists user overrides, and restores the latest Pi 
     cacheWrite: 0,
   };
   const piPrice = { input: 7, output: 20, cacheRead: 0.7, cacheWrite: 8, source: 'Pi 模型配置' };
-  let prices: Record<string, Price> = { [model]: piPrice };
+  let prices: Record<string, Price> | undefined = { [model]: piPrice };
   const request = vi.fn().mockImplementation(async () => ({ records: [record], prices }));
   const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
     harness: 'pi',
@@ -259,8 +259,16 @@ it('uses current Pi prices, persists user overrides, and restores the latest Pi 
   expect(stats.value.prices[model]).toEqual(prices[model]);
   expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].cost).toBe(9);
   expect(store.get('prices')).toEqual({});
+  prices = undefined;
+  await stats.refresh();
+  expect(stats.value.prices[model]).toEqual({ ...piPrice, input: 9 });
   prices = {};
   await stats.refresh();
+  expect(stats.value.prices[model]).toBeUndefined();
+  await stats.setPrice(model, custom);
+  await stats.refresh();
+  expect(stats.value.prices[model]).toMatchObject({ input: 2, source: '用户设置' });
+  await stats.setPrice(model);
   expect(stats.value.prices[model]).toBeUndefined();
   expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].unpriced).toBe(1);
 });

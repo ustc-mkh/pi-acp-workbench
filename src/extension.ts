@@ -1,4 +1,5 @@
 import { SessionCoordinator, type SessionHost } from './conversation-session';
+import { mergeCatalogue } from './catalogue';
 import { mergeTranscript } from './transcript-window';
 import { modelProvider } from './model-provider';
 import { loadEarlier } from './conversation-transcript';
@@ -182,8 +183,8 @@ export class ChatProvider
       this.history = this.history.map((item) =>
         item.id === s.id ? { ...item, title: s.title, sessionNumber: s.sessionNumber } : item,
       );
-    this.state.configs = s.configs;
-    this.state.modes = s.modes;
+    this.state.configs = mergeCatalogue(this.state.configs, s.configs);
+    this.state.modes = mergeCatalogue(this.state.modes, s.modes);
     this.state.nativeForks = s.nativeForks;
     this.state.permissions = value.permissions;
     this.state.commands = value.commands;
@@ -311,7 +312,7 @@ export class ChatProvider
       this.timer = undefined;
       this.state.harness = this.harness;
       this.state.history = this.history.map(
-        ({ id, cwd, title, updated, sessionNumber, harness, busy }) => ({
+        ({ id, cwd, title, updated, sessionNumber, harness, busy, lifeDays }) => ({
           id,
           cwd,
           title,
@@ -319,6 +320,7 @@ export class ChatProvider
           sessionNumber,
           harness,
           busy,
+          lifeDays,
         }),
       );
       this.telemetry.sessionMetadata(this.history);

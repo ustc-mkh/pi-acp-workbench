@@ -416,15 +416,29 @@ impl SessionService {
             // catalogue so successful settings can be restored through standard RPC.
             {
                 let r = rt.lock_unpoisoned();
-                if session.get("configOptions").is_none() {
-                    if let Some(configs) = &r.state.configs {
-                        session["configOptions"] = json!(configs);
-                    }
+                if let Some(configs) = crate::catalogue::merge_catalogue(
+                    r.state.configs.clone(),
+                    session
+                        .get("configOptions")
+                        .and_then(Value::as_array)
+                        .cloned(),
+                    true,
+                ) {
+                    session["configOptions"] = json!(configs);
+                } else if let Some(object) = session.as_object_mut() {
+                    object.remove("configOptions");
                 }
-                if session.get("modes").is_none() {
-                    if let Some(modes) = &r.state.modes {
-                        session["modes"] = modes.clone();
-                    }
+                if let Some(modes) = crate::catalogue::merge_catalogue(
+                    r.state.modes.clone(),
+                    session
+                        .get("modes")
+                        .filter(|value| value.is_object())
+                        .cloned(),
+                    true,
+                ) {
+                    session["modes"] = modes;
+                } else if let Some(object) = session.as_object_mut() {
+                    object.remove("modes");
                 }
             }
             agent.configure_session(&mut session).await?;
@@ -437,16 +451,24 @@ impl SessionService {
                 ));
             }
             let mut r = rt.lock_unpoisoned();
-            if let Some(configs) = session
-                .get("configOptions")
-                .and_then(Value::as_array)
-                .cloned()
-            {
-                r.state.configs = Some(configs);
-            }
-            if session.get("modes").is_some_and(js_truthy_value) {
-                r.state.modes = session.get("modes").cloned();
-            }
+            // Cold fallback was applied before settings RPCs. Their live []
+            // responses must still be allowed to clear the catalogue.
+            r.state.configs = crate::catalogue::merge_catalogue(
+                r.state.configs.take(),
+                session
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .cloned(),
+                false,
+            );
+            r.state.modes = crate::catalogue::merge_catalogue(
+                r.state.modes.take(),
+                session
+                    .get("modes")
+                    .filter(|value| value.is_object())
+                    .cloned(),
+                false,
+            );
             if let Some(active) = r.phase.active_mut() {
                 active.step = Step::Preparing;
             } else {

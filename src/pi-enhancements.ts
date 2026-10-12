@@ -191,10 +191,13 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           sessionId: session.sessionId,
           update: { sessionUpdate: 'current_mode_update', currentModeId: thinking },
         });
-      await conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: { sessionUpdate: 'config_option_update', configOptions },
-      });
+      // Without models the catalogue would lose its model selector — an empty
+      // getAvailableModels is transient, never publish a crippled catalogue.
+      if (models.length)
+        await conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: { sessionUpdate: 'config_option_update', configOptions },
+        });
     }
     private async forkNative(
       session: PiSession,

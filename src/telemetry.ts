@@ -39,6 +39,7 @@ export interface Inspection {
   contextWindow?: number;
   modelContexts?: Record<string, number>;
   model?: string;
+  /** Omitted means unknown/unchanged; {} explicitly clears server defaults. */
   prices?: Record<string, Price>;
 }
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;

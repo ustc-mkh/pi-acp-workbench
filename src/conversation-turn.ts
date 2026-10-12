@@ -1,4 +1,5 @@
 import type * as acp from '@agentclientprotocol/sdk';
+import { mergeCatalogue } from './catalogue';
 import { codexFixedConfigs } from './session-settings';
 import { RemoteAgent } from './remote-agent';
 import { checkPromptSize } from './context';
@@ -176,7 +177,7 @@ export class TurnCoordinator {
         }),
         15000,
       );
-      this.host.state.configs = response.configOptions;
+      this.host.state.configs = mergeCatalogue(this.host.state.configs, response.configOptions);
       await this.host.refreshHistory();
       await this.host.refreshTelemetry();
     } finally {

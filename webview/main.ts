@@ -16,6 +16,7 @@ import { StateInbox } from './state-inbox';
 import { sessionLabel } from '../src/session-numbers';
 import { HARNESSES, isHarnessId, type HarnessId } from '../src/harness';
 import { TranscriptView } from './transcript';
+import { PaintScheduler } from './paint-scheduler';
 import { installComposerResize } from './composer-resize';
 import { SlashCommands } from './slash-commands';
 interface UiState {
@@ -233,7 +234,7 @@ installImagePaste(
   },
   () => state?.harness || 'pi',
 );
-let paintPending = false;
+const paintScheduler = new PaintScheduler(paint);
 let activityExpanded = vscode.getState()?.activityExpanded || false;
 const outputImages = new OutputImages(send, () => {
   if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
@@ -432,7 +433,6 @@ function updateSend() {
     pasting;
 }
 function paint() {
-  paintPending = false;
   if (!state) return;
   const busy = state.status === 'busy',
     connecting = state.status === 'connecting';
@@ -633,10 +633,7 @@ window.addEventListener('message', (event) => {
     followBottom = true;
   }
   if (state?.status !== 'busy') sending = false;
-  if (!paintPending) {
-    paintPending = true;
-    requestAnimationFrame(paint);
-  }
+  paintScheduler.request(state?.status === 'busy', `${nextHarness}:${state?.sessionId || ''}`);
 });
 new MutationObserver(() => renderDiagrams(el('messages'))).observe(document.body, {
   attributes: true,

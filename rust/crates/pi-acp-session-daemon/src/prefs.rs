@@ -240,16 +240,18 @@ async fn apply_selection(
             30_000,
         )
         .await?;
-    match response.get("configOptions") {
-        Some(options) => {
-            session["configOptions"] = options.clone();
-        }
-        None => {
-            // session.configOptions = undefined → JSON.stringify drops the key.
-            if let Some(object) = session.as_object_mut() {
-                object.remove("configOptions");
-            }
-        }
+    if let Some(options) = crate::catalogue::merge_catalogue(
+        session
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .cloned(),
+        response
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .cloned(),
+        false,
+    ) {
+        session["configOptions"] = Value::Array(options);
     }
     Ok(true)
 }

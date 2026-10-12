@@ -234,13 +234,15 @@ export class ConversationStatistics {
               );
             if (data.contextWindow && Number.isFinite(data.contextWindow) && data.contextWindow > 0)
               this.contextWindow(data.contextWindow);
-            if (data.prices !== undefined)
+            if (data.prices !== undefined) {
               this.modelPrices = Object.fromEntries(
                 Object.entries(data.prices).filter(
                   ([key, value]) =>
                     validPrice(value) && !['__proto__', 'constructor', 'prototype'].includes(key),
                 ),
               );
+              // Omission is unknown; an explicitly empty price map clears Pi defaults.
+            }
             this.value = {
               ...this.value,
               prices: this.prices(),

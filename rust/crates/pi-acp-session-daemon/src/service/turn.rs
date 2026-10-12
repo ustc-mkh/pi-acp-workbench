@@ -218,10 +218,16 @@ impl SessionService {
             }
         }
         if method == "session/set_config_option" {
-            // Adapters may return {} — never wipe the catalogue on omission.
-            if let Some(configs) = result.get("configOptions").and_then(Value::as_array) {
-                rt.lock_unpoisoned().state.configs = Some(configs.clone());
-            }
+            // An omitted field is unknown; an explicit [] clears the catalogue.
+            let mut r = rt.lock_unpoisoned();
+            r.state.configs = crate::catalogue::merge_catalogue(
+                r.state.configs.take(),
+                result
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .cloned(),
+                false,
+            );
         }
         if method == "session/set_mode" {
             if let Some(Value::Object(modes)) = &mut rt.lock_unpoisoned().state.modes {
