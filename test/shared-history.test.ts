@@ -78,7 +78,7 @@ it('owns every harness through the same socket, namespaces IDs, and persists set
 it.each(['pi', 'codex', 'claude'] as const)(
   'keeps %s work alive when clients detach and rejects deleted sessions',
   async (harness) => {
-    const { service, agent } = await fixture();
+    const { root, service, agent } = await fixture();
     const first = agent(harness),
       second = agent(harness);
     await first.initialize();
@@ -89,6 +89,19 @@ it.each(['pi', 'codex', 'claude'] as const)(
     const detached = expect(running).rejects.toThrow();
     await vi.waitFor(async () =>
       expect((await service.call('state', { sessionId: session.sessionId })).busy).toBe(true),
+    );
+    // busy includes worker loading/preparation. Wait for the mock to receive
+    // the prompt so this specifically tests detaching/cancelling live work,
+    // not a race between cancellation and the worker's first prompt frame.
+    await vi.waitFor(
+      async () => {
+        const requests = (await readFile(join(root, 'audit'), 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(requests.some((request) => request.method === 'session/prompt')).toBe(true);
+      },
+      { timeout: 5000 },
     );
     first.dispose();
     await detached;
