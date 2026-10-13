@@ -319,20 +319,17 @@ export class SessionCoordinator {
         this.host.emit();
         return;
       }
-      try {
-      } finally {
-        // Restore transcript/settings, but never roll back a connection or lease loss.
-        this.host.active.replace({
-          state: {
-            ...previous,
-            status: this.host.agent === source && !source.isClosed ? 'ready' : 'disconnected',
-            readOnly: previous.readOnly || this.host.state.readOnly,
-            permissions: [],
-          },
-        });
-        this.host.lifecycle.transition(false);
-        this.host.emit();
-      }
+      // Restore transcript/settings, but never roll back a connection or lease loss.
+      this.host.active.replace({
+        state: {
+          ...previous,
+          status: this.host.agent === source && !source.isClosed ? 'ready' : 'disconnected',
+          readOnly: previous.readOnly || this.host.state.readOnly,
+          permissions: [],
+        },
+      });
+      this.host.lifecycle.transition(false);
+      this.host.emit();
       throw error;
     } finally {
       signal.removeEventListener('abort', cancel);

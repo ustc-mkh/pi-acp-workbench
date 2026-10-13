@@ -28,6 +28,16 @@ it('parses JSONL on LF, not Unicode line separators, and retains title-call usag
   expect(parseTitleOutput(event('failed', 'error'), 's', 'p/m').title).toBe('');
   expect([...parseTitleOutput(event('修复'.repeat(40)), 's', 'p/m').title]).toHaveLength(32);
 });
+it('skips non-JSON stdout lines instead of throwing', () => {
+  const output = [
+    'npm warn deprecated x',
+    event('标题'),
+    '{not json',
+    '',
+    event('更好的标题'),
+  ].join('\n');
+  expect(parseTitleOutput(output, 's', 'p/m').title).toBe('更好的标题');
+});
 it('disables tools, persistence and all project resources', () => {
   const args = titleArgs('p', 'm');
   expect(args).toEqual(

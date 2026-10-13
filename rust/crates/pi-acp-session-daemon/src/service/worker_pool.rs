@@ -232,7 +232,15 @@ impl SessionService {
                         {
                             publication.update();
                         }
-                        json!({ "type": "update", "notification": notification })
+                        // Envelope sessionId is the LOCAL id — the ACP
+                        // notification carries the adapter-side id, which
+                        // differs for sessions recreated under a fresh adapter
+                        // id (remoteSessionId); subscribers watch the local id.
+                        json!({
+                            "type": "update",
+                            "sessionId": r.snapshot.id.clone(),
+                            "notification": notification
+                        })
                     };
                     broadcast(event);
                     // Coalesce authoritative snapshots; raw ACP events remain
@@ -254,7 +262,10 @@ impl SessionService {
                             tokio::time::sleep(Duration::from_millis(40)).await;
                             if let Some(rt) = rt.upgrade() {
                                 let event = {
-                                    let Ok(mut r) = rt.lock() else { return };
+                                    // lock_unpoisoned: a panic elsewhere must
+                                    // not leave snapshot_pending stuck true,
+                                    // which would stall all coalesced pushes.
+                                    let mut r = rt.lock_unpoisoned();
                                     r.snapshot_pending = false;
                                     view_state_with_type(&r)
                                 };

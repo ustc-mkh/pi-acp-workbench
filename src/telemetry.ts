@@ -69,12 +69,18 @@ export function validRecord(value: unknown): value is UsageRecord {
     (r.reportedCost === undefined || finite(r.reportedCost))
   );
 }
+// workspaceState is a per-workspace cache, not a billing archive — without a
+// cap, usageRecords grows forever and bloats every Memento read/write.
+const MAX_USAGE_RECORDS = 5000;
 export function mergeUsage(existing: UsageRecord[], incoming: UsageRecord[]): UsageRecord[] {
   const records = new Map(existing.filter(validRecord).map((r) => [r.id, r]));
   for (const r of incoming) if (validRecord(r)) records.set(r.id, r);
-  return [...records.values()].sort(
+  const merged = [...records.values()].sort(
     (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
   );
+  return merged.length > MAX_USAGE_RECORDS
+    ? merged.slice(merged.length - MAX_USAGE_RECORDS)
+    : merged;
 }
 function inputTotal(r: TokenUsage) {
   return r.input + r.cacheRead + r.cacheWrite;

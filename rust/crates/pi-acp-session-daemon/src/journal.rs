@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -39,7 +40,10 @@ pub struct Receipt {
 
 struct Pending {
     fingerprint: String,
-    task: broadcast::Sender<Result<Value, String>>,
+    /// Weak so a waiter can tell a live owner from a stale marker: the owner
+    /// holds the only strong sender and its drop proves the task is gone
+    /// (lane abort, panic, shutdown) — the completion can never arrive.
+    task: Weak<broadcast::Sender<Result<Value, String>>>,
 }
 
 pub struct RequestJournal {
@@ -262,41 +266,56 @@ impl RequestJournal {
         let fingerprint = request_fingerprint(method, params);
         enum Dedup {
             Wait(broadcast::Receiver<Result<Value, String>>),
-            Owner,
+            Owner(Arc<broadcast::Sender<Result<Value, String>>>),
         }
-        let dedup = {
-            let mut in_flight = self.in_flight.lock().await;
-            match in_flight.get(request_id) {
-                Some(pending) if pending.fingerprint != fingerprint => {
-                    return Err("请求 ID 已被其他操作使用".into())
-                }
-                Some(pending) => Dedup::Wait(pending.task.subscribe()),
-                None => {
-                    if in_flight.len() >= 100 {
-                        return Err("服务请求已满".into());
+        let owner = loop {
+            let dedup = {
+                let mut in_flight = self.in_flight.lock().await;
+                match in_flight.get(request_id) {
+                    Some(pending) if pending.fingerprint != fingerprint => {
+                        return Err("请求 ID 已被其他操作使用".into())
                     }
-                    let (task, _) = broadcast::channel(1);
-                    in_flight.insert(
-                        request_id.to_string(),
-                        Pending {
-                            fingerprint: fingerprint.clone(),
-                            task,
-                        },
-                    );
-                    Dedup::Owner
+                    Some(pending) => match pending.task.upgrade() {
+                        Some(task) => Dedup::Wait(task.subscribe()),
+                        // The owner future was dropped mid-flight (lane abort
+                        // or panic) — its completion can never arrive. Reap
+                        // the stale marker and re-dedup; the durable receipt
+                        // decides what the request may return.
+                        None => {
+                            in_flight.remove(request_id);
+                            continue;
+                        }
+                    },
+                    None => {
+                        if in_flight.len() >= 100 {
+                            return Err("服务请求已满".into());
+                        }
+                        let task = Arc::new(broadcast::channel(1).0);
+                        in_flight.insert(
+                            request_id.to_string(),
+                            Pending {
+                                fingerprint: fingerprint.clone(),
+                                task: Arc::downgrade(&task),
+                            },
+                        );
+                        Dedup::Owner(task)
+                    }
                 }
+            };
+            match dedup {
+                Dedup::Owner(task) => break task,
+                Dedup::Wait(mut receiver) => match receiver.recv().await {
+                    Ok(result) => return result,
+                    // Sender dropped without sending: the owner was aborted
+                    // mid-flight — re-dedup instead of waiting forever.
+                    Err(broadcast::error::RecvError::Closed) => continue,
+                    // Capacity-1 channel with a single send cannot lag.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return Err("等待请求结果时结果丢失".into())
+                    }
+                },
             }
         };
-        if let Dedup::Wait(mut receiver) = dedup {
-            // Lagged is unreachable (single send into a capacity-1 channel);
-            // Closed means the owner future was dropped mid-flight — a state JS
-            // cannot express — so it maps to the shutdown error.
-            return receiver
-                .recv()
-                .await
-                .map_err(|_| "会话服务正在停止".to_string())
-                .and_then(|r| r);
-        }
         let lane_id = if session_id.is_empty() {
             format!("create:{request_id}")
         } else {
@@ -370,10 +389,10 @@ impl RequestJournal {
                 }
             })
             .await;
-        let pending = self.in_flight.lock().await.remove(request_id);
-        if let Some(pending) = pending {
-            let _ = pending.task.send(result.clone());
-        }
+        self.in_flight.lock().await.remove(request_id);
+        // Receivers subscribed before this send still observe the buffered
+        // result even though the entry (and soon the sender) is gone.
+        let _ = owner.send(result.clone());
         result
     }
 
@@ -510,12 +529,12 @@ impl RequestJournal {
     }
 
     pub async fn drain(&self) {
-        let senders: Vec<broadcast::Sender<Result<Value, String>>> = self
+        let senders: Vec<Arc<broadcast::Sender<Result<Value, String>>>> = self
             .in_flight
             .lock()
             .await
             .values()
-            .map(|p| p.task.clone())
+            .filter_map(|p| p.task.upgrade())
             .collect();
         for sender in senders {
             let mut receiver = sender.subscribe();
@@ -760,6 +779,55 @@ mod tests {
             json!({"created":"one"})
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        queue.close().await;
+    }
+
+    #[tokio::test]
+    async fn reaps_stale_in_flight_markers_and_wakes_waiters_after_owner_abort() {
+        let root = Root::new();
+        let journal = Arc::new(RequestJournal::new(root.0.clone()));
+        journal.initialize(|_| async { Ok(()) }).await.unwrap();
+        let queue = Arc::new(TaskQueue::new(1, 100));
+        let (entered, started) = oneshot::channel();
+        let j = journal.clone();
+        let q = queue.clone();
+        let owner = tokio::spawn(async move {
+            j.run("id", "create", &json!({"a":1}), "", &q, |_| async move {
+                let _ = entered.send(());
+                std::future::pending::<Result<Value, String>>().await
+            })
+            .await
+        });
+        started.await.unwrap();
+        assert_eq!(journal.pending_count().await, 1);
+        // A duplicate subscribes while the owner is alive...
+        let dup = tokio::spawn({
+            let j = journal.clone();
+            let q = queue.clone();
+            async move {
+                j.run("id", "create", &json!({"a":1}), "", &q, |_| async {
+                    panic!("duplicate must not execute")
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        // ...then the owner dies mid-flight (lane abort / panic). Its marker
+        // must be reaped and the waiter must wake — neither may hang forever.
+        owner.abort();
+        let _ = owner.await;
+        let result = dup.await.unwrap();
+        // The durable 'running' receipt refuses automatic replay.
+        assert!(result.unwrap_err().contains("不会自动重放"));
+        assert_eq!(journal.pending_count().await, 0);
+        // A later caller also reaps rather than deadlocking on the dead sender.
+        let result = journal
+            .run("id", "create", &json!({"a":1}), "", &queue, |_| async {
+                panic!("must not re-execute")
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(journal.pending_count().await, 0);
         queue.close().await;
     }
 

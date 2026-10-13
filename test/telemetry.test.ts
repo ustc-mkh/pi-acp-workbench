@@ -19,6 +19,13 @@ it('deduplicates repeated inspections, including compaction usage', () => {
     mergeUsage([r('1')], [r('1'), r('2', { kind: 'compaction' }), r('bad', { input: -1 })]),
   ).toHaveLength(2);
 });
+it('caps retained usage records at the newest 5000', () => {
+  const many = Array.from({ length: 6000 }, (_, i) => r(`u${i}`, { timestamp: i }));
+  const merged = mergeUsage(many.slice(0, 3000), many.slice(3000));
+  expect(merged).toHaveLength(5000);
+  expect(merged[0].id).toBe('u1000');
+  expect(merged.at(-1)!.id).toBe('u5999');
+});
 it('uses total input inclusive of both caches and weighted cache hit rates', () => {
   const groups = groupUsage(
     [r('1'), r('2', { input: 1000, cacheRead: 0, cacheWrite: 0 })],

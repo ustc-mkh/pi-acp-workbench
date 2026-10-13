@@ -124,7 +124,22 @@ export class ConversationStatistics {
   }
   private readOverrides() {
     const legacy = this.legacyOverrides();
-    const raw = this.pricePreferences?.read(legacy) ?? legacy;
+    let raw: PriceOverrides;
+    try {
+      raw = this.pricePreferences?.read(legacy) ?? legacy;
+    } catch (error) {
+      // The display path must degrade: a corrupt/unreadable overrides file
+      // falls back to the Memento copy instead of breaking activation or the
+      // statistics view. Writes stay fail-closed — set() re-reads inside the
+      // lock and aborts before replacing the file, so this catch can never
+      // mask a clobbered write.
+      raw = { ...legacy };
+      // MUTATE note — never `this.value = {...}` here: this runs inside
+      // `this.value.prices = this.prices()` where the assignment target was
+      // already bound, so replacing the object would drop the computed prices
+      // (and the note) onto a stale object.
+      if (this.value) this.value.note = error instanceof Error ? error.message : String(error);
+    }
     const overrides: Record<string, Price> = {};
     const resets = new Set<string>();
     for (const [model, value] of Object.entries(raw)) {

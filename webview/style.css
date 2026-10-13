@@ -12,6 +12,9 @@
   --code-bg: color-mix(in srgb, var(--vscode-textCodeBlock-background, #101214) 35%, var(--bg));
   --inline-code-bg: color-mix(in srgb, var(--vscode-input-background, #22262a) 60%, var(--bg));
   --focus: color-mix(in srgb, var(--vscode-focusBorder, #58bfa2) 68%, var(--bg));
+  /* Keep composer actions as bright as the normal context ring, not the softened highlights. */
+  --composer-accent: var(--vscode-focusBorder, #76bfa9);
+  --composer-accent-hover: color-mix(in srgb, var(--composer-accent) 88%, var(--fg));
 }
 * {
   box-sizing: border-box;
@@ -463,11 +466,16 @@ button.primary:hover {
 }
 #send,
 #stop {
+  background: var(--composer-accent);
   color: var(--bg);
   width: 26px;
   height: 26px;
   min-width: 26px;
   padding: 0;
+}
+#send:hover:not(:disabled),
+#stop:hover:not(:disabled) {
+  background: var(--composer-accent-hover);
 }
 #send svg {
   width: 16px;
@@ -841,7 +849,7 @@ body.vscode-high-contrast-light button {
   opacity: 0.22;
 }
 #usage-fill {
-  stroke: var(--vscode-focusBorder, #76bfa9);
+  stroke: var(--composer-accent);
   stroke-linecap: round;
 }
 #usage[data-level='high'] #usage-fill {

@@ -451,3 +451,30 @@ it.each(['codex', 'claude'] as const)(
     expect(request).not.toHaveBeenCalled();
   },
 );
+it('degrades to legacy prices on a corrupt shared overrides file instead of breaking construction', async () => {
+  const { writeFileSync, readFileSync } = await import('node:fs');
+  const state = { ...initialState(), sessionId: 'one', status: 'ready' as const };
+  const model = 'openai/gpt-5';
+  const price: Price = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 };
+  const store = storage();
+  await store.update(`price:${model}`, price);
+  const preferences = priceFixture(store);
+  await preferences.set('other/model', price, { [model]: price });
+  // Corrupt the shared file after it held a valid payload.
+  writeFileSync(preferences.file, 'broken');
+  const stats = new ConversationStatistics(
+    store,
+    new ClientOperations(),
+    () => ({ state, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+    preferences,
+  );
+  // Construction survives: Memento legacy values remain visible, the failure
+  // surfaces as a note rather than an activation-breaking throw.
+  expect(stats.value.note).toContain('损坏');
+  expect(stats.value.prices[model]).toMatchObject({ input: 1, output: 2 });
+  // Writes stay fail-closed and never overwrite the corrupt evidence.
+  await expect(stats.setPrice(model, { ...price, input: 9 })).rejects.toThrow();
+  expect(readFileSync(preferences.file, 'utf8')).toBe('broken');
+});

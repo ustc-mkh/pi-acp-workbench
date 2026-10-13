@@ -1025,6 +1025,7 @@ try {
   await page.screenshot({ path: resolve(artifacts, 'preview-output-images.png') });
   // Render button previews in both themes and verify glyph/background colors.
   await page.setViewportSize({ width: 440, height: 640 });
+  state.usage = { used: 30000, size: 100000 };
   state.harness = 'pi';
   state.permissions = [];
   state.entries = [
@@ -1052,13 +1053,13 @@ try {
     node.style.height = '80px';
   });
   await page.locator('#input').fill('继续完善这个功能');
-  for (const [theme, bg, fg, muted, border, input] of [
-    ['dark', '#151719', '#dfdfdf', '#999', '#34383d', '#22262a'],
-    ['light', '#fafafa', '#242424', '#666', '#ddd', '#f0f0f0'],
+  for (const [theme, bg, fg, muted, border, input, focus] of [
+    ['dark', '#151719', '#dfdfdf', '#999', '#34383d', '#22262a', '#66bfff'],
+    ['light', '#fafafa', '#242424', '#666', '#ddd', '#f0f0f0', '#007acc'],
   ]) {
     await page.emulateMedia({ colorScheme: theme });
     await page.addStyleTag({
-      content: `:root{--bg:${bg};--fg:${fg};--muted:${muted};--border:${border};--vscode-input-background:${input}}`,
+      content: `:root{--bg:${bg};--fg:${fg};--muted:${muted};--border:${border};--vscode-input-background:${input};--vscode-focusBorder:${focus}}`,
     });
     for (const status of ['ready', 'busy']) {
       state.status = status;
@@ -1069,6 +1070,9 @@ try {
         return {
           send: getComputedStyle(document.querySelector('#send svg')).stroke,
           stop: getComputedStyle(document.querySelector('#stop .stop-square')).backgroundColor,
+          sendBackground: getComputedStyle(document.querySelector('#send')).backgroundColor,
+          stopBackground: getComputedStyle(document.querySelector('#stop')).backgroundColor,
+          ring: getComputedStyle(document.querySelector('#usage-fill')).stroke,
           bg,
           history: [...document.querySelectorAll('.history-controls button')].map(
             (node) => getComputedStyle(node).backgroundColor,
@@ -1077,10 +1081,32 @@ try {
       });
       assert.equal(colors.send, colors.bg);
       assert.equal(colors.stop, colors.bg);
+      assert.equal(colors.sendBackground, colors.ring);
+      assert.equal(colors.stopBackground, colors.ring);
+      const action = page.locator(status === 'ready' ? '#send' : '#stop');
+      assert(await action.isEnabled());
+      assert.equal(await action.evaluate((node) => getComputedStyle(node).opacity), '1');
+      await action.hover();
+      assert.notEqual(
+        await action.evaluate((node) => getComputedStyle(node).backgroundColor),
+        colors.ring,
+      );
+      await page.mouse.move(0, 0);
       assert.deepEqual(colors.history, ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
       await page.screenshot({ path: resolve(artifacts, `preview-buttons-${theme}-${status}.png`) });
     }
   }
+  state.usage = { used: 95000, size: 100000 };
+  await emit(state);
+  assert.equal(await page.locator('#usage').getAttribute('data-level'), 'high');
+  assert(
+    await page.evaluate(
+      () =>
+        getComputedStyle(document.querySelector('#usage-fill')).stroke !==
+        getComputedStyle(document.querySelector('#stop')).backgroundColor,
+    ),
+  );
+  state.usage = { used: 30000, size: 100000 };
   // Match the reference's dark blue theme and exercise all shared highlight surfaces.
   state.status = 'ready';
   state.entries = [

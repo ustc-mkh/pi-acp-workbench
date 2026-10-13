@@ -446,7 +446,7 @@ async fn emit_loop(shared: Arc<Shared>, conn: Arc<Conn>, mut rx: mpsc::Unbounded
     }
 }
 
-/// JS `||` truthiness for `snapshot?.id || notification?.sessionId`
+/// JS `||` truthiness for `snapshot?.id || sessionId || notification?.sessionId`
 /// (null/false/0/'' are falsy; objects are always truthy).
 use pi_acp_core::util::js_truthy;
 
@@ -702,6 +702,48 @@ mod resource_tests {
     }
 
     #[tokio::test]
+    async fn update_events_route_by_envelope_session_id_not_adapter_id() {
+        let root = Root::new();
+        let path = root.0.join("s");
+        let server = SessionServer::new(
+            path.clone(),
+            Arc::new(|_, _, _, _| Box::pin(async { Ok(json!(true)) })),
+        );
+        server.listen().await.unwrap();
+        let mut client = Client::open(&path).await;
+        client
+            .send(
+                "watch",
+                "_watch",
+                json!({"sessionId":"local","enabled":true}),
+            )
+            .await;
+        assert_eq!(client.reply().await["value"], true);
+        // A session recreated under a fresh adapter id emits ACP notifications
+        // keyed by the remote id; the envelope sessionId stays the local id
+        // the subscriber watches — it must still be delivered.
+        server.broadcast(json!({
+            "type": "update",
+            "sessionId": "local",
+            "notification": {"sessionId": "adapter-remote-id", "update": {"sessionUpdate": "x"}}
+        }));
+        assert_eq!(
+            client.reply().await["event"]["notification"]["sessionId"],
+            "adapter-remote-id"
+        );
+        // Without an envelope id the notification id is used (legacy emitters).
+        server.broadcast(json!({
+            "type": "update",
+            "notification": {"sessionId": "local", "update": {"sessionUpdate": "y"}}
+        }));
+        assert_eq!(
+            client.reply().await["event"]["notification"]["update"]["sessionUpdate"],
+            "y"
+        );
+        server.dispose().await;
+    }
+
+    #[tokio::test]
     async fn bounds_requests_and_connections_and_releases_all_accounting() {
         let root = Root::new();
         let path = root.0.join("s");
@@ -897,7 +939,13 @@ impl SessionServer {
     pub fn broadcast(&self, event: Value) {
         let session_id = match event.get("snapshot").and_then(|s| s.get("id")) {
             Some(v) if js_truthy(v) => Some(v),
-            _ => event.get("notification").and_then(|n| n.get("sessionId")),
+            // Envelope sessionId is the local id the emitter chose. The ACP
+            // notification carries the adapter-side id, which differs after a
+            // session is recreated under a fresh adapter id (remoteSessionId).
+            _ => match event.get("sessionId") {
+                Some(v) if js_truthy(v) => Some(v),
+                _ => event.get("notification").and_then(|n| n.get("sessionId")),
+            },
         };
         let Some(session_id) = session_id.and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             return;

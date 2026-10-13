@@ -148,18 +148,33 @@ export class SessionClient {
   ) {}
   private connect() {
     if (this.closed) return Promise.reject(new Error('会话客户端已关闭'));
-    return (this.connecting ||= new Promise<void>((resolve, reject) => {
-      const socket = (this.socket = createConnection(this.path));
+    if (this.connecting) return this.connecting;
+    let socket: Socket;
+    try {
+      socket = createConnection(this.path);
+    } catch (error) {
+      // A synchronous throw (bad path) must not lodge a permanently rejected
+      // promise in `connecting` — with no socket there is no 'close' event to
+      // reset it, and every later call() would fail until extension reload.
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    this.socket = socket;
+    return (this.connecting = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => socket.destroy(new Error('连接超时')), 5000);
       socket.once('connect', () => {
         clearTimeout(timer);
         resolve();
       });
-      socket.on('error', () => {});
+      // Swallowed but remembered so the close error keeps the real cause
+      // (ECONNREFUSED etc.) instead of only the generic message.
+      let lastError: Error | undefined;
+      socket.on('error', (error) => {
+        lastError = error;
+      });
       socket.once('close', () => {
         clearTimeout(timer);
         const error = new Error(
-          'Pi 会话服务连接已断开。请检查 pi-sessions.service；任务不会自动重发。',
+          `Pi 会话服务连接已断开${lastError ? `：${lastError.message}` : ''}。请检查 pi-sessions.service；任务不会自动重发。`,
         );
         reject(error);
         this.states.clear();

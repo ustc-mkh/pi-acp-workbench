@@ -96,10 +96,18 @@ export class DiffDocuments implements vscode.Disposable {
             path: `/${key}/${fileIndex}/${side}/${file.path}`,
           });
         const left = uri('before'),
-          right = uri('after');
-        documents.push([left, file.before], [right, file.after]);
+          right = uri('after'),
+          resource = uri('file');
+        // vscode.changes labels the entry by the resource uri — give it real
+        // content (post-change text, or pre-change for deletes) so opening it
+        // directly doesn't show an empty document.
+        documents.push(
+          [left, file.before],
+          [right, file.after],
+          [resource, file.after ?? file.before ?? ''],
+        );
         resources.push([
-          uri('file'),
+          resource,
           file.status === 'added' ? undefined : left,
           file.status === 'deleted' ? undefined : right,
         ]);

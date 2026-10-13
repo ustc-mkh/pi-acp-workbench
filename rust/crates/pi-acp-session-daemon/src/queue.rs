@@ -46,6 +46,34 @@ struct Lane {
     queued: AtomicUsize,
 }
 
+/// Decrements the global/lane slot accounting when run_inner ends — on normal
+/// return AND on future-drop (task abort, panic unwind). Without this guard a
+/// dropped in-flight run leaks `queued`, so close() can wait forever and the
+/// lane is never retired.
+struct SlotGuard<'a> {
+    queue: &'a TaskQueue,
+    id: &'a str,
+    lane: Arc<Lane>,
+}
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.queue.queued.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.queue.drained.notify_waiters();
+        }
+        let mut inner = self.queue.inner.lock_unpoisoned();
+        if self.lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
+            && inner
+                .lanes
+                .get(self.id)
+                .map(|l| Arc::ptr_eq(l, &self.lane))
+                .unwrap_or(false)
+        {
+            inner.lanes.remove(self.id);
+            inner.epochs.remove(self.id);
+        }
+    }
+}
+
 impl TaskQueue {
     pub fn new(capacity: usize, limit: usize) -> Self {
         TaskQueue {
@@ -137,7 +165,12 @@ impl TaskQueue {
                 }
             })
         };
-        let result = async {
+        let _slot = SlotGuard {
+            queue: self,
+            id,
+            lane: lane.clone(),
+        };
+        async {
             let _lane_guard = lane.lock.lock().await;
             let _permit = self
                 .semaphore
@@ -147,22 +180,7 @@ impl TaskQueue {
             check()?;
             operation(check).await
         }
-        .await;
-        if self.queued.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.drained.notify_waiters();
-        }
-        let mut inner = self.inner.lock_unpoisoned();
-        if lane.queued.fetch_sub(1, Ordering::SeqCst) == 1
-            && inner
-                .lanes
-                .get(id)
-                .map(|l| Arc::ptr_eq(l, &lane))
-                .unwrap_or(false)
-        {
-            inner.lanes.remove(id);
-            inner.epochs.remove(id);
-        }
-        result
+        .await
     }
 
     pub fn mark_closed(&self) {

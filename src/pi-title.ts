@@ -37,7 +37,14 @@ export function parseTitleOutput(output: string, sessionId: string, model: strin
   const records: UsageRecord[] = [];
   for (const line of output.split('\n')) {
     if (!line.trim()) continue;
-    const event = JSON.parse(line);
+    // pi --mode json can interleave non-JSON diagnostics on stdout; skip them
+    // instead of letting a SyntaxError fail the whole title attempt.
+    let event: ReturnType<typeof JSON.parse>;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant') continue;
     const message = event.message;
     title = ['error', 'aborted', 'toolUse'].includes(message.stopReason)
