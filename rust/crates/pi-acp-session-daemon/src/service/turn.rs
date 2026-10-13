@@ -6,16 +6,30 @@ impl SessionService {
     pub(super) async fn with_worker<'a, F>(
         &'a self,
         id: &'a str,
+        check: Option<Check>,
         operation: F,
     ) -> Result<Value, String>
     where
         F: FnOnce(Rt, Arc<AgentProcess>) -> OpFuture<'a>,
     {
-        let rt = self.runtime(id).await?;
+        let rt = self.runtime(id, check.as_ref()).await?;
         let guarded = pi_acp_core::panic_guard::run(async {
+            // Cover cancellation during snapshot I/O/runtime insertion as well
+            // as during worker initialization. The runtime flag handles stops
+            // after these checks; the queue epoch covers stops before insertion.
+            let cancelled = || {
+                check.as_ref().is_some_and(|check| check().is_err())
+                    || rt.lock_unpoisoned().phase.cancelled()
+                    || self.closed.load(Ordering::SeqCst)
+            };
+            if cancelled() {
+                return Ok(json!({ "stopReason": "cancelled" }));
+            }
             let agent = self.worker(&rt).await?;
             rt.lock_unpoisoned().error = None;
-            if rt.lock_unpoisoned().phase.cancelled() || self.closed.load(Ordering::SeqCst) {
+            if cancelled() {
+                // A runtime already started: preserve the normal stop result
+                // instead of reporting a queued-request failure to the UI.
                 return Ok(json!({ "stopReason": "cancelled" }));
             }
             operation(rt.clone(), agent).await
@@ -496,18 +510,22 @@ impl SessionService {
     }
 
     pub(super) async fn cancel(&self, id: &str) -> bool {
-        self.queue.cancel(id).await;
+        let queued = self.queue.cancel(id).await;
         let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
-        let Some(rt) = rt else { return false };
+        let Some(rt) = rt else { return queued };
         let (token, prompting, agent) = {
             let mut r = rt.lock_unpoisoned();
             if !r.phase.busy() {
-                return false;
+                return queued;
             }
-            r.phase.stop_cancel_timer();
             let Some(active) = r.phase.active_mut() else {
                 return false;
             };
+            // A repeated stop invalidates newly queued work, but must not
+            // postpone this operation's original escalation deadline.
+            if active.cancelled {
+                return true;
+            }
             active.cancelled = true;
             for (_, settle) in r.permissions.drain() {
                 let _ = settle.send(None);
@@ -519,11 +537,12 @@ impl SessionService {
                 r.agent.clone(),
             )
         };
-        // 5 s escalation: still busy with the SAME agent → dispose the worker.
+        // 5 s from the FIRST stop, still busy with the SAME agent → dispose.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let weak = Arc::downgrade(&rt);
         let reference = agent.clone();
         let task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep_until(deadline).await;
             let Some(rt) = weak.upgrade() else { return };
             let kill = {
                 let r = rt.lock_unpoisoned();
@@ -536,7 +555,10 @@ impl SessionService {
                         .unwrap_or(false)
             };
             if kill {
-                if let Some(agent) = rt.lock_unpoisoned().agent.take() {
+                // Keep cleanup ownership in the runtime. A replay failure can
+                // finish the lane before TERM escalates; shutdown/eviction must
+                // still be able to retain this agent and await stop().
+                if let Some(agent) = rt.lock_unpoisoned().agent.clone() {
                     agent.dispose();
                 }
             }

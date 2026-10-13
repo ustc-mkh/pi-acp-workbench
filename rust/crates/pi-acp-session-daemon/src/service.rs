@@ -19,7 +19,7 @@ use crate::prefs::{apply_preferences, model_preferences, SessionPreferences};
 use crate::protocol::{
     durable_command, service_command, AgentRequest, ServiceCommand, ServiceState,
 };
-use crate::queue::TaskQueue;
+use crate::queue::{Check, TaskQueue};
 use crate::types::{ChatState, Entry, Permission, Snapshot};
 use crate::updates::{apply_update, initial_state, next_id};
 use pi_acp_core::utf16::utf16_head;
@@ -209,7 +209,7 @@ impl SessionService {
                     &params,
                     command_session_id(&command),
                     &self.queue,
-                    || self.execute(&command, request_id),
+                    |check| self.execute(&command, request_id, Some(check)),
                 )
                 .await
                 .map_err(ServiceError::from);
@@ -217,7 +217,20 @@ impl SessionService {
         if matches!(
             command,
             ServiceCommand::Remove { .. } | ServiceCommand::HistoryRemove { .. }
-        ) || matches!(
+        ) {
+            let id = command_session_id(&command);
+            if !id.is_empty() {
+                // Stop live work and invalidate old waiters BEFORE joining its
+                // lane. Otherwise deletion waits forever behind a live prompt.
+                self.cancel(id).await;
+            }
+            return self
+                .queue
+                .run_control(id, |_check| self.execute(&command, request_id, None))
+                .await
+                .map_err(ServiceError::from);
+        }
+        if matches!(
             &command,
             ServiceCommand::Request {
                 request: AgentRequest::Inspect { .. },
@@ -226,18 +239,23 @@ impl SessionService {
         ) {
             return self
                 .queue
-                .run(command_session_id(&command), |_check| {
-                    self.execute(&command, request_id)
+                .run(command_session_id(&command), |check| {
+                    self.execute(&command, request_id, Some(check))
                 })
                 .await
                 .map_err(ServiceError::from);
         }
-        self.execute(&command, request_id)
+        self.execute(&command, request_id, None)
             .await
             .map_err(ServiceError::from)
     }
 
-    async fn execute(&self, command: &ServiceCommand, request_id: &str) -> Result<Value, String> {
+    async fn execute(
+        &self,
+        command: &ServiceCommand,
+        request_id: &str,
+        check: Option<Check>,
+    ) -> Result<Value, String> {
         // The journal/session lane is acquired first. Workspace conflicts fail
         // visibly rather than holding global queue slots while waiting.
         let cwd = match command {
@@ -275,7 +293,7 @@ impl SessionService {
                 self.history_remove(session_id.as_deref()).await?;
                 Ok(Value::Null)
             }
-            _ => self.execute_session(command, request_id).await,
+            _ => self.execute_session(command, request_id, check).await,
         }
     }
 
@@ -283,6 +301,7 @@ impl SessionService {
         self.closed.store(true, Ordering::SeqCst);
         self.queue.mark_closed();
         let draining = self.queue.close();
+        let mut stopping_agents = Vec::new();
         {
             let runtimes: Vec<Rt> = self.runtimes.lock_unpoisoned().values().cloned().collect();
             for rt in runtimes {
@@ -295,10 +314,18 @@ impl SessionService {
                 };
                 if let Some(agent) = agent {
                     agent.dispose();
+                    stopping_agents.push(agent);
                 }
             }
         }
-        let ((), ()) = tokio::join!(draining, self.journal.drain());
+        // Retain and await every worker's group cleanup before the daemon's
+        // runtime can exit, even though its runtime directory no longer owns it.
+        let cleanup = async {
+            for agent in stopping_agents {
+                agent.stop().await;
+            }
+        };
+        let ((), (), ()) = tokio::join!(draining, self.journal.drain(), cleanup);
         self.exclusive(|| async {
             let ids: Vec<String> = self.runtimes.lock_unpoisoned().keys().cloned().collect();
             for id in ids {
@@ -440,6 +467,9 @@ async fn service_permission(
     {
         let mut r = rt.lock_unpoisoned();
         if closed.load(Ordering::SeqCst)
+            || !r.phase.busy()
+            || r.phase.cancelled()
+            || r.phase.at(Step::Finishing)
             || r.phase.at(Step::Replaying)
             || r.permissions.len() >= 32
             || too_big
@@ -511,7 +541,7 @@ mod recovery_tests {
             .unwrap();
         let before = service.state(id).await.unwrap()["snapshot"]["entries"].clone();
         let result = service
-            .with_worker(id, |rt, _agent| {
+            .with_worker(id, None, |rt, _agent| {
                 Box::pin(async move {
                     let mut r = rt.lock_unpoisoned();
                     r.state.entries.clear();
@@ -534,6 +564,340 @@ mod recovery_tests {
             .unwrap();
         service.dispose().await;
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use tokio::time::{timeout, Duration};
+
+    async fn fixture() -> (Arc<SessionService>, std::path::PathBuf, String) {
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/contract-agent.mjs");
+        fixture_with_args(vec![worker.to_string_lossy().into_owned()]).await
+    }
+
+    async fn fixture_with_args(
+        args: Vec<String>,
+    ) -> (Arc<SessionService>, std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!("pi-control-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = SessionService::new(
+            &root,
+            ServiceConfig {
+                command: "node".into(),
+                args,
+                env: HashMap::new(),
+                max_workers: 3,
+                idle_ms: 900000,
+                harnesses: HashMap::new(),
+            },
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        service.initialize().await.unwrap();
+        let session = service
+            .create(root.to_str().unwrap(), Harness::Pi)
+            .await
+            .unwrap();
+        (service, root, session["id"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_waits_for_term_resistant_worker_descendants() {
+        let pid_file = std::env::temp_dir().join(format!("pi-shutdown-{}", Uuid::new_v4()));
+        let descendant = format!(
+            r#"
+            process.on('SIGTERM', () => {{}});
+            require('node:fs').writeFileSync({}, String(process.pid));
+            setInterval(() => {{}}, 1000);
+        "#,
+            serde_json::to_string(&pid_file.to_str().unwrap()).unwrap()
+        );
+        let contract = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/contract-agent.mjs");
+        let script = format!(
+            r#"
+            require('node:child_process').spawn(process.execPath, ['-e', {}], {{stdio:'ignore'}});
+            import({});
+        "#,
+            serde_json::to_string(&descendant).unwrap(),
+            serde_json::to_string(&contract.to_str().unwrap()).unwrap()
+        );
+        let (service, root, id) = fixture_with_args(vec!["-e".into(), script]).await;
+        let _ = std::fs::remove_file(&pid_file);
+        let rt = service.runtime(&id, None).await.unwrap();
+        let _agent = service.worker(&rt).await.unwrap();
+        let child: i32 = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                    break pid.parse().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), service.dispose())
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                #[cfg(target_os = "linux")]
+                {
+                    let stat = std::fs::read_to_string(format!("/proc/{child}/stat"));
+                    if stat.is_err() || stat.unwrap().split(") ").nth(1).unwrap().starts_with('Z') {
+                        break;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                if unsafe { libc::kill(child, 0) } != 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::remove_file(pid_file).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_eviction_cannot_remove_replacement_or_release_its_lease() {
+        let (service, root, id) = fixture().await;
+        let old = service.runtime(&id, None).await.unwrap();
+        service
+            .exclusive(|| async { service.evict(&id, &old).await })
+            .await;
+        let new = service.runtime(&id, None).await.unwrap();
+        new.lock_unpoisoned().phase = Phase::begin();
+        service
+            .exclusive(|| async { service.evict(&id, &old).await })
+            .await;
+        assert!(Arc::ptr_eq(
+            service.runtimes.lock_unpoisoned().get(&id).unwrap(),
+            &new
+        ));
+        save_snapshot(&service.store, &new).await.unwrap();
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_permissions_after_stop_or_completion_are_cancelled_without_publication() {
+        for kind in 0..3 {
+            let mut phase = if kind == 0 {
+                Phase::Idle
+            } else {
+                Phase::begin()
+            };
+            if kind == 1 {
+                phase.active_mut().unwrap().cancelled = true;
+            }
+            if kind == 2 {
+                phase.active_mut().unwrap().step = Step::Finishing;
+            }
+            let rt = Arc::new(Mutex::new(Runtime {
+                snapshot: Snapshot::default(),
+                state: initial_state(),
+                agent: None,
+                phase,
+                used: 0,
+                permissions: HashMap::new(),
+                error: None,
+                snapshot_pending: false,
+            }));
+            let outcome = service_permission(
+                &rt,
+                json!({"sessionId":"one","options":[]}),
+                Arc::new(|_| panic!("late permission was published")),
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert_eq!(outcome["outcome"]["outcome"], "cancelled");
+            assert!(rt.lock_unpoisoned().permissions.is_empty());
+            assert!(rt.lock_unpoisoned().state.permissions.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_stops_do_not_postpone_deleting_an_unresponsive_worker() {
+        let script = r#"
+const {createInterface}=require('node:readline');
+const {randomUUID}=require('node:crypto');
+let sid;
+const reply=(id,result)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\n');
+createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line);
+ if(r.method==='initialize') reply(r.id,{protocolVersion:1,agentCapabilities:{loadSession:true}});
+ else if(r.method==='session/new'){sid=randomUUID();reply(r.id,{sessionId:sid});}
+ else if(r.method==='session/load'){sid=r.params.sessionId;reply(r.id,{});}
+ else if(r.method==='session/prompt') process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:sid,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'started'}}}})+'\n');
+ // Deliberately never answer prompt or react to session/cancel.
+});
+"#;
+        let (service, root, id) = fixture_with_args(vec!["-e".into(), script.into()]).await;
+        let running_service = service.clone();
+        let key = id.clone();
+        let turn = tokio::spawn(async move {
+            running_service
+                .handle(
+                    "prompt",
+                    json!({"sessionId":key,"prompt":[{"type":"text","text":"wait"}]}),
+                    "unresponsive-turn",
+                )
+                .await
+        });
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if service.state(&id).await.unwrap()["snapshot"]["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["text"] == "started")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let deleting_service = service.clone();
+        let key = id.clone();
+        let deletion = tokio::spawn(async move {
+            deleting_service
+                .handle(
+                    "historyRemove",
+                    json!({"sessionId":key}),
+                    "delete-unresponsive",
+                )
+                .await
+        });
+        let rt = service.runtimes.lock_unpoisoned().get(&id).unwrap().clone();
+        let original = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(id) = rt
+                    .lock_unpoisoned()
+                    .phase
+                    .active()
+                    .and_then(|active| active.cancel_task.as_ref().map(|task| task.id()))
+                {
+                    break id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(service.cancel(&id).await);
+            assert_eq!(
+                rt.lock_unpoisoned()
+                    .phase
+                    .active()
+                    .unwrap()
+                    .cancel_task
+                    .as_ref()
+                    .unwrap()
+                    .id(),
+                original
+            );
+        }
+        // Includes the cancellation deadline plus process-group escalation.
+        timeout(Duration::from_secs(5), deletion)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
+        assert!(service.list().await.unwrap().is_empty());
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_lane_entry_survives_waiting_for_runtime_allocation() {
+        let (service, root, id) = fixture().await;
+        let allocation = service.allocation.lock().await;
+        let (entered, started) = oneshot::channel();
+        let queue_service = service.clone();
+        let worker_service = service.clone();
+        let key = id.clone();
+        let task = tokio::spawn(async move {
+            queue_service
+                .queue
+                .run(&key, |check| async {
+                    check()?; // The original pre-execution check already passed.
+                    entered.send(()).unwrap();
+                    worker_service
+                        .with_worker(&key, Some(check), |_rt, _agent| {
+                            Box::pin(async { panic!("cancelled operation reached the worker") })
+                        })
+                        .await
+                })
+                .await
+        });
+        started.await.unwrap();
+        assert!(
+            service.cancel(&id).await,
+            "queued work must acknowledge stop even without a runtime"
+        );
+        drop(allocation);
+        assert_eq!(task.await.unwrap().unwrap_err(), "排队请求已取消");
+        assert!(!service.runtimes.lock_unpoisoned().contains_key(&id));
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_one_live_session_stops_it_without_waiting_for_user_cancellation() {
+        for method in ["remove", "historyRemove"] {
+            let (service, root, id) = fixture().await;
+            let running_service = service.clone();
+            let running_id = id.clone();
+            let turn = tokio::spawn(async move {
+                running_service
+                    .handle(
+                        "prompt",
+                        json!({"sessionId":running_id,
+                    "prompt":[{"type":"text","text":"permission"}]}),
+                        "live-turn",
+                    )
+                    .await
+            });
+            // A permission proves the prompt has reached the upstream worker.
+            timeout(Duration::from_secs(3), async {
+                loop {
+                    if !service.state(&id).await.unwrap()["permissions"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            timeout(
+                Duration::from_secs(3),
+                service.handle(method, json!({"sessionId":id}), "delete"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            turn.await.unwrap().unwrap();
+            assert!(service.state(&id).await.is_err());
+            assert!(service.list().await.unwrap().is_empty());
+            assert!(service.runtimes.lock_unpoisoned().is_empty());
+            service.dispose().await;
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
 

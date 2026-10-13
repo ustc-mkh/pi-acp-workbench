@@ -1,4 +1,5 @@
 import type { Memento } from 'vscode';
+import { validPriceModel, type PricePreferences, type PriceOverrides } from './price-preferences';
 import type { Agent } from './remote-agent';
 import type { ChatState, Snapshot } from './shared';
 import type { ClientOperations } from './conversation-history';
@@ -49,15 +50,19 @@ export class ConversationStatistics {
     private current: () => StatisticsContext,
     private contextWindow: (value: number) => void,
     private changed: () => void,
+    private pricePreferences?: PricePreferences,
   ) {
-    this.overrides = storage.get('prices', {});
+    this.overrides = {};
     this.value = {
       records: mergeUsage([], storage.get('usageRecords', [])),
-      prices: this.prices(),
+      prices: {},
       titles: storage.get('usageTitles', {}),
       sessionNumbers: storage.get('usageSessionNumbers', {}),
       available: false,
     };
+    // Legacy bare prices need the already loaded records when expanding around
+    // a qualified model reset, including cold sessions with no model catalogue.
+    this.value.prices = this.prices();
   }
   reset(harness: HarnessId) {
     this.value = {
@@ -103,7 +108,57 @@ export class ConversationStatistics {
     await this.storage.update('usageTitles', this.value.titles);
     await this.storage.update('usageSessionNumbers', this.value.sessionNumbers || {});
   }
+  private legacyOverrides(): PriceOverrides {
+    const legacy: PriceOverrides = Object.fromEntries(
+      Object.entries(this.storage.get<Record<string, unknown>>('prices', {})).filter(
+        ([model, value]) => validPriceModel(model) && validPrice(value),
+      ),
+    ) as Record<string, Price>;
+    for (const key of this.storage.keys()) {
+      if (!key.startsWith('price:')) continue;
+      const model = key.slice('price:'.length);
+      const value = this.storage.get<Price | null>(key);
+      if (validPriceModel(model) && (value === null || validPrice(value))) legacy[model] = value;
+    }
+    return legacy;
+  }
+  private readOverrides() {
+    const legacy = this.legacyOverrides();
+    const raw = this.pricePreferences?.read(legacy) ?? legacy;
+    const overrides: Record<string, Price> = {};
+    const resets = new Set<string>();
+    for (const [model, value] of Object.entries(raw)) {
+      if (value === null) resets.add(model);
+      else overrides[model] = value;
+    }
+    // Apply bare resets first, independent of storage key enumeration order.
+    for (const model of resets) delete overrides[model];
+    // Tombstones mask legacy values without rewriting a shared aggregate key.
+    for (const model of resets) {
+      const bare = model.split('/').slice(1).join('/');
+      const legacy = overrides[bare];
+      if (legacy && priceFor(model, { [bare]: legacy })) {
+        const known = new Set([
+          ...Object.keys(this.modelPrices),
+          ...Object.keys(overrides),
+          ...(this.value?.models || []).map((m) => m.id),
+          ...(this.value?.records || []).map((r) => r.model),
+        ]);
+        for (const other of known)
+          if (
+            !resets.has(other) &&
+            !Object.hasOwn(overrides, other) &&
+            priceFor(other, { [bare]: legacy })
+          )
+            overrides[other] = legacy;
+        delete overrides[bare];
+      }
+      delete overrides[model];
+    }
+    return overrides;
+  }
   private prices() {
+    this.overrides = this.readOverrides();
     const prices = { ...this.modelPrices, ...this.overrides };
     // Older user settings can use a bare model ID. They still outrank Pi's defaults.
     for (const model of Object.keys(this.modelPrices)) {
@@ -113,47 +168,28 @@ export class ConversationStatistics {
     return prices;
   }
   async setPrice(model: string, price?: Price) {
-    if (
-      typeof model !== 'string' ||
-      !model.trim() ||
-      model.length > 300 ||
-      ['__proto__', 'constructor', 'prototype'].includes(model)
-    )
-      throw new Error('模型标识无效。');
-    if (price === undefined) {
-      // Legacy bare IDs can otherwise keep shadowing a qualified model after reset.
-      const bare = model.split('/').slice(1).join('/');
-      const legacy = Object.hasOwn(this.overrides, bare) ? this.overrides[bare] : undefined;
-      if (legacy && priceFor(model, { [bare]: legacy })) {
-        const known = new Set([
-          ...Object.keys(this.modelPrices),
-          ...(this.value.models || []).map((m) => m.id),
-        ]);
-        for (const other of known)
-          if (
-            other !== model &&
-            !Object.hasOwn(this.overrides, other) &&
-            priceFor(other, { [bare]: legacy })
-          )
-            this.overrides[other] = legacy;
-        delete this.overrides[bare];
-      }
-      delete this.overrides[model];
-    } else {
-      if (!validPrice(price)) throw new Error('价格必须为非负有限数值。');
-      this.overrides[model] = {
-        input: price.input,
-        output: price.output,
-        cacheRead: price.cacheRead,
-        cacheWrite: price.cacheWrite,
-        source: '用户设置',
-      };
-    }
+    if (typeof model !== 'string' || !validPriceModel(model)) throw new Error('模型标识无效。');
+    if (price !== undefined && !validPrice(price)) throw new Error('价格必须为非负有限数值。');
+    if (!this.pricePreferences) throw new Error('模型价格共享存储尚未配置。');
+    // Memento writes the whole extension cache, even for separate model keys.
+    // Only a locked file transaction can safely merge another window's write.
+    await this.pricePreferences.set(
+      model,
+      price === undefined
+        ? null
+        : {
+            input: price.input,
+            output: price.output,
+            cacheRead: price.cacheRead,
+            cacheWrite: price.cacheWrite,
+            source: '用户设置',
+          },
+      this.legacyOverrides(),
+    );
     this.value = {
       ...this.value,
       prices: this.prices(),
     };
-    await this.storage.update('prices', this.overrides);
     // Cold sessions have no live model catalogue until explicitly inspected.
     if (price === undefined) await this.refresh(this.current().state.status !== 'busy');
   }

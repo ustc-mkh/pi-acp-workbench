@@ -63,10 +63,13 @@ impl TaskQueue {
         self.queued.load(Ordering::SeqCst)
     }
 
-    pub async fn cancel(&self, id: &str) {
+    pub async fn cancel(&self, id: &str) -> bool {
         let mut inner = self.inner.lock_unpoisoned();
         if inner.lanes.contains_key(id) {
             *inner.epochs.entry(id.to_string()).or_insert(0) += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -74,6 +77,24 @@ impl TaskQueue {
     /// `operation` receives a check closure: Err('排队请求已取消') when the epoch
     /// moved or the queue closed.
     pub async fn run<F, Fut, T>(&self, id: &str, operation: F) -> Result<T, String>
+    where
+        F: FnOnce(Check) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
+        self.run_inner(id, operation, false).await
+    }
+
+    /// Destructive controls still serialize with the session, but a later stop
+    /// cannot cancel the deletion itself. Shutdown continues to reject them.
+    pub async fn run_control<F, Fut, T>(&self, id: &str, operation: F) -> Result<T, String>
+    where
+        F: FnOnce(Check) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
+        self.run_inner(id, operation, true).await
+    }
+
+    async fn run_inner<F, Fut, T>(&self, id: &str, operation: F, control: bool) -> Result<T, String>
     where
         F: FnOnce(Check) -> Fut,
         Fut: Future<Output = Result<T, String>>,
@@ -107,7 +128,9 @@ impl TaskQueue {
             let key = id.to_string();
             Arc::new(move || {
                 let inner = inner.lock_unpoisoned();
-                if closed.load(Ordering::SeqCst) || epoch != *inner.epochs.get(&key).unwrap_or(&0) {
+                if closed.load(Ordering::SeqCst)
+                    || (!control && epoch != *inner.epochs.get(&key).unwrap_or(&0))
+                {
                     Err("排队请求已取消".into())
                 } else {
                     Ok(())
@@ -231,6 +254,35 @@ mod tests {
             assert!(inner.epochs.is_empty());
         }
         queue.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_later_stop_cancels_waiters_but_not_a_queued_deletion() {
+        let queue = Arc::new(TaskQueue::new(1, 100));
+        let (release, held) = oneshot::channel();
+        let first_queue = queue.clone();
+        let first = tokio::spawn(async move {
+            first_queue
+                .run("s", |_| async {
+                    held.await.unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        pending(&queue, 1).await;
+        let control_queue = queue.clone();
+        let deletion = tokio::spawn(async move {
+            control_queue
+                .run_control("s", |_| async { Ok("deleted") })
+                .await
+        });
+        pending(&queue, 2).await;
+        assert!(queue.cancel("s").await);
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert_eq!(deletion.await.unwrap().unwrap(), "deleted");
+        queue.close().await;
+        assert!(queue.run_control("s", |_| async { Ok(()) }).await.is_err());
     }
 
     #[tokio::test]

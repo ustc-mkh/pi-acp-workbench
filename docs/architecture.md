@@ -32,6 +32,7 @@ Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位�
 | `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                    |
 | `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务        |
 | `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                 |
+| `price-preferences.ts`                                                             | 工作区价格偏好的跨进程锁、旧格式迁移与持久化原子提交     |
 | `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                    |
 
 ## Telegram 中继的内部边界
@@ -71,9 +72,9 @@ Pi 使用原生 ID；其他 harness 使用 `workbench:<harness>:<encodeURICompon
 
 首次打开无历史时仅显示欢迎页；显式新建才调用 create。活动指针触发恢复，浏览已有历史读取服务状态，不为浏览启动工作进程。冷会话在发送、修改设置或分支时请求上游 session/load；加载失败保留原 ID 和快照，不重放提示词、不自动新建。无 loadSession 能力的历史只读展示。
 
-多个桌面/Telegram 客户端可以附着同一个会话，没有客户端独占文件租约。服务队列按会话串行执行，授权可在任一端处理。关闭窗口、断开连接或切换 harness 只移除客户端连接，已经提交的任务继续运行。服务空闲回收 worker，下一次操作原生加载。
+多个桌面/Telegram 客户端可以附着同一个会话，没有客户端独占文件租约。服务队列按会话串行执行，授权可在任一端处理。关闭窗口、断开连接或切换 harness 只移除客户端连接，已经提交的任务继续运行。服务空闲回收 worker，下一次操作原生加载。回收在取得分配锁后重算活动时间与驻留档位，移除前核对 runtime 身份和 busy 状态；强制取消保留 worker 的清理所有权，初始化 / 恢复失败也等待进程组 stop 完成。
 
-客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。桌面通过可选增量订阅复用未变化条目；Telegram 权限订阅只传授权信息。增量基线失效时重新订阅获得全量状态，不重放任务。删除会话由 daemon 处置运行时并提交 tombstone；清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
+客户端取消代际防止迟到结果覆盖新会话；服务取消使当时排队的请求失效，取消代际在 runtime 分配和 worker 加载后再次检查，覆盖尚未建立 runtime 的启动窗口。服务保存轮次正文、授权状态与 Diff，客户端重新附着可以获得一致状态。桌面通过可选增量订阅复用未变化条目；Telegram 权限订阅只传授权信息。增量基线失效时重新订阅获得全量状态，不重放任务。客户端状态查询若被新推送、新查询或会话切换取代，则忽略迟到回复；设置请求收尾也通过状态查询获得服务端 busy / ready，不自行推断。删除单个会话先停止当前任务、使旧排队请求失效，再经会话串行队列处置运行时并提交 tombstone；删除控制本身不会被后续停止操作取消。清空会停止全部 harness 的任务。关闭 persistHistory 只隐藏这个客户端的历史和活动指针，服务仍持久化。
 
 selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness.<id>.*`。草稿和附件按 harness 暂存，切换时不跨供应商搬运。生成、连接或分支期间拒绝切换。`ActiveConversation` 集中持有 UI state、agent、cwd、conversationId、contextWindow、generation 和 contextAbort；会话身份通过 reset / replace 更新，统一清理连接和取消资源；迟到的启动 / 分支失败按代际过滤，不会恢复已经删除的会话。Provider 只暴露这些字段的读取视图，协调器不引用 extension.ts。UI 内容仍按现有增量编码流程更新。
 
@@ -87,7 +88,7 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。原生历史仍由各上游适配器管理，备份需要保留原生会话和 daemon 数据目录。
 
-计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格单独持久化并优先于 Pi 默认价，恢复默认删除覆盖；缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
+计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在工作区扩展存储目录的独立 `price-overrides.json`；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记，首次提交迁移旧格式，后续不导入其他窗口的旧缓存。缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
 
 ## 历史窗口与服务端撤回
 

@@ -68,6 +68,12 @@ const modes = {
     { id: 'high', name: 'Thinking: high' },
   ],
 };
+if (mode === 'context-large-catalogue')
+  configOptions[0].options = Array.from({ length: 2048 }, (_, i) => ({
+    value: i === 0 ? 'default' : i === 1 ? 'other' : `large-${i}`,
+    name: `Model ${i} ${'x'.repeat(128)}`,
+    description: 'd'.repeat(128),
+  }));
 if (mode === 'context-dependent') configOptions[1].options = [{ value: 'low', name: 'Low' }];
 if (mode === 'context-codex-options')
   configOptions.push(

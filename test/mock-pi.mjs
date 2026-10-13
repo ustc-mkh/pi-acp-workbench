@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 const sid = randomUUID(),
@@ -20,6 +20,7 @@ let messages = [],
   thinking = 'off',
   contextTokens = 1020;
 const fastEntries = [];
+let heldStateReply;
 writeFileSync(
   file,
   JSON.stringify({
@@ -41,19 +42,32 @@ const append = (e) =>
     JSON.stringify({ ...e, id: randomUUID(), timestamp: new Date().toISOString() }) + '\n',
   );
 createInterface({ input: process.stdin }).on('line', (line) => {
-  const cmd = JSON.parse(line),
-    reply = (data) =>
-      send({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
+  const cmd = JSON.parse(line);
+  if (process.env.PI_TEST_PREFLIGHT_AUDIT)
+    appendFileSync(
+      process.env.PI_TEST_PREFLIGHT_AUDIT,
+      JSON.stringify({ type: cmd.type, message: cmd.message }) + '\n',
+    );
+  const reply = (data) =>
+    send({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
   switch (cmd.type) {
-    case 'get_state':
-      reply({
+    case 'get_state': {
+      const data = {
         sessionId: sid,
         sessionFile: file,
         model,
         thinkingLevel: thinking,
         isStreaming: false,
-      });
+      };
+      if (process.env.PI_TEST_PREFLIGHT_FLAG && existsSync(process.env.PI_TEST_PREFLIGHT_FLAG)) {
+        heldStateReply = () => reply(data);
+        appendFileSync(
+          process.env.PI_TEST_PREFLIGHT_AUDIT,
+          JSON.stringify({ held: 'get_state' }) + '\n',
+        );
+      } else reply(data);
       break;
+    }
     case 'get_available_models':
       reply({ models: [model] });
       break;
@@ -107,6 +121,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       }
       break;
     case 'abort':
+      if (heldStateReply) {
+        unlinkSync(process.env.PI_TEST_PREFLIGHT_FLAG);
+        const release = heldStateReply;
+        heldStateReply = undefined;
+        setTimeout(release, 100);
+      }
       reply({});
       send({ type: 'agent_end', messages });
       send({ type: 'agent_settled' });

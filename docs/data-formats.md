@@ -17,7 +17,8 @@
 │   ├── sessions.sock                  # socket，0600；见 service-protocol.md
 │   └── requests/
 │       ├── <sha256(requestId)>.json   # 请求收据
-│       └── session-<sha256(sessionId)>.json  # 每会话最近一次收据副本
+│       ├── session-<sha256(sessionId)>.json  # 每会话最近一次收据副本
+│       └── results/<sha256(result-json)>.json  # 大结果的不可变正文
 ├── service.lock/                      # mkdir 目录锁（daemon 单例）
 ├── history/
 │   ├── index.json                     # 共享历史索引（原子 rename 提交）
@@ -76,13 +77,14 @@ TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状�
 ## 4. `service/requests/` 任务收据
 
 ```json
-{"id":"<requestId>","sessionId":"...","fingerprint":"<sha256 hex>","status":"running|completed|interrupted","result":<any>?,"error":"<string>"?}
+{"id":"<requestId>","sessionId":"...","fingerprint":"<sha256 hex>","status":"running|completed|completed_ref|interrupted","result":<any>?,"resultRef":"<sha256 hex>"?,"error":"<string>"?}
 ```
 
 - `fingerprint` = `sha256(JSON.stringify(canonical({method,params})))`；`canonical` 把对象 key 按 **UTF-16 code unit 序**（JS `<` 字符串序）递归排序，数组顺序保留，所有值参与。**Rust 注意**：键排序按 UTF-16 而非 UTF-8 字节序（BMP 与代理项混排时不同）。
-- 文件上限 256 KiB；`id`/`sessionId`/`status`/`fingerprint`(64 hex) 格式校验失败即拒绝执行。
+- 收据文件上限 256 KiB；`id`/`sessionId`/`status`/`fingerprint`(64 hex) 格式校验失败即拒绝执行。超出收据容量的成功结果存到 `results/<sha256>.json`（上限 64 MiB），哈希基于 Rust 紧凑 JSON 原始字节；先 durable 写结果，再提交仅含 `resultRef` 的 `completed_ref` 收据。`result` 与 `resultRef` 不得同时出现；读取正文有界并校验哈希，缺失/损坏拒绝返回缓存结果，绝不重跑操作。
+- `completed_ref` 在服务内部等同于 completed，线协议结果不变。旧 daemon 不认识此状态，会拒绝读取/启动，不会误将已完成大结果返回为 null；使用外置结果后回滚旧 daemon 必须恢复升级前备份。旧 inline 收据继续可读，不迁移原文件。
 - `session-<hash>.json` 是同会话最近一次收据副本，用于启动时报告"上次任务被服务中断"；两者写顺序：先收据后标记。
-- 生命周期：执行前 `running` → `completed`/`interrupted`。daemon 重启把残留 `running` 标记为 `interrupted` 并写一条 `failed` outbox 事件。**已完成/中断收据保留 30 天后由启动清理删除**（防重放窗口，见 session-service.md）。
+- 生命周期：执行前 `running` → `completed`/`completed_ref`/`interrupted`。daemon 重启把残留 `running` 标记为 `interrupted` 并写一条 `failed` outbox 事件。**已完成/中断收据保留 30 天后由启动清理删除**（防重放窗口，见 session-service.md）。结果正文只在无收据/最近标记引用且超过 30 天后清理；近期孤立结果保留作提交失败的证据，无法确认引用关系时停止清理。
 
 ## 5. `telegram/` 状态
 
@@ -129,6 +131,12 @@ TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状�
 `_pi_workbench/inspect` 返回的 `forkPoints` 与 `_pi_workbench/fork` 的 `hash` 校验依赖 `native-branch.ts` 的确定性计算：从 leaf 沿 parentId 回溯、检查完整性与重复后反转成 root→leaf 顺序 → `canonicalEntries`（剔除 `label` 节点、label→下一节点 id 映射、剥离 `parentId`、compaction 的 `firstKeptEntryId` 重映射）→ 逐节点 `JSON.stringify` 连接（`,` 分隔）做流式 SHA-256 得前缀 hash。当前原生树安全校验与前缀哈希只有 TS 实现；Rust `native.rs` 将已校验 forkPoints 绑定到显示条目，不重新生成原生树哈希。冻结样例由 `npm run fixtures` 导出，`test/native-fixtures.test.ts` 校验输出；Rust canonical 请求指纹与 UTF-16 wire 各自有兼容性测试。样例说明见 [Fixtures](../test/fixtures/README.md)。
 
 通用任务事件由 `pi-acp-core::TurnEvent` 同时供 outbox 写入与 socket 消费，磁盘格式仅由会话服务管理。可选 `pendingPermissions` 和 `nonTextBlocks` 均为非负计数，缺省为 0，服务不拼接通知呈现文案。工具条目可附 `terminal`（id/output/cwd/exitCode/signal/truncated），用于流式输出与恢复查看。
+
+### 客户端模型价格偏好
+
+价格偏好位于 VS Code `ExtensionContext.storageUri` 目录的 `price-overrides.json`；无工作区存储目录时使用 `globalStorageUri`（无工作区窗口共享此文件）。文件格式为 `{version:1, overrides:{"<模型 ID>":Price|null}}`，`Price` 包含 `input/output/cacheRead/cacheWrite/source`；`null` 是恢复默认的持久化标记。上限 4 MiB / 10000 个模型，损坏或超限拒绝写入并保留原文件。
+
+写入使用 proper-lockfile 的跨进程锁，锁内重新读取最新文件、只修改目标模型，然后 durable 原子替换并释放锁；不同模型的写入合并，同一模型按事务提交顺序覆盖。文件尚不存在时只读兼容 Memento 的旧 `prices` 表和 `price:<模型 ID>` 键，首次成功提交一并迁移；文件存在后以文件为唯一价格来源，不再导入其他窗口的旧缓存，也不写回 Memento。备份需包含该文件；旧客户端不读取它，回滚后不会看到新格式保存的价格。
 
 ### Codex / Claude 用量记录
 

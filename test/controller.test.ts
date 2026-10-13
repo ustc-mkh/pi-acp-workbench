@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import type * as vscode from 'vscode';
 import type { ChatProvider } from '../src/extension';
-import type { RemoteAgentOptions } from '../src/remote-agent';
+import type { RemoteAgent, RemoteAgentOptions } from '../src/remote-agent';
 import type { DiffDocuments } from '../src/workspace-documents';
 import type { Statistics, UsageRecord } from '../src/telemetry';
 import type { ConversationHistory } from '../src/conversation-history';
@@ -32,7 +32,7 @@ type TestProvider = Omit<ChatProvider, 'documents'> & {
   statistics: Statistics;
   recordUsage(records: UsageRecord[]): Promise<void>;
 };
-type TestContext = Pick<vscode.ExtensionContext, 'subscriptions' | 'workspaceState'>;
+type TestContext = Pick<vscode.ExtensionContext, 'subscriptions' | 'workspaceState' | 'storageUri'>;
 const host = vi.hoisted(() => {
   let provider: TestProvider | undefined;
   return {
@@ -119,6 +119,10 @@ const activate = (context: TestContext) => {
 };
 let context: TestContext;
 let preferencesHome: string;
+const savedPrice = (model: string) =>
+  JSON.parse(
+    readFileSync(resolve(preferencesHome, 'workspace-storage', 'price-overrides.json'), 'utf8'),
+  ).overrides[model];
 beforeEach(async () => {
   preferencesHome = mkdtempSync(resolve(tmpdir(), 'pi-controller-home-'));
   host.home = preferencesHome;
@@ -131,6 +135,7 @@ beforeEach(async () => {
   host.terminals = [];
   context = {
     subscriptions: [],
+    storageUri: { fsPath: resolve(preferencesHome, 'workspace-storage') } as vscode.Uri,
     workspaceState: {
       keys: () => [...host.stored.keys()],
       get: <T>(key: string, fallback?: T) =>
@@ -1153,7 +1158,7 @@ it('saves and resets context and all four prices through one scoped model-settin
     model: 'p/m',
     contextWindow: 2000,
   });
-  expect(host.stored.get('prices')).toMatchObject({ 'p/m': price });
+  expect(savedPrice('p/m')).toMatchObject(price);
   expect(host.provider.snapshot().modelSettingsResult).toEqual({
     id: 'settings-save',
     model: 'p/m',
@@ -1173,7 +1178,7 @@ it('saves and resets context and all four prices through one scoped model-settin
     model: 'p/m',
     contextWindow: null,
   });
-  expect(host.stored.get('prices')).toEqual({});
+  expect(savedPrice('p/m')).toBeNull();
   expect(host.provider.snapshot().modelSettingsResult).toEqual({
     id: 'settings-reset',
     model: 'p/m',
@@ -1213,8 +1218,9 @@ it('resets only the chosen provider and reports partial completion', async () =>
     provider: 'p',
   });
   expect(context).toHaveBeenCalledTimes(2);
-  expect(host.stored.get('prices')).toMatchObject({ 'p/n': price, 'q/m': price });
-  expect(host.stored.get('prices')).not.toHaveProperty('p/m');
+  expect(savedPrice('p/n')).toMatchObject(price);
+  expect(savedPrice('q/m')).toMatchObject(price);
+  expect(savedPrice('p/m')).toBeNull();
   expect(host.provider.snapshot().providerSettingsResult).toMatchObject({
     id: 'batch',
     provider: 'p',
@@ -1279,15 +1285,17 @@ it('persists custom prices, rejects invalid numbers and restores defaults', asyn
     model: 'p/m',
     price: { input: 2, output: 3, cacheRead: 0.2, cacheWrite: 2.5 },
   });
-  expect(host.stored.get('prices')).toMatchObject({ 'p/m': { input: 2 } });
+  const saved = () => savedPrice('p/m');
+  expect(saved()).toMatchObject({ input: 2 });
+  expect(host.stored.get('price:p/m')).toBeUndefined();
   await host.provider.perform({
     type: 'setPrice',
     model: 'p/m',
     price: { input: -1, output: 3, cacheRead: 0.2, cacheWrite: 2.5 },
   });
-  expect(host.stored.get('prices')).toMatchObject({ 'p/m': { input: 2 } });
+  expect(saved()).toMatchObject({ input: 2 });
   await host.provider.perform({ type: 'setPrice', model: 'p/m' });
-  expect(host.stored.get('prices')).toEqual({});
+  expect(saved()).toBeNull();
 });
 const pastedPng = {
   name: 'clipboard.png',
@@ -1585,14 +1593,25 @@ it('persists model visibility per harness and rejects stale page submissions', a
   await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: null });
   expect(host.provider.snapshot().visibleModels).toBeUndefined();
 });
-it('preserves configs on omitted setting responses and accepts explicit live clears', async () => {
+it('uses authoritative state after omitted setting responses and accepts explicit live clears', async () => {
   host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
   await host.provider.perform({ type: 'new' });
   const previous = host.provider.state.configs!;
   const request = vi.spyOn(host.provider.agent!, 'request');
   request.mockResolvedValueOnce({});
   await host.provider.turnCoordinator.onConfig({ type: 'config', id: 'model', value: 'other' });
-  expect(host.provider.state.configs).toBe(previous);
+  expect(host.provider.state.configs).toEqual(previous);
+  vi.spyOn(host.provider.agent! as RemoteAgent, 'sync').mockImplementationOnce(async () => {
+    const value = {
+      snapshot: { ...host.provider.sessionCoordinator.currentSnapshot()!, configs: [] },
+      busy: false,
+      permissions: [],
+      commands: [],
+      plan: [],
+    };
+    host.provider.applyServiceState(value);
+    return value;
+  });
   request.mockResolvedValueOnce({ configOptions: [] });
   await host.provider.turnCoordinator.onConfig({ type: 'config', id: 'model', value: 'other' });
   expect(host.provider.state.configs).toEqual([]);

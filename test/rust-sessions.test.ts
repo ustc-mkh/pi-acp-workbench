@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { SessionClient } from '../src/session-wire';
 import type { ServiceEvent } from '../src/session-protocol';
 import type { ChatState, Entry } from '../src/shared';
+import type * as acp from '@agentclientprotocol/sdk';
 import type { Inspection } from '../src/telemetry';
 import { SharedHistoryStore } from './support/history-fixture';
 import { startRustService } from './rust-service';
@@ -386,6 +387,42 @@ it('does not start a worker when initial receipt storage is unavailable', async 
   expect(await workerPids(service.child.pid!)).toEqual([]);
   await expect(readFile(audit)).rejects.toMatchObject({ code: 'ENOENT' });
 });
+
+it('persists large create/settings results and replays them after restart or deletion without new side effects', async () => {
+  const { root, client, socket, audit, restart } = await fixture(
+    2,
+    900000,
+    'context-large-catalogue',
+  );
+  const params = { cwd: root, harness: 'pi' };
+  const created = await client.call('create', params, 'large-create');
+  expect(Buffer.byteLength(JSON.stringify(created))).toBeGreaterThan(256 * 1024);
+  expect(await client.call('create', params, 'large-create')).toEqual(created);
+  expect(await client.call('list')).toHaveLength(1);
+  const setting = {
+    sessionId: created.id,
+    method: 'session/set_config_option',
+    params: { sessionId: created.id, configId: 'model', value: 'other' },
+  };
+  const changed = await client.call<acp.SetSessionConfigOptionResponse>(
+    'request',
+    setting,
+    'large-setting',
+  );
+  expect(changed.configOptions[0].currentValue).toBe('other');
+  expect(Buffer.byteLength(JSON.stringify(changed))).toBeGreaterThan(256 * 1024);
+  const before = await readFile(audit, 'utf8');
+  client.dispose();
+  await restart();
+  const cold = new SessionClient(socket);
+  cleanup.push(() => cold.dispose());
+  expect(await cold.call('create', params, 'large-create')).toEqual(created);
+  expect(await cold.call('request', setting, 'large-setting')).toEqual(changed);
+  expect(await readFile(audit, 'utf8')).toBe(before);
+  await cold.call('historyRemove', { sessionId: created.id });
+  expect(await cold.call('create', params, 'large-create')).toEqual(created);
+  expect(await cold.call('list')).toEqual([]); // A cached reply never revives a deleted session.
+}, 15000);
 
 it('persists create receipts across service restarts and rejects ID reuse for different payloads', async () => {
   const { root, service, audit, restart } = await fixture();

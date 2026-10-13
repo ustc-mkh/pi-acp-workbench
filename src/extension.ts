@@ -11,6 +11,8 @@ import type { UiPolicy } from './ui-dispatch';
 import { dispatchUi, failUi, type UiHandlers } from './ui-dispatch';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
+import { FilePricePreferences } from './price-preferences';
 import { sessionSelectors } from './session-settings';
 import { DiffDocuments } from './workspace-documents';
 import { StateEncoder } from './state-channel';
@@ -237,6 +239,9 @@ export class ChatProvider
         if (this.state.usage) this.state.usage = { ...this.state.usage, size: value };
       },
       () => this.emit(),
+      new FilePricePreferences(
+        join((context.storageUri || context.globalStorageUri).fsPath, 'price-overrides.json'),
+      ),
     );
     this.historyStore.start();
     if (!this.config.get('persistHistory', true)) this.disableHistory();

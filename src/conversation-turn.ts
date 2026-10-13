@@ -1,5 +1,4 @@
 import type * as acp from '@agentclientprotocol/sdk';
-import { mergeCatalogue } from './catalogue';
 import { codexFixedConfigs } from './session-settings';
 import { RemoteAgent } from './remote-agent';
 import { checkPromptSize } from './context';
@@ -110,21 +109,10 @@ export class TurnCoordinator {
   async onMode(message: UiMessage & { type: 'mode' }): Promise<void> {
     if (!this.host.agent || !this.host.state.sessionId) return;
     if (!this.host.state.modes?.availableModes.some((m) => m.id === message.value)) return;
-    this.host.state.status = 'connecting';
-    this.host.emit();
-    try {
-      await this.host.agent.withTimeout(
-        this.host.agent.request('session/set_mode', {
-          sessionId: this.host.state.sessionId,
-          modeId: message.value,
-        }),
-        15000,
-      );
-      this.host.state.modes.currentModeId = message.value;
-      await this.host.refreshHistory();
-    } finally {
-      this.host.state.status = this.host.agent ? 'ready' : 'disconnected';
-    }
+    await this.applySetting('session/set_mode', {
+      sessionId: this.host.state.sessionId,
+      modeId: message.value,
+    });
   }
 
   async onConfig(message: UiMessage & { type: 'config' }): Promise<void> {
@@ -166,23 +154,49 @@ export class TurnCoordinator {
   }
   private async applyConfig(id: string, value: string): Promise<void> {
     if (!this.host.agent || !this.host.state.sessionId) return;
-    this.host.state.status = 'connecting';
+    await this.applySetting('session/set_config_option', {
+      sessionId: this.host.state.sessionId,
+      configId: id,
+      value,
+    });
+  }
+
+  private async applySetting(
+    method: 'session/set_mode' | 'session/set_config_option',
+    params: Record<string, string>,
+  ): Promise<void> {
+    const { agent, state, generation } = this.host;
+    if (!agent) return;
+    const current = () =>
+      this.host.agent === agent &&
+      this.host.state === state &&
+      this.host.generation === generation &&
+      this.host.state.sessionId === params.sessionId;
+    state.status = 'connecting';
     this.host.emit();
+    let failed = false;
     try {
-      const response = await this.host.agent.withTimeout(
-        this.host.agent.request('session/set_config_option', {
-          sessionId: this.host.state.sessionId,
-          configId: id,
-          value,
-        }),
-        15000,
-      );
-      this.host.state.configs = mergeCatalogue(this.host.state.configs, response.configOptions);
-      await this.host.refreshHistory();
-      await this.host.refreshTelemetry();
+      await agent.withTimeout(agent.request(method, params), 15000);
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
-      this.host.state.status = this.host.agent ? 'ready' : 'disconnected';
+      if (current()) {
+        try {
+          // The RPC's catalogue/ready status may already be obsolete because
+          // another client started work. Only authoritative state ends the UI
+          // transition; never overwrite a newer busy push with local ready.
+          await (agent as RemoteAgent).sync();
+        } catch (error) {
+          if (current() && (agent.isClosed || state.status === 'connecting'))
+            state.status = 'disconnected';
+          if (!failed) throw error;
+        }
+      }
     }
+    if (!current()) return;
+    await this.host.refreshHistory();
+    if (current() && method === 'session/set_config_option') await this.host.refreshTelemetry();
   }
 
   async onCancel(message: UiMessage & { type: 'cancel' }): Promise<void> {

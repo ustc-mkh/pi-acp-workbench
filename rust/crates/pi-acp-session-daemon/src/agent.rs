@@ -1,6 +1,6 @@
 //! ACP JSON-RPC client over a child process stdin/stdout.
 //! Requests, permissions and writes are independently tracked; prompts have no timeout.
-//! Shutdown signals the process group, escalating after 1.5s only if the child has not exited.
+//! Shutdown signals the process group and escalates before reaping its leader.
 use crate::harness::Harness;
 use pi_acp_core::sync::MutexExt;
 use serde_json::{json, Value};
@@ -12,7 +12,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
@@ -39,6 +39,8 @@ pub struct AgentOptions {
 
 /// ndJsonStream({maxMessageBytes: 16 * 1024 * 1024}).
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_STDERR_LINE_BYTES: usize = 16 * 1024;
+const STDERR_TRUNCATED: &str = " [stderr line truncated]\n";
 const SIGKILL_DELAY: Duration = Duration::from_millis(1500);
 /// Grace window after stdout EOF so the exit monitor's
 /// 'ACP 进程退出 (…)。' beats 'ACP 连接已关闭。' — Node delivers the child
@@ -56,7 +58,8 @@ struct Inner {
     cwd: String,
     pid: u32,
     closed_flag: AtomicBool,
-    exited_flag: AtomicBool,
+    /// Keep the leader unreaped until the last group signal, pinning its PID/PGID.
+    termination: StdMutex<Option<std::time::Instant>>,
     next_id: AtomicU64,
     /// connection.pendingResponses — short critical sections, std Mutex so the
     /// sync dispose() path can drain without a runtime.
@@ -79,25 +82,39 @@ fn terminate(inner: &Arc<Inner>, pending_reason: &str) {
     for (_, waiter) in inner.pending.lock_unpoisoned().drain() {
         let _ = waiter.send(Err(pending_reason.to_string()));
     }
-    if inner.pid == 0 || inner.exited_flag.load(Ordering::SeqCst) {
-        return;
+    let mut started = inner.termination.lock_unpoisoned();
+    if inner.pid != 0 && started.is_none() {
+        *started = Some(std::time::Instant::now());
+        unsafe { libc::kill(-(inner.pid as i32), libc::SIGTERM) };
     }
-    // process.kill(-pid, 'SIGTERM') — ESRCH on an already-dead group ignored.
-    unsafe { libc::kill(-(inner.pid as i32), libc::SIGTERM) };
-    let pid = inner.pid;
-    // Stop escalation as soon as the exit monitor confirms this child exited.
-    let mut exited = inner.exit_rx.clone();
-    let child = inner.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = async { let _ = exited.wait_for(|done| *done).await; } => {}
-            _ = tokio::time::sleep(SIGKILL_DELAY) => {
-                if !child.exited_flag.load(Ordering::SeqCst) {
-                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-                }
-            }
-        }
-    });
+    // The monitor owns escalation and reaping; no detached timer may signal a
+    // recycled process group after Child::wait has released the leader PID.
+}
+
+/// Observe a child exit without releasing its PID/process-group identity.
+fn observe_exit(pid: u32) -> std::io::Result<Option<ExitStatus>> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { info.si_pid() } == 0 {
+        return Ok(None);
+    }
+    let code = unsafe { info.si_status() };
+    let raw = if info.si_code == libc::CLD_EXITED {
+        code << 8
+    } else {
+        code
+    };
+    Ok(Some(ExitStatus::from_raw(raw)))
 }
 
 fn fail_reason(inner: &Arc<Inner>, message: String, pending_reason: &str) {
@@ -471,13 +488,46 @@ async fn writer_task(
 }
 
 async fn stderr_task(inner: Arc<Inner>, stderr: ChildStderr) {
-    let mut reader = BufReader::new(stderr);
-    let mut line = Vec::new();
+    forward_stderr(stderr, &inner.log).await;
+}
+
+/// Drain even an unterminated stderr line without retaining it indefinitely.
+/// Emit one bounded prefix/marker, discard the remainder until newline, and
+/// resume normal logging without closing an otherwise healthy ACP worker.
+async fn forward_stderr(mut stderr: impl AsyncRead + Unpin, log: &LogCb) {
+    let mut chunk = [0u8; 4096];
+    let mut line = Vec::with_capacity(MAX_STDERR_LINE_BYTES);
+    let mut truncated = false;
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => (inner.log)(&String::from_utf8_lossy(&line)),
+        let size = match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => {
+                if !line.is_empty() {
+                    log(&String::from_utf8_lossy(&line));
+                }
+                return;
+            }
+            Ok(size) => size,
+        };
+        for part in chunk[..size].split_inclusive(|byte| *byte == b'\n') {
+            if !truncated {
+                let remaining = MAX_STDERR_LINE_BYTES - line.len();
+                line.extend_from_slice(&part[..part.len().min(remaining)]);
+                if part.len() > remaining {
+                    log(&format!(
+                        "{}{STDERR_TRUNCATED}",
+                        String::from_utf8_lossy(&line)
+                    ));
+                    line.clear();
+                    truncated = true;
+                }
+            }
+            if part.last() == Some(&b'\n') {
+                if !truncated {
+                    log(&String::from_utf8_lossy(&line));
+                }
+                line.clear();
+                truncated = false;
+            }
         }
     }
 }
@@ -537,7 +587,7 @@ impl AgentProcess {
             cwd: options.cwd,
             pid,
             closed_flag: AtomicBool::new(false),
-            exited_flag: AtomicBool::new(false),
+            termination: StdMutex::new(None),
             next_id: AtomicU64::new(1),
             pending: StdMutex::new(HashMap::new()),
             write_tx: StdMutex::new(Some(write_tx)),
@@ -548,20 +598,54 @@ impl AgentProcess {
         tokio::spawn(stderr_task(inner.clone(), stderr));
         tokio::spawn(writer_task(inner.clone(), stdin, write_rx));
         tokio::spawn(reader_task(inner.clone(), stdout));
-        // 'exit' monitor — owns Child::wait. fail() runs BEFORE the watch
-        // send so the exit message wins over the reader's EOF handling
-        // (Node delivers 'exit' before connection.closed).
         let monitor = inner.clone();
         tokio::spawn(async move {
-            let status = child.wait().await;
-            monitor.exited_flag.store(true, Ordering::SeqCst);
-            fail(
-                &monitor,
-                format!(
-                    "ACP 进程退出 ({})。请查看 Pi Agent 日志。",
-                    describe_exit(status)
-                ),
-            );
+            loop {
+                // Observe without reaping: even a crashed leader must reserve
+                // its PID until TERM/KILL have reached surviving group members.
+                let observed = observe_exit(pid);
+                let leader_exited = matches!(&observed, Ok(Some(_)));
+                match observed {
+                    Ok(Some(status)) => fail(
+                        &monitor,
+                        format!(
+                            "ACP 进程退出 ({})。请查看 Pi Agent 日志。",
+                            describe_exit(Ok(status))
+                        ),
+                    ),
+                    Err(error) if error.raw_os_error() != Some(libc::EINTR) => {
+                        // Fail closed without signalling an identity we can no
+                        // longer pin (e.g. an external reaper consumed it).
+                        // Mark termination handled before fail(), which otherwise
+                        // sends TERM. No future dispose may signal this identity.
+                        *monitor.termination.lock_unpoisoned() = Some(std::time::Instant::now());
+                        fail(&monitor, format!("ACP exit observation failed: {error}"));
+                        let _ = child.wait().await;
+                        break;
+                    }
+                    _ => {}
+                }
+                // Once the protocol owner exits, finish orphan cleanup now;
+                // waiting the full grace period only delays every healthy stop.
+                // A still-running leader retains the full TERM grace window.
+                let ready = leader_exited
+                    || monitor
+                        .termination
+                        .lock_unpoisoned()
+                        .is_some_and(|started| started.elapsed() >= SIGKILL_DELAY);
+                if ready {
+                    {
+                        // Serialize the last signal with terminate(), including
+                        // a dispose that set closed_flag but has not sent TERM.
+                        let mut started = monitor.termination.lock_unpoisoned();
+                        started.get_or_insert_with(std::time::Instant::now);
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    }
+                    let _ = child.wait().await;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             monitor.exit_tx.send_replace(true);
         });
         Ok(Self {
@@ -806,6 +890,122 @@ mod tests {
                 closed,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn group_cleanup_survives_leader_crash_and_term_resistant_descendants() {
+        for crash in [false, true] {
+            let pid_file = std::env::temp_dir().join(format!("pi-group-{}", uuid::Uuid::new_v4()));
+            let descendant = format!(
+                r#"
+                process.on('SIGTERM', () => {{}});
+                require('node:fs').writeFileSync({}, String(process.pid));
+                setInterval(() => {{}}, 1000);
+            "#,
+                serde_json::to_string(&pid_file.to_str().unwrap()).unwrap()
+            );
+            let script = format!(
+                r#"
+                require('node:child_process').spawn(process.execPath, ['-e', {}], {{stdio:'ignore'}});
+                setInterval(() => {{}}, 1000);
+            "#,
+                serde_json::to_string(&descendant).unwrap()
+            );
+            let (mut options, _) = test_options();
+            options.args = vec!["-e".into(), script];
+            let agent = AgentProcess::spawn(options).unwrap();
+            let descendant_pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        break text.parse().unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if crash {
+                unsafe { libc::kill(agent.inner.pid as i32, libc::SIGKILL) };
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !agent.is_closed() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), agent.stop())
+                .await
+                .unwrap();
+            // A killed orphan may remain a zombie until init reaps it.
+            if cfg!(target_os = "linux") {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let stat = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"));
+                        if stat.is_err()
+                            || stat.unwrap().split(") ").nth(1).unwrap().starts_with('Z')
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while unsafe { libc::kill(descendant_pid, 0) } == 0 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            std::fs::remove_file(pid_file).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stderr_discards_an_unterminated_megabyte_line_and_resumes_after_newline() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let output = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let captured = output.clone();
+        let log: LogCb = Arc::new(move |text| captured.lock_unpoisoned().push(text.into()));
+        let forwarding = tokio::spawn(async move { forward_stderr(reader, &log).await });
+        let chunk = [b'x'; 4096];
+        for _ in 0..256 {
+            writer.write_all(&chunk).await.unwrap();
+        }
+        // The bounded prefix is logged without needing newline or EOF.
+        assert_eq!(output.lock_unpoisoned().len(), 1);
+        writer
+            .write_all("\n正常日志😀\ntrailing".as_bytes())
+            .await
+            .unwrap();
+        drop(writer);
+        forwarding.await.unwrap();
+        let output = output.lock_unpoisoned();
+        assert_eq!(output.len(), 3);
+        assert!(output[0].ends_with(STDERR_TRUNCATED));
+        assert_eq!(
+            output[0].len(),
+            MAX_STDERR_LINE_BYTES + STDERR_TRUNCATED.len()
+        );
+        assert_eq!(output[1], "正常日志😀\n");
+        assert_eq!(output[2], "trailing");
+    }
+
+    #[tokio::test]
+    async fn stderr_preserves_regular_lines_and_utf8_across_chunk_boundaries() {
+        let text = format!("{}😀\nshort\n", "x".repeat(4095));
+        let output = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let captured = output.clone();
+        let log: LogCb = Arc::new(move |text| captured.lock_unpoisoned().push(text.into()));
+        forward_stderr(text.as_bytes(), &log).await;
+        assert_eq!(
+            *output.lock_unpoisoned(),
+            vec![format!("{}😀\n", "x".repeat(4095)), "short\n".into()]
+        );
     }
 
     #[tokio::test]

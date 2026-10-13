@@ -66,7 +66,8 @@ export interface PiAgent {
   store: { upsert(session: { sessionId: string; cwd: string; sessionFile: string }): void };
   restoreSession(id: string): Promise<PiSession>;
   initialize(params: acp.InitializeRequest): Promise<acp.InitializeResponse>;
-  prompt(params: acp.PromptRequest): Promise<acp.PromptResponse>;
+  prompt(params: acp.PromptRequest, cancelled?: () => boolean): Promise<acp.PromptResponse>;
+  cancel(params: acp.CancelNotification): Promise<void>;
   dispose(): void;
 }
 export interface WorkbenchParams {

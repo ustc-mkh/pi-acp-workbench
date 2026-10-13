@@ -17,6 +17,10 @@ impl SessionService {
                 if service.sweeping.swap(true, Ordering::SeqCst) {
                     continue;
                 }
+                // Inspect activity and tier ranking only after acquiring the
+                // allocation boundary. A prompt may have completed while this
+                // sweep was waiting; never reuse its old expiration decision.
+                let _guard = service.allocation.lock().await;
                 let (idle, ranked) = {
                     let map = service.runtimes.lock_unpoisoned();
                     let ranked = activity_order(&map);
@@ -37,13 +41,8 @@ impl SessionService {
                     })
                     .map(|(id, rt, _)| (id, rt))
                     .collect();
-                {
-                    let _guard = service.allocation.lock().await;
-                    for (id, rt) in idle {
-                        if !rt.lock_unpoisoned().phase.busy() {
-                            service.evict(&id, &rt).await;
-                        }
-                    }
+                for (id, rt) in idle {
+                    service.evict_idle(&id, &rt).await;
                 }
                 service.sweeping.store(false, Ordering::SeqCst);
             }
@@ -60,11 +59,31 @@ impl SessionService {
     }
 
     pub(super) async fn evict(&self, id: &str, rt: &Rt) {
-        let agent = rt.lock_unpoisoned().agent.take();
+        self.evict_matching(id, rt, false).await;
+    }
+
+    async fn evict_idle(&self, id: &str, rt: &Rt) {
+        self.evict_matching(id, rt, true).await;
+    }
+
+    /// Caller holds allocation through removal, worker cleanup and lease release.
+    async fn evict_matching(&self, id: &str, rt: &Rt, idle_only: bool) {
+        let agent = {
+            let mut map = self.runtimes.lock_unpoisoned();
+            if !map.get(id).is_some_and(|current| Arc::ptr_eq(current, rt)) {
+                return;
+            }
+            let mut runtime = rt.lock_unpoisoned();
+            if idle_only && runtime.phase.busy() {
+                return;
+            }
+            let agent = runtime.agent.take();
+            map.remove(id);
+            agent
+        };
         if let Some(agent) = agent {
             agent.stop().await;
         }
-        self.runtimes.lock_unpoisoned().remove(id);
         self.store.release(id).await;
     }
 
@@ -82,7 +101,10 @@ impl SessionService {
         let Some((id, rt)) = idle else {
             return Err("工作进程均忙碌".into());
         };
-        self.evict(&id, &rt).await;
+        self.evict_idle(&id, &rt).await;
+        if self.runtimes.lock_unpoisoned().len() >= self.config.max_workers {
+            return Err("工作进程均忙碌".into());
+        }
         Ok(())
     }
 
@@ -307,8 +329,13 @@ impl SessionService {
         })?))
     }
 
-    pub(super) async fn runtime(&self, id: &str) -> Result<Rt, String> {
+    pub(super) async fn runtime(&self, id: &str, check: Option<&Check>) -> Result<Rt, String> {
         let _guard = self.allocation.lock().await;
+        // A stop may arrive while another session holds the allocation lock.
+        // Do not forget that epoch merely because this runtime did not exist yet.
+        if let Some(check) = check {
+            check()?;
+        }
         if let Some(rt) = self.runtimes.lock_unpoisoned().get(id).cloned() {
             {
                 let mut r = rt.lock_unpoisoned();
@@ -480,9 +507,146 @@ impl SessionService {
         match started {
             Ok(()) => Ok(agent),
             Err(e) => {
-                agent.dispose();
+                // Failed initialization/replay is also a worker lifetime, not
+                // just a rejected RPC. Complete its group cleanup before the
+                // operation releases its lane or drops its last local owner.
+                agent.stop().await;
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sweep_rechecks_activity_and_tier_after_waiting_for_allocation() {
+        for renew_activity in [true, false] {
+            let root = std::env::temp_dir().join(format!("pi-idle-renew-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let service = SessionService::new(
+                &root,
+                ServiceConfig {
+                    command: "unused".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    max_workers: 16,
+                    idle_ms: 10,
+                    harnesses: HashMap::new(),
+                },
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+            );
+            service.initialize().await.unwrap();
+            let allocation = service.allocation.lock().await;
+            let runtime = |used| {
+                Arc::new(Mutex::new(Runtime {
+                    snapshot: Snapshot::default(),
+                    state: initial_state(),
+                    agent: None,
+                    phase: Phase::Idle,
+                    used,
+                    permissions: HashMap::new(),
+                    error: None,
+                    snapshot_pending: false,
+                }))
+            };
+            let rt = runtime(if renew_activity {
+                0
+            } else {
+                now_ms() - 2 * SHORT_LIFE_MS
+            });
+            {
+                let mut map = service.runtimes.lock_unpoisoned();
+                map.insert("target".into(), rt.clone());
+                if !renew_activity {
+                    for i in 0..LONG_LIFE_WORKERS {
+                        map.insert(format!("recent-{i}"), runtime(now_ms()));
+                    }
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !service.sweeping.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if renew_activity {
+                let mut r = rt.lock_unpoisoned();
+                r.phase = Phase::begin();
+                r.used = now_ms();
+                r.phase = Phase::Idle;
+            } else {
+                // An earlier allocation operation evicted other runtimes. The
+                // target is now in the long-life tier, not the old one-day tier.
+                service
+                    .runtimes
+                    .lock_unpoisoned()
+                    .retain(|id, _| id == "target");
+            }
+            drop(allocation);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while service.sweeping.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(Arc::ptr_eq(
+                service.runtimes.lock_unpoisoned().get("target").unwrap(),
+                &rt
+            ));
+            service.dispose().await;
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_eviction_rechecks_busy_under_the_removal_lock() {
+        let root = std::env::temp_dir().join(format!("pi-idle-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = SessionService::new(
+            &root,
+            ServiceConfig {
+                command: "unused".into(),
+                args: vec![],
+                env: HashMap::new(),
+                max_workers: 1,
+                idle_ms: 900000,
+                harnesses: HashMap::new(),
+            },
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        service.initialize().await.unwrap();
+        let rt = Arc::new(Mutex::new(Runtime {
+            snapshot: Snapshot::default(),
+            state: initial_state(),
+            agent: None,
+            phase: Phase::Idle,
+            used: 0,
+            permissions: HashMap::new(),
+            error: None,
+            snapshot_pending: false,
+        }));
+        service
+            .runtimes
+            .lock_unpoisoned()
+            .insert("one".into(), rt.clone());
+        // Simulate an idle candidate starting work while sweep awaits allocation.
+        let allocation = service.allocation.lock().await;
+        rt.lock_unpoisoned().phase = Phase::begin();
+        service.evict_idle("one", &rt).await;
+        assert!(Arc::ptr_eq(
+            service.runtimes.lock_unpoisoned().get("one").unwrap(),
+            &rt
+        ));
+        assert!(service.make_room().await.is_err());
+        drop(allocation);
+        service.dispose().await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

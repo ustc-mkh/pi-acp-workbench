@@ -71,6 +71,7 @@ impl SessionService {
         &self,
         command: &ServiceCommand,
         request_id: &str,
+        check: Option<Check>,
     ) -> Result<Value, String> {
         let id = command_session_id(command);
         let index = self.index(id).await?;
@@ -217,13 +218,13 @@ impl SessionService {
                         "contextWindow": state.pointer("/snapshot/contextWindow").cloned().unwrap_or(Value::Null),
                     }));
                 }
-                self.with_worker(id, |rt, agent| {
+                self.with_worker(id, check, |rt, agent| {
                     self.run_command(rt, agent, command, request_id)
                 })
                 .await
             }
             ServiceCommand::Prompt { .. } | ServiceCommand::Request { .. } => {
-                self.with_worker(id, |rt, agent| {
+                self.with_worker(id, check, |rt, agent| {
                     self.run_command(rt, agent, command, request_id)
                 })
                 .await

@@ -128,8 +128,35 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
   );
   source = replaceExactlyOnce(
     source,
+    '  async prompt(params) {\n    const session = await this.restoreSession(params.sessionId);',
+    '  async prompt(params, workbenchCancelled = () => false) {\n    const session = await this.restoreSession(params.sessionId);\n    if (workbenchCancelled()) return {stopReason: "cancelled"};',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    const result = await session.prompt(message, images);',
+    '    const result = await session.prompt(message, images, workbenchCancelled);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '  async prompt(message, images = []) {\n    const expandedMessage = expandSlashCommand(message, this.fileCommands);',
+    '  async prompt(message, images = [], workbenchCancelled = () => false) {\n    const expandedMessage = expandSlashCommand(message, this.fileCommands);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '      const queued = { message: expandedMessage, images, resolve: resolve4, reject };',
+    '      const queued = { message: expandedMessage, images, resolve: resolve4, reject, workbenchCancelled };',
+  );
+  source = replaceExactlyOnce(
+    source,
     '  startTurn(t) {\n    this.cancelRequested = false;',
-    '  startTurn(t) {\n    this.cancelRequested = false;\n    this.modelError = undefined;',
+    `  startTurn(t) {
+    while (t.workbenchCancelled?.()) {
+      t.resolve("cancelled");
+      t = this.turnQueue.shift();
+      if (!t) return;
+    }
+    this.cancelRequested = false;
+    this.modelError = undefined;`,
   );
   source = replaceExactlyOnce(
     source,

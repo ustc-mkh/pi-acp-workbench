@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join, resolve, delimiter, dirname } from 'node:path';
 import { AgentProcess } from './support/acp-client';
+import { startRustService } from './rust-service';
 import type { Inspection } from '../src/telemetry';
 import type * as acp from '@agentclientprotocol/sdk';
 // Build into a private directory: tests must not rewrite dist/ while packaging may read it.
@@ -63,6 +64,126 @@ it.each(['user-bin', 'npm-prefix/bin', 'stale-override', 'managed-install'])(
     }
   },
 );
+it('cancels preflight before sending a model prompt, without cancelling the following turn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-preflight-cancel-'));
+  const flag = join(root, 'hold'),
+    audit = join(root, 'rpc.jsonl');
+  let agent: AgentProcess | undefined;
+  try {
+    await writeFile(audit, '');
+    agent = new AgentProcess({
+      command: process.execPath,
+      args: [adapter()],
+      cwd: root,
+      env: {
+        PI_ACP_PI_COMMAND: resolve('test/mock-pi.mjs'),
+        PI_ACP_WORKBENCH_STATE_DIR: join(root, 'registry'),
+        PI_CODING_AGENT_DIR: join(root, 'pi-data'),
+        PI_TEST_PREFLIGHT_FLAG: flag,
+        PI_TEST_PREFLIGHT_AUDIT: audit,
+      },
+      update: () => {},
+      permission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      closed: () => {},
+      log: () => {},
+      requestTimeoutMs: 5000,
+    });
+    await agent.initialize();
+    const session = await agent.createSession();
+    await writeFile(flag, 'hold preflight');
+    const running = agent.prompt(session.sessionId, [{ type: 'text', text: 'must-not-reach-Pi' }]);
+    const events = async () =>
+      (await readFile(audit, 'utf8'))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { held?: string; type?: string; message?: string });
+    await vi.waitFor(async () =>
+      expect((await events()).some((event) => event.held === 'get_state')).toBe(true),
+    );
+    await agent.cancel(session.sessionId);
+    expect((await running).stopReason).toBe('cancelled');
+    expect(
+      (await events()).some(
+        (event) => event.type === 'prompt' && event.message === 'must-not-reach-Pi',
+      ),
+    ).toBe(false);
+    expect(
+      (await agent.prompt(session.sessionId, [{ type: 'text', text: 'next-turn' }])).stopReason,
+    ).toBe('end_turn');
+    expect(
+      (await events()).filter((event) => event.type === 'prompt' && event.message === 'next-turn'),
+    ).toHaveLength(1);
+  } finally {
+    await agent?.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('honors preflight cancellation through the real daemon and bundled adapter', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-daemon-preflight-'));
+  const flag = join(root, 'hold'),
+    audit = join(root, 'rpc.jsonl');
+  let service: Awaited<ReturnType<typeof startRustService>> | undefined;
+  try {
+    await writeFile(audit, '');
+    service = await startRustService(root, {
+      command: process.execPath,
+      args: [adapter()],
+      maxWorkers: 2,
+      idleMs: 900000,
+      env: {
+        PI_ACP_PI_COMMAND: resolve('test/mock-pi.mjs'),
+        PI_ACP_WORKBENCH_STATE_DIR: join(root, 'registry'),
+        PI_CODING_AGENT_DIR: join(root, 'pi-data'),
+        PI_TEST_PREFLIGHT_FLAG: flag,
+        PI_TEST_PREFLIGHT_AUDIT: audit,
+      },
+    });
+    await service.call('setTitleModel', { model: 'off' });
+    const session = await service.call('create', { cwd: root, harness: 'pi' });
+    await service.call('prompt', {
+      sessionId: session.id,
+      prompt: [{ type: 'text', text: 'warm-up' }],
+    });
+    await writeFile(flag, 'hold preflight');
+    const running = service.call('prompt', {
+      sessionId: session.id,
+      prompt: [{ type: 'text', text: 'must-not-reach-Pi' }],
+    });
+    const events = async () =>
+      (await readFile(audit, 'utf8'))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { held?: string; type?: string; message?: string });
+    await vi.waitFor(async () =>
+      expect((await events()).some((event) => event.held === 'get_state')).toBe(true),
+    );
+    expect(await service.call('cancel', { sessionId: session.id })).toBe(true);
+    expect((await running).stopReason).toBe('cancelled');
+    expect(
+      (await events()).some(
+        (event) => event.type === 'prompt' && event.message === 'must-not-reach-Pi',
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await service.call('prompt', {
+          sessionId: session.id,
+          prompt: [{ type: 'text', text: 'next-turn' }],
+        })
+      ).stopReason,
+    ).toBe('end_turn');
+    expect(
+      (await events()).filter((event) => event.type === 'prompt' && event.message === 'next-turn'),
+    ).toHaveLength(1);
+  } finally {
+    await service?.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15000);
+
 it('uses dynamic discovery for terminal login when an old explicit path is missing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-login-path-'));
   try {

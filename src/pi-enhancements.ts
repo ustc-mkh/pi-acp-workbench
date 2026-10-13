@@ -64,6 +64,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
   return class extends Agent {
     private forkWorkers = new Map<string, { dispose: () => void }>();
     private usageCache?: { key: string; records: UsageRecord[] };
+    private turns = new Map<string, Set<{ cancelled: boolean }>>();
     async initialize(params: acp.InitializeRequest) {
       const result = await super.initialize(params);
       result.agentCapabilities ??= {};
@@ -74,33 +75,56 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       return result;
     }
     async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
-      const session = await this.restoreSession(params.sessionId);
-      session.cancelRequested = false;
-      if (await refreshPiModels(session.proc))
-        await this.publishConfigOptions(session).catch(() => {});
-      let refreshing: Promise<void> | undefined;
-      const refresh = () =>
-        (refreshing ??= session.publishContextUsage().finally(() => {
-          refreshing = undefined;
-        }));
-      // Context can grow across many model/tool steps in one ACP prompt. Never
-      // run billing/tree inspection here; Pi's bounded stats RPC is sufficient.
-      const timer = setInterval(() => {
-        void refresh().catch(() => {});
-      }, 1000);
-      timer.unref();
+      // Register before the first await, including restore/preflight. A later
+      // cancel invalidates exactly the submitted turns, not the next prompt.
+      const turn = { cancelled: false };
+      const turns = this.turns.get(params.sessionId) ?? new Set<{ cancelled: boolean }>();
+      turns.add(turn);
+      this.turns.set(params.sessionId, turns);
+      let session: PiSession | undefined;
+      let timer: NodeJS.Timeout | undefined;
+      let refresh: (() => Promise<void>) | undefined;
       try {
-        return await super.prompt(params);
+        session = await this.restoreSession(params.sessionId);
+        if (turn.cancelled) return { stopReason: 'cancelled' };
+        session.cancelRequested = false;
+        if (await refreshPiModels(session.proc))
+          await this.publishConfigOptions(session).catch(() => {});
+        if (turn.cancelled) return { stopReason: 'cancelled' };
+        const current = session;
+        let refreshing: Promise<void> | undefined;
+        refresh = () =>
+          (refreshing ??= current.publishContextUsage().finally(() => {
+            refreshing = undefined;
+          }));
+        // Only bounded context metadata, never billing/tree inspection here.
+        const poll = refresh;
+        timer = setInterval(() => {
+          void poll().catch(() => {});
+        }, 1000);
+        timer.unref();
+        // The pinned adapter checks this guard after its own restore await and
+        // at startTurn, before clearing cancelRequested or sending to Pi.
+        return await super.prompt(params, () => turn.cancelled);
       } catch (error) {
-        if (session.wasCancelRequested()) return { stopReason: 'cancelled' };
+        if (turn.cancelled || session?.wasCancelRequested()) return { stopReason: 'cancelled' };
         const detail = error instanceof Error ? error.message : String(error);
         throw Errors.internalError({}, providerError(detail));
       } finally {
         clearInterval(timer);
-        await refresh().catch(() => {});
+        turns.delete(turn);
+        if (!turns.size && this.turns.get(params.sessionId) === turns)
+          this.turns.delete(params.sessionId);
+        if (refresh) await refresh().catch(() => {});
       }
     }
+    async cancel(params: acp.CancelNotification): Promise<void> {
+      for (const turn of this.turns.get(params.sessionId) ?? []) turn.cancelled = true;
+      await super.cancel(params);
+    }
     dispose() {
+      for (const turns of this.turns.values()) for (const turn of turns) turn.cancelled = true;
+      this.turns.clear();
       for (const worker of this.forkWorkers.values()) worker.dispose();
       super.dispose();
     }

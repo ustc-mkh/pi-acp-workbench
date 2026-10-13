@@ -35,6 +35,8 @@ export class RemoteAgent implements Agent {
   latest?: ServiceState;
   private client: SessionClient;
   private id?: string;
+  private stateVersion = 0;
+  private syncVersion = 0;
   private pendingIds = new WeakMap<Promise<unknown>, string>();
   constructor(
     private options: RemoteAgentOptions,
@@ -44,7 +46,8 @@ export class RemoteAgent implements Agent {
     this.client = new SessionClient(
       socket,
       (event) => {
-        if (event.type === 'state' && event.snapshot.id === this.id) {
+        if (!this.isClosed && event.type === 'state' && event.snapshot.id === this.id) {
+          this.stateVersion++;
           this.latest = event;
           this.state(event);
         }
@@ -68,9 +71,22 @@ export class RemoteAgent implements Agent {
     return (this.info = info);
   }
   async sync() {
-    if (this.id) {
-      this.latest = await this.client.call<ServiceState>('state', { sessionId: this.id });
-      this.state(this.latest);
+    const id = this.id,
+      observed = this.stateVersion,
+      request = ++this.syncVersion;
+    if (id && !this.isClosed) {
+      const value = await this.client.call<ServiceState>('state', { sessionId: id });
+      // Replies and subscribed events have separate transport paths. A newer
+      // push, sync request, attachment or disposal supersedes this read.
+      if (
+        !this.isClosed &&
+        this.id === id &&
+        observed === this.stateVersion &&
+        request === this.syncVersion
+      ) {
+        this.latest = value;
+        this.state(value);
+      }
     }
     return this.latest;
   }
@@ -88,12 +104,14 @@ export class RemoteAgent implements Agent {
     if (current.snapshot.harness !== this.harness) throw new Error('会话不属于当前 harness。');
     if (this.id && this.id !== id) await this.client.watch(this.id, false);
     this.id = id;
+    this.stateVersion++;
+    this.latest = undefined;
     await this.client.watch(id!);
-    await this.sync();
+    const latest = await this.sync();
     return {
       sessionId: id!,
-      configOptions: current!.snapshot.configs,
-      modes: current!.snapshot.modes,
+      configOptions: latest?.snapshot.configs,
+      modes: latest?.snapshot.modes,
     };
   }
   request<Method extends acp.AgentRequestMethod>(

@@ -6,6 +6,7 @@ import { initialState } from '../src/state';
 import type { Agent } from '../src/remote-agent';
 import type { Snapshot } from '../src/shared';
 import { groupUsage, type Price } from '../src/telemetry';
+import { priceFixture } from './support/price-fixture';
 const storage = () => {
   const values = new Map<string, unknown>();
   return {
@@ -206,6 +207,7 @@ it('loads defaults when resetting a cold session and does not lose a forced refr
     () => ({ state, agent, harness: 'pi', retained: true }),
     () => {},
     () => {},
+    priceFixture(),
   );
   expect(cold.value.prices).toEqual({});
   await cold.setPrice(model);
@@ -242,6 +244,7 @@ it('uses current Pi prices, persists user overrides, and restores the latest Pi 
       () => ({ state, agent, harness: 'pi', retained: true }),
       () => {},
       () => {},
+      priceFixture(store),
     );
   let stats = create();
   expect(stats.value.prices).toEqual({}); // No frozen built-in price table.
@@ -258,7 +261,9 @@ it('uses current Pi prices, persists user overrides, and restores the latest Pi 
   await stats.setPrice(model);
   expect(stats.value.prices[model]).toEqual(prices[model]);
   expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].cost).toBe(9);
-  expect(store.get('prices')).toEqual({});
+  expect(priceFixture(store).read({})[model]).toBeNull();
+  expect(store.get(`price:${model}`)).toBeUndefined();
+  expect(store.get('prices')).toBeUndefined();
   prices = undefined;
   await stats.refresh();
   expect(stats.value.prices[model]).toEqual({ ...piPrice, input: 9 });
@@ -299,6 +304,7 @@ it('gives legacy bare model user prices precedence over Pi without applying them
     () => ({ state, agent, harness: 'pi', retained: true }),
     () => {},
     () => {},
+    priceFixture(store),
   );
   await stats.refresh();
   expect(stats.value.prices[direct].input).toBe(2);
@@ -309,7 +315,9 @@ it('gives legacy bare model user prices precedence over Pi without applying them
   expect(stats.value.prices[direct].input).toBe(1);
   await stats.setPrice(direct);
   expect(stats.value.prices[direct].input).toBe(7);
-  expect(store.get<Record<string, Price>>('prices')?.[model]).toBeUndefined();
+  expect(priceFixture(store).read({})[direct]).toBeNull();
+  expect(store.get(`price:${direct}`)).toBeUndefined();
+  expect(store.get<Record<string, Price>>('prices')?.[model]?.input).toBe(2);
   await stats.setPrice(model);
   expect(stats.value.prices[direct].input).toBe(7);
 });

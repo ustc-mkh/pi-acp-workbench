@@ -239,14 +239,24 @@ export class AttachmentCoordinator {
   }
 
   async exportChat() {
+    const { generation, cwd } = this.host;
+    const sessionId = this.host.state.sessionId;
+    const verify = () => {
+      if (
+        generation !== this.host.generation ||
+        sessionId !== this.host.state.sessionId ||
+        cwd !== this.host.cwd
+      )
+        throw new Error('会话已切换，导出已取消。');
+    };
     const uri = await vscode.window.showSaveDialog({
-      defaultUri: this.host.cwd
-        ? vscode.Uri.file(path.join(this.host.cwd, 'pi-conversation.md'))
-        : undefined,
+      defaultUri: cwd ? vscode.Uri.file(path.join(cwd, 'pi-conversation.md')) : undefined,
       filters: { Markdown: ['md'] },
     });
     if (!uri) return;
+    verify();
     const text = this.conversationText(await exportEntries(this.host));
+    verify();
     await vscode.workspace.fs.writeFile(uri, Buffer.from(text));
   }
 }
