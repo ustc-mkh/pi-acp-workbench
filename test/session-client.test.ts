@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionClient, WIRE_LIMITS } from '../src/session-wire';
+import type { ServiceEvent } from '../src/session-protocol';
 const cleanup: Array<() => Promise<unknown> | void> = [];
 interface TestRequest {
   id: string;
@@ -17,7 +18,10 @@ afterEach(async () => {
 });
 
 // Transport-only fixture. No sessions, persistence, worker execution or service implementation.
-async function fixture(handle: (request: TestRequest, socket: Socket) => Promise<unknown>) {
+async function fixture(
+  handle: (request: TestRequest, socket: Socket) => Promise<unknown>,
+  event: (value: ServiceEvent) => void = () => {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'pi-client-'));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const sockets = new Set<Socket>(),
@@ -46,7 +50,7 @@ async function fixture(handle: (request: TestRequest, socket: Socket) => Promise
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  const client = new SessionClient(path);
+  const client = new SessionClient(path, event);
   cleanup.push(() => client.dispose());
   return client;
 }
@@ -97,4 +101,126 @@ it('rejects a fragmented reply cut off by disconnect and releases the pending sl
   });
   await expect(client.call('state')).rejects.toThrow('连接已断开');
   expect(pendingCount(client)).toBe(0);
+});
+
+it.each([true, false])('accepts in-flight patches while changing watch to %s', async (enabled) => {
+  const events: ServiceEvent[] = [];
+  let watches = 0;
+  const snapshot = {
+    id: 'one',
+    harness: 'pi',
+    cwd: '/work',
+    title: 'one',
+    updated: 1,
+    entries: [],
+  };
+  const fields = { snapshot, busy: false, permissions: [], commands: [], plan: [] };
+  const client = await fixture(
+    async (request, socket) => {
+      if (request.method !== '_watch') return true;
+      if (++watches === 1) {
+        socket.write(JSON.stringify({ event: { ...fields, type: 'state', revision: 1 } }) + '\n');
+      } else {
+        socket.write(
+          JSON.stringify({
+            event: {
+              type: 'statePatch',
+              sessionId: 'one',
+              baseRevision: 1,
+              revision: 2,
+              state: fields,
+              entries: [],
+            },
+          }) + '\n',
+        );
+        if (enabled)
+          socket.write(JSON.stringify({ event: { ...fields, type: 'state', revision: 1 } }) + '\n');
+      }
+      return true;
+    },
+    (event) => events.push(event),
+  );
+  await client.watch('one');
+  await expect(client.watch('one', enabled)).resolves.toBe(true);
+  expect(events).toHaveLength(enabled ? 3 : 2);
+  expect(await client.call('hello')).toBe(true);
+});
+
+it('gives each partial frame its own deadline when frames share a data chunk', async () => {
+  const original = WIRE_LIMITS.partialMs;
+  WIRE_LIMITS.partialMs = 1000;
+  let socket!: Socket;
+  let requestId!: string;
+  const client = await fixture(async (request, connection) => {
+    socket = connection;
+    requestId = request.id;
+    connection.write('{"id":');
+  });
+  const result = client.call<string>('hold', {}, undefined, 0).then(
+    (value) => ({ value }),
+    (error: Error) => ({ error: error.message }),
+  );
+  try {
+    await vi.waitFor(() => expect(socket).toBeDefined());
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // Finish an unrelated response and start the requested response in the
+    // same write: the second response must not inherit the first deadline.
+    socket.write('"unrelated","value":true}\n{"id":');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    socket.write(JSON.stringify(requestId) + ',"value":"ok"}\n');
+    expect(await result).toEqual({ value: 'ok' });
+  } finally {
+    WIRE_LIMITS.partialMs = original;
+    client.dispose();
+  }
+});
+
+it('keeps the new baseline when unsubscribe and resubscribe replies arrive together', async () => {
+  let watches = 0;
+  let disabledId = '';
+  const fields = {
+    snapshot: { id: 'one', harness: 'pi', cwd: '/work', title: 'one', updated: 1, entries: [] },
+    busy: false,
+    permissions: [],
+    commands: [],
+    plan: [],
+  };
+  const client = await fixture(async (request, socket) => {
+    if (request.method !== '_watch') {
+      socket.write(
+        JSON.stringify({
+          event: {
+            type: 'statePatch',
+            sessionId: 'one',
+            baseRevision: 1,
+            revision: 2,
+            state: fields,
+            entries: [],
+          },
+        }) + '\n',
+      );
+      return true;
+    }
+    if (++watches === 1) {
+      socket.write(JSON.stringify({ event: { ...fields, type: 'state', revision: 5 } }) + '\n');
+      return true;
+    }
+    if (watches === 2) {
+      disabledId = request.id;
+      return undefined;
+    }
+    socket.write(
+      [
+        { id: disabledId, value: true },
+        { event: { ...fields, type: 'state', revision: 1 } },
+        { id: request.id, value: true },
+      ]
+        .map((frame) => JSON.stringify(frame) + '\n')
+        .join(''),
+    );
+    return undefined;
+  });
+  await client.watch('one');
+  await Promise.all([client.watch('one', false), client.watch('one', true)]);
+  await expect(client.call('hello')).resolves.toBe(true);
 });

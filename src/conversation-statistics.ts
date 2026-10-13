@@ -41,6 +41,7 @@ export class ConversationStatistics {
   value: Statistics;
   pending?: Promise<void>;
   private pendingForce = false;
+  private pendingContext?: Pick<StatisticsContext, 'agent' | 'state'> & { sessionId?: string };
   private priceStorageNote?: string;
   private withPriceNote(note?: string) {
     return [note, this.priceStorageNote].filter(Boolean).join('\n') || undefined;
@@ -236,11 +237,25 @@ export class ConversationStatistics {
   }
   async refresh(settledTurn = false): Promise<void> {
     if (this.pending) {
+      const requested = this.current(),
+        sessionId = requested.state.sessionId;
+      const same =
+        this.pendingContext?.agent === requested.agent &&
+        this.pendingContext?.state === requested.state &&
+        this.pendingContext?.sessionId === sessionId;
       const forced = this.pendingForce;
       await this.pending;
-      if (!settledTurn || forced) return;
-      // An earlier cached/cold read must not swallow an explicit refresh.
-      return this.refresh(true);
+      const now = this.current();
+      if (
+        now.agent !== requested.agent ||
+        now.state !== requested.state ||
+        now.state.sessionId !== sessionId
+      )
+        return;
+      if (same && (!settledTurn || forced)) return;
+      // A read belonging to another session or a cached read cannot swallow
+      // an explicit page-open refresh.
+      return this.refresh(settledTurn);
     }
     const { agent, state, harness } = this.current(),
       sessionId = state.sessionId;
@@ -256,13 +271,13 @@ export class ConversationStatistics {
         (agent?.harness === 'pi' && meta?.version === 1) || service?.usageInspection === true,
       note: harness !== 'pi' ? this.withPriceNote(HARNESSES[harness].note) : this.value.note,
     };
-    if (!agent || !sessionId || !this.value.available || (state.status === 'busy' && !settledTurn))
-      return;
+    if (!agent || !sessionId || !this.value.available) return;
     const current = () => {
       const now = this.current();
       return now.agent === agent && now.state === state && now.state.sessionId === sessionId;
     };
     this.pendingForce = settledTurn;
+    this.pendingContext = { agent, state, sessionId };
     this.pending = (async () => {
       try {
         let cursor: number | undefined;
@@ -331,6 +346,7 @@ export class ConversationStatistics {
     } finally {
       this.pending = undefined;
       this.pendingForce = false;
+      this.pendingContext = undefined;
     }
   }
 }

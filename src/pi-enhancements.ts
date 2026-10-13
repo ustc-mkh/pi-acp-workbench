@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branch';
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
+import { fastConfig } from './pi-fast-config';
 import { refreshPiModels } from './pi-context-config';
 import { generatePiTitle } from './pi-title';
 export function usageRecord(
@@ -157,7 +158,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         return {};
       }
       if (!session) throw new Error('Unknown session');
-      if (session.pendingTurn)
+      if (session.pendingTurn && method !== '_pi_workbench/inspect')
         throw new Error('Wait for the current turn to finish before inspecting or branching.');
       if (method === '_pi_workbench/title') {
         if (
@@ -222,6 +223,8 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
               : models[0].value,
           options: models,
         });
+      const fast = await fastConfig(session.proc).catch(() => undefined);
+      if (fast) configOptions.push({ ...fast });
       if (thinking)
         await conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -345,8 +348,12 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       }
     }
     private async inspect(session: PiSession, params: WorkbenchParams): Promise<Inspection> {
-      if (!params.cursor && (await refreshPiModels(session.proc)))
+      if (!params.cursor) {
+        await refreshPiModels(session.proc);
+        // Page entry must also refresh selections/catalogue when the registry
+        // reload is skipped because Pi is streaming. These RPCs are read-only.
         await this.publishConfigOptions(session).catch(() => {});
+      }
       const state = await session.proc.getState();
       const model = state.model,
         modelKey = model?.provider && model?.id ? `${model.provider}/${model.id}` : 'unknown';

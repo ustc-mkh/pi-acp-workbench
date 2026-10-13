@@ -256,6 +256,46 @@ impl SessionService {
                 ..
             }
         ) {
+            // An inspection during a live run is read-only.
+            // Do not enter its request lane or change phase/permissions/busy;
+            // otherwise the UI cannot synchronize until the prompt ends.
+            if matches!(
+                &command,
+                ServiceCommand::Request {
+                    request: AgentRequest::Inspect { .. },
+                    ..
+                }
+            ) {
+                let live = self
+                    .runtimes
+                    .lock_unpoisoned()
+                    .get(command_session_id(&command))
+                    .and_then(|rt| {
+                        let r = rt.lock_unpoisoned();
+                        if r.busy() {
+                            r.agent.clone().map(|agent| {
+                                (
+                                    rt.clone(),
+                                    agent,
+                                    r.snapshot.harness.as_deref() == Some("pi"),
+                                )
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                if let Some((rt, agent, pi)) = live {
+                    let result = if pi {
+                        self.agent_request(&rt, &agent, &command).await
+                    } else {
+                        self.execute_session(&command, request_id, None).await
+                    };
+                    if pi && result.is_ok() {
+                        self.emit(&rt);
+                    }
+                    return result.map_err(ServiceError::from);
+                }
+            }
             return self
                 .queue
                 .run(command_session_id(&command), |check| {

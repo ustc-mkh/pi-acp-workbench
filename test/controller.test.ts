@@ -1612,6 +1612,32 @@ it('uses the production remote Pi client and receives phone turns without owning
     rmSync(root, { recursive: true, force: true });
   }
 }, 15000);
+it('retains authoritative residency colors across live state pushes and clears them on a new list', async () => {
+  await host.provider.perform({ type: 'new' });
+  const snapshot = host.provider.sessionCoordinator.currentSnapshot()!;
+  host.provider.history = [{ ...snapshot, entries: [], lifeDays: 16 }];
+  const value = { snapshot, busy: true, permissions: [], commands: [], plan: [] };
+  for (let i = 0; i < 5; i++) {
+    host.provider.applyServiceState(value);
+    expect(host.provider.history.find((entry) => entry.id === snapshot.id)?.lifeDays).toBe(16);
+  }
+  host.provider.history = [{ ...snapshot, entries: [], lifeDays: 1 }];
+  host.provider.applyServiceState(value);
+  expect(host.provider.history[0].lifeDays).toBe(1);
+  host.provider.history = [{ ...snapshot, entries: [] }];
+  host.provider.applyServiceState({ ...value, busy: false });
+  expect(host.provider.history[0].lifeDays).toBeUndefined();
+});
+it('synchronizes the current service state on every page-open refresh before reading statistics', async () => {
+  await host.provider.perform({ type: 'new' });
+  const sync = vi.spyOn(host.provider.agent! as RemoteAgent, 'sync');
+  const inspect = vi.spyOn(host.provider.telemetry, 'refresh').mockResolvedValue();
+  await host.provider.perform({ type: 'refreshStatistics' });
+  await host.provider.perform({ type: 'refreshStatistics' });
+  expect(sync).toHaveBeenCalledTimes(2);
+  expect(inspect).toHaveBeenCalledTimes(2);
+  expect(sync.mock.invocationCallOrder[0]).toBeLessThan(inspect.mock.invocationCallOrder[0]);
+});
 it('refreshes statistics for new remote assistant output without looping on inspection state pushes', async () => {
   host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
   await host.provider.perform({ type: 'new' });

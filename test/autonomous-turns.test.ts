@@ -174,6 +174,26 @@ it('allows autonomous permission dialogs and keeps late completions scoped acros
   expect((await f.state()).permissions).toHaveLength(1);
   await expect(f.prompt('user while background permission is pending')).rejects.toThrow('发送失败');
   expect((await f.state()).permissions[0].id).toBe(permission.id);
+  const inspection = await Promise.race([
+    f.service.call<{ prices: Record<string, { input: number }> }>('request', {
+      sessionId: f.session.id,
+      method: '_pi_workbench/inspect',
+      params: { force: false },
+    }),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('inspection waited for autonomous completion')),
+        1500,
+      );
+      timer.unref();
+    }),
+  ]);
+  expect(inspection.prices['anthropic/claude-sonnet-4-6'].input).toBe(3);
+  expect((await f.state()).busy).toBe(true);
+  expect((await f.state()).snapshot.configs).toContainEqual(
+    expect.objectContaining({ id: 'model', currentValue: 'anthropic/claude-sonnet-4-6' }),
+  );
+  expect((await f.state()).permissions[0].id).toBe(permission.id);
   expect(
     await f.service.call('permission', {
       sessionId: f.session.id,

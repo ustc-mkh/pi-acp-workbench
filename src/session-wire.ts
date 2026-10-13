@@ -49,6 +49,10 @@ function reader(socket: Socket, receive: (value: WireFrame) => void) {
       const line = buffer.slice(0, end);
       buffer = buffer.slice(end + 1);
       bytes -= Buffer.byteLength(line) + 1;
+      // A completed frame ends its deadline. Any remaining bytes belong to a
+      // new frame and must get their own full partial-frame timeout.
+      clearTimeout(timer);
+      timer = undefined;
       try {
         // The daemon owns the wire schema; keep deserialization at this boundary.
         receive(JSON.parse(line) as WireFrame);
@@ -137,6 +141,7 @@ export class SessionClient {
   private connecting?: Promise<void>;
   private closed = false;
   private states = new ServiceStateStream();
+  private watchRequests = new Map<string, symbol>();
   private pending = new Map<
     string,
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout }
@@ -203,9 +208,19 @@ export class SessionClient {
       });
     }));
   }
-  watch(sessionId: string, enabled = true) {
-    this.states.clear(sessionId);
-    return this.call('_watch', { sessionId, enabled });
+  async watch(sessionId: string, enabled = true) {
+    // Keep the old baseline for deltas already queued before the daemon handles
+    // this request. Re-enabling makes the daemon send a full state next, which
+    // replaces the baseline; disabling is safe to clear only after its reply.
+    const request = Symbol();
+    this.watchRequests.set(sessionId, request);
+    try {
+      const result = await this.call('_watch', { sessionId, enabled });
+      if (!enabled && this.watchRequests.get(sessionId) === request) this.states.clear(sessionId);
+      return result;
+    } finally {
+      if (this.watchRequests.get(sessionId) === request) this.watchRequests.delete(sessionId);
+    }
   }
   call<Method extends keyof ServiceResponses>(
     method: Method,

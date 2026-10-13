@@ -1,10 +1,62 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { mkdtemp, writeFile, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { enhancePiAgent } from '../src/pi-enhancements';
 import type { UsageRecord } from '../src/telemetry';
 
+it('inspects and republishes current selectors during a managed turn without sending a prompt', async () => {
+  const updates: { update: { sessionUpdate: string; configOptions?: unknown[] } }[] = [];
+  const prompt = vi.fn();
+  const session = {
+    sessionId: 'live',
+    pendingTurn: {},
+    proc: {
+      prompt,
+      request: async () => ({ success: true, data: { entries: [], leafId: null, commands: [] } }),
+      getState: async () => ({
+        isStreaming: true,
+        thinkingLevel: 'off',
+        model: { provider: 'test', id: 'latest' },
+      }),
+      getMessages: async () => ({ messages: [] }),
+      getAvailableThinkingLevels: async () => ['off'],
+      getAvailableModels: async () => ({
+        models: [
+          {
+            provider: 'test',
+            id: 'latest',
+            name: 'Latest',
+            contextWindow: 4096,
+            cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      }),
+    },
+  };
+  class Base {
+    sessions = new Map([['live', session]]);
+    conn = {
+      sessionUpdate: async (update: (typeof updates)[number]) => {
+        updates.push(update);
+      },
+    };
+  }
+  const Agent = enhancePiAgent(Base, undefined);
+  const result = await new Agent().extMethod('_pi_workbench/inspect', { sessionId: 'live' });
+  expect(result.prices?.['test/latest'].input).toBe(1);
+  expect(updates).toContainEqual(
+    expect.objectContaining({
+      update: expect.objectContaining({
+        sessionUpdate: 'config_option_update',
+        configOptions: expect.arrayContaining([
+          expect.objectContaining({ id: 'model', currentValue: 'test/latest' }),
+        ]),
+      }),
+    }),
+  );
+  expect(prompt).not.toHaveBeenCalled();
+});
 it('paginates cached usage and invalidates it on append and truncation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-usage-cache-'));
   const sessionFile = join(dir, 'session.jsonl');

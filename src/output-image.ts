@@ -31,7 +31,7 @@ export async function readOutputImage(cwd: string, source: string): Promise<Past
     '.webp': 'image/webp',
   }[path.extname(target).toLowerCase()];
   if (!mimeType) throw new Error('只支持 PNG、JPEG、WebP 和 GIF 图片。');
-  const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     // Verify the opened descriptor as well on Linux, closing parent-symlink races.
     if (process.platform === 'linux') {

@@ -805,7 +805,14 @@ try {
   state.visibleModels = ['other'];
   await emit(state);
   assert.equal(await page.locator('#selectors select[aria-label="Model"] option').count(), 2);
+  const pageRefreshes = () =>
+    page.evaluate(() => window.messages.filter((m) => m.type === 'refreshStatistics').length);
+  const modelRefreshCount = await pageRefreshes();
   await page.locator('#models-toggle').click();
+  assert.equal(await pageRefreshes(), modelRefreshCount + 1);
+  await page.locator('#models-toggle').click();
+  await page.locator('#models-toggle').click();
+  assert.equal(await pageRefreshes(), modelRefreshCount + 2);
   assert(await page.locator('#models').isVisible());
   assert.equal(await page.locator('#models input[type="checkbox"]').count(), 3);
   assert.equal(await page.locator('#models .provider-group[open]').count(), 0);
@@ -843,7 +850,12 @@ try {
     prices: { m: { input: 2, cacheRead: 0, cacheWrite: 0, output: 8 } },
   };
   await emit(state);
+  const statisticsRefreshCount = await pageRefreshes();
   await page.locator('#statistics-toggle').click();
+  assert.equal(await pageRefreshes(), statisticsRefreshCount + 1);
+  await page.locator('#statistics-toggle').click();
+  await page.locator('#statistics-toggle').click();
+  assert.equal(await pageRefreshes(), statisticsRefreshCount + 2);
   assert.equal(await page.getByRole('button', { name: '模型设置 →', exact: true }).count(), 0);
   await page.getByRole('tab', { name: '按时间', exact: true }).click();
   assert.equal(await page.locator('.usage-bar').count(), 1);

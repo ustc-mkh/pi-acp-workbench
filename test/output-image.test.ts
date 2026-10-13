@@ -3,10 +3,22 @@ import { mkdtemp, writeFile, mkdir, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readOutputImage } from '../src/output-image';
 import { MAX_IMAGE_BYTES } from '../src/images';
 const png =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
+it.skipIf(process.platform === 'win32')('rejects a FIFO without waiting for a writer', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'pi-output-fifo-'));
+  try {
+    await promisify(execFile)('mkfifo', [join(cwd, 'pipe.png')]);
+    await expect(readOutputImage(cwd, 'pipe.png')).rejects.toThrow('图片不可读');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 it('loads bounded local raster images, including encoded names and file URIs, but refuses escapes and invalid files', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-output-image-'));
   const cwd = join(dir, 'workspace');

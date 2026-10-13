@@ -289,6 +289,13 @@ impl SessionService {
                 serde_json::from_value(result.get("forkPoints").cloned().unwrap_or(json!([])))
                     .unwrap_or_default();
             let mut r = rt.lock_unpoisoned();
+            if !r
+                .agent
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, agent))
+            {
+                return Err("元数据来源工作进程已切换，请重新刷新。".into());
+            }
             r.state.native_forks = Some(bind_native_forks(
                 &r.state.entries,
                 &points,

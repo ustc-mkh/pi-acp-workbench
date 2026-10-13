@@ -204,7 +204,13 @@ export class ChatProvider
     this.state.error = value.error;
     if (this.config.get('persistHistory', true) && !this.forgottenSessions.has(s.id))
       this.history = [
-        { ...s, entries: [], stored: true, busy: value.busy },
+        {
+          ...s,
+          entries: [],
+          stored: true,
+          busy: value.busy,
+          lifeDays: this.history.find((item) => item.id === s.id)?.lifeDays,
+        },
         ...this.history.filter((h) => h.id !== s.id),
       ];
     this.emit();
@@ -609,6 +615,10 @@ export class ChatProvider
       const settings = await this.serviceClient.call('titleSettings');
       if (revision === this.titleModelRevision) this.titleModel = settings.model;
     }
+    const agent = this.agent,
+      generation = this.generation;
+    if (agent) await (agent as import('./remote-agent').RemoteAgent).sync();
+    if (generation !== this.generation || agent !== this.agent) return;
     await this.refreshTelemetry(this.state.status !== 'busy');
     this.emit();
   }

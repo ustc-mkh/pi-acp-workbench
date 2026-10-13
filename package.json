@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "0.12.13",
+  "version": "0.12.14",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {

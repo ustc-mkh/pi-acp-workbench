@@ -168,6 +168,43 @@ it('statistics discards late responses and errors from detached sessions', async
   expect(stats.pending).toBeUndefined();
   expect(stats.value.records).toEqual([]);
 });
+it('reads usage during streaming and does not let an old session read swallow page entry in a new session', async () => {
+  let state = { ...initialState(), sessionId: 'old', status: 'busy' as const };
+  let finish!: (value: { records: never[] }) => void;
+  const request = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValue({ records: [], prices: {} });
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
+    harness: 'pi',
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    request,
+  };
+  const stats = new ConversationStatistics(
+    storage(),
+    new ClientOperations(),
+    () => ({ state, agent, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+  );
+  const old = stats.refresh();
+  expect(request).toHaveBeenCalledOnce();
+  expect(request.mock.calls[0][1]).toMatchObject({ sessionId: 'old', force: false });
+  state = { ...state, sessionId: 'new' };
+  stats.reset('pi');
+  const next = stats.refresh();
+  finish({ records: [] });
+  await Promise.all([old, next]);
+  expect(request.mock.calls.map(([, params]) => params.sessionId)).toEqual(['old', 'new']);
+  expect(request.mock.calls[1][1].force).toBe(false);
+  await stats.refresh();
+  expect(request).toHaveBeenCalledTimes(3);
+});
 it('loads defaults when resetting a cold session and does not lose a forced refresh behind a cached read', async () => {
   const model = 'openai/m',
     price = { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 0 };

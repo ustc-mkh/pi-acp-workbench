@@ -131,6 +131,45 @@ it('does not make a billable title call when automatic naming is disabled', asyn
       .filter((line) => line.includes('"method":"_pi_workbench/title"')),
   ).toHaveLength(0);
 });
+it('reads live inspection without waiting for a managed prompt or changing its busy phase', async () => {
+  const { host, service } = await fixture(1, 900000, 'context-title');
+  const session = await host.create();
+  const pending = host.run(session.id, 'permission', { permission: () => {} });
+  void pending.catch(() => {});
+  await vi.waitFor(async () =>
+    expect((await host.status(session.id)).permissions.length).toBeGreaterThan(0),
+  );
+  const result = await Promise.race([
+    service.call<{ records: unknown[] }>('request', {
+      sessionId: session.id,
+      method: '_pi_workbench/inspect',
+      params: { force: false },
+    }),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('inspection waited for prompt')), 1500);
+      timer.unref();
+    }),
+  ]);
+  expect(Array.isArray(result.records)).toBe(true);
+  const forced = await Promise.race([
+    service.call<{ records: unknown[] }>('request', {
+      sessionId: session.id,
+      method: '_pi_workbench/inspect',
+      params: { force: true },
+    }),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('forced inspection waited for prompt')),
+        1500,
+      );
+      timer.unref();
+    }),
+  ]);
+  expect(Array.isArray(forced.records)).toBe(true);
+  expect((await host.status(session.id)).busy).toBe(true);
+  await host.cancel(session.id);
+  await pending;
+});
 it('prefers native adapter titles and keeps them across saves', async () => {
   const { host } = await fixture(1, 900000, 'context-native-title');
   const session = await host.create();

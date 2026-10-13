@@ -41,6 +41,7 @@ export class RemoteAgent implements Agent {
   private id?: string;
   private stateVersion = 0;
   private syncVersion = 0;
+  private attachmentVersion = 0;
   private pendingIds = new WeakMap<Promise<unknown>, string>();
   constructor(
     private options: RemoteAgentOptions,
@@ -95,6 +96,12 @@ export class RemoteAgent implements Agent {
     return this.latest;
   }
   async createSession(id?: string): Promise<acp.NewSessionResponse> {
+    const version = ++this.attachmentVersion;
+    const verify = () => {
+      if (this.isClosed) throw new Error('会话客户端已关闭');
+      if (version !== this.attachmentVersion) throw new Error('会话挂接已被更新的请求取代。');
+    };
+    verify();
     if (!id) {
       const snapshot = await this.client.call(
         'create',
@@ -102,16 +109,21 @@ export class RemoteAgent implements Agent {
         undefined,
         0,
       );
+      verify();
       id = snapshot.id;
     }
     const current = await this.client.call<ServiceState>('state', { sessionId: id });
+    verify();
     if (current.snapshot.harness !== this.harness) throw new Error('会话不属于当前 harness。');
     if (this.id && this.id !== id) await this.client.watch(this.id, false);
+    verify();
     this.id = id;
     this.stateVersion++;
     this.latest = undefined;
     await this.client.watch(id!);
+    verify();
     const latest = await this.sync();
+    verify();
     return {
       sessionId: id!,
       configOptions: latest?.snapshot.configs,

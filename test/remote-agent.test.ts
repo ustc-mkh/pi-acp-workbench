@@ -12,7 +12,7 @@ afterEach(async () => {
 interface WireRequest {
   id: string;
   method: string;
-  params: Record<string, string>;
+  params: { sessionId: string; enabled?: boolean };
 }
 const state = (id: string, text: string, busy = false): ServiceState => ({
   snapshot: {
@@ -117,6 +117,47 @@ it('ignores older concurrent queries and replies from a previous attachment', as
   await agent.createSession('two');
   replies[2](state('one', 'stale'));
   await stale;
+  expect(agent.latest?.snapshot.id).toBe('two');
+});
+
+it('does not let an older attachment query replace a newer session', async () => {
+  let reply!: (value: ServiceState) => void;
+  const watches: string[] = [];
+  const { agent } = await wireFixture(async (request) => {
+    if (request.method === '_watch') {
+      watches.push(request.params.sessionId);
+      return true;
+    }
+    if (request.params.sessionId === 'one')
+      return new Promise<ServiceState>((resolve) => (reply = resolve));
+    return state('two', 'new attachment');
+  });
+  const first = agent.createSession('one');
+  const rejected = expect(first).rejects.toThrow('取代');
+  await vi.waitFor(() => expect(reply).toBeDefined());
+  await agent.createSession('two');
+  reply(state('one', 'late attachment'));
+  await rejected;
+  expect(agent.latest?.snapshot.id).toBe('two');
+  expect(watches).toEqual(['two']);
+});
+
+it('rejects an attachment superseded while its watch acknowledgement is pending', async () => {
+  let release!: (value: boolean) => void;
+  const { agent } = await wireFixture(async (request) => {
+    if (request.method === '_watch') {
+      if (request.params.sessionId === 'one' && request.params.enabled === true)
+        return new Promise<boolean>((resolve) => (release = resolve));
+      return true;
+    }
+    return state(request.params.sessionId, request.params.sessionId);
+  });
+  const first = agent.createSession('one');
+  const rejected = expect(first).rejects.toThrow('取代');
+  await vi.waitFor(() => expect(release).toBeDefined());
+  await agent.createSession('two');
+  release(true);
+  await rejected;
   expect(agent.latest?.snapshot.id).toBe('two');
 });
 
