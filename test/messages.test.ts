@@ -23,6 +23,31 @@ const summary: Entry = {
     ],
   },
 };
+it('shows a failed input with an accessible exclamation before its message and no native branch action', () => {
+  const render = createMessageRenderer(
+    (text) => text,
+    () => 'session',
+    vi.fn(),
+  );
+  const root = document.createElement('div');
+  const transcript = new TranscriptView(root, render);
+  const failure = {
+    id: 'refused',
+    role: 'user',
+    text: 'please continue',
+    sendError: '发送失败：消息未发送',
+  } as const;
+  transcript.update([failure], false);
+  const indicator = root.querySelector('.send-failure-indicator')!;
+  expect(indicator.textContent).toBe('!');
+  expect(indicator.getAttribute('aria-label')).toContain('发送失败');
+  expect(indicator.parentElement?.className).toContain('send-failed');
+  expect(root.querySelector('.send-failure-status')?.textContent).toBe('发送失败');
+  expect(root.querySelector('[data-context-action]')).toBeNull();
+  transcript.update([failure, { id: 'reply', role: 'assistant', text: 'background reply' }], true);
+  expect(root.querySelector('.send-failure-indicator')).toBe(indicator);
+  expect(root.textContent).toContain('background reply');
+});
 it('keeps the final turn diff visible after the answer and outside collapsed activity', () => {
   const root = document.createElement('div'),
     send = vi.fn(),

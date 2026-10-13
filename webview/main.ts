@@ -223,6 +223,7 @@ let state: ChatState | undefined;
 const stateInbox = new StateInbox();
 let followBottom = true;
 let sending = false;
+let submitted: { id: string; text: string; harness?: string; sessionId?: string } | undefined;
 let pasting = false;
 installImagePaste(
   input,
@@ -280,7 +281,9 @@ function submit() {
   el('transcript').scrollTop = el('transcript').scrollHeight;
   el('bottom').hidden = true;
   sending = true;
-  send({ type: 'send', text: input.value });
+  const request = { type: 'send', text: input.value, id: crypto.randomUUID() } as const;
+  submitted = { ...request, harness: state?.harness, sessionId: state?.sessionId };
+  send(request);
 }
 input.addEventListener('keydown', (event) => {
   if (!event.defaultPrevented && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -609,8 +612,32 @@ window.addEventListener('message', (event) => {
     outputImages.receive(event.data);
     return;
   }
+  if (event.data.type === 'sendFailed') {
+    if (
+      !submitted ||
+      event.data.id !== submitted.id ||
+      event.data.harness !== state?.harness ||
+      event.data.sessionId !== state?.sessionId
+    )
+      return;
+    if (!input.value) {
+      input.value = submitted.text;
+      saveDraft();
+    }
+    submitted = undefined;
+    sending = false;
+    updateSend();
+    return;
+  }
   if (event.data.type === 'sent') {
-    input.value = '';
+    if (
+      !submitted ||
+      event.data.id !== submitted.id ||
+      submitted.harness !== state?.harness ||
+      submitted.sessionId !== state?.sessionId
+    )
+      return;
+    if (input.value === submitted.text) input.value = '';
     saveDraft();
     sending = false;
     updateSend();

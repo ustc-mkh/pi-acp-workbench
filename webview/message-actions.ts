@@ -25,7 +25,7 @@ export function messageActions(
     }, 1500);
   };
   actions.append(copy);
-  if (entry.role === 'user' || entry.role === 'assistant') {
+  if ((entry.role === 'user' || entry.role === 'assistant') && !entry.sendError) {
     const type = 'branchMessage',
       label = '分支',
       tooltip = '回溯到此消息后的原生上下文；保留当时的压缩记录，不重新生成摘要';

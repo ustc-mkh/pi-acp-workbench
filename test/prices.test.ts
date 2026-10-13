@@ -161,11 +161,19 @@ it('sends provider visibility and reset operations, acknowledges reset without l
       (b) => b.textContent === label,
     )!;
   button('全部不显示').click();
-  expect(send).toHaveBeenLastCalledWith({ type: 'setVisibleModels', harness: 'pi', models: [] });
+  expect(send).toHaveBeenLastCalledWith({
+    type: 'setVisibleModels',
+    harness: 'pi',
+    sessionId: 's',
+    affected: ['p/m'],
+    models: [],
+  });
   button('全部显示').click();
   expect(send).toHaveBeenLastCalledWith({
     type: 'setVisibleModels',
     harness: 'pi',
+    sessionId: 's',
+    affected: ['p/m'],
     models: ['p/m'],
   });
   const field = card.querySelector<HTMLInputElement>('input[type=number]')!;
@@ -211,13 +219,17 @@ it('keeps other providers unchanged during bulk visibility changes', () => {
   expect(send).toHaveBeenLastCalledWith({
     type: 'setVisibleModels',
     harness: 'pi',
-    models: ['p/m', 'p/n', 'q/n'],
+    sessionId: 's',
+    affected: ['p/m', 'p/n'],
+    models: ['p/m', 'p/n'],
   });
   [...group.querySelectorAll('button')].find((b) => b.textContent === '全部不显示')!.click();
   expect(send).toHaveBeenLastCalledWith({
     type: 'setVisibleModels',
     harness: 'pi',
-    models: ['q/n'],
+    sessionId: 's',
+    affected: ['p/m', 'p/n'],
+    models: [],
   });
 });
 it('selects the title model independently from the conversation model', () => {

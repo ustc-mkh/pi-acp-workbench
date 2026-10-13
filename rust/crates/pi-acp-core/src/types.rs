@@ -12,6 +12,9 @@ pub struct Entry {
     pub role: String, // user | assistant | thought | notice | tool | diff
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Rejected input is displayed in history but was never delivered to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,7 @@ impl Entry {
             id,
             role: role.to_string(),
             text: Some(text),
+            send_error: None,
             message_id: None,
             context_blocks: None,
             tool: None,

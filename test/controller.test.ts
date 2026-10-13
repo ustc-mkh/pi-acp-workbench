@@ -440,7 +440,13 @@ it('locks preview before awaiting persistence', async () => {
   const preview = host.provider.perform({ type: 'preview' });
   await host.provider.perform({ type: 'send', text: 'must not send' });
   await host.provider.perform({ type: 'new' });
-  expect(host.provider.snapshot().entries).toEqual([]);
+  expect(host.provider.snapshot().entries).toEqual([
+    expect.objectContaining({
+      role: 'user',
+      text: 'must not send',
+      sendError: expect.stringContaining('发送失败'),
+    }),
+  ]);
   release();
   await preview;
   expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', preview: true });
@@ -628,7 +634,16 @@ it('does not create a session on ready, reconnect, or send; only explicit new do
   await host.provider.perform({ type: 'connect' });
   await host.provider.perform({ type: 'send', text: 'hello' });
   expect(start).not.toHaveBeenCalled();
-  expect(host.provider.snapshot()).toMatchObject({ status: 'disconnected', entries: [] });
+  expect(host.provider.snapshot()).toMatchObject({
+    status: 'disconnected',
+    entries: [
+      expect.objectContaining({
+        role: 'user',
+        text: 'hello',
+        sendError: expect.stringContaining('发送失败'),
+      }),
+    ],
+  });
   await host.provider.perform({ type: 'new' });
   const id = host.provider.snapshot().sessionId;
   await host.provider.perform({ type: 'ready' });
@@ -712,12 +727,15 @@ it('submits only one of two simultaneous prompts', async () => {
   await host.provider.perform({ type: 'send', text: 'second' });
   await vi.waitFor(() => expect(host.provider.snapshot().status).toBe('busy'));
   await vi.waitFor(() =>
-    expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1),
+    expect(
+      host.provider.snapshot().entries.filter((e) => e.role === 'user' && !e.sendError),
+    ).toHaveLength(1),
   );
   await host.provider.perform({ type: 'cancel' });
   await turn;
   expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toEqual([
     expect.objectContaining({ text: 'wait' }),
+    expect.objectContaining({ text: 'second', sendError: expect.stringContaining('发送失败') }),
   ]);
 });
 it('cancels pending permission requests when the user stops', async () => {
@@ -773,7 +791,15 @@ it('creates and switches sessions while the original turn keeps running in the d
   await host.provider.perform({ type: 'resume', id: original });
   expect(host.provider.snapshot()).toMatchObject({ sessionId: original, status: 'busy' });
   await host.provider.perform({ type: 'send', text: 'blocked overlap' });
-  expect(host.provider.snapshot().entries.filter((e) => e.role === 'user')).toHaveLength(1);
+  expect(
+    host.provider.snapshot().entries.filter((e) => e.role === 'user' && !e.sendError),
+  ).toHaveLength(1);
+  expect(host.provider.snapshot().entries).toContainEqual(
+    expect.objectContaining({
+      text: 'blocked overlap',
+      sendError: expect.stringContaining('发送失败'),
+    }),
+  );
   await host.provider.perform({ type: 'resume', id: second });
   expect(host.provider.snapshot()).toMatchObject({
     sessionId: second,
@@ -834,7 +860,15 @@ it('retains the busy session and original request gate when navigation fails bef
   });
   refresh.mockRestore();
   await host.provider.perform({ type: 'send', text: 'blocked overlap' });
-  expect(host.provider.snapshot().entries.filter((entry) => entry.role === 'user')).toHaveLength(1);
+  expect(
+    host.provider.snapshot().entries.filter((entry) => entry.role === 'user' && !entry.sendError),
+  ).toHaveLength(1);
+  expect(host.provider.snapshot().entries).toContainEqual(
+    expect.objectContaining({
+      text: 'blocked overlap',
+      sendError: expect.stringContaining('发送失败'),
+    }),
+  );
   await host.provider.perform({ type: 'cancel' });
   await turn;
   expect(host.provider.snapshot().status).toBe('ready');
@@ -1578,18 +1612,86 @@ it('uses the production remote Pi client and receives phone turns without owning
     rmSync(root, { recursive: true, force: true });
   }
 }, 15000);
+it('refreshes statistics for new remote assistant output without looping on inspection state pushes', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  const inspect = vi.spyOn(host.provider.telemetry, 'refresh').mockResolvedValue();
+  const snapshot = host.provider.sessionCoordinator.currentSnapshot()!;
+  const value = {
+    snapshot: {
+      ...snapshot,
+      entries: [{ id: 'remote-answer', role: 'assistant' as const, text: 'background result' }],
+    },
+    busy: true,
+    permissions: [],
+    commands: [],
+    plan: [],
+  };
+  host.provider.applyServiceState(value);
+  host.provider.applyServiceState({ ...value, busy: false });
+  expect(inspect).toHaveBeenCalledTimes(1);
+  host.provider.applyServiceState(value);
+  host.provider.applyServiceState({ ...value, busy: false });
+  expect(inspect).toHaveBeenCalledTimes(1);
+});
+it('applies visibility patches without clearing absent models or hiding catalogue additions', async () => {
+  host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
+  await host.provider.perform({ type: 'new' });
+  const sessionId = host.provider.state.sessionId;
+  const model = host.provider.state.configs!.find((c) => c.id === 'model')!;
+  if (model.type !== 'select') throw new Error('expected select');
+  model.options = [
+    ...model.options.flatMap((o) => ('options' in o ? o.options : [o])),
+    { value: 'new-model', name: 'New Model' },
+  ];
+  await host.provider.perform({
+    type: 'setVisibleModels',
+    harness: 'pi',
+    sessionId,
+    affected: ['default'],
+    models: [],
+  });
+  expect(host.provider.snapshot().visibleModels).toContain('new-model');
+  const original = structuredClone(host.provider.state.configs!);
+  model.options = model.options.filter((o) => o.value !== 'default');
+  await host.provider.perform({
+    type: 'setVisibleModels',
+    harness: 'pi',
+    sessionId,
+    affected: ['other'],
+    models: [],
+  });
+  host.provider.state.configs = original;
+  expect(host.provider.snapshot().visibleModels).toEqual(['new-model']);
+  await host.provider.perform({
+    type: 'setVisibleModels',
+    harness: 'pi',
+    sessionId: 'old',
+    affected: ['new-model'],
+    models: [],
+  });
+  expect(host.provider.snapshot().visibleModels).toEqual(['new-model']);
+  await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: [] });
+  expect(host.provider.snapshot().visibleModels).toEqual(['new-model']);
+});
 it('persists model visibility per harness and rejects stale page submissions', async () => {
   host.config.args = [resolve('test/mock-agent.mjs'), 'context'];
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({
     type: 'setVisibleModels',
     harness: 'pi',
+    sessionId: host.provider.state.sessionId,
+    affected: ['default', 'other'],
     models: ['other', 'invalid', 'other'],
   });
+  const visibility = () =>
+    JSON.parse(
+      readFileSync(resolve(preferencesHome, 'workspace-storage', 'model-visibility.json'), 'utf8'),
+    ).preferences;
   expect(host.provider.snapshot().visibleModels).toEqual(['other']);
-  expect(host.stored.get('visibleModels')).toEqual({ pi: { hidden: ['default'] } });
+  expect(visibility()).toEqual({ pi: { hidden: ['default'] } });
   await host.provider.perform({ type: 'setVisibleModels', harness: 'codex', models: [] });
-  expect(host.stored.get('visibleModels')).toEqual({ pi: { hidden: ['default'] } });
+  expect(visibility()).toEqual({ pi: { hidden: ['default'] } });
   await host.provider.perform({ type: 'setVisibleModels', harness: 'pi', models: null });
   expect(host.provider.snapshot().visibleModels).toBeUndefined();
 });

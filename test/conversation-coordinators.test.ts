@@ -477,4 +477,23 @@ it('degrades to legacy prices on a corrupt shared overrides file instead of brea
   // Writes stay fail-closed and never overwrite the corrupt evidence.
   await expect(stats.setPrice(model, { ...price, input: 9 })).rejects.toThrow();
   expect(readFileSync(preferences.file, 'utf8')).toBe('broken');
+  const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
+    harness: 'pi',
+    info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
+    request: vi.fn().mockResolvedValue({ records: [], prices: {}, note: 'server note' }),
+  };
+  const live = new ConversationStatistics(
+    store,
+    new ClientOperations(),
+    () => ({ state, agent, harness: 'pi', retained: true }),
+    () => {},
+    () => {},
+    preferences,
+  );
+  await live.refresh(true);
+  expect(live.value.note).toContain('损坏');
+  expect(live.value.note).toContain('server note');
+  writeFileSync(preferences.file, JSON.stringify({ version: 1, overrides: {} }));
+  await live.refresh(true);
+  expect(live.value.note).toBe('server note');
 });

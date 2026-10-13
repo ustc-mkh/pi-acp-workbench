@@ -21,6 +21,86 @@ let messages = [],
   contextTokens = 1020;
 const fastEntries = [];
 let heldStateReply;
+let wakeActive = false;
+let queuedPrompts = [];
+const statsReplies = [];
+const control = process.env.PI_TEST_WAKE_CONTROL;
+function startWake() {
+  wakeActive = true;
+  send({ type: 'agent_start' });
+  const custom = {
+    role: 'custom',
+    customType: 'background-completion-batch',
+    content: '后台任务已完成',
+    display: true,
+  };
+  send({ type: 'message_start', message: custom });
+  send({ type: 'message_end', message: custom });
+  if (control && existsSync(control + '.permission')) {
+    unlinkSync(control + '.permission');
+    send({
+      type: 'extension_ui_request',
+      id: 'background-confirm',
+      method: 'confirm',
+      title: 'Background confirmation',
+      message: 'Proceed?',
+    });
+  }
+  const message = { role: 'assistant', content: [], timestamp: Date.now() };
+  send({ type: 'message_start', message });
+  send({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'thinking_delta', delta: '后台分析' },
+  });
+  send({
+    type: 'tool_execution_start',
+    toolCallId: 'wake-tool',
+    toolName: 'bash',
+    args: { command: 'printf background-output' },
+  });
+  send({
+    type: 'tool_execution_update',
+    toolCallId: 'wake-tool',
+    partialResult: { content: [{ type: 'text', text: 'background-output' }] },
+  });
+  send({
+    type: 'tool_execution_end',
+    toolCallId: 'wake-tool',
+    toolName: 'bash',
+    result: { content: [{ type: 'text', text: 'background-output' }] },
+    isError: false,
+  });
+  send({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: '自主唤醒回复' },
+  });
+}
+function finishWake() {
+  wakeActive = false;
+  send({ type: 'agent_end', messages: [] });
+  const queued = queuedPrompts.splice(0);
+  if (queued.length) for (const cmd of queued) handleCommand({ ...cmd, skipReply: true });
+  else send({ type: 'agent_settled' });
+}
+if (control)
+  setInterval(() => {
+    if (existsSync(control + '.wake') && !wakeActive) {
+      unlinkSync(control + '.wake');
+      startWake();
+    }
+    if (existsSync(control + '.continue') && wakeActive) {
+      unlinkSync(control + '.continue');
+      send({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: '，继续输出' },
+      });
+    }
+    if (existsSync(control + '.finish') && wakeActive) {
+      unlinkSync(control + '.finish');
+      finishWake();
+    }
+    if (!existsSync(control + '.stats-hold')) for (const reply of statsReplies.splice(0)) reply();
+  }, 10).unref();
 writeFileSync(
   file,
   JSON.stringify({
@@ -41,14 +121,19 @@ const append = (e) =>
     file,
     JSON.stringify({ ...e, id: randomUUID(), timestamp: new Date().toISOString() }) + '\n',
   );
-createInterface({ input: process.stdin }).on('line', (line) => {
-  const cmd = JSON.parse(line);
-  if (process.env.PI_TEST_PREFLIGHT_AUDIT)
+function handleCommand(input) {
+  const cmd = typeof input === 'string' ? JSON.parse(input) : input;
+  if (process.env.PI_TEST_PREFLIGHT_AUDIT && !cmd.skipReply)
     appendFileSync(
       process.env.PI_TEST_PREFLIGHT_AUDIT,
-      JSON.stringify({ type: cmd.type, message: cmd.message }) + '\n',
+      JSON.stringify({
+        type: cmd.type,
+        message: cmd.message,
+        streamingBehavior: cmd.streamingBehavior,
+      }) + '\n',
     );
   const reply = (data) =>
+    !cmd.skipReply &&
     send({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
   switch (cmd.type) {
     case 'get_state': {
@@ -57,7 +142,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         sessionFile: file,
         model,
         thinkingLevel: thinking,
-        isStreaming: false,
+        isStreaming: wakeActive,
       };
       if (process.env.PI_TEST_PREFLIGHT_FLAG && existsSync(process.env.PI_TEST_PREFLIGHT_FLAG)) {
         heldStateReply = () => reply(data);
@@ -95,17 +180,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'get_messages':
       reply({ messages });
       break;
-    case 'get_session_stats':
-      reply({
-        tokens: { input: 100, output: 20, cacheRead: 800, cacheWrite: 100, total: 1020 },
-        contextUsage: {
-          tokens: contextTokens,
-          contextWindow: 200000,
-          percent: contextTokens === null ? null : contextTokens / 2000,
-        },
-        cost: 0.01,
-      });
+    case 'get_session_stats': {
+      const emit = () =>
+        reply({
+          tokens: { input: 100, output: 20, cacheRead: 800, cacheWrite: 100, total: 1020 },
+          contextUsage: {
+            tokens: contextTokens,
+            contextWindow: 200000,
+            percent: contextTokens === null ? null : contextTokens / 2000,
+          },
+          cost: 0.01,
+        });
+      if (control && existsSync(control + '.stats-hold')) statsReplies.push(emit);
+      else emit();
       break;
+    }
     case 'compact':
       if (cmd.customInstructions === 'fail') {
         send({
@@ -120,7 +209,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         reply({ tokensBefore: 1020, summary: '手动压缩后的上下文' });
       }
       break;
+    case 'clear_queue':
+      queuedPrompts = [];
+      reply({ steering: [], followUp: [] });
+      break;
     case 'abort':
+      wakeActive = false;
+      queuedPrompts = [];
       if (heldStateReply) {
         unlinkSync(process.env.PI_TEST_PREFLIGHT_FLAG);
         const release = heldStateReply;
@@ -132,6 +227,25 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({ type: 'agent_settled' });
       break;
     case 'prompt': {
+      if (control && existsSync(control + '.race') && !cmd.message.startsWith('/')) {
+        unlinkSync(control + '.race');
+        startWake();
+      }
+      if (wakeActive) {
+        if (cmd.streamingBehavior !== 'followUp') {
+          send({
+            type: 'response',
+            id: cmd.id,
+            command: cmd.type,
+            success: false,
+            error: 'Agent is streaming',
+          });
+          break;
+        }
+        queuedPrompts.push(cmd);
+        reply({ disposition: 'queued' });
+        break;
+      }
       contextTokens = 1020;
       if (process.env.PI_TEST_FAST_MODE && cmd.message.startsWith('/workbench-fast ')) {
         const entry = {
@@ -183,6 +297,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         messages = [{ role: 'compactionSummary', summary: compaction.summary }, message];
       }
       send({ type: 'agent_start' });
+      send({ type: 'message_start', message: { role: 'user', content: cmd.message } });
       send({ type: 'message_start', message: { ...message, content: [] } });
       send({
         type: 'message_update',
@@ -206,4 +321,6 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     default:
       reply({});
   }
-});
+}
+if (process.env.PI_TEST_WAKE_ON_RESTORE && process.argv.includes('--session')) startWake();
+createInterface({ input: process.stdin }).on('line', handleCommand);

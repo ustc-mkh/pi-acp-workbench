@@ -190,9 +190,9 @@ export class ModelSettingsPage {
             this.send({
               type: 'setVisibleModels',
               harness: this.state.harness || 'pi',
-              models: [...this.cards]
-                .filter(([, c]) => !c.visible.disabled && c.visible.checked)
-                .map(([id]) => id),
+              sessionId: this.state.sessionId,
+              affected: [model.id],
+              models: visible.checked ? [model.id] : [],
             });
         };
         const toggle = text('label', '', 'model-visibility');
@@ -333,14 +333,16 @@ export class ModelSettingsPage {
   }
   private showProvider(provider: string, visible: boolean) {
     if (!this.state || this.batch) return;
-    const models = [...this.cards]
-      .filter(
-        ([id, card]) =>
-          !card.visible.disabled &&
-          (modelProvider(id) === provider ? visible : card.visible.checked),
-      )
+    const affected = [...this.cards]
+      .filter(([id, card]) => !card.visible.disabled && modelProvider(id) === provider)
       .map(([id]) => id);
-    this.send({ type: 'setVisibleModels', harness: this.state.harness || 'pi', models });
+    this.send({
+      type: 'setVisibleModels',
+      harness: this.state.harness || 'pi',
+      sessionId: this.state.sessionId,
+      affected,
+      models: visible ? affected : [],
+    });
   }
   private resetProvider(provider: string) {
     const state = this.state;

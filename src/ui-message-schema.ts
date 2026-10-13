@@ -62,13 +62,15 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
           (n) => typeof n === 'number' && Number.isSafeInteger(n) && n > 0 && n <= 100000000,
         )(v.contextWindow)),
   },
-  send: { text: (v) => typeof v === 'string' && v.length <= 500000 },
+  send: { text: (v) => typeof v === 'string' && v.length <= 500000, id: optional(text) },
   dismissError: { error: text },
   permission: { id: text, optionId: optional(text) },
   mode: { value: text },
   config: { id: text, value: text },
   setVisibleModels: {
     harness,
+    sessionId: optional(text),
+    affected: optional((v) => Array.isArray(v) && v.length <= 10000 && Array.from(v).every(text)),
     models: (v) =>
       v === null || (Array.isArray(v) && v.length <= 10000 && Array.from(v).every(text)),
   },

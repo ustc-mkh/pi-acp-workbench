@@ -203,7 +203,7 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
     source = replaceExactlyOnce(
       source,
       target,
-      `sessionUpdate: "${kind}",\n            messageId: typeof ame.partial?.timestamp === "number" ? String(ame.partial.timestamp) : undefined,\n            content: { type: "text", text: ame.delta }`,
+      `sessionUpdate: "${kind}",\n            messageId: piMessageId(this),\n            content: { type: "text", text: ame.delta }`,
     );
   }
   source = replaceExactlyOnce(
@@ -211,10 +211,103 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
     '  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;',
     '  if (used === null && Number.isSafeInteger(size) && size > 0) return { sessionUpdate: "session_info_update", _meta: { "pi-workbench-context": { used: null, size } } };\n  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;',
   );
+  source = replaceExactlyOnce(
+    source,
+    '    this.proc.prompt(t.message, t.images).catch((err) => {',
+    '    const ownedTurn = this.pendingTurn;\n    this.proc.prompt(t.message, t.images).catch((err) => {\n      if (this.pendingTurn !== ownedTurn) return;',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    await this.proc.abort();',
+    '    await cancelPiRun(this);',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '  async requestExtensionPermission(id, ev, options) {\n    try {',
+    '  async requestExtensionPermission(id, ev, options) {\n    await this.flushEmits();\n    try {',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '  emit(update) {\n    this.lastEmit = this.lastEmit.then(',
+    '  emit(update) {\n    update = piLiveUpdate(this, update);\n    this.lastEmit = this.lastEmit.then(',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '      if (this.pendingTurn) {',
+    '      if (piRunBusy(this)) {',
+  );
+  const queueStart = source.indexOf('      if (piRunBusy(this)) {');
+  const queueEnd = source.indexOf('      this.startTurn(queued);', queueStart);
+  if (queueStart < 0 || queueEnd < queueStart)
+    throw new Error('pi-acp integration seam changed: prompt queue');
+  source = replaceExactlyOnce(
+    source,
+    source.slice(queueStart, queueEnd),
+    '      if (piRunBusy(this)) {\n        reject(RequestError3.internalError({}, "发送失败：Agent 正在工作，消息未发送，请稍后重试。"));\n        return;\n      }\n',
+  );
+  const promptCatchStart = source.indexOf(
+    '      void this.flushEmits().finally(() => {',
+    source.indexOf('    const ownedTurn = this.pendingTurn;'),
+  );
+  const promptCatchEnd =
+    source.indexOf('      void err;', promptCatchStart) + '      void err;'.length;
+  if (promptCatchStart < 0 || promptCatchEnd < promptCatchStart)
+    throw new Error('pi-acp integration seam changed: prompt rejection');
+  source = replaceExactlyOnce(
+    source,
+    source.slice(promptCatchStart, promptCatchEnd),
+    '      rejectPiPrompt(this, ownedTurn, err, message => maybeAuthRequiredError(err) || RequestError3.internalError({}, message));',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '    switch (type) {',
+    '    if (handlePiRunEvent(this, ev)) return;\n    switch (type) {',
+  );
+  const settleStart = source.indexOf('  async settleTurn() {');
+  const settleEnd = source.indexOf('  emitBashToolCall(params)', settleStart);
+  if (settleStart < 0 || settleEnd < settleStart)
+    throw new Error('pi-acp integration seam changed: settleTurn');
+  source = replaceExactlyOnce(
+    source,
+    source.slice(settleStart, settleEnd),
+    `  async settleTurn() {
+    await settlePiRun(this, message => RequestError3.internalError({}, message));
+  }
+`,
+  );
+
+  source = replaceExactlyOnce(
+    source,
+    '  eventHandlers = [];',
+    '  eventHandlers = [];\n  workbenchBacklog = new PiEventBacklog();\n  workbenchStartupError;',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '      for (const h of this.eventHandlers) h(msg);',
+    `      if (!this.eventHandlers.length) {
+        try { this.workbenchBacklog.push(msg); }
+        catch (error) {
+          this.workbenchStartupError = error;
+          for (const [, pending] of this.pending) pending.reject(error);
+          this.pending.clear();
+          this.dispose();
+        }
+        return;
+      }
+      for (const h of this.eventHandlers) h(msg);`,
+  );
+  source = replaceExactlyOnce(
+    source,
+    '  onEvent(handler) {\n    this.eventHandlers.push(handler);',
+    '  onEvent(handler) {\n    if (this.workbenchStartupError) throw this.workbenchStartupError;\n    this.eventHandlers.push(handler);\n    this.workbenchBacklog.drain(handler);',
+  );
   source = source.replace(/^#!.*\n/, '');
 
   source =
-    `import {resolvePiCommand} from ${JSON.stringify(resolve('src/pi-command.ts'))};\n` + source;
+    `import {PiEventBacklog} from ${JSON.stringify(resolve('src/pi-event-backlog.ts'))};\n` +
+    `import {piRunBusy, handlePiRunEvent, settlePiRun, piMessageId, piLiveUpdate, cancelPiRun, rejectPiPrompt} from ${JSON.stringify(resolve('src/pi-session-runs.ts'))};\n` +
+    `import {resolvePiCommand} from ${JSON.stringify(resolve('src/pi-command.ts'))};\n` +
+    source;
   source =
     `import {fastConfig, setFastConfig, restoreEmptyFastConfig} from ${JSON.stringify(resolve('src/pi-fast-config.ts'))};
 import {fileURLToPath as workbenchFileURLToPath} from 'node:url';

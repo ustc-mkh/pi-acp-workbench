@@ -81,6 +81,12 @@ Pi 使用 OpenAI / Codex Responses 时提供 Fast mode 开关，请求优先级�
 
 模型与 thinking 组合固定保存在 `~/.pi/pi-acp-workbench/preferences/{pi,codex,claude}.json`，按 harness 隔离、跨工作区共享。成功选择立即保存，新建自动读取；恢复旧会话保留其自身设置，不覆盖默认组合，实际发送或修改设置后才更新。关闭历史保存也不影响偏好。Pi 桌面与 Telegram 共用服务端偏好；自定义 `--data-dir` 时 Pi 使用该目录下的 `preferences/pi.json`。旧工作区偏好不自动迁移。
 
+### Pi 后台任务扩展
+
+支持 `pi-better-background-tasks` 等扩展在任务完成后自主唤醒 Pi：完成消息会显示在对话中，后续 Agent 回复具有忙碌状态、停止、授权、共享历史保存及完成发布。自主轮次与用户输入按运行边界协调；发送时若 Agent 正在自主运行，或提交的最后窗口被唤醒抢先，用户输入会明确显示“发送失败”，对应消息左侧显示淡红色感叹号，不会作为 follow-up 或 steering 排队，也不会在空闲后自动重发。失败后保留输入供手动重试；拒绝发送不会中断自主输出或其授权弹窗。旧轮次的迟到结束不会结束新轮次，停止同时清理插件尚未执行的原生队列。
+
+扩展需安装在 daemon 实际启动的 Pi 环境中；TUI 专用 navigator / widget 不会移植到侧栏。自主轮次仍支持已有工具级 diff，但不额外生成整轮工作区 diff 基线。升级此兼容性支持时，需同步更新并重启会话服务，让存量 worker 使用新的适配器。
+
 ## 接入 Telegram
 
 ### 1. 准备 Bot 和话题群组

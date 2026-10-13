@@ -21,14 +21,22 @@ use pi_acp_core::util::js_truthy;
 
 /// Merge text into the last entry of the same role (except notices), honoring messageId.
 pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Option<&Value>) {
-    let mergeable = state.entries.last().is_some_and(|last| {
-        last.role == role
-            && role != "notice"
-            && (message_id.map(|m| !js_truthy(m)).unwrap_or(true)
-                || last.message_id == message_id.cloned())
-    });
+    // A refused input is not a model turn boundary and must not split an
+    // autonomous message that is still streaming around it.
+    let last_index = state
+        .entries
+        .iter()
+        .rposition(|entry| entry.send_error.is_none());
+    let mergeable = last_index
+        .and_then(|index| state.entries.get(index))
+        .is_some_and(|last| {
+            last.role == role
+                && role != "notice"
+                && (message_id.map(|m| !js_truthy(m)).unwrap_or(true)
+                    || last.message_id == message_id.cloned())
+        });
     if mergeable {
-        let Some(last) = state.entries.last_mut() else {
+        let Some(last) = last_index.and_then(|index| state.entries.get_mut(index)) else {
             return;
         };
         let mut text_owned = last.text.take().unwrap_or_default();
@@ -39,6 +47,7 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
             id: next_id(),
             role: role.to_string(),
             text: Some(text.to_string()),
+            send_error: None,
             message_id: message_id.cloned(),
             context_blocks: None,
             tool: None,
@@ -59,7 +68,13 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             if kind == "user_message_chunk" && !replay {
                 return;
             }
-            let role = if kind == "user_message_chunk" {
+            let role = if update
+                .pointer("/_meta/pi-workbench-notice")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                "notice"
+            } else if kind == "user_message_chunk" {
                 "user"
             } else if kind == "agent_thought_chunk" {
                 "thought"
@@ -126,6 +141,7 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                         id: next_id(),
                         role: "tool".to_string(),
                         text: None,
+                        send_error: None,
                         message_id: None,
                         context_blocks: None,
                         tool: Some(tool),

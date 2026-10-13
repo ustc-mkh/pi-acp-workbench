@@ -142,6 +142,20 @@ export function createMessageRenderer(
       entry.role === 'tool' || entry.role === 'thought' ? 'details' : 'article',
     );
     node.className = `message ${entry.role}`;
+    if (entry.role === 'user' && entry.sendError) {
+      node.classList.add('send-failed');
+      const indicator = document.createElement('span');
+      indicator.className = 'send-failure-indicator';
+      indicator.textContent = '!';
+      indicator.title = entry.sendError;
+      indicator.setAttribute('role', 'img');
+      indicator.setAttribute('aria-label', entry.sendError);
+      node.append(indicator);
+      const status = document.createElement('small');
+      status.className = 'send-failure-status';
+      status.textContent = '发送失败';
+      node.append(status);
+    }
     if (entry.role === 'tool') {
       const summary = document.createElement('summary');
       const labels: Record<string, string> = {

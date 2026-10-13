@@ -21,7 +21,11 @@ export interface Agent {
   ): Promise<acp.AgentRequestResponsesByMethod[Method]>;
   request<Response = unknown, Params = unknown>(method: string, params?: Params): Promise<Response>;
   withTimeout<T>(request: Promise<T>, ms?: number): Promise<T>;
-  prompt(sessionId: string, prompt: acp.ContentBlock[]): Promise<acp.PromptResponse>;
+  prompt(
+    sessionId: string,
+    prompt: acp.ContentBlock[],
+    requestId?: string,
+  ): Promise<acp.PromptResponse>;
   cancel(sessionId: string): Promise<void>;
   dispose(): void;
 }
@@ -144,8 +148,8 @@ export class RemoteAgent implements Agent {
       clearTimeout(timer);
     }
   }
-  prompt(sessionId: string, prompt: acp.ContentBlock[]) {
-    return this.client.call<acp.PromptResponse>('prompt', { sessionId, prompt }, undefined, 0);
+  prompt(sessionId: string, prompt: acp.ContentBlock[], requestId?: string) {
+    return this.client.call<acp.PromptResponse>('prompt', { sessionId, prompt }, requestId, 0);
   }
   async cancel(sessionId: string) {
     await this.client.call('cancel', { sessionId });

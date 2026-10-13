@@ -11,7 +11,7 @@ impl SessionService {
             .into_iter()
             .map(|snapshot| {
                 let runtime = runtimes.get(&snapshot.id);
-                let busy = runtime.is_some_and(|rt| rt.lock_unpoisoned().phase.busy());
+                let busy = runtime.is_some_and(|rt| rt.lock_unpoisoned().busy());
                 let life_days = runtime.map(|_| {
                     let rank = ranked
                         .iter()
@@ -223,7 +223,22 @@ impl SessionService {
                 })
                 .await
             }
-            ServiceCommand::Prompt { .. } | ServiceCommand::Request { .. } => {
+            ServiceCommand::Prompt { prompt, .. } => {
+                let result = self
+                    .with_worker_mode(id, check, false, |rt, agent| {
+                        self.run_command(rt, agent, command, request_id)
+                    })
+                    .await;
+                if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.contains("发送失败："))
+                {
+                    return self.reject_prompt(id, prompt, request_id).await;
+                }
+                result
+            }
+            ServiceCommand::Request { .. } => {
                 self.with_worker(id, check, |rt, agent| {
                     self.run_command(rt, agent, command, request_id)
                 })
@@ -302,7 +317,7 @@ impl SessionService {
         snapshot.title = snapshot
             .entries
             .iter()
-            .find(|e| e.is("user"))
+            .find(|e| e.is("user") && e.send_error.is_none())
             .map(|e| utf16_head(e.text(), 70))
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "新分支".into());

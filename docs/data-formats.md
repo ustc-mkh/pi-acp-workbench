@@ -130,6 +130,8 @@ TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状�
 
 `_pi_workbench/inspect` 返回的 `forkPoints` 与 `_pi_workbench/fork` 的 `hash` 校验依赖 `native-branch.ts` 的确定性计算：从 leaf 沿 parentId 回溯、检查完整性与重复后反转成 root→leaf 顺序 → `canonicalEntries`（剔除 `label` 节点、label→下一节点 id 映射、剥离 `parentId`、compaction 的 `firstKeptEntryId` 重映射）→ 逐节点 `JSON.stringify` 连接（`,` 分隔）做流式 SHA-256 得前缀 hash。当前原生树安全校验与前缀哈希只有 TS 实现；Rust `native.rs` 将已校验 forkPoints 绑定到显示条目，不重新生成原生树哈希。冻结样例由 `npm run fixtures` 导出，`test/native-fixtures.test.ts` 校验输出；Rust canonical 请求指纹与 UTF-16 wire 各自有兼容性测试。样例说明见 [Fixtures](../test/fixtures/README.md)。
 
+用户显示条目可包含 `sendError?: string`，表示该输入被拒绝、未进入模型上下文；消息显示“发送失败”和左侧淡红色感叹号。服务端输入条目使用 `input:<requestId>` 关联一次发送，失败收据重放仍为失败；拒绝条目不计作实际首次输入、不绑定原生分支，也不作为完成通知的输入。客户端在 UI 准入阶段拒绝的条目仅作为会话作用域内的本地显示，不写入模型历史。
+
 通用任务事件由 `pi-acp-core::TurnEvent` 同时供 outbox 写入与 socket 消费，磁盘格式仅由会话服务管理。可选 `pendingPermissions` 和 `nonTextBlocks` 均为非负计数，缺省为 0，服务不拼接通知呈现文案。工具条目可附 `terminal`（id/output/cwd/exitCode/signal/truncated），用于流式输出与恢复查看。
 
 ### 客户端模型价格偏好
@@ -137,6 +139,14 @@ TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状�
 价格偏好位于 VS Code `ExtensionContext.storageUri` 目录的 `price-overrides.json`；无工作区存储目录时使用 `globalStorageUri`（无工作区窗口共享此文件）。文件格式为 `{version:1, overrides:{"<模型 ID>":Price|null}}`，`Price` 包含 `input/output/cacheRead/cacheWrite/source`；`null` 是恢复默认的持久化标记。上限 4 MiB / 10000 个模型，损坏或超限拒绝写入并保留原文件。
 
 写入使用 proper-lockfile 的跨进程锁，锁内重新读取最新文件、只修改目标模型，然后 durable 原子替换并释放锁；不同模型的写入合并，同一模型按事务提交顺序覆盖。文件尚不存在时只读兼容 Memento 的旧 `prices` 表和 `price:<模型 ID>` 键，首次成功提交一并迁移；文件存在后以文件为唯一价格来源，不再导入其他窗口的旧缓存，也不写回 Memento。备份需包含该文件；旧客户端不读取它，回滚后不会看到新格式保存的价格。
+
+### 客户端模型显示偏好
+
+模型显示偏好位于 VS Code `ExtensionContext.globalStorageUri` 目录的 `model-visibility.json`，同一扩展存储范围内的工作区窗口共享。文件格式为 `{version:1, preferences:{pi:{hidden:["<模型 ID>"]},codex:{hidden:[]}}}`，按 harness 保存隐藏名单；空隐藏名单是显式重置，不再导入旧缓存。文件上限 4 MiB，每个 harness 最多 10000 个模型，损坏或超限拒绝写入并保留原文件；显示路径回退旧 Memento 值并报告错误。
+
+写入使用跨进程锁，锁内重读最新文件，仅修改本次操作的模型，durable 原子提交；目录外的隐藏模型继续保留，新加入的模型不会因旧页面提交而被隐藏。Webview 提交包含 `affected`（本次操作的模型）、`models`（其中应显示的模型）和 `sessionId`；过期会话提交被忽略，缺少 `affected` 的旧版全量勾选提交被拒绝。
+
+文件不存在时兼容读取旧 `globalState.visibleModels`（测试或没有 globalState 的宿主回退 workspaceState）。首次成功写入导入各 harness 的旧偏好；旧白名单仅在该 harness 有已知目录并保存时转成隐藏名单，其他 harness 的白名单保持原样。显示路径不执行迁移写入。备份需包含该文件；旧客户端不读取新文件，回滚后不会看到新保存的显示设置。
 
 ### Codex / Claude 用量记录
 

@@ -1,6 +1,7 @@
 //! Session orchestration. Worker allocation, session operations and turns have separate modules.
 //! Runtime mutexes never span an await; queue lanes serialize each session.
 use pi_acp_core::sync::MutexExt;
+mod autonomous;
 mod session_ops;
 mod title;
 mod turn;
@@ -99,6 +100,7 @@ pub struct Runtime {
     pub state: ChatState,
     pub agent: Option<Arc<AgentProcess>>,
     pub phase: Phase,
+    runs: autonomous::Runs,
     pub used: u64,
     /// permissionId → settle channel; send resolves the pending agent request.
     pub permissions: HashMap<String, oneshot::Sender<Option<String>>>,
@@ -200,6 +202,12 @@ impl SessionService {
             return Err(ServiceError::Stopping);
         }
         let command = service_command(method, &params)?;
+        let rejected_at_admission = matches!(&command, ServiceCommand::Prompt { .. })
+            && self
+                .runtimes
+                .lock_unpoisoned()
+                .get(command_session_id(&command))
+                .is_some_and(|rt| rt.lock_unpoisoned().runs.busy());
         if durable_command(&command) {
             return self
                 .journal
@@ -209,7 +217,18 @@ impl SessionService {
                     &params,
                     command_session_id(&command),
                     &self.queue,
-                    |check| self.execute(&command, request_id, Some(check)),
+                    |check| async {
+                        if rejected_at_admission {
+                            if let ServiceCommand::Prompt {
+                                session_id, prompt, ..
+                            } = &command
+                            {
+                                check()?;
+                                return self.reject_prompt(session_id, prompt, request_id).await;
+                            }
+                        }
+                        self.execute(&command, request_id, Some(check)).await
+                    },
                 )
                 .await
                 .map_err(ServiceError::from);
@@ -344,6 +363,8 @@ impl SessionService {
 }
 
 async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String> {
+    let gate = rt.lock_unpoisoned().runs.persistence.clone();
+    let _guard = gate.lock().await;
     let snapshot = {
         let r = rt.lock_unpoisoned();
         let title = if r.snapshot.extra.contains_key("titleSource") {
@@ -352,7 +373,7 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
             r.state
                 .entries
                 .iter()
-                .find(|e| e.is("user"))
+                .find(|e| e.is("user") && e.send_error.is_none())
                 .map(|e| crate::title::short_title(e.text(), 32))
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| r.snapshot.title.clone())
@@ -430,7 +451,7 @@ fn view_state(r: &Runtime) -> Value {
     snapshot.extra.insert("historyBefore".into(), json!(before));
     serde_json::to_value(ServiceState {
         snapshot,
-        busy: r.phase.busy(),
+        busy: r.busy(),
         permissions: r
             .state
             .permissions
@@ -457,6 +478,7 @@ async fn service_permission(
     request: Value,
     broadcast: Broadcast,
     closed: &AtomicBool,
+    worker_epoch: Option<u64>,
 ) -> Value {
     let cancelled = || json!({ "outcome": { "outcome": "cancelled" } });
     let too_big = serde_json::to_vec(&request)
@@ -466,11 +488,14 @@ async fn service_permission(
     let (tx, rx) = oneshot::channel::<Option<String>>();
     {
         let mut r = rt.lock_unpoisoned();
-        if closed.load(Ordering::SeqCst)
-            || !r.phase.busy()
-            || r.phase.cancelled()
-            || r.phase.at(Step::Finishing)
-            || r.phase.at(Step::Replaying)
+        if worker_epoch.is_some_and(|epoch| r.runs.worker_epoch != epoch)
+            || closed.load(Ordering::SeqCst)
+            || !r.busy()
+            || (r.runs.running() && r.runs.cancelled())
+            || (!r.runs.running()
+                && (r.phase.cancelled()
+                    || r.phase.at(Step::Finishing)
+                    || r.phase.at(Step::Replaying)))
             || r.permissions.len() >= 32
             || too_big
         {
@@ -687,7 +712,7 @@ mod control_tests {
 
     #[tokio::test]
     async fn late_permissions_after_stop_or_completion_are_cancelled_without_publication() {
-        for kind in 0..3 {
+        for kind in 0..4 {
             let mut phase = if kind == 0 {
                 Phase::Idle
             } else {
@@ -704,6 +729,7 @@ mod control_tests {
                 state: initial_state(),
                 agent: None,
                 phase,
+                runs: Default::default(),
                 used: 0,
                 permissions: HashMap::new(),
                 error: None,
@@ -714,6 +740,7 @@ mod control_tests {
                 json!({"sessionId":"one","options":[]}),
                 Arc::new(|_| panic!("late permission was published")),
                 &AtomicBool::new(false),
+                (kind == 3).then_some(1),
             )
             .await;
             assert_eq!(outcome["outcome"]["outcome"], "cancelled");
@@ -915,6 +942,7 @@ mod usage_tests {
             state: initial_state(),
             agent: None,
             phase: Phase::begin(),
+            runs: Default::default(),
             used: 0,
             permissions: HashMap::new(),
             error: None,

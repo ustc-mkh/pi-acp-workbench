@@ -85,14 +85,14 @@ pub fn bind_native_forks(
     let mut out: BTreeMap<String, NativeBranchTarget> = BTreeMap::new();
     let mut keys: HashMap<String, usize> = HashMap::new();
     for e in entries {
-        if e.role == "user" || e.role == "assistant" {
+        if (e.role == "user" || e.role == "assistant") && e.send_error.is_none() {
             *keys
                 .entry(native_text_key(&e.role, &ui_text(e)))
                 .or_default() += 1;
         }
     }
     for e in entries {
-        if e.role != "user" && e.role != "assistant" {
+        if (e.role != "user" && e.role != "assistant") || e.send_error.is_some() {
             continue;
         }
         let key = native_text_key(&e.role, &ui_text(e));

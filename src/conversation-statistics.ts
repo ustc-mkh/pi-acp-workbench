@@ -41,6 +41,10 @@ export class ConversationStatistics {
   value: Statistics;
   pending?: Promise<void>;
   private pendingForce = false;
+  private priceStorageNote?: string;
+  private withPriceNote(note?: string) {
+    return [note, this.priceStorageNote].filter(Boolean).join('\n') || undefined;
+  }
   private metadataHistory?: Snapshot[];
   private overrides: Record<string, Price>;
   private modelPrices: Record<string, Price> = {};
@@ -69,7 +73,7 @@ export class ConversationStatistics {
       ...this.value,
       available: false,
       models: [],
-      note: harness === 'pi' ? undefined : HARNESSES[harness].note,
+      note: this.withPriceNote(harness === 'pi' ? undefined : HARNESSES[harness].note),
     };
   }
   sessionMetadata(history: Snapshot[]) {
@@ -127,6 +131,7 @@ export class ConversationStatistics {
     let raw: PriceOverrides;
     try {
       raw = this.pricePreferences?.read(legacy) ?? legacy;
+      this.priceStorageNote = undefined;
     } catch (error) {
       // The display path must degrade: a corrupt/unreadable overrides file
       // falls back to the Memento copy instead of breaking activation or the
@@ -138,7 +143,8 @@ export class ConversationStatistics {
       // `this.value.prices = this.prices()` where the assignment target was
       // already bound, so replacing the object would drop the computed prices
       // (and the note) onto a stale object.
-      if (this.value) this.value.note = error instanceof Error ? error.message : String(error);
+      this.priceStorageNote = error instanceof Error ? error.message : String(error);
+      if (this.value) this.value.note = this.priceStorageNote;
     }
     const overrides: Record<string, Price> = {};
     const resets = new Set<string>();
@@ -248,7 +254,7 @@ export class ConversationStatistics {
       ...this.value,
       available:
         (agent?.harness === 'pi' && meta?.version === 1) || service?.usageInspection === true,
-      note: harness !== 'pi' ? HARNESSES[harness].note : this.value.note,
+      note: harness !== 'pi' ? this.withPriceNote(HARNESSES[harness].note) : this.value.note,
     };
     if (!agent || !sessionId || !this.value.available || (state.status === 'busy' && !settledTurn))
       return;
@@ -307,12 +313,14 @@ export class ConversationStatistics {
           cursor = data.cursor;
         } while (cursor !== undefined);
         await this.record(records);
-        if (current()) this.value = { ...this.value, note };
+        if (current()) this.value = { ...this.value, note: this.withPriceNote(note) };
       } catch (error) {
         if (current())
           this.value = {
             ...this.value,
-            note: `用量读取未完成：${error instanceof Error ? error.message : String(error)}`,
+            note: this.withPriceNote(
+              `用量读取未完成：${error instanceof Error ? error.message : String(error)}`,
+            ),
           };
       } finally {
         this.changed();

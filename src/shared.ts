@@ -9,6 +9,7 @@ export type Entry = Readonly<
       id: string;
       role: 'user' | 'assistant' | 'thought' | 'notice';
       text: string;
+      sendError?: string;
       messageId?: string | null;
       contextBlocks?: acp.ContentBlock[];
     }
@@ -137,12 +138,18 @@ export type UiMessage =
       model: string;
       values: { price: Price; contextWindow?: number } | null;
     }
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; id?: string }
   | { type: 'dismissError'; error: string }
   | { type: 'permission'; id: string; optionId?: string }
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }
-  | { type: 'setVisibleModels'; harness: HarnessId; models: string[] | null }
+  | {
+      type: 'setVisibleModels';
+      harness: HarnessId;
+      models: string[] | null;
+      affected?: string[];
+      sessionId?: string;
+    }
   | { type: 'refreshModelContexts'; harness: HarnessId; sessionId: string }
   | {
       type: 'setModelContext';

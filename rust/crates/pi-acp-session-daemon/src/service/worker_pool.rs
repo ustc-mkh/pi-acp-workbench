@@ -27,7 +27,7 @@ impl SessionService {
                     let now = now_ms();
                     (
                         map.iter()
-                            .filter(|(_, r)| !r.lock_unpoisoned().phase.busy())
+                            .filter(|(_, r)| !r.lock_unpoisoned().busy())
                             .map(|(id, r)| (id.clone(), r.clone(), now))
                             .collect::<Vec<_>>(),
                         ranked,
@@ -74,9 +74,11 @@ impl SessionService {
                 return;
             }
             let mut runtime = rt.lock_unpoisoned();
-            if idle_only && runtime.phase.busy() {
+            if idle_only && runtime.busy() {
                 return;
             }
+            runtime.runs.worker_epoch += 1;
+            runtime.runs.clear();
             let agent = runtime.agent.take();
             map.remove(id);
             agent
@@ -94,7 +96,7 @@ impl SessionService {
         let idle = {
             let map = self.runtimes.lock_unpoisoned();
             map.iter()
-                .filter(|(_, r)| !r.lock_unpoisoned().phase.busy())
+                .filter(|(_, r)| !r.lock_unpoisoned().busy())
                 .min_by_key(|(_, r)| r.lock_unpoisoned().used)
                 .map(|(id, rt)| (id.clone(), rt.clone()))
         };
@@ -166,7 +168,18 @@ impl SessionService {
         let weak = Arc::downgrade(rt);
         let broadcast = self.broadcast.clone();
         let report = self.report.clone();
-        let snapshot = rt.lock_unpoisoned().snapshot.clone();
+        let autonomous_host = autonomous::Host {
+            store: self.store.clone(),
+            events: self.events.clone(),
+            broadcast: broadcast.clone(),
+            report: report.clone(),
+            closed: self.closed.clone(),
+        };
+        let (snapshot, epoch) = {
+            let mut r = rt.lock_unpoisoned();
+            r.runs.worker_epoch += 1;
+            (r.snapshot.clone(), r.runs.worker_epoch)
+        };
         let harness = Harness::parse(snapshot.harness.as_deref().unwrap_or(""))?;
         let launch = self.launch(harness);
         let cwd = snapshot.cwd;
@@ -179,11 +192,22 @@ impl SessionService {
             update: {
                 let rt = weak.clone();
                 let broadcast = broadcast.clone();
+                let host = autonomous_host.clone();
                 Arc::new(move |notification: Value| {
                     let Some(rt) = rt.upgrade() else { return };
                     let event = {
                         let mut r = rt.lock_unpoisoned();
-                        if r.phase.at(Step::Replaying) {
+                        if r.runs.worker_epoch != epoch {
+                            return;
+                        }
+                        let live = notification
+                            .pointer("/update/_meta/pi-workbench-live")
+                            .and_then(Value::as_str)
+                            .is_some()
+                            || notification
+                                .pointer("/update/_meta/pi-workbench-run")
+                                .is_some();
+                        if r.phase.at(Step::Replaying) && !live {
                             // During session/load replay only commands are accepted;
                             // the persisted transcript stays authoritative. The worker
                             // serves exactly one session and a recreated session
@@ -224,7 +248,9 @@ impl SessionService {
                                     .insert("titleSource".into(), json!("agent"));
                             }
                         }
+                        autonomous::observe(&mut r, &rt, &update, &host);
                         apply_update(&mut r.state, &update, false);
+                        autonomous::capture(&mut r, &update);
                         if let Some(publication) = r
                             .phase
                             .active()
@@ -287,7 +313,7 @@ impl SessionService {
                         let Some(rt) = rt.upgrade() else {
                             return json!({ "outcome": { "outcome": "cancelled" } });
                         };
-                        service_permission(&rt, request, broadcast, &closed).await
+                        service_permission(&rt, request, broadcast, &closed, Some(epoch)).await
                     })
                         as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
                 })
@@ -295,10 +321,18 @@ impl SessionService {
             log: report.clone(),
             closed: {
                 let broadcast = broadcast.clone();
+                let host = autonomous_host;
                 Arc::new(move |error: String| {
                     let Some(rt) = weak.upgrade() else { return };
                     let event = {
                         let mut r = rt.lock_unpoisoned();
+                        if r.runs.worker_epoch != epoch {
+                            return;
+                        }
+                        if let Some(id) = r.runs.current.clone() {
+                            let update = json!({ "_meta": { "pi-workbench-run": { "id": id, "autonomous": true, "running": false, "error": error.clone() } } });
+                            autonomous::observe(&mut r, &rt, &update, &host);
+                        }
                         r.error = Some(error);
                         view_state_with_type(&r)
                     };
@@ -375,6 +409,7 @@ impl SessionService {
                     state,
                     agent: None,
                     phase: Phase::begin(),
+                    runs: Default::default(),
                     used: now_ms(),
                     permissions: HashMap::new(),
                     snapshot_pending: false,
@@ -480,13 +515,19 @@ impl SessionService {
                 }
             }
             agent.configure_session(&mut session).await?;
-            let prefs = model_preferences(&rt.lock_unpoisoned().state);
-            if let Some(warning) = apply_preferences(agent.as_ref(), &mut session, &prefs).await? {
-                rt.lock_unpoisoned().state.entries.push(Entry::text_entry(
-                    next_id(),
-                    "notice",
-                    warning,
-                ));
+            // A restore-time wake owns its model while running. Return promptly
+            // so user admission can fail rather than silently wait and send later.
+            if !rt.lock_unpoisoned().runs.busy() {
+                let prefs = model_preferences(&rt.lock_unpoisoned().state);
+                if let Some(warning) =
+                    apply_preferences(agent.as_ref(), &mut session, &prefs).await?
+                {
+                    rt.lock_unpoisoned().state.entries.push(Entry::text_entry(
+                        next_id(),
+                        "notice",
+                        warning,
+                    ));
+                }
             }
             let mut r = rt.lock_unpoisoned();
             // Cold fallback was applied before settings RPCs. Their live []
@@ -558,6 +599,7 @@ mod eviction_tests {
                     state: initial_state(),
                     agent: None,
                     phase: Phase::Idle,
+                    runs: Default::default(),
                     used,
                     permissions: HashMap::new(),
                     error: None,
@@ -638,6 +680,7 @@ mod eviction_tests {
             state: initial_state(),
             agent: None,
             phase: Phase::Idle,
+            runs: Default::default(),
             used: 0,
             permissions: HashMap::new(),
             error: None,

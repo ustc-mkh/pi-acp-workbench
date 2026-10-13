@@ -18,22 +18,33 @@ Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff
 
 Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位于 `src/`；Telegram 模块位于 `rust/crates/pi-acp-telegram-daemon/src/`。
 
-| 模块                                                                               | 职责                                                     |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `server.rs`                                                                        | Unix socket 接入、帧限制、背压、订阅与连接回收           |
-| `pi-acp-core/src/protocol.rs` / `session-protocol.generated.ts`                    | serde 边界与 ts-rs 生成的客户端协议                      |
-| `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收     |
-| `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                   |
-| `service/turn.rs` / `phase.rs`                                                     | 轮次执行、授权、取消、分支、终态保存                     |
-| `queue.rs` / `journal.rs`                                                          | 会话串行、全局容量、取消代际、持久化防重放收据           |
-| `history.rs` / `prefs.rs` / `diff.rs`                                              | 服务独占历史、按 harness 偏好、工作区净变化              |
-| `conversation-session.ts` / `conversation-turn.ts` / `conversation-attachments.ts` | 会话选择与启动、轮次操作、附件与导出；依赖本地 Host 接口 |
-| `bridge/commands.rs`                                                               | Telegram 命令解析、分发与会话权限检查                    |
-| `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                    |
-| `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务        |
-| `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                 |
-| `price-preferences.ts`                                                             | 工作区价格偏好的跨进程锁、旧格式迁移与持久化原子提交     |
-| `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                    |
+| 模块                                                                               | 职责                                                              |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `server.rs`                                                                        | Unix socket 接入、帧限制、背压、订阅与连接回收                    |
+| `pi-acp-core/src/protocol.rs` / `session-protocol.generated.ts`                    | serde 边界与 ts-rs 生成的客户端协议                               |
+| `service/worker_pool.rs`                                                           | 按 harness 选择 worker、能力协商、原生加载、闲置回收              |
+| `service/session_ops.rs`                                                           | 创建、状态、设置、删除                                            |
+| `service/turn.rs` / `phase.rs`                                                     | 轮次执行、授权、取消、分支、终态保存                              |
+| `queue.rs` / `journal.rs`                                                          | 会话串行、全局容量、取消代际、持久化防重放收据                    |
+| `history.rs` / `prefs.rs` / `diff.rs`                                              | 服务独占历史、按 harness 偏好、工作区净变化                       |
+| `conversation-session.ts` / `conversation-turn.ts` / `conversation-attachments.ts` | 会话选择与启动、轮次操作、附件与导出；依赖本地 Host 接口          |
+| `bridge/commands.rs`                                                               | Telegram 命令解析、分发与会话权限检查                             |
+| `outbox.rs` / `outbox_reader.rs`                                                   | 持久化事件、socket 分页读取与版本确认                             |
+| `conversation-history.ts`                                                          | socket 历史读取、轮询、删除、失效代际；无磁盘事务                 |
+| `service/autonomous.rs`                                                            | Pi 自主轮次的代际、检查点、完成保存与发布；独立于客户端请求 phase |
+| `pi-session-runs.ts` / `pi-event-backlog.ts`                                       | ACP 适配器运行边界、忙碌输入拒绝与恢复早到事件缓存                |
+| `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                          |
+| `price-preferences.ts`                                                             | 工作区价格偏好的跨进程锁、旧格式迁移与持久化原子提交              |
+| `visibility-preferences.ts`                                                        | 全局模型隐藏偏好的跨进程事务、旧格式迁移与增量合并                |
+| `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                             |
+
+## Pi 扩展自主轮次
+
+Pi 扩展可在客户端 prompt 已结束后用 `sendMessage(..., {triggerTurn:true})` 启动模型。适配器为 session-level run 分配 UUID，在 `session_info_update._meta["pi-workbench-run"]` 发布 `{id,autonomous,running,cancelled,error?}`；`agent_end` 不表示空闲，仅 `agent_settled` 关闭该运行边界。结束处理先同步摘下该轮的 pending promise，再读取 context 元数据，迟到完成不能清掉后来的运行 / 用户 promise。RPC 启动至 session listener 安装之间的早到事件有界缓存（4 MiB / 10000 项），超限关闭 worker 而不是静默丢消息。
+
+服务端请求 phase 与自主运行状态独立，busy 是两者及自主轮次最终提交的并集。自主轮次忙碌时拒绝用户输入，而不是等待后发送；准入时的拒绝结果即使等到请求 lane 可提交、彼时已恢复空闲也不会转为执行。恢复期间的唤醒同样拒绝输入，且不在其运行中恢复模型偏好。最后一次 idle 判断与原生 prompt 之间仍可能被扩展抢先：用户 prompt 不携带 `streamingBehavior`，让 Pi 原生拒绝忙碌输入；适配器也拒绝本地排队，自定义 starter 抢先时解除用户预留槽并保持自主生命周期。服务端以 `input:<requestId>` 对应用户条目，拒绝记录使用可选 `sendError`，不参与原生分支绑定、首次输入或完成通知的输入关联；持久收据保证相同请求不会在空闲后自动重放。客户端为失败输入显示淡红感叹号，并按请求 ID 和会话作用域恢复未被新编辑覆盖的草稿。拒绝不得清理自主轮次授权或打断其流式输出。取消清理插件原生队列、按 run id 作用于当前运行，结束 I/O 及升级停止计时器不应影响新运行。
+
+自主轮次每 2 秒保存检查点，结束时串行保存完整最新快照，再用该 run 捕获的条目发布 `autonomous:<UUID>` 完成事件；期间保留 busy，避免请求 / 闲置回收越过未提交状态。共享快照写入使用每 runtime 的持久化互斥，快照在锁内捕获；worker 代际过滤旧进程回调。实时运行输出标记 `pi-workbench-live`，恢复时不会把它当历史 replay 丢掉。custom 消息按 notice 展示；TUI navigator / widget 不移植到 Webview。自主轮次不额外生成工作区整轮 diff 基线，已有工具级 diff 仍可显示。
 
 ## Telegram 中继的内部边界
 
@@ -86,7 +97,7 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 偏好统一保存到数据目录 `preferences/{pi,codex,claude}.json`，只继承最近成功使用的 model/thinking，按 harness 隔离。新建读取最新组合，顺序为 model → 刷新选项 → thinking。成功修改设置或实际发送才更新偏好；浏览/恢复旧会话不覆盖账户默认。不继承授权或协作模式。损坏文件拒绝覆盖。
 
-客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。原生历史仍由各上游适配器管理，备份需要保留原生会话和 daemon 数据目录。
+客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。模型隐藏偏好使用全局扩展存储目录的 `model-visibility.json`，跨进程锁保护按目标模型的增量合并；暂时不在目录中的隐藏项不会被其他保存操作删除。原生历史仍由各上游适配器管理，备份需要保留原生会话、daemon 数据目录及客户端偏好文件。
 
 计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在工作区扩展存储目录的独立 `price-overrides.json`；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记，首次提交迁移旧格式，后续不导入其他窗口的旧缓存。缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
 

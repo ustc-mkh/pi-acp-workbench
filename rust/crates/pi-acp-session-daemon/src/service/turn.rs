@@ -2,11 +2,63 @@
 use super::*;
 use pi_acp_core::sync::MutexExt;
 
+const SEND_REJECTED: &str = "发送失败：Agent 正在工作，消息未发送，请稍后重试。";
+
 impl SessionService {
+    pub(super) async fn reject_prompt(
+        &self,
+        id: &str,
+        prompt: &[Value],
+        request_id: &str,
+    ) -> Result<Value, String> {
+        let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
+        if let Some(rt) = rt {
+            let input_id = format!("input:{request_id}");
+            {
+                let mut r = rt.lock_unpoisoned();
+                if let Some(entry) = r
+                    .state
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.id == input_id)
+                {
+                    entry.send_error = Some(SEND_REJECTED.into());
+                } else {
+                    let text = prompt
+                        .iter()
+                        .filter(|block| block["type"] == "text")
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let mut entry = Entry::text_entry(input_id, "user", text);
+                    entry.context_blocks = Some(prompt.to_vec());
+                    entry.send_error = Some(SEND_REJECTED.into());
+                    r.state.entries.push(entry);
+                }
+            }
+            self.save(&rt).await?;
+            self.emit(&rt);
+        }
+        Err(SEND_REJECTED.into())
+    }
+
     pub(super) async fn with_worker<'a, F>(
         &'a self,
         id: &'a str,
         check: Option<Check>,
+        operation: F,
+    ) -> Result<Value, String>
+    where
+        F: FnOnce(Rt, Arc<AgentProcess>) -> OpFuture<'a>,
+    {
+        self.with_worker_mode(id, check, true, operation).await
+    }
+
+    pub(super) async fn with_worker_mode<'a, F>(
+        &'a self,
+        id: &'a str,
+        check: Option<Check>,
+        wait_for_autonomous: bool,
         operation: F,
     ) -> Result<Value, String>
     where
@@ -25,12 +77,27 @@ impl SessionService {
             if cancelled() {
                 return Ok(json!({ "stopReason": "cancelled" }));
             }
+            if !wait_for_autonomous && rt.lock_unpoisoned().runs.busy() {
+                return Err(SEND_REJECTED.into());
+            }
             let agent = self.worker(&rt).await?;
             rt.lock_unpoisoned().error = None;
             if cancelled() {
                 // A runtime already started: preserve the normal stop result
                 // instead of reporting a queued-request failure to the UI.
                 return Ok(json!({ "stopReason": "cancelled" }));
+            }
+            while rt.lock_unpoisoned().runs.busy() {
+                if !wait_for_autonomous {
+                    return Err(SEND_REJECTED.into());
+                }
+                if cancelled() {
+                    return Ok(json!({ "stopReason": "cancelled" }));
+                }
+                if agent.is_closed() {
+                    return Err("自主轮次的工作进程已关闭。".into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
             operation(rt.clone(), agent).await
         })
@@ -86,9 +153,14 @@ impl SessionService {
                 active.step = Step::Finishing;
             }
             r.phase.stop_cancel_timer();
-            for (_, settle) in r.permissions.drain() {
-                let _ = settle.send(None);
+            if !r.runs.running() {
+                for (_, settle) in r.permissions.drain() {
+                    let _ = settle.send(None);
+                }
+                r.state.permissions.clear();
             }
+            r.runs.managed_input = None;
+            r.runs.managed_excluded.clear();
             r.phase = Phase::Idle;
         }
         self.emit(&rt);
@@ -307,7 +379,7 @@ impl SessionService {
             .state
             .entries
             .iter()
-            .any(|entry| entry.is("user"));
+            .any(|entry| entry.is("user") && entry.send_error.is_none());
         {
             let mut r = rt.lock_unpoisoned();
             let text = prompt
@@ -316,9 +388,11 @@ impl SessionService {
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let mut entry = Entry::text_entry(next_id(), "user", text);
+            let mut entry = Entry::text_entry(format!("input:{request_id}"), "user", text);
             entry.context_blocks = Some(prompt.to_vec());
+            let input_id = entry.id.clone();
             r.state.entries.push(entry);
+            r.runs.managed_input = Some(input_id);
         }
         self.save(rt).await?;
         let start = rt.lock_unpoisoned().state.entries.len();
@@ -342,7 +416,12 @@ impl SessionService {
                         (
                             r.snapshot.id.clone(),
                             r.snapshot.session_number,
-                            r.state.entries.clone(),
+                            r.state
+                                .entries
+                                .iter()
+                                .filter(|entry| !r.runs.managed_excluded.contains(&entry.id))
+                                .cloned()
+                                .collect(),
                             r.state.permissions.len(),
                             Some(r.snapshot.title.clone()),
                         )
@@ -434,6 +513,17 @@ impl SessionService {
                     Ok(result)
                 }
                 Err(error) => {
+                    if error.contains("发送失败：") {
+                        let mut r = rt.lock_unpoisoned();
+                        if let Some(input) = r.runs.managed_input.clone() {
+                            if let Some(entry) =
+                                r.state.entries.iter_mut().find(|entry| entry.id == input)
+                            {
+                                entry.send_error = Some(SEND_REJECTED.into());
+                            }
+                        }
+                        return Err(SEND_REJECTED.into());
+                    }
                     let cancelled = rt.lock_unpoisoned().phase.cancelled();
                     let mut r = rt.lock_unpoisoned();
                     if cancelled {
@@ -465,15 +555,27 @@ impl SessionService {
         if agent.is_closed() {
             agent.stop().await;
         }
-        let mut diff_entry = changes.finish().await;
+        let rejected = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.contains("发送失败："));
+        let diff_entry = if rejected {
+            None
+        } else {
+            Some(changes.finish().await)
+        };
         ckpt_cancel.cancel();
         let _ = checkpoint.await;
-        if let Some(diff) = &mut diff_entry.diff {
-            self.store.compact_diff(diff).await?;
+        if let Some(mut diff_entry) = diff_entry {
+            if let Some(diff) = &mut diff_entry.diff {
+                self.store.compact_diff(diff).await?;
+            }
+            rt.lock_unpoisoned().state.entries.push(diff_entry);
         }
-        rt.lock_unpoisoned().state.entries.push(diff_entry);
-        if let Some(error) = rt.lock_unpoisoned().error.clone() {
-            result = Err(error);
+        if !rejected {
+            if let Some(error) = rt.lock_unpoisoned().error.clone() {
+                result = Err(error);
+            }
         }
         self.save(rt).await?;
         let settings_after = {
@@ -495,7 +597,7 @@ impl SessionService {
             let (error, stop_reason) = {
                 let r = rt.lock_unpoisoned();
                 (
-                    r.error.clone(),
+                    result.as_ref().err().cloned().or_else(|| r.error.clone()),
                     result
                         .as_ref()
                         .ok()
@@ -513,10 +615,11 @@ impl SessionService {
         let queued = self.queue.cancel(id).await;
         let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
         let Some(rt) = rt else { return queued };
+        let autonomous_cancelled = autonomous::cancel(&rt).await;
         let (token, prompting, agent) = {
             let mut r = rt.lock_unpoisoned();
             if !r.phase.busy() {
-                return queued;
+                return queued || autonomous_cancelled;
             }
             let Some(active) = r.phase.active_mut() else {
                 return false;
@@ -547,6 +650,7 @@ impl SessionService {
             let kill = {
                 let r = rt.lock_unpoisoned();
                 r.phase.token() == token
+                    && !r.runs.running()
                     && reference.is_some()
                     && r.agent
                         .as_ref()
@@ -575,7 +679,7 @@ impl SessionService {
                 task.abort();
             }
         }
-        if prompting {
+        if prompting && !autonomous_cancelled {
             if let Some(agent) = agent {
                 let acp_id = acp_session_id(&rt.lock_unpoisoned()).to_string();
                 agent.cancel(&acp_id).await;

@@ -191,7 +191,9 @@ impl TurnPublication {
         s.event.session_id = session_id;
         s.event.session_number = session_number;
         // Prefer the daemon's durable semantic title; retain legacy fallback.
-        let first = entries.iter().find(|e| e.role == "user");
+        let first = entries
+            .iter()
+            .find(|e| e.role == "user" && e.send_error.is_none());
         s.event.title = title
             .filter(|t| !t.is_empty())
             .or_else(|| {
@@ -204,7 +206,7 @@ impl TurnPublication {
         if shared.source_desktop {
             // input = state.entries[start-1]
             if let Some(input) = shared.start.checked_sub(1).and_then(|i| entries.get(i)) {
-                if input.role == "user" {
+                if input.role == "user" && input.send_error.is_none() {
                     let attachments = input
                         .context_blocks
                         .as_ref()

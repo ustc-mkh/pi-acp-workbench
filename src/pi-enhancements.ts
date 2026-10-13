@@ -70,7 +70,13 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       result.agentCapabilities ??= {};
       result.agentCapabilities._meta = {
         ...result.agentCapabilities._meta,
-        'pi-workbench': { version: 1, inspect: true, nativeFork: true, title: true },
+        'pi-workbench': {
+          version: 1,
+          inspect: true,
+          nativeFork: true,
+          title: true,
+          autonomousRuns: true,
+        },
       };
       return result;
     }
@@ -107,6 +113,12 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         // at startTurn, before clearing cancelRequested or sending to Pi.
         return await super.prompt(params, () => turn.cancelled);
       } catch (error) {
+        if (
+          error instanceof Error &&
+          /streaming|already.*running|发送失败：/i.test(error.message)
+        ) {
+          throw Errors.internalError({}, '发送失败：Agent 正在工作，消息未发送，请稍后重试。');
+        }
         if (turn.cancelled || session?.wasCancelRequested()) return { stopReason: 'cancelled' };
         const detail = error instanceof Error ? error.message : String(error);
         throw Errors.internalError({}, providerError(detail));

@@ -244,9 +244,57 @@ try {
       .evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2),
   );
   assert(await page.locator('#bottom').isHidden());
-  await page.evaluate(() => window.postMessage({ type: 'sent' }, '*'));
+  const sentId = await page.evaluate(
+    () => window.messages.filter((message) => message.type === 'send').at(-1).id,
+  );
+  await page.evaluate((id) => window.postMessage({ type: 'sent', id }, '*'), sentId);
   await page.waitForTimeout(40);
   assert.equal(await page.locator('#input').inputValue(), '');
+  await page.evaluate(
+    (id) =>
+      window.postMessage(
+        { type: 'sendFailed', id, text: '推导这个公式', error: '发送失败：消息未发送' },
+        '*',
+      ),
+    sentId,
+  );
+  await page.waitForTimeout(40);
+  assert.equal(await page.locator('#input').inputValue(), '推导这个公式');
+  state.entries = [
+    {
+      id: `input:${sentId}`,
+      role: 'user',
+      text: '推导这个公式',
+      sendError: '发送失败：消息未发送',
+    },
+  ];
+  await emit(state);
+  const failure = page.locator('.send-failure-indicator');
+  assert.equal(await failure.textContent(), '!');
+  assert.equal(await failure.getAttribute('aria-label'), '发送失败：消息未发送');
+  const failureStyle = await failure.evaluate((indicator) => ({
+    color: getComputedStyle(indicator).color,
+    before:
+      indicator.getBoundingClientRect().right <=
+      indicator.parentElement.getBoundingClientRect().left,
+  }));
+  assert.equal(failureStyle.color, 'rgb(233, 160, 160)');
+  assert.equal(failureStyle.before, true);
+  await page.locator('#input').fill('重试');
+  await page.locator('#input').press('Enter');
+  const retryId = await page.evaluate(
+    () => window.messages.filter((message) => message.type === 'send').at(-1).id,
+  );
+  assert.notEqual(retryId, sentId);
+  await page.locator('#input').fill('正在编辑的新草稿');
+  await page.evaluate((id) => window.postMessage({ type: 'sent', id }, '*'), retryId);
+  await page.evaluate(
+    (id) => window.postMessage({ type: 'sendFailed', id, text: '重试', error: '发送失败' }, '*'),
+    retryId,
+  );
+  await page.waitForTimeout(40);
+  assert.equal(await page.locator('#input').inputValue(), '正在编辑的新草稿');
+  await page.locator('#input').fill('');
   state.status = 'busy';
   state.entries = [{ id: 'stream', role: 'assistant', text: '$$\\frac{1}' }];
   await emit(state);

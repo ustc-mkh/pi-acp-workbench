@@ -13,6 +13,7 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { FilePricePreferences } from './price-preferences';
+import { FileVisibilityPreferences, type VisibilityPreferences } from './visibility-preferences';
 import { sessionSelectors } from './session-settings';
 import { DiffDocuments } from './workspace-documents';
 import { StateEncoder } from './state-channel';
@@ -24,7 +25,7 @@ import { ConversationHistory } from './conversation-history';
 import { ConversationStatistics } from './conversation-statistics';
 import { HARNESS_IDS, isHarnessId, type HarnessId } from './harness';
 import { validPrice, type UsageRecord } from './telemetry';
-import type { Snapshot, UiMessage } from './shared';
+import type { Snapshot, UiMessage, Entry } from './shared';
 
 export function activate(context: vscode.ExtensionContext) {
   const provider = new ChatProvider(context);
@@ -128,11 +129,19 @@ export class ChatProvider
   private get modelStorage() {
     return this.context.globalState || this.context.workspaceState;
   }
+  private visibilityPreferences: FileVisibilityPreferences;
+  private legacyVisibility() {
+    return this.modelStorage.get<VisibilityPreferences>('visibleModels', {});
+  }
   /** Unchecked models persist as a hidden set so catalogue additions stay visible. */
   private visibleModels() {
-    const saved = this.modelStorage.get<
-      Partial<Record<HarnessId, string[] | { hidden: string[] }>>
-    >('visibleModels', {})[this.harness];
+    let saved: VisibilityPreferences[HarnessId];
+    try {
+      saved = this.visibilityPreferences.read(this.legacyVisibility())[this.harness];
+    } catch (error) {
+      this.state.error = error instanceof Error ? error.message : String(error);
+      saved = this.legacyVisibility()[this.harness];
+    }
     if (!saved) return undefined;
     const catalog = new Set(
       sessionSelectors(this.state)
@@ -141,32 +150,32 @@ export class ChatProvider
     );
     // A missing catalogue is unknown, never a request to hide everything.
     if (!catalog.size) return undefined;
-    // Legacy entries stored the checked whitelist; freeze it once into a hidden set.
+    // Legacy whitelists are interpreted without writing from the display path.
+    // Migration occurs inside the next locked save with a known catalogue.
     const hidden = new Set(
       (Array.isArray(saved)
         ? [...catalog].filter((id) => !saved.includes(id))
         : saved.hidden
       ).filter((id) => catalog.has(id)),
     );
-    if (Array.isArray(saved)) {
-      const stored = {
-        ...this.modelStorage.get<Partial<Record<HarnessId, string[] | { hidden: string[] }>>>(
-          'visibleModels',
-          {},
-        ),
-        [this.harness]: { hidden: [...hidden] },
-      };
-      void this.modelStorage.update('visibleModels', stored);
-    }
-    return [...catalog].filter((id) => !hidden.has(id));
+    return hidden.size ? [...catalog].filter((id) => !hidden.has(id)) : undefined;
   }
   serviceClient = new SessionClient();
   private titleModel = '';
   private titleModelRevision = 0;
+  private inspectedAssistantId?: string;
   applyServiceState(value: ServiceState) {
     if (value.snapshot.harness !== this.harness || this.state.sessionId !== value.snapshot.id)
       return;
     const s = value.snapshot;
+    const lastAssistant = [...s.entries].reverse().find((entry) => entry.role === 'assistant')?.id;
+    const remoteSettled =
+      !value.busy &&
+      this.state.status === 'busy' &&
+      !!lastAssistant &&
+      lastAssistant !== this.inspectedAssistantId &&
+      !this.prompting;
+    if (!value.busy) this.inspectedAssistantId = lastAssistant;
     // The socket decoder preserves unchanged entry identities across state deltas.
     const transcript = mergeTranscript(
       this.state.entries,
@@ -199,9 +208,16 @@ export class ChatProvider
         ...this.history.filter((h) => h.id !== s.id),
       ];
     this.emit();
+    // Remote/autonomous rounds have no onSend finally block. Only new assistant
+    // output triggers inspection, so inspect's own busy→ready pushes cannot loop.
+    if (remoteSettled)
+      void this.refreshTelemetry(true).catch((error) => this.log.appendLine(String(error)));
   }
   private log = vscode.window.createOutputChannel('Pi Agent');
   constructor(readonly context: vscode.ExtensionContext) {
+    this.visibilityPreferences = new FileVisibilityPreferences(
+      join((context.globalStorageUri || context.storageUri!).fsPath, 'model-visibility.json'),
+    );
     const selected = context.workspaceState.get('selectedHarness', 'pi');
     if (isHarnessId(selected)) this.harness = selected;
     this.state.harness = this.harness;
@@ -311,6 +327,24 @@ export class ChatProvider
     });
     this.emit();
   }
+  private failedSends = new Map<
+    string,
+    {
+      harness: HarnessId;
+      sessionId?: string;
+      entry: Extract<Entry, { role: 'user' | 'assistant' | 'thought' | 'notice' }>;
+    }
+  >();
+  private displayState() {
+    const entries = [...this.state.entries];
+    for (const failed of this.failedSends.values()) {
+      if (failed.harness !== this.harness || failed.sessionId !== this.state.sessionId) continue;
+      const index = entries.findIndex((entry) => entry.id === failed.entry.id);
+      if (index < 0) entries.push(failed.entry);
+      else entries[index] = { ...entries[index], sendError: failed.entry.sendError } as Entry;
+    }
+    return { ...this.state, entries };
+  }
   emit() {
     if (this.disposed || this.timer) return;
     this.timer = setTimeout(() => {
@@ -335,7 +369,7 @@ export class ChatProvider
       this.state.showThoughts = this.config.get('showThoughts', true);
       this.state.visibleModels = this.visibleModels();
       if (this.view) {
-        void this.view.webview.postMessage(this.stateEncoder.encode(this.state)).then(
+        void this.view.webview.postMessage(this.stateEncoder.encode(this.displayState())).then(
           (delivered) => {
             if (!delivered) this.stateEncoder.reset();
           },
@@ -350,7 +384,7 @@ export class ChatProvider
   }
   snapshot() {
     return structuredClone({
-      ...this.state,
+      ...this.displayState(),
       harness: this.harness,
       visibleModels: this.visibleModels(),
       titleModel: this.titleModel,
@@ -439,7 +473,33 @@ export class ChatProvider
     branchMessage: { run: (m) => this.sessionCoordinator.onBranchMessage(m), gated: true },
     resume: { run: (m) => this.sessionCoordinator.onResume(m), gated: true, navigation: true },
     preview: { run: (m) => this.sessionCoordinator.onPreview(m), gated: true },
-    send: { run: (m) => this.turnCoordinator.onSend(m), gated: true },
+    send: {
+      run: (m) => this.turnCoordinator.onSend(m),
+      gated: true,
+      reportRefusal: true,
+      fail: (m, error) => {
+        const id = `input:${m.id || randomBytes(16).toString('hex')}`;
+        const detail = error.includes('发送失败：') ? error : `发送失败：${error}`;
+        const existing = this.state.entries.find((entry) => entry.id === id);
+        if (!existing || detail.includes('消息未发送')) {
+          if (this.failedSends.size >= 100)
+            this.failedSends.delete(this.failedSends.keys().next().value!);
+          this.failedSends.set(id, {
+            harness: this.harness,
+            sessionId: this.state.sessionId,
+            entry: { id, role: 'user', text: m.text, sendError: detail },
+          });
+        }
+        void this.view?.webview.postMessage({
+          type: 'sendFailed',
+          id: m.id,
+          text: m.text,
+          error: detail,
+          harness: this.harness,
+          sessionId: this.state.sessionId,
+        });
+      },
+    },
     mode: { run: (m) => this.turnCoordinator.onMode(m), gated: true },
     config: { run: (m) => this.turnCoordinator.onConfig(m), gated: true },
     setModelContext: { run: (m) => this.turnCoordinator.onModelContext(m), gated: true },
@@ -462,6 +522,10 @@ export class ChatProvider
     message: UiMessage & { type: 'setVisibleModels' },
   ): Promise<void> {
     if (message.harness !== this.harness || !isHarnessId(message.harness)) return;
+    if (message.models !== null && message.affected === undefined) {
+      throw new Error('模型设置页面已过期，请重新打开后修改显示选项。');
+    }
+    if (message.affected !== undefined && message.sessionId !== this.state.sessionId) return;
     const catalog = new Set(
       sessionSelectors(this.state)
         .filter((c) => c.kind === 'model')
@@ -472,20 +536,13 @@ export class ChatProvider
       this.emit();
       return;
     }
-    const saved = {
-      ...this.modelStorage.get<Partial<Record<HarnessId, string[] | { hidden: string[] }>>>(
-        'visibleModels',
-        {},
-      ),
-    };
-    if (message.models === null) delete saved[this.harness];
-    else {
-      const checked = new Set(message.models);
-      saved[this.harness] = {
-        hidden: [...catalog].filter((id) => !checked.has(id)),
-      };
-    }
-    await this.modelStorage.update('visibleModels', saved);
+    await this.visibilityPreferences.set(
+      this.harness,
+      [...catalog],
+      (message.affected || [...catalog]).filter((id) => catalog.has(id)),
+      message.models,
+      this.legacyVisibility(),
+    );
     this.emit();
   }
   private async onRefreshHistory(): Promise<void> {
@@ -680,13 +737,23 @@ export class ChatProvider
         harness: this.harness,
       });
       if (acquired === false) {
-        if (policy.reportRefusal) throw new Error('有其他操作正在进行，请稍后保存。');
+        if (policy.reportRefusal)
+          throw new Error(
+            parsed.type === 'send'
+              ? '发送失败：Agent 正在工作，消息未发送，请稍后重试。'
+              : '有其他操作正在进行，请稍后保存。',
+          );
         return;
       }
       gate = acquired;
       await this.historyReady;
       if (!this.lifecycle.allowed(policy, { ...this.state, harness: this.harness })) {
-        if (policy.reportRefusal) throw new Error('请等待当前任务结束再保存模型设置。');
+        if (policy.reportRefusal)
+          throw new Error(
+            parsed.type === 'send'
+              ? '发送失败：Agent 正在工作，消息未发送，请稍后重试。'
+              : '请等待当前任务结束再保存模型设置。',
+          );
         return;
       }
       if (policy.gated) this.state.error = undefined;

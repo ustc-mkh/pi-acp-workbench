@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type * as acp from '@agentclientprotocol/sdk';
 import { codexFixedConfigs } from './session-settings';
 import { RemoteAgent } from './remote-agent';
@@ -63,6 +64,9 @@ export class TurnCoordinator {
           text: `\n附加代码上下文：${a.name} (${a.uri})\n${a.text}`,
         });
     }
+    message.id ??= randomUUID();
+    const requestId = message.id;
+    const inputId = `input:${requestId}`;
     checkPromptSize(prompt);
     this.host.state.attachments = [];
     this.host.state.status = 'busy';
@@ -71,7 +75,7 @@ export class TurnCoordinator {
     try {
       await this.host.refreshHistory();
       if (generation !== this.host.generation) return;
-      await this.host.view?.webview.postMessage({ type: 'sent' });
+      await this.host.view?.webview.postMessage({ type: 'sent', id: requestId });
       if (this.host.stopping || generation !== this.host.generation) {
         if (generation === this.host.generation) {
           await (agent as RemoteAgent).sync();
@@ -82,13 +86,29 @@ export class TurnCoordinator {
       try {
         this.host.lifecycle.prompt(true);
         if (!this.host.stopping && generation === this.host.generation)
-          await agent.prompt(this.host.state.sessionId!, prompt);
+          await agent.prompt(this.host.state.sessionId!, prompt, requestId);
       } finally {
         if (generation === this.host.generation) this.host.lifecycle.prompt(false);
       }
       await (agent as RemoteAgent).sync();
     } catch (error) {
-      if (generation === this.host.generation) throw error;
+      if (generation === this.host.generation) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (detail.includes('发送失败：')) {
+          await (agent as RemoteAgent).sync().catch(() => {});
+          if (generation !== this.host.generation || agent !== this.host.agent) return;
+          if (!this.host.state.entries.some((entry) => entry.id === inputId))
+            this.host.state.entries.push({
+              id: inputId,
+              role: 'user',
+              text: message.text,
+              contextBlocks: prompt,
+              sendError: detail,
+            });
+          this.host.state.attachments = [...attached, ...this.host.state.attachments];
+        }
+        throw error;
+      }
     } finally {
       if (generation === this.host.generation) {
         this.host.lifecycle.finishTurn();

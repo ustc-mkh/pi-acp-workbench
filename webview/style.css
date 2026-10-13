@@ -203,6 +203,24 @@ h1 {
   border: 1px solid var(--border);
   border-radius: 10px;
 }
+.user.send-failed {
+  position: relative;
+  margin-left: 20px;
+}
+.send-failure-indicator {
+  position: absolute;
+  left: -20px;
+  top: 12px;
+  color: #e9a0a0;
+  font-weight: 700;
+  font-size: 16px;
+}
+.send-failure-status {
+  display: block;
+  color: #e9a0a0;
+  font-size: 11px;
+  margin-bottom: 5px;
+}
 .copy-message {
   font-size: 10px;
   color: var(--muted);

@@ -95,7 +95,9 @@ it('searches the complete catalogue and sends harness-scoped selections', () => 
   expect(messages.at(-1)).toEqual({
     type: 'setVisibleModels',
     harness: 'codex',
-    models: ['a', 'c'],
+    sessionId: undefined,
+    affected: ['c'],
+    models: ['c'],
   });
   const search = root.querySelector<HTMLInputElement>('input[type=search]')!;
   search.value = 'Model c';

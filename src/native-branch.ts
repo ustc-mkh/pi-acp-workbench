@@ -190,12 +190,12 @@ export function bindNativeForks(
   const out: Record<string, NativeBranchTarget> = {},
     keys = new Map<string, number>();
   for (const e of entries)
-    if (e.role === 'user' || e.role === 'assistant') {
+    if ((e.role === 'user' || e.role === 'assistant') && !e.sendError) {
       const k = nativeTextKey(e.role, uiText(e));
       keys.set(k, (keys.get(k) || 0) + 1);
     }
   for (const e of entries) {
-    if (e.role !== 'user' && e.role !== 'assistant') continue;
+    if ((e.role !== 'user' && e.role !== 'assistant') || e.sendError) continue;
     const key = nativeTextKey(e.role, uiText(e)),
       matches = points.filter((p) => p.key === key);
     const saved = matches.find(
