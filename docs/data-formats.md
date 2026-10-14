@@ -136,17 +136,21 @@ TurnDiff 可带 `contentRef`（64 位 hex）。此时 files 保留路径、状�
 
 ### 客户端模型价格偏好
 
-价格偏好位于 VS Code `ExtensionContext.storageUri` 目录的 `price-overrides.json`；无工作区存储目录时使用 `globalStorageUri`（无工作区窗口共享此文件）。文件格式为 `{version:1, overrides:{"<模型 ID>":Price|null}}`，`Price` 包含 `input/output/cacheRead/cacheWrite/source`；`null` 是恢复默认的持久化标记。上限 4 MiB / 10000 个模型，损坏或超限拒绝写入并保留原文件。
+价格偏好仅位于宿主账户目录 `~/.pi/pi-acp-workbench/preferences/price-overrides.json`，跨工作区、VS Code Profile 和编辑器安装共享；不依赖 `PI_CODING_AGENT_DIR` 或当前工作目录。文件格式为 `{version:1, overrides:{"<模型 ID>":Price|null}}`，`Price` 包含 `input/output/cacheRead/cacheWrite/source`；`null` 是恢复默认的持久化标记。上限 4 MiB / 10000 个模型，损坏或超限拒绝写入并保留原文件。
 
-写入使用 proper-lockfile 的跨进程锁，锁内重新读取最新文件、只修改目标模型，然后 durable 原子替换并释放锁；不同模型的写入合并，同一模型按事务提交顺序覆盖。文件尚不存在时只读兼容 Memento 的旧 `prices` 表和 `price:<模型 ID>` 键，首次成功提交一并迁移；文件存在后以文件为唯一价格来源，不再导入其他窗口的旧缓存，也不写回 Memento。备份需包含该文件；旧客户端不读取它，回滚后不会看到新格式保存的价格。
+写入使用 proper-lockfile 的跨进程锁，锁内重新读取最新文件、只修改目标模型，然后 durable 原子替换并释放锁；不同模型的写入合并，同一模型按事务提交顺序覆盖。客户端只读取账户本地价格文件，不读取、迁移或回退到旧 Profile / 工作区的 `price-overrides.json` 和 Memento 的 `prices` / `price:<模型 ID>`；首次使用且文件缺失时无用户覆盖价，首次保存只写入本次设置。旧文件和缓存保持原样。读取失败时保留本进程最后一次成功读取的全局价并显示错误；已读到的文件被删除后拒绝静默重建。保存带逐模型价格版本，在文件锁内拒绝过期草稿覆盖其他窗口的新价格。备份需包含该文件；旧客户端不读取它，回滚后不会看到新格式保存的价格。
 
 ### 客户端模型显示偏好
 
-模型显示偏好位于 VS Code `ExtensionContext.globalStorageUri` 目录的 `model-visibility.json`，同一扩展存储范围内的工作区窗口共享。文件格式为 `{version:1, preferences:{pi:{hidden:["<模型 ID>"]},codex:{hidden:[]}}}`，按 harness 保存隐藏名单；空隐藏名单是显式重置，不再导入旧缓存。文件上限 4 MiB，每个 harness 最多 10000 个模型，损坏或超限拒绝写入并保留原文件；显示路径回退旧 Memento 值并报告错误。
+模型显示偏好位于账户目录 `~/.pi/pi-acp-workbench/preferences/model-visibility.json`，跨工作区与 VS Code Profile 共享。文件格式为 `{version:1, preferences:{pi:{hidden:["<模型 ID>"]},codex:{hidden:[]}}}`，按 harness 保存隐藏名单；空隐藏名单是显式重置，不再导入旧缓存。文件上限 4 MiB，每个 harness 最多 10000 个模型，损坏或超限拒绝写入并保留原文件；显示路径保留最后一次成功读取的本地值并报告错误，不回退到 Memento。
 
 写入使用跨进程锁，锁内重读最新文件，仅修改本次操作的模型，durable 原子提交；目录外的隐藏模型继续保留，新加入的模型不会因旧页面提交而被隐藏。Webview 提交包含 `affected`（本次操作的模型）、`models`（其中应显示的模型）和 `sessionId`；过期会话提交被忽略，缺少 `affected` 的旧版全量勾选提交被拒绝。
 
-文件不存在时兼容读取旧 `globalState.visibleModels`（测试或没有 globalState 的宿主回退 workspaceState）。首次成功写入导入各 harness 的旧偏好；旧白名单仅在该 harness 有已知目录并保存时转成隐藏名单，其他 harness 的白名单保持原样。显示路径不执行迁移写入。备份需包含该文件；旧客户端不读取新文件，回滚后不会看到新保存的显示设置。
+文件不存在时默认显示全部模型，不导入旧 `globalState.visibleModels` / workspaceState 或旧 Profile 文件。本地文件中的旧白名单格式仍可读取并在锁内保存时转成隐藏名单；显示路径不写入。备份需包含该文件；旧客户端不读取新位置，回滚后不会看到新保存的显示设置。
+
+### 客户端设置
+
+`~/.pi/pi-acp-workbench/preferences/client-settings.json` 格式为 `{version:1, selectedHarness:"pi"|"codex"|"claude"}`，上限 4 KiB；文件缺失时默认 Pi。所选 Agent 不再存储到 workspaceState。采用规范化目录的跨进程锁和 durable 原子提交；损坏、非普通文件、符号链接和已知文件丢失均拒绝覆盖。上述目录都在扩展宿主所在账户，Remote / SSH 时是远程用户主目录，不是桌面本机目录。历史、用量缓存和工作区会话恢复状态仍保持原有作用域。
 
 ### Codex / Claude 用量记录
 

@@ -136,6 +136,7 @@ export type UiMessage =
       harness: HarnessId;
       sessionId?: string;
       model: string;
+      priceVersion?: string;
       values: { price: Price; contextWindow?: number } | null;
     }
   | { type: 'send'; text: string; id?: string }

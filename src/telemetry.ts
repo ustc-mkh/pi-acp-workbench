@@ -24,6 +24,8 @@ export interface Statistics {
   models?: { id: string; name: string }[];
   records: UsageRecord[];
   prices: Record<string, Price>;
+  /** Per-model global override baseline, for rejecting stale settings saves. */
+  priceVersions?: Record<string, string>;
   titles: Record<string, string>;
   sessionNumbers?: Record<string, number>;
   available: boolean;
@@ -94,6 +96,25 @@ function estimateCost(r: TokenUsage, p?: Price) {
         1e6
     : undefined;
 }
+/** Stable per-model optimistic-concurrency token. Metadata is not pricing. */
+export function priceOverrideVersion(model: string, overrides: Record<string, Price | null>) {
+  const value = (id: string) => {
+    const p = Object.hasOwn(overrides, id) ? overrides[id] : undefined;
+    return p === undefined
+      ? 'unset'
+      : p === null
+        ? null
+        : [p.input, p.output, p.cacheRead, p.cacheWrite];
+  };
+  const [provider, ...name] = model.split('/');
+  return JSON.stringify([
+    value(model),
+    ['openai', 'openai-codex', 'anthropic', 'google'].includes(provider)
+      ? value(name.join('/'))
+      : 'unset',
+  ]);
+}
+
 export function priceFor(model: string, prices: Record<string, Price>) {
   // Bare model IDs in user settings only apply to direct providers.
   if (Object.hasOwn(prices, model)) return prices[model];

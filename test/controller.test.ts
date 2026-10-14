@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import type * as vscode from 'vscode';
@@ -32,7 +32,10 @@ type TestProvider = Omit<ChatProvider, 'documents'> & {
   statistics: Statistics;
   recordUsage(records: UsageRecord[]): Promise<void>;
 };
-type TestContext = Pick<vscode.ExtensionContext, 'subscriptions' | 'workspaceState' | 'storageUri'>;
+type TestContext = Pick<
+  vscode.ExtensionContext,
+  'subscriptions' | 'workspaceState' | 'storageUri' | 'globalStorageUri'
+>;
 const host = vi.hoisted(() => {
   let provider: TestProvider | undefined;
   return {
@@ -121,7 +124,10 @@ let context: TestContext;
 let preferencesHome: string;
 const savedPrice = (model: string) =>
   JSON.parse(
-    readFileSync(resolve(preferencesHome, 'workspace-storage', 'price-overrides.json'), 'utf8'),
+    readFileSync(
+      resolve(preferencesHome, '.pi/pi-acp-workbench/preferences/price-overrides.json'),
+      'utf8',
+    ),
   ).overrides[model];
 beforeEach(async () => {
   preferencesHome = mkdtempSync(resolve(tmpdir(), 'pi-controller-home-'));
@@ -135,6 +141,7 @@ beforeEach(async () => {
   host.terminals = [];
   context = {
     subscriptions: [],
+    globalStorageUri: { fsPath: resolve(preferencesHome, 'global-storage') } as vscode.Uri,
     storageUri: { fsPath: resolve(preferencesHome, 'workspace-storage') } as vscode.Uri,
     workspaceState: {
       keys: () => [...host.stored.keys()],
@@ -177,6 +184,68 @@ function mockHarness(harness: 'codex' | 'claude', mode = '') {
   host.config[harness + '.command'] = process.execPath;
   host.config[harness + '.args'] = [resolve('test/mock-agent.mjs'), mode];
 }
+it('stores prices in the account directory across workspaces and VS Code profiles', async () => {
+  await host.provider.telemetry.setPrice('openai/shared-model', {
+    input: 2,
+    output: 8,
+    cacheRead: 0.2,
+    cacheWrite: 1,
+  });
+  expect(savedPrice('openai/shared-model')).toMatchObject({ input: 2, output: 8 });
+  expect(existsSync(resolve(preferencesHome, 'workspace-storage', 'price-overrides.json'))).toBe(
+    false,
+  );
+  await host.provider.persistence.pending;
+  host.provider.dispose();
+  (context as { storageUri: vscode.Uri }).storageUri = {
+    fsPath: resolve(preferencesHome, 'another-workspace'),
+  } as vscode.Uri;
+  (context as { globalStorageUri: vscode.Uri }).globalStorageUri = {
+    fsPath: resolve(preferencesHome, 'another-profile'),
+  } as vscode.Uri;
+  host.stored.clear();
+  activate(context);
+  await host.provider.persistence.pending;
+  expect(host.provider.statistics.prices['openai/shared-model']).toMatchObject({
+    input: 2,
+    output: 8,
+  });
+});
+
+it('ignores old workspace price files and Memento prices on activation and save', async () => {
+  await host.provider.persistence.pending;
+  host.provider.dispose();
+  mkdirSync(context.storageUri!.fsPath, { recursive: true });
+  const oldFile = resolve(context.storageUri!.fsPath, 'price-overrides.json');
+  const saved = JSON.stringify({
+    version: 1,
+    overrides: {
+      'p/m': { input: 3, output: 9, cacheRead: 0.3, cacheWrite: 1 },
+      'p/reset': null,
+    },
+  });
+  writeFileSync(oldFile, saved);
+  host.stored.set('prices', { 'p/m': { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 } });
+  host.stored.set('price:p/legacy', { input: 7, output: 7, cacheRead: 0, cacheWrite: 0 });
+  activate(context);
+  await host.provider.persistence.pending;
+  expect(host.provider.statistics.prices).toEqual({});
+  expect(
+    existsSync(resolve(preferencesHome, '.pi/pi-acp-workbench/preferences/price-overrides.json')),
+  ).toBe(false);
+  await host.provider.telemetry.setPrice('p/new', {
+    input: 2,
+    output: 8,
+    cacheRead: 0,
+    cacheWrite: 0,
+  });
+  expect(savedPrice('p/new')).toMatchObject({ input: 2, output: 8 });
+  expect(savedPrice('p/m')).toBeUndefined();
+  expect(savedPrice('p/legacy')).toBeUndefined();
+  expect(savedPrice('p/reset')).toBeUndefined();
+  expect(readFileSync(oldFile, 'utf8')).toBe(saved);
+});
+
 it('publishes busy history metadata for concurrent foreground and background sessions', async () => {
   mockHarness('codex');
   await host.provider.perform({ type: 'new' });
@@ -1712,7 +1781,10 @@ it('persists model visibility per harness and rejects stale page submissions', a
   });
   const visibility = () =>
     JSON.parse(
-      readFileSync(resolve(preferencesHome, 'workspace-storage', 'model-visibility.json'), 'utf8'),
+      readFileSync(
+        resolve(preferencesHome, '.pi/pi-acp-workbench/preferences/model-visibility.json'),
+        'utf8',
+      ),
     ).preferences;
   expect(host.provider.snapshot().visibleModels).toEqual(['other']);
   expect(visibility()).toEqual({ pi: { hidden: ['default'] } });

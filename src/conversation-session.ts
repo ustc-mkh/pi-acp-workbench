@@ -41,6 +41,7 @@ export interface SessionHost {
   readonly history: readonly Snapshot[];
   readonly serviceClient: Pick<SessionClient, 'call'>;
   readonly stateEncoder: Pick<StateEncoder, 'reset'>;
+  saveSelectedHarness(harness: HarnessId): Promise<void>;
   emit(): void;
   refreshHistory(): Promise<void>;
   refreshTelemetry(settledTurn?: boolean): Promise<void>;
@@ -71,7 +72,7 @@ export class SessionCoordinator {
     });
     this.host.telemetry.reset(harness);
     this.host.autoConnectHandled = true;
-    await this.host.context.workspaceState.update('selectedHarness', harness);
+    await this.host.saveSelectedHarness(harness);
     const previous = this.lastSnapshot() || this.host.transientSnapshots.get(harness);
     if (previous) {
       const snapshot = previous.stored ? await this.readSnapshot(previous) : previous;

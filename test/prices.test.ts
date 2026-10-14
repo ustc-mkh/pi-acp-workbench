@@ -38,6 +38,48 @@ function fixture() {
     [...card.querySelectorAll('button')].find((b) => b.textContent === name)!.click();
   return { root, send, page, state, card, click };
 }
+it('keeps the displayed price baseline while editing or saving a stale draft', () => {
+  const { root, page, state, card, click, send } = fixture();
+  page.update({
+    ...state,
+    statistics: { ...state.statistics!, priceVersions: { 'p/m': 'original' } },
+  });
+  const field = card.querySelector<HTMLInputElement>('input[type=number]')!;
+  field.value = '0';
+  field.dispatchEvent(new Event('input'));
+  page.update({
+    ...state,
+    statistics: {
+      ...state.statistics!,
+      prices: { 'p/m': { ...price, input: 9 } },
+      priceVersions: { 'p/m': 'other-window' },
+    },
+  });
+  click('保存');
+  const request = send.mock.calls.at(-1)![0];
+  expect(request.priceVersion).toBe('original');
+  page.update({
+    ...state,
+    modelSettingsResult: { id: request.id, model: 'p/m', error: '价格已更新' },
+  });
+  expect(field.value).toBe('0');
+  expect(card.textContent).toContain('价格已更新');
+  // Re-opening the settings in a different session reloads a confirmed baseline.
+  page.update({
+    ...state,
+    sessionId: 'other',
+    statistics: {
+      ...state.statistics!,
+      prices: { 'p/m': { ...price, input: 9 } },
+      priceVersions: { 'p/m': 'other-window' },
+    },
+  });
+  expect(root.querySelector<HTMLInputElement>('input[type=number]')!.value).toBe('9');
+  [...root.querySelectorAll<HTMLButtonElement>('button')]
+    .find((b) => b.textContent === '保存')!
+    .click();
+  expect(send.mock.calls.at(-1)![0].priceVersion).toBe('other-window');
+});
 it('has one compact heading, five fields, a visibility toggle and one save/reset pair', () => {
   const { root, card } = fixture();
   expect(root.querySelector('h2')?.textContent).toBe('模型设置');

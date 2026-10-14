@@ -1,5 +1,5 @@
 import type { Price } from '../src/telemetry';
-import { priceFor } from '../src/telemetry';
+import { priceFor, priceOverrideVersion } from '../src/telemetry';
 import type { ChatState, UiMessage } from '../src/shared';
 import { sessionSelectors } from './selectors';
 import { modelProvider } from '../src/model-provider';
@@ -25,6 +25,7 @@ interface Card {
   reset: HTMLButtonElement;
   status: HTMLElement;
   dirty: boolean;
+  priceVersion?: string;
   pending?: string;
 }
 /** One catalogue for visibility, context length and the four billing prices. */
@@ -276,6 +277,8 @@ export class ModelSettingsPage {
       card.save.disabled = card.reset.disabled = !editable || !!card.pending;
       for (const input of card.fields.values()) input.disabled = !!card.pending || !!this.batch;
       if (!card.dirty && !card.pending) {
+        card.priceVersion =
+          state?.statistics?.priceVersions?.[model.id] ?? priceOverrideVersion(model.id, {});
         const price = priceFor(model.id, state?.statistics?.prices || {});
         for (const [key, input] of card.fields) input.value = price ? String(price[key]) : '';
         card.context.value = state?.modelContexts?.[model.id]
@@ -378,6 +381,7 @@ export class ModelSettingsPage {
       harness: state.harness || 'pi',
       sessionId: state.sessionId,
       model,
+      priceVersion: card.priceVersion,
       values: reset
         ? null
         : {

@@ -314,13 +314,14 @@ it('uses current Pi prices, persists user overrides, and restores the latest Pi 
   expect(stats.value.prices[model]).toBeUndefined();
   expect(groupUsage(stats.value.records, stats.value.prices, 'model')[0].unpriced).toBe(1);
 });
-it('gives legacy bare model user prices precedence over Pi without applying them to resellers', async () => {
+it('gives global bare model user prices precedence over Pi without applying them to resellers', async () => {
   const model = 'claude-sonnet-4-6';
   const direct = `anthropic/${model}`,
     reseller = `reseller/${model}`;
   const piPrice = { input: 7, output: 20, cacheRead: 0.7, cacheWrite: 8 };
   const store = storage();
-  await store.update('prices', { [model]: { ...piPrice, input: 2, source: '用户设置' } });
+  await store.update('prices', { [model]: { ...piPrice, input: 99, source: '旧工作区' } });
+  await priceFixture(store).set(model, { ...piPrice, input: 2, source: '用户设置' }, {});
   const agent: Pick<Agent, 'harness' | 'info' | 'request'> = {
     harness: 'pi',
     info: { protocolVersion: 1, agentCapabilities: { _meta: { 'pi-workbench': { version: 1 } } } },
@@ -354,7 +355,7 @@ it('gives legacy bare model user prices precedence over Pi without applying them
   expect(stats.value.prices[direct].input).toBe(7);
   expect(priceFixture(store).read({})[direct]).toBeNull();
   expect(store.get(`price:${direct}`)).toBeUndefined();
-  expect(store.get<Record<string, Price>>('prices')?.[model]?.input).toBe(2);
+  expect(store.get<Record<string, Price>>('prices')?.[model]?.input).toBe(99);
   await stats.setPrice(model);
   expect(stats.value.prices[direct].input).toBe(7);
 });
@@ -488,7 +489,7 @@ it.each(['codex', 'claude'] as const)(
     expect(request).not.toHaveBeenCalled();
   },
 );
-it('degrades to legacy prices on a corrupt shared overrides file instead of breaking construction', async () => {
+it('reports a corrupt global price file without falling back to workspace prices', async () => {
   const { writeFileSync, readFileSync } = await import('node:fs');
   const state = { ...initialState(), sessionId: 'one', status: 'ready' as const };
   const model = 'openai/gpt-5';
@@ -507,10 +508,10 @@ it('degrades to legacy prices on a corrupt shared overrides file instead of brea
     () => {},
     preferences,
   );
-  // Construction survives: Memento legacy values remain visible, the failure
+  // Construction survives without importing workspace prices; the failure
   // surfaces as a note rather than an activation-breaking throw.
   expect(stats.value.note).toContain('损坏');
-  expect(stats.value.prices[model]).toMatchObject({ input: 1, output: 2 });
+  expect(stats.value.prices[model]).toBeUndefined();
   // Writes stay fail-closed and never overwrite the corrupt evidence.
   await expect(stats.setPrice(model, { ...price, input: 9 })).rejects.toThrow();
   expect(readFileSync(preferences.file, 'utf8')).toBe('broken');

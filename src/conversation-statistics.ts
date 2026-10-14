@@ -8,6 +8,7 @@ import {
   mergeUsage,
   validPrice,
   priceFor,
+  priceOverrideVersion,
   type Inspection,
   type Statistics,
   type Price,
@@ -48,6 +49,7 @@ export class ConversationStatistics {
   }
   private metadataHistory?: Snapshot[];
   private overrides: Record<string, Price>;
+  private lastOverrides: PriceOverrides = {};
   private modelPrices: Record<string, Price> = {};
   constructor(
     private storage: Memento,
@@ -113,33 +115,19 @@ export class ConversationStatistics {
     await this.storage.update('usageTitles', this.value.titles);
     await this.storage.update('usageSessionNumbers', this.value.sessionNumbers || {});
   }
-  private legacyOverrides(): PriceOverrides {
-    const legacy: PriceOverrides = Object.fromEntries(
-      Object.entries(this.storage.get<Record<string, unknown>>('prices', {})).filter(
-        ([model, value]) => validPriceModel(model) && validPrice(value),
-      ),
-    ) as Record<string, Price>;
-    for (const key of this.storage.keys()) {
-      if (!key.startsWith('price:')) continue;
-      const model = key.slice('price:'.length);
-      const value = this.storage.get<Price | null>(key);
-      if (validPriceModel(model) && (value === null || validPrice(value))) legacy[model] = value;
-    }
-    return legacy;
-  }
   private readOverrides() {
-    const legacy = this.legacyOverrides();
     let raw: PriceOverrides;
     try {
-      raw = this.pricePreferences?.read(legacy) ?? legacy;
+      raw = this.pricePreferences?.read({}) ?? {};
+      this.lastOverrides = raw;
+      if (this.priceStorageNote && this.value.note)
+        this.value.note = this.value.note.replace(this.priceStorageNote, '').trim() || undefined;
       this.priceStorageNote = undefined;
     } catch (error) {
-      // The display path must degrade: a corrupt/unreadable overrides file
-      // falls back to the Memento copy instead of breaking activation or the
-      // statistics view. Writes stay fail-closed — set() re-reads inside the
-      // lock and aborts before replacing the file, so this catch can never
-      // mask a clobbered write.
-      raw = { ...legacy };
+      // Retain the last successfully read global overrides on transient read
+      // failures. Never replace them with workspace data or a zero/default price.
+      // Writes remain fail-closed and the error stays visible.
+      raw = this.lastOverrides;
       // MUTATE note — never `this.value = {...}` here: this runs inside
       // `this.value.prices = this.prices()` where the assignment target was
       // already bound, so replacing the object would drop the computed prices
@@ -187,9 +175,18 @@ export class ConversationStatistics {
       const override = priceFor(model, this.overrides);
       if (override) prices[model] = override;
     }
+    this.value.priceVersions = Object.fromEntries(
+      [
+        ...new Set([
+          ...Object.keys(this.lastOverrides),
+          ...Object.keys(this.modelPrices),
+          ...(this.value.models || []).map((m) => m.id),
+        ]),
+      ].map((model) => [model, priceOverrideVersion(model, this.lastOverrides)]),
+    );
     return prices;
   }
-  async setPrice(model: string, price?: Price) {
+  async setPrice(model: string, price?: Price, expectedVersion?: string) {
     if (typeof model !== 'string' || !validPriceModel(model)) throw new Error('模型标识无效。');
     if (price !== undefined && !validPrice(price)) throw new Error('价格必须为非负有限数值。');
     if (!this.pricePreferences) throw new Error('模型价格共享存储尚未配置。');
@@ -206,11 +203,13 @@ export class ConversationStatistics {
             cacheWrite: price.cacheWrite,
             source: '用户设置',
           },
-      this.legacyOverrides(),
+      {},
+      expectedVersion,
     );
     this.value = {
       ...this.value,
       prices: this.prices(),
+      priceVersions: this.value.priceVersions,
     };
     // Cold sessions have no live model catalogue until explicitly inspected.
     if (price === undefined) await this.refresh(this.current().state.status !== 'busy');
@@ -236,6 +235,9 @@ export class ConversationStatistics {
     });
   }
   async refresh(settledTurn = false): Promise<void> {
+    // Global prices can be changed by another window even without a connected
+    // agent. Re-read before deciding whether inspection is available.
+    this.value.prices = this.prices();
     if (this.pending) {
       const requested = this.current(),
         sessionId = requested.state.sessionId;
@@ -318,6 +320,7 @@ export class ConversationStatistics {
             this.value = {
               ...this.value,
               prices: this.prices(),
+              priceVersions: this.value.priceVersions,
             };
           }
           if (

@@ -1,14 +1,19 @@
-import { closeSync, openSync, readSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { closeSync, openSync, readSync, fstatSync, constants } from 'node:fs';
+import { mkdir, realpath } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { lock } from 'proper-lockfile';
 import { writeAtomicJson } from './atomic-json';
-import { validPrice, type Price } from './telemetry';
+import { validPrice, priceOverrideVersion, type Price } from './telemetry';
 
 export type PriceOverrides = Record<string, Price | null>;
 export interface PricePreferences {
   read(legacy: PriceOverrides): PriceOverrides;
-  set(model: string, value: Price | null, legacy: PriceOverrides): Promise<void>;
+  set(
+    model: string,
+    value: Price | null,
+    legacy: PriceOverrides,
+    expectedVersion?: string,
+  ): Promise<void>;
 }
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_MODELS = 10000;
@@ -34,21 +39,29 @@ function validOverrides(value: unknown): value is PriceOverrides {
 
 /** Independent of Memento's whole-extension cache. All writers lock, reread the
  * latest file, change one model, and durably replace it before releasing the lock.
- * The first transaction imports the legacy workspace preferences; later writes
- * never import an older window's cached data again.
+ * Old workspace preferences are never imported, including when the file is missing.
  */
 export class FilePricePreferences implements PricePreferences {
+  private observed = false;
   constructor(readonly file: string) {}
 
-  read(legacy: PriceOverrides): PriceOverrides {
+  read(_legacy: PriceOverrides = {}): PriceOverrides {
     let handle: number;
     try {
-      handle = openSync(this.file, 'r');
+      handle = openSync(
+        this.file,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ...legacy };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (this.observed) throw new Error(`模型价格配置已丢失，拒绝重新创建：${this.file}`);
+        return {};
+      }
       throw error;
     }
     try {
+      this.observed = true;
+      if (!fstatSync(handle).isFile()) throw new Error(`模型价格配置不是普通文件：${this.file}`);
       const chunks: Buffer[] = [];
       let size = 0;
       while (size <= MAX_BYTES) {
@@ -80,12 +93,19 @@ export class FilePricePreferences implements PricePreferences {
     }
   }
 
-  async set(model: string, value: Price | null, legacy: PriceOverrides) {
+  async set(
+    model: string,
+    value: Price | null,
+    _legacy: PriceOverrides = {},
+    expectedVersion?: string,
+  ) {
     if (!validPriceModel(model) || (value !== null && !validPrice(value)))
       throw new Error('模型价格配置无效。');
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
     let compromised: Error | undefined;
-    const release = await lock(this.file, {
+    // Windows opened through symlinked workspace/storage paths must share one lock.
+    const lockFile = join(await realpath(dirname(this.file)), basename(this.file));
+    const release = await lock(lockFile, {
       realpath: false,
       stale: 30000,
       update: 10000,
@@ -95,7 +115,12 @@ export class FilePricePreferences implements PricePreferences {
       },
     });
     try {
-      const overrides = this.read(legacy);
+      const overrides = this.read();
+      if (
+        expectedVersion !== undefined &&
+        priceOverrideVersion(model, overrides) !== expectedVersion
+      )
+        throw new Error('模型价格已在其他窗口更新，请重新加载窗口后确认，未覆盖已有价格。');
       overrides[model] = value;
       if (!validOverrides(overrides)) throw new Error('模型价格配置无效或模型数量过多。');
       const data = { version: 1, overrides };
@@ -104,6 +129,7 @@ export class FilePricePreferences implements PricePreferences {
       await writeAtomicJson(this.file, data, true, () => {
         if (compromised) throw compromised;
       });
+      this.observed = true;
     } finally {
       await release();
     }

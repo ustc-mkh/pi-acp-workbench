@@ -34,7 +34,7 @@ Rust 模块位于 `rust/crates/pi-acp-session-daemon/src/`，客户端模块位�
 | `service/autonomous.rs`                                                            | Pi 自主轮次的代际、检查点、完成保存与发布；独立于客户端请求 phase |
 | `pi-session-runs.ts` / `pi-event-backlog.ts`                                       | ACP 适配器运行边界、忙碌输入拒绝与恢复早到事件缓存                |
 | `conversation-statistics.ts`                                                       | 客户端用量分页、价格、标题与迟到结果过滤                          |
-| `price-preferences.ts`                                                             | 工作区价格偏好的跨进程锁、旧格式迁移与持久化原子提交              |
+| `price-preferences.ts`                                                             | 全局价格偏好的跨进程锁与持久化原子提交                            |
 | `visibility-preferences.ts`                                                        | 全局模型隐藏偏好的跨进程事务、旧格式迁移与增量合并                |
 | `workspace-documents.ts`                                                           | Diff 预览、文档缓存、链接真实路径校验                             |
 
@@ -97,9 +97,9 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 偏好统一保存到数据目录 `preferences/{pi,codex,claude}.json`，只继承最近成功使用的 model/thinking，按 harness 隔离。新建读取最新组合，顺序为 model → 刷新选项 → thinking。成功修改设置或实际发送才更新偏好；浏览/恢复旧会话不覆盖账户默认。不继承授权或协作模式。损坏文件拒绝覆盖。
 
-客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。模型隐藏偏好使用全局扩展存储目录的 `model-visibility.json`，跨进程锁保护按目标模型的增量合并；暂时不在目录中的隐藏项不会被其他保存操作删除。原生历史仍由各上游适配器管理，备份需要保留原生会话、daemon 数据目录及客户端偏好文件。
+客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。模型隐藏偏好使用账户本地目录 `~/.pi/pi-acp-workbench/preferences/model-visibility.json`，跨进程锁保护按目标模型的增量合并；暂时不在目录中的隐藏项不会被其他保存操作删除。原生历史仍由各上游适配器管理，备份需要保留原生会话、daemon 数据目录及客户端偏好文件。所选 Agent 使用同目录 `client-settings.json`，不再读写 workspaceState；模型显示和价格不导入旧 Profile / 工作区配置。会话命名模型与模型/thinking 已在 daemon 账户目录，Pi context 配置仍由上游 `models.json` 管理。Remote 场景下客户端偏好位于扩展宿主账户，与远程服务端设置作用域可不同。
 
-计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在工作区扩展存储目录的独立 `price-overrides.json`；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记，首次提交迁移旧格式，后续不导入其他窗口的旧缓存。缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
+计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在账户本地目录 `~/.pi/pi-acp-workbench/preferences/price-overrides.json`，跨工作区和 VS Code Profile 共享；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记；旧工作区文件和 Memento 价格不会被读取或迁移。缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
 
 ## 历史窗口与服务端撤回
 

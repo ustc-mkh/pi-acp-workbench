@@ -1,6 +1,6 @@
-import { openSync, readSync, closeSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { openSync, readSync, closeSync, fstatSync, constants } from 'node:fs';
+import { mkdir, realpath } from 'node:fs/promises';
+import { dirname, basename, join } from 'node:path';
 import { lock } from 'proper-lockfile';
 import { writeAtomicJson } from './atomic-json';
 import { isHarnessId, type HarnessId } from './harness';
@@ -35,17 +35,26 @@ function validPreferences(value: unknown): value is VisibilityPreferences {
 /** All windows merge targeted changes under a shared file lock. Legacy whitelist
  * entries remain intact until that harness has a known catalogue for migration. */
 export class FileVisibilityPreferences {
+  private observed = false;
   constructor(readonly file: string) {}
   read(legacy: VisibilityPreferences): VisibilityPreferences {
     let handle: number;
     try {
-      handle = openSync(this.file, 'r');
+      handle = openSync(
+        this.file,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(legacy);
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (this.observed) throw new Error(`模型显示配置已丢失，拒绝重新创建：${this.file}`);
+        return structuredClone(legacy);
+      }
       throw error;
     }
     let body: Buffer;
     try {
+      this.observed = true;
+      if (!fstatSync(handle).isFile()) throw new Error(`模型显示配置不是普通文件：${this.file}`);
       const chunks: Buffer[] = [];
       let size = 0;
       while (size <= MAX_BYTES) {
@@ -90,7 +99,8 @@ export class FileVisibilityPreferences {
       throw new Error('模型显示配置无效。');
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
     let compromised: Error | undefined;
-    const release = await lock(this.file, {
+    const target = join(await realpath(dirname(this.file)), basename(this.file));
+    const release = await lock(target, {
       realpath: false,
       stale: 30000,
       update: 10000,
@@ -121,6 +131,7 @@ export class FileVisibilityPreferences {
       await writeAtomicJson(this.file, data, true, () => {
         if (compromised) throw compromised;
       });
+      this.observed = true;
     } finally {
       await release();
     }

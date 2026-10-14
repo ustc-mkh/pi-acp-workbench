@@ -11,7 +11,8 @@ import type { UiPolicy } from './ui-dispatch';
 import { dispatchUi, failUi, type UiHandlers } from './ui-dispatch';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { FileClientSettings } from './client-settings';
+import { localPreferencesPath } from './local-preferences';
 import { FilePricePreferences } from './price-preferences';
 import { FileVisibilityPreferences, type VisibilityPreferences } from './visibility-preferences';
 import { sessionSelectors } from './session-settings';
@@ -126,21 +127,21 @@ export class ChatProvider
   }
   documents = new DiffDocuments();
   private resources: vscode.Disposable[] = [];
-  private get modelStorage() {
-    return this.context.globalState || this.context.workspaceState;
+  private clientSettings = new FileClientSettings(localPreferencesPath('client-settings.json'));
+  async saveSelectedHarness(harness: HarnessId) {
+    await this.clientSettings.setSelectedHarness(harness);
   }
   private visibilityPreferences: FileVisibilityPreferences;
-  private legacyVisibility() {
-    return this.modelStorage.get<VisibilityPreferences>('visibleModels', {});
-  }
+  private lastVisibility: VisibilityPreferences = {};
   /** Unchecked models persist as a hidden set so catalogue additions stay visible. */
   private visibleModels() {
     let saved: VisibilityPreferences[HarnessId];
     try {
-      saved = this.visibilityPreferences.read(this.legacyVisibility())[this.harness];
+      this.lastVisibility = this.visibilityPreferences.read({});
+      saved = this.lastVisibility[this.harness];
     } catch (error) {
       this.state.error = error instanceof Error ? error.message : String(error);
-      saved = this.legacyVisibility()[this.harness];
+      saved = this.lastVisibility[this.harness];
     }
     if (!saved) return undefined;
     const catalog = new Set(
@@ -222,10 +223,15 @@ export class ChatProvider
   private log = vscode.window.createOutputChannel('Pi Agent');
   constructor(readonly context: vscode.ExtensionContext) {
     this.visibilityPreferences = new FileVisibilityPreferences(
-      join((context.globalStorageUri || context.storageUri!).fsPath, 'model-visibility.json'),
+      localPreferencesPath('model-visibility.json'),
     );
-    const selected = context.workspaceState.get('selectedHarness', 'pi');
-    if (isHarnessId(selected)) this.harness = selected;
+    try {
+      const selected = this.clientSettings.read().selectedHarness;
+      if (selected) this.harness = selected;
+    } catch (error) {
+      this.state.error = String(error);
+      this.log.appendLine(`[settings] ${String(error)}`);
+    }
     this.state.harness = this.harness;
     this.serviceClient = new SessionClient(this.config.get<string>('serviceSocket') || undefined);
     this.historyStore = new ConversationHistory({
@@ -261,9 +267,7 @@ export class ChatProvider
         if (this.state.usage) this.state.usage = { ...this.state.usage, size: value };
       },
       () => this.emit(),
-      new FilePricePreferences(
-        join((context.storageUri || context.globalStorageUri).fsPath, 'price-overrides.json'),
-      ),
+      new FilePricePreferences(localPreferencesPath('price-overrides.json')),
     );
     this.historyStore.start();
     if (!this.config.get('persistHistory', true)) this.disableHistory();
@@ -547,7 +551,7 @@ export class ChatProvider
       [...catalog],
       (message.affected || [...catalog]).filter((id) => catalog.has(id)),
       message.models,
-      this.legacyVisibility(),
+      {},
     );
     this.emit();
   }
@@ -716,7 +720,7 @@ export class ChatProvider
         throw new Error('当前 Agent 不支持修改 context 长度。');
       }
       if (generation !== this.generation) throw new Error('会话已切换，设置操作已停止。');
-      await this.telemetry.setPrice(message.model, message.values?.price);
+      await this.telemetry.setPrice(message.model, message.values?.price, message.priceVersion);
       this.state.modelSettingsResult = { id: message.id, model: message.model };
     } catch (error) {
       const detail = `${contextSaved ? 'Context 已更新，但价格未确认保存；请检查后重试。' : ''}${String(error)}`;

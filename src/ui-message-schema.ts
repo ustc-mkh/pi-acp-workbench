@@ -54,6 +54,7 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
     harness,
     sessionId: optional(text),
     model: text,
+    priceVersion: optional(text),
     values: (v) =>
       v === null ||
       (object(v) &&
