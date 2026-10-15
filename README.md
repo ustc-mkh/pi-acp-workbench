@@ -1,32 +1,40 @@
 # Pi ACP Workbench
 
-在 VS Code 和 Telegram 中使用 Pi Agent 的对话插件。桌面与手机共享会话，Pi 由服务器上的独立服务执行，关闭 VS Code 后任务仍可继续。
+在 VS Code 和 Telegram 中使用 Pi 的编码工作台，也可接入 Codex / Claude Code。桌面与手机共享会话，Agent 由服务器上的独立会话服务运行，关闭 VS Code 后已提交的任务仍可继续。
 
-## 功能
+## 核心功能
 
-- **Telegram 远程控制**：每个会话对应一个群组话题，支持流式回复、完成通知、工具授权、停止任务，以及旧会话与历史消息同步。桌面输入和 Pi 回复可同步到手机。
-- **桌面编码助手**：侧栏对话、模型可见性管理、思考强度与适配器支持的 Fast 选择、代码选区和文件上下文、粘贴图片、工具调用与 diff 查看。
-- **每轮总 Diff**：输出末尾展示该轮工作区的文件和增删行数汇总，可展开补丁或打开编辑器对比；支持 Pi / Codex / Claude。[采集范围与限制](docs/turn-diff.md)。
-- **会话管理**：保存与恢复历史、跨端继续对话、Pi 原生会话分支、Markdown 导出。
-- **内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表，以及 token 用量与费用估算。Codex / Claude 可统计适配器上报的输入、输出和缓存用量，显示上下文占用；只记录启用后经本服务执行的轮次，不回填原生历史。
-- **其他 Agent**：可选接入 Codex / Claude Code 的 ACP 适配器；三种 Agent 共用独立会话服务，Telegram 可打开已有会话。
+- **桌面编码助手**：侧栏流式对话，附加代码选区、文件和粘贴图片，查看思考过程、工具调用与实时终端输出，处理工具授权或停止任务。
+- **跨端继续任务**：Telegram 每个话题对应一个会话，支持远程发指令、流式回复、完成通知、授权与停止；桌面输入、Agent 回复及支持的图片可同步到手机。
+- **修改审阅与撤回**：按轮汇总工作区文件及增删行数，查看单文件或多文件总 Diff；对满足完整快照与无冲突条件的文本修改，可确认后撤回。支持 Pi / Codex / Claude。[范围与限制](docs/turn-diff.md)。
+- **会话与历史**：保存、恢复和跨端继续会话，运行中切换到其他会话或 Agent，支持 Pi 原生会话分支和 Markdown 导出。
+- **模型管理与用量统计**：选择模型、思考强度和适配器支持的 Fast 模式；管理模型可见性、价格与 Pi context 长度；按模型、时间、会话查看 token 用量和费用估算。
+- **丰富内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表、图片与上下文占用。
 
-## 配置 Pi 与 VS Code
+```text
+VS Code ─┐                                  ┌─ Pi
+         ├─ Unix socket ─ 独立会话服务 ─ ACP ├─ Codex
+Telegram ┘                                  └─ Claude Code
+```
 
-### 1. 准备运行环境
+## 安装与开始使用
 
-Pi 服务使用 Rust 常驻进程，运行需要 **Linux x86_64、Node.js 22+ 和用户级 systemd**；从源码构建还需要 Rust/Cargo。使用 Remote SSH / WSL 时，以下操作在扩展宿主所在的机器、同一用户账户下完成。
+### 1. 准备环境
+
+会话服务目前支持 **Linux x86_64**，需要 **Node.js 22+、Pi 和用户级 systemd**；从源码构建服务还需要 **Rust/Cargo**。VS Code 要求 **1.96+**。使用 Remote SSH / WSL 时，服务与扩展安装在扩展宿主所在的机器，并使用同一账户。
+
+安装 Pi，并完成模型供应商登录或 API key 配置：
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent
 pi
 ```
 
-在 Pi 中完成模型供应商登录或 API key 配置。插件和会话服务复用该账户的 Pi 凭据。
+插件与会话服务复用该账户的 Pi 凭据。
 
-下载 [Release 中的 VSIX](https://github.com/ustc-mkh/pi-acp-workbench/releases/latest)，在 VS Code 执行 **Extensions: Install from VSIX…**，远程开发时安装到远端。安装后重新加载窗口。
+### 2. 部署会话服务
 
-### 2. 启动独立会话服务
+以下从源码构建；也可使用 [Release](https://github.com/ustc-mkh/pi-acp-workbench/releases/latest) 的 Linux 服务包，按[服务发布指南](docs/service-release.md#校验安装与回滚)校验和安装。
 
 ```bash
 git clone https://github.com/ustc-mkh/pi-acp-workbench.git
@@ -40,12 +48,11 @@ cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
 cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
 ```
 
-编辑两个文件：
+编辑 `pi-sessions.service`，将占位路径替换为仓库的实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。
 
-- `sessions.json`：启动时动态查找 `pi`，无需填写安装路径：优先 PATH，再查找当前账户的 Pi 托管安装、Node 所在目录和 npm 实际全局 prefix；Pi 的代理变量放在 `env` 中。需要指定某个 Pi 安装时设置 `env.PI_ACP_PI_COMMAND`，有效覆盖优先，失效路径自动回退并记录提示。
-- `pi-sessions.service`：将仓库的占位路径替换为实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。该目录同时包含 JS 适配器；Node 必须在服务的 PATH 中，否则在 `sessions.json` 显式设置 Node `command` 和适配器 `args`。
-
-示例 unit 的 PATH 包含 `%h/.local/bin` 和常用系统安装目录，`%h` 由 systemd 展开为运行账户的 home。适配器也支持从 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）或 `PI_MANAGED_INSTALL_ROOT` 推导托管启动器位置。使用 nvm、Volta 时仍需确保服务可以启动 Node；systemd 不会读取交互式 shell 的启动文件。不要把某台机器的 Pi 绝对路径复制到其他机器。
+- 默认自动查找 `pi`，无需填写 Pi 安装路径。
+- 确保 **Node 在服务的 PATH 中**；systemd 不读取 `.bashrc` 或 nvm / Volta 的交互式初始化配置。
+- 代理及模型环境变量放在 `sessions.json` 的 `env` 中，不写入仓库。
 
 ```bash
 chmod 600 ~/.config/pi-acp-workbench/sessions.json
@@ -53,95 +60,77 @@ systemctl --user daemon-reload
 systemctl --user enable --now pi-sessions
 ```
 
-默认最多 3 个 Pi 工作进程（上限 16）；空闲进程按最近活跃度分层回收，前 8 个驻留 16 天、其余 1 天；允许在当前账户有权限访问的任意目录运行，无需目录白名单。完整参数见 [会话服务配置](docs/session-service.md)。
+需要退出 SSH 后仍运行时，为账户启用 linger：`loginctl enable-linger "$USER"`，是否需要管理员权限取决于服务器策略。
 
-### 3. 在插件中对话
+默认最多 3 个 Agent 工作进程，空闲时按需回收；历史保存在服务账户的数据目录。完整配置与排障见[会话服务](docs/session-service.md)。
 
-打开并信任项目文件夹，点击活动栏 **π** → **新建会话**。Enter 发送，Shift+Enter 换行；编辑器右键可将选区加入对话。
+### 3. 安装插件并开始对话
 
-工作时模型输出直接显示在滚动消息流中，连续的工具调用与思考默认归为一个折叠组；结束后整轮过程自动折叠，保留最终回答。运行中可以新建对话、切换历史会话或 Harness，原任务在服务中继续执行，切回后可查看进度或停止。
+从 [Release](https://github.com/ustc-mkh/pi-acp-workbench/releases/latest) 下载 VSIX，在 VS Code 执行 **Extensions: Install from VSIX…**。远程开发时安装到远端，然后重新加载窗口。
 
-历史列表保留全部会话，右侧滚动条可下滑查看；默认高度约 4 条，底部可展开至 10 / 16 条高度或收回，不限制可访问的会话数量。打开后会一直保持展开，选择会话、刷新、发送消息或重新连接均不会收起；再次点击历史记录按钮才会关闭。
+打开并信任项目文件夹，点击活动栏 **π** → **新建会话**：
 
-Pi 的 `/compact` 成功后只显示压缩成功，不输出内部上下文摘要。压缩后的上下文占用暂时显示等待更新，下一次模型回复后恢复实际占用。
+- **Enter** 发送，**Shift+Enter** 换行。
+- 编辑器右键 **Pi: Add Selection to Chat** 可附加选区，也可粘贴图片。
+- 顶部选择 Agent、模型、思考强度和可用的 Fast 模式。
+- 任务结束后在「本轮修改」中审阅 Diff；运行中可切换会话，原任务继续执行。
 
-用量统计仅纳入具有有效插件会话编号的记录，排除外部 Pi 会话；总计及按模型、时间、会话视图使用同一过滤范围，原始记录不会删除。计费统计的默认价格直接读取 Pi 返回的模型配置，更新 Pi 或模型价格后刷新统计即可使用最新单价；打开“模型设置”、点击“刷新模型配置”或“恢复默认”都会主动读取 Pi 模型目录，冷会话也可读取，不会发送模型提示词。用户自定义价格优先；价格、模型可见性和所选 Agent 保存在账户本地目录 `~/.pi/pi-acp-workbench/preferences/`，跨工作区、VS Code Profile 共享。旧工作区、Profile 文件和 Memento 设置不迁移、不读取。Remote/SSH 场景下目录位于扩展宿主所在的远程账户；会话历史和用量记录仍按原有作用域管理。每个模型的“保存 / 恢复默认”同时应用四项单价与 Pi context 长度（修改 Pi 配置需要已连接且空闲的会话）。没有 Pi 默认价或自定义价格的模型显示未定价，不套用静态价格表。
+插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，自定义路径使用 VS Code 设置 `piAcp.serviceSocket`。
 
-Telegram 可在仓库执行 `npm run telegram:setup`，按向导输入 token、在话题群发送配对码，即可完成配置和用户级自启动，无需 sudo。详见 [Telegram 配置](docs/telegram.md#一键配置推荐)。
-
-右上角“模型设置”与“用量统计”为并列页面，统计表中可点击的模型名也可进入模型设置；点击历史记录或任一页面的“返回对话”均回到对话。供应商默认折叠，提供“全部显示 / 全部不显示 / 全部恢复默认”；搜索会展开匹配分组，批量恢复只影响该供应商的价格与 context，逐项执行并报告部分失败。模型设置和统计页使用整行吸顶功能栏，返回按钮位于栏内。每个模型仅显示一个标题，右上角勾选控制输入框模型列表中的可见性；四项价格下方左侧为紧凑的 context 长度输入框（k tokens，填 256 即 256K = 256000 tokens），五个数值框均不显示增减按钮；右侧“保存 / 恢复默认”一起应用五个值。其他 Agent 暂不支持修改 context，仍可设置价格与模型可见性。设置写入 Pi 配置目录的 `models.json`，与 Pi 共用；不会提高服务商的真实上限。打开页面、刷新配置及发送下一轮前会重新加载 Pi 模型配置；已有任务运行中不修改模型，思考强度和 Fast 设置保持不变。
-
-用量统计支持按模型、时间、会话查看；按时间显示费用柱状图，可选天 / 周（周一开始）/ 月，沿用日期筛选。会话显示 `#编号 会话名`，模型名和会话名不再显示悬浮文本框。
-
-Pi 新会话收到首条文本输入后，先通过独立、无工具、无会话持久化的调用生成约 8–16 字标题，再开始正常任务，不等待首轮回答。模型设置中的“会话名压缩模型”可选择 Pi 模型、跟随当前模型或关闭；默认跟随当前模型，设置由 daemon 保存。调用只发送首条输入的前 1000 个字符，不加载项目上下文，不进入聊天记录，不改变聊天模型；会有少量额外模型费用，返回的用量合并到统计。生成阶段服务最多等待 20 秒，失败保留 32 字以内的短文本，不自动重试，也不批量重命名旧会话。成功标题跨重启保留，并供历史列表和 Telegram 使用；其他适配器提供的原生标题也会保留。
-
-Pi 使用 OpenAI / Codex Responses 时提供 Fast mode 开关，请求优先级服务，可能增加费用；是否可用取决于模型、账户和 Pi 扩展支持。它与思考级别独立，默认关闭，设置随原生会话分支恢复。
-
-插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，自定义路径使用 VS Code 设置 `piAcp.serviceSocket`。历史记录默认保存在该服务器账户的 `~/.pi/pi-acp-workbench/history/`。
-
-模型与 thinking 组合固定保存在 `~/.pi/pi-acp-workbench/preferences/{pi,codex,claude}.json`，按 harness 隔离、跨工作区共享。成功选择立即保存，新建自动读取；恢复旧会话保留其自身设置，不覆盖默认组合，实际发送或修改设置后才更新。关闭历史保存也不影响偏好。Pi 桌面与 Telegram 共用服务端偏好；自定义 `--data-dir` 时 Pi 使用该目录下的 `preferences/pi.json`。旧工作区偏好不自动迁移。
-
-### Pi 后台任务扩展
-
-支持 `pi-better-background-tasks` 等扩展在任务完成后自主唤醒 Pi：完成消息会显示在对话中，后续 Agent 回复具有忙碌状态、停止、授权、共享历史保存及完成发布。自主轮次与用户输入按运行边界协调；发送时若 Agent 正在自主运行，或提交的最后窗口被唤醒抢先，用户输入会明确显示“发送失败”，对应消息左侧显示淡红色感叹号，不会作为 follow-up 或 steering 排队，也不会在空闲后自动重发。失败后保留输入供手动重试；拒绝发送不会中断自主输出或其授权弹窗。旧轮次的迟到结束不会结束新轮次，停止同时清理插件尚未执行的原生队列。
-
-扩展需安装在 daemon 实际启动的 Pi 环境中；TUI 专用 navigator / widget 不会移植到侧栏。自主轮次仍支持已有工具级 diff，但不额外生成整轮工作区 diff 基线。升级此兼容性支持时，需同步更新并重启会话服务，让存量 worker 使用新的适配器。
+更多操作见[桌面使用指南](docs/usage.md)。
 
 ## 接入 Telegram
 
-### 1. 准备 Bot 和话题群组
+1. 准备 Bot token，建立私人群组并启用 **Topics / 话题**；将 Bot 加入群组，设为管理员并允许管理话题。
+2. 在运行会话服务的服务器上，以同一账户执行：
 
-已有 Bot token 可直接使用。建立私人群组并启用 **Topics / 话题**，将 Bot 加入群组、设为管理员并允许管理话题。服务器需能访问 Telegram API；使用长轮询，无需开放入站端口。
+   ```bash
+   npm run telegram:setup
+   ```
 
-### 2. 运行配置向导
+   使用服务发布包时，在解压目录执行 `node scripts/setup-telegram.mjs`。向导需要 curl，隐藏输入 token，通过群内配对码获取群组与用户 ID，并配置用户级自启动，无需 sudo。
 
-在运行 Pi 的服务器上，以同一用户账户执行：
+3. 在群组 General 中发送 `/menu`，选择目录和 Agent 创建会话；进入对应话题后直接发文字。
 
-```bash
-# 在本仓库中运行
-npm run telegram:setup
-```
+| 命令                         | 用途                                                   |
+| ---------------------------- | ------------------------------------------------------ |
+| `/menu`                      | General 管理会话与全局开关；会话话题管理当前模型和任务 |
+| `/new /绝对路径`             | 在服务器指定目录创建会话                               |
+| `/sessions`、`/open 编号`    | 列出或打开已有会话                                     |
+| `/history`、`/history all`   | 同步本话题更多或完整历史                               |
+| `/sync`                      | 为已有会话建立话题并同步历史摘要                       |
+| `/status`                    | 查看任务进度及待授权操作                               |
+| `/stop`、`/interrupt 新指令` | 停止任务，或停止后发送新指令                           |
+| `/notifications`、`/silent`  | 自动推送与静音开关                                     |
 
-如果使用包含配置脚本的服务发布包，在解压目录运行 `node scripts/setup-telegram.mjs`，无需安装 npm 依赖。
+路径指服务器上的已有目录。默认允许服务账户可访问的任意目录，可配置目录限制；此限制不是工具执行沙箱。服务使用长轮询，无需开放入站端口。
 
-按提示隐藏输入 token，用个人身份在群里发送终端显示的配对码，再确认应用配置。向导自动获取群组和用户 ID、保存配置并启动用户级服务，全程无需 sudo。Node.js 22+、Pi、curl、用户级 systemd 和服务程序需事先安装。
-
-首次配置无需选择或登记项目目录。完成后用 `/menu` 的按钮向导选择目录和 Harness，或发送 `/new /项目的绝对路径` 直接选择 Harness，可在当前服务账户能访问的任意已有目录创建会话；换项目无需重新配置。路径指的是服务器上的目录。
-
-向导尝试启用 linger，使服务退出登录后继续运行并在开机时启动；若本机策略不允许，会明确提示，目前只保证登录后自启动。手工配置、代理、已有目录限制的取消方式见 [Telegram 指南](docs/telegram.md)。
-
-### 3. 在手机上使用
-
-在配置的群组中发送命令，进入对应话题后直接发文字即可继续对话。
-
-| 命令                         | 用途                                                                 |
-| ---------------------------- | -------------------------------------------------------------------- |
-| `/menu`                      | General：会话管理与全局开关；Topic：当前会话设置、任务与最近消息同步 |
-| `/history`、`/history all`   | 手动补充本话题更多或完整历史                                         |
-| `/new /绝对路径`             | 选择 Harness，在指定服务器目录新建会话及独立话题                     |
-| `/sync`                      | 最新 5 个会话各取最后 10 条，其余各取最后 2 条；setup 同样处理       |
-| `/sessions`、`/open 编号`    | 列出或打开已有会话                                                   |
-| `/status`                    | 查看任务状态、当前回复和待授权操作                                   |
-| `/stop`、`/interrupt 新消息` | 停止任务，或停止后发送新指令                                         |
-| `/notifications`             | 自动投递总开关，默认开启；关闭后暂停自动回复与授权卡片               |
-| `/silent`                    | 静音开关，默认关闭；开启后正常投递但不请求声音提醒                   |
-| `/help` 或 `/commands`       | 查看全部命令与说明                                                   |
-
-若希望收到回复但不响铃，保持 `/notifications` 开启，再开启 `/silent`。静音仍可能显示手机通知，实际效果受 Telegram 和系统设置影响。两个开关跨服务重启保留。
-
-桌面与手机可使用同一会话，消息按顺序执行；关闭 VS Code 不会中断已提交任务。Telegram 目前支持文字输入；输出和历史同步支持 Agent / 工具、内嵌或会话工作目录内的图片，其他非文本内容只同步提示。General 菜单统一管理新建 / 已有会话、`/sync`、推送和静音；会话 Topic 菜单只控制绑定的 Session。更多操作见 [Telegram 指南](docs/telegram.md#日常使用)。
+Telegram 目前仅支持文字输入，输出与历史同步支持文字及部分图片。详细配置、代理与恢复说明见[Telegram 指南](docs/telegram.md)。
 
 ## 可选：Codex / Claude Code
 
-在扩展宿主安装对应 ACP 适配器并完成其认证，然后在插件顶部切换 Agent：
+在服务所在机器安装对应 ACP 适配器，并完成其认证：
 
 ```bash
 npm install -g @agentclientprotocol/codex-acp
 npm install -g @agentclientprotocol/claude-agent-acp
 ```
 
-三种 Agent 都由 Rust daemon 托管，插件只通过 socket 连接。自定义启动路径、参数和环境变量放在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中；实际功能取决于适配器声明的 ACP 能力。配置示例见 [会话服务](docs/session-service.md#codex--claude-配置)。需要将插件与 v4 daemon 一起更新，没有文件写入降级路径。
+确保服务 PATH 可找到适配器，然后在插件顶部切换 Agent，或在 Telegram 新建会话时选择。自定义命令、参数及环境变量放在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中，见[配置说明](docs/session-service.md#codex--claude-配置)。功能以适配器声明的 ACP 能力为准，Pi 原生分支等专属能力不适用于其他 Agent。
 
-详细资料：[全部文档](docs/README.md) · [架构说明](docs/architecture.md) · [开发与测试](docs/testing.md) · [服务发布与回滚](docs/service-release.md) · [更新记录](CHANGELOG.md)
+## 使用边界
 
-长任务期间 context 占用会持续刷新并保存在会话快照中；终端工具实时显示输出，“全部修改”展开后显示采集说明。Telegram 通知保留 Markdown 格式。
+- **独立服务是必需组件**：VSIX 不包含原生 daemon，插件不自动安装或启动服务。插件、会话服务与 Telegram relay 需配套更新，当前要求 v4 服务协议。
+- **不是沙箱**：Agent 可在服务账户权限范围内执行命令和修改文件；仅在可信项目与私人群组中使用，生产部署建议最小权限账户或容器隔离。
+- **任务继续不等于故障续跑**：关闭 VS Code 不影响已提交任务；停止服务、服务器重启或掉电会中断任务，服务不会自动重放工具操作。
+- **撤回有范围限制**：取消任务不撤销已发生的修改；手动撤回只覆盖已完整采集且无冲突的文件，不是多文件原子事务，也不回退模型上下文。
+- **费用是估算值**：统计依赖 Agent 返回的用量与已配置价格，不等于供应商账单。Fast 优先级服务和自动会话命名可能产生额外费用。
+
+## 文档与开发
+
+- [文档索引](docs/README.md)：按使用、部署、开发主题导航。
+- [桌面使用指南](docs/usage.md)：会话、模型、用量统计与后台任务扩展。
+- [参与开发](CONTRIBUTING.md) · [架构](docs/architecture.md) · [测试与发布](docs/testing.md)。
+- [更新记录](CHANGELOG.md)：版本变更与发布历史。
+
+本项目采用 [MIT 许可证](LICENSE)。

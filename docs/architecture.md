@@ -10,9 +10,9 @@ Telegram → Rust relay / WireClient ──────────────�
                                                                                    └→ claude-agent-acp
 ```
 
-Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff 的唯一所有者。插件只负责 webview 接线、附件、文档预览、客户端统计和活动会话指针。没有扩展宿主直接启动 ACP worker 的路径，没有 v1/v2 文件写降级路径。插件要求 `session-service.version=4`；升级必须同时更新插件和 daemon。
+Rust daemon 是所有 harness 的进程、队列、历史、偏好和本轮 Diff 的唯一所有者。插件负责 Webview 接线、附件、文档预览、客户端统计和活动会话指针，不直接启动 ACP worker 或写入共享历史。插件要求 `session-service.version=4`；升级必须配套更新插件和 daemon。
 
-`ChatProvider` 使用同一个 `RemoteAgent` 接口，所有会话状态来自服务。原来的 `ConversationBackend`、本地 `AgentProcess`、`SessionCache`、共享历史事务/租约、客户端 Diff 和快照写入已移除。测试中的直接 ACP 客户端及离线数据 fixture 仅用于上游协议与损坏数据测试，不属于生产入口。
+`ChatProvider` 使用同一个 `RemoteAgent` 接口，所有会话状态来自服务。测试中的直接 ACP 客户端及离线数据 fixture 仅用于上游协议与损坏数据测试，不属于生产入口。
 
 ## 职责
 
@@ -97,9 +97,9 @@ selectedHarness 和活动指针按工作区保存；非 Pi 指针使用 `harness
 
 偏好统一保存到数据目录 `preferences/{pi,codex,claude}.json`，只继承最近成功使用的 model/thinking，按 harness 隔离。新建读取最新组合，顺序为 model → 刷新选项 → thinking。成功修改设置或实际发送才更新偏好；浏览/恢复旧会话不覆盖账户默认。不继承授权或协作模式。损坏文件拒绝覆盖。
 
-客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。模型隐藏偏好使用账户本地目录 `~/.pi/pi-acp-workbench/preferences/model-visibility.json`，跨进程锁保护按目标模型的增量合并；暂时不在目录中的隐藏项不会被其他保存操作删除。原生历史仍由各上游适配器管理，备份需要保留原生会话、daemon 数据目录及客户端偏好文件。所选 Agent 使用同目录 `client-settings.json`，不再读写 workspaceState；模型显示和价格不导入旧 Profile / 工作区配置。会话命名模型与模型/thinking 已在 daemon 账户目录，Pi context 配置仍由上游 `models.json` 管理。Remote 场景下客户端偏好位于扩展宿主账户，与远程服务端设置作用域可不同。
+客户端仍保存可见模型、价格与去重用量等界面偏好；这些不决定 worker 生命周期或共享正文。模型隐藏偏好使用账户本地目录 `~/.pi/pi-acp-workbench/preferences/model-visibility.json`，跨进程锁保护按目标模型的增量合并；暂时不在目录中的隐藏项不会被其他保存操作删除。原生历史仍由各上游适配器管理，备份需要保留原生会话、daemon 数据目录及客户端偏好文件。所选 Agent 使用同目录 `client-settings.json`，跨工作区与 Profile 共享。会话命名模型与模型/thinking 已在 daemon 账户目录，Pi context 配置仍由上游 `models.json` 管理。Remote 场景下客户端偏好位于扩展宿主账户，与远程服务端设置作用域可不同。
 
-计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在账户本地目录 `~/.pi/pi-acp-workbench/preferences/price-overrides.json`，跨工作区和 VS Code Profile 共享；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记；旧工作区文件和 Memento 价格不会被读取或迁移。缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
+计费默认价来自 Pi 的 `get_available_models` RPC 模型 `cost` 字段，通过 inspect 返回给客户端；客户端刷新时替换默认价格快照，不维护静态价格表。用户价格优先于 Pi 默认价，存放在账户本地目录 `~/.pi/pi-acp-workbench/preferences/price-overrides.json`，跨工作区和 VS Code Profile 共享；跨进程锁保护最新文件的读改写与 durable 原子提交，不依赖 Memento 的整扩展缓存写回。恢复默认写入重置标记，缺失价格保留未定价状态。适配器的所有 Pi 启动入口共用 `pi-command.ts`，每次按显式覆盖、PATH、账户托管安装和实际 npm prefix 查找可执行文件，避免缓存旧安装路径。
 
 ## 历史窗口与服务端撤回
 
@@ -117,7 +117,7 @@ release 使用 `panic = "unwind"`。同步短临界区通过 `pi-acp-core::sync:
 
 socket 不监听公网，只允许同服务器账户使用；当前部署支持 Linux x86_64，需要单独部署 daemon，插件不自动启动或安装服务。Telegram 可打开三种 harness 的已有会话，`/new` 默认创建 Pi。Telegram 通过 `events.next` / `events.ack` 消费持久化 outbox，不读取或删除会话服务的文件。relay 可使用独立数据目录，通过 `serviceSocket` 指向服务 socket。
 
-协议分块、请求 fingerprint 与原生分支哈希仍遵守 UTF-16/canonical JSON 契约，详见 [service-protocol.md](service-protocol.md) 和 [data-formats.md](data-formats.md)。适配器自身的 native fork 锁与 daemon 单实例锁各有独立职责，不应因删除客户端历史锁而移除。
+协议分块、请求 fingerprint 与原生分支哈希仍遵守 UTF-16/canonical JSON 契约，详见 [service-protocol.md](service-protocol.md) 和 [data-formats.md](data-formats.md)。适配器自身的 native fork 锁与 daemon 单实例锁各有独立职责。
 
 ## 接入退避与构建边界
 

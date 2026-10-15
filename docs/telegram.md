@@ -1,8 +1,8 @@
 # Telegram 接入
 
-Telegram relay 是独立的 Rust 常驻进程，关闭 VS Code 后仍可对话和执行任务。生产入口为 `service-dist/pi-acp-telegram-daemon`，通过 `npm run build:services` 构建；不再发布 Node relay。接受 `--config` / `--data-dir` / `--discover` 参数与 Token 环境变量，继续读写 `~/.pi/pi-acp-workbench/telegram/` 的既有格式。契约验证为 `npm run test:contract:telegram`，真实 Rust 会话服务与 relay 集成为 `npm run test:integration:rust`。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知都保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
+Telegram relay 是独立的 Rust 常驻进程，通过 Unix socket 连接会话服务，关闭 VS Code 后仍可对话和执行任务。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
 
-本版支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复将 Markdown 转成 Telegram 原生 entities；流式不完整片段按安全文本处理，长代码与中文 / emoji 分块保留格式。
+支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复将 Markdown 转成 Telegram 原生 entities；流式不完整片段按安全文本处理，长代码与中文 / emoji 分块保留格式。
 
 ## 一键配置（推荐）
 
@@ -161,9 +161,7 @@ journalctl --user -u pi-telegram -f
 
 ### 4. 桌面与手机共享会话
 
-安装新插件并重载窗口。VS Code 和 Telegram 均连接 `pi-sessions.service`，不再通过桌面控制端点或抢占会话锁。关闭 VS Code 后任务继续，手机在对应话题直接发送消息即可。通知由执行服务保存到 outbox，Telegram `/notifications` 控制是否推送，无需桌面单独启用通知设置。
-
-旧版本升级时先等待任务结束，退出旧插件连接并停止旧 Telegram，再按新配置启动会话服务与 Telegram。不要混用仍直接启动 Pi 的旧客户端。
+VS Code 和 Telegram 均连接 `pi-sessions.service`。关闭 VS Code 后任务继续，手机在对应话题直接发送消息即可。通知由执行服务保存到 outbox，Telegram `/notifications` 控制是否推送，无需桌面单独启用通知设置。
 
 ## 存储与恢复边界
 
@@ -178,7 +176,7 @@ journalctl --user -u pi-telegram -f
 
 ## 维护与升级范围
 
-共享历史要求快照含明确 harness 和原生会话 ID。旧版待重建快照、跨存储自动迁移和缺失元数据推断已移除；已有文件不会被自动删除。升级前可备份 `~/.pi/pi-acp-workbench/` 和 Pi 原生会话目录。维护源码后，应先验证、打包，再在任务空闲时更新插件与常驻服务。配置文件中的 token 和代理凭据始终留在用户配置目录，不进入仓库。
+共享历史要求快照含明确 harness 和原生会话 ID，不推断缺失元数据，也不自动迁移或删除不兼容文件。升级前备份 `~/.pi/pi-acp-workbench/` 和 Agent 原生会话目录，在任务空闲时配套更新插件与常驻服务。配置文件中的 token 和代理凭据始终留在用户配置目录，不进入仓库。
 
 ## 日常使用
 
@@ -188,7 +186,7 @@ journalctl --user -u pi-telegram -f
 
 ### 创建和继续会话
 
-统一使用 `/menu` 打开按钮面板，`/settings` 已移除。在 General 中显示管理菜单：第一行并排“新建会话 / 已有会话”，其后是同步历史摘要、自动推送、静音发送和命令帮助；开关标明作用于所有会话。在已绑定会话 Topic 中只显示对应 Session 的模型、思考强度、状态、停止任务、“同步最近的消息”和“刷新面板”；不显示新建、其他 Harness、管理菜单或全局开关。未绑定的其他 Topic 只提示前往 General。`/help` 同时显示帮助与当前话题对应的面板。
+统一使用 `/menu` 打开按钮面板。在 General 中显示管理菜单：第一行并排“新建会话 / 已有会话”，其后是同步历史摘要、自动推送、静音发送和命令帮助；开关标明作用于所有会话。在已绑定会话 Topic 中只显示对应 Session 的模型、思考强度、状态、停止任务、“同步最近的消息”和“刷新面板”；不显示新建、其他 Harness、管理菜单或全局开关。未绑定的其他 Topic 只提示前往 General。`/help` 同时显示帮助与当前话题对应的面板。
 
 - **新建会话**：点击新建，选择工作区别名或最近目录，点击 Pi / Codex / Claude 创建会话。也可用 `/new /absolute/path/to/project` 或 `/new project` 直接进入 Harness 选择。无参数 `/new` 打开目录选择；输入新目录时回复专门的提示消息，不会作为模型指令发送。目录仍按服务器账户权限和 `restrictToWorkspaces` 检查。未安装或未登录的 Harness 会显示创建失败原因。
 - **模型 / 思考强度**：新建或 `/open` 后在会话话题展示设置卡片。点击选择按钮，分页查看真实 Agent 提供的选项，当前项带 ✓，供应商分组保留在名称中。切换模型后刷新思考强度和实际生效值；未提供对应选项时显示说明。设置沿用服务端的按 Harness 偏好，与桌面端共享，新建会话继承。
@@ -223,7 +221,7 @@ Telegram 输出支持 ACP 图片 / 嵌入资源，以及 Markdown 中的内嵌 r
 - `/stop` 停止当前任务并取消已排队请求；取消不撤销已发生的文件修改。
 - `/interrupt 新指令` 停止后执行新指令。
 - `/status` 查看最近输出与待处理授权；任一端处理授权后另一端不能重复批准。
-- 桌面和手机共享服务会话，不存在接管操作；`/takeover`、`/desktop` 接口已删除。
+- 桌面和手机共享服务会话，无需接管。
 
 每个话题最多 20 条手机消息排队，Pi 服务全局最多接受 100 个排队或执行请求。尚未执行的内存队列不会在重启后重放。Pi 服务重启会中断任务并保留中断状态；Telegram 接入重启不会取消已交给 Pi 服务的任务。
 
@@ -265,4 +263,4 @@ Telegram Bot API 的 [`sendMessage.disable_notification`](https://core.telegram.
 
 同话题的提示词按接收顺序执行，状态查询和控制操作不等待当前任务结束。`/stop` 同时取消尚未执行的旧提示词；`/interrupt` 完成取消后把替代提示词放回普通队列，避免长任务占用控制槽。通知总开关不隐藏队列拒绝和重启结果未确认的提示。
 
-部署包、TLS / 代理和升级回滚见 [服务发布](service-release.md)；测试入口与已经执行的范围见 [测试](testing.md) 和 [验收记录](rust-acceptance.md)。
+部署包、TLS / 代理和升级回滚见[服务发布](service-release.md)；测试入口见[测试指南](testing.md)。

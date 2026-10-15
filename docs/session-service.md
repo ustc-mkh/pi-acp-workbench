@@ -1,6 +1,6 @@
 # Pi 会话服务
 
-Pi 由独立的 `pi-sessions.service` 启动和管理。VS Code 与 Telegram 都连接本地 Unix socket，不再各自启动 Pi，也不互相接管。Pi、Codex、Claude Code 均由同一个 daemon 管理。
+Pi、Codex、Claude Code 均由独立的 `pi-sessions.service` 启动和管理。VS Code 与 Telegram 通过本地 Unix socket 连接同一个 daemon，共享会话、任务与历史。
 
 ## 安装
 
@@ -21,7 +21,7 @@ Pi 可以在当前账户有权限访问的任意目录运行，无需配置目�
 
 示例 unit 使用 `Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`，兼容用户目录及常见系统安装；`%h` 按运行账户展开，不绑定用户名。托管安装和 npm 全局 prefix 即使不在 PATH 中也可被检索；使用 nvm、Volta 时仍需将实际 Node 所在目录加入 unit 的 PATH。systemd 不读取 `.bashrc` 等交互式 shell 配置；修改后执行 `systemctl --user daemon-reload` 并重启服务。
 
-`npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs`、`pi-fast-mode.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；标准 ACP 适配器即可；原生会话加载、图片、选择器与 Pi 分支按实际能力启用。插件中的旧 Pi command/args/env 设置不再决定服务的运行环境。
+`npm run build:services` 生成独立的 `service-dist/`：两个 Rust 二进制、`pi-adapter.mjs`、`pi-native-fork.mjs`、`pi-fast-mode.mjs` 和平台/架构/文件 SHA-256 清单。生产构建不开启 `contract-test` feature，VSIX 不包含原生服务。默认使用二进制旁的内置 `pi-adapter.mjs`，Node 22+ 必须位于服务 PATH；非标准 Node 安装请显式配置 `command` / `args`。只有明确需要自定义 ACP 适配器时才设置 `command` 和 `args`；标准 ACP 适配器即可；原生会话加载、图片、选择器与 Pi 分支按实际能力启用。worker 的运行环境统一由 `sessions.json` 配置。
 
 Pi 的 Fast mode 通过随包扩展请求 OpenAI / OpenAI Codex Responses 的 `service_tier: priority`，不是降低思考级别。只在对应 provider/API 显示，默认 Off；扩展未加载或原生节点 RPC 失败时明确报错。是否接受优先级及收费取决于模型和账户。设置保存为原生分支上的 custom entry，恢复与分支沿用该点的设置，新建会话默认 Off；不写入跨会话模型/思考偏好。Pi 尚未写入对话的空会话另在现有适配器索引保存设置，以便 worker 重启后恢复；有对话或 Fast 原生节点时始终以原生分支为准。切到其他 provider 时不注入优先级请求。不要同时安装其他改写 service_tier 的扩展，以免请求 hook 相互覆盖。
 
@@ -51,7 +51,7 @@ Pi 的 Fast mode 通过随包扩展请求 OpenAI / OpenAI Codex Responses 的 `s
 }
 ```
 
-服务 PATH 必须能找到适配器；也可填写绝对路径。`harnesses.pi` 可覆盖顶层 Pi 启动配置。Codex/Claude 无配置时使用上述默认命令，环境覆盖彼此隔离。旧 `piAcp.codex.command/args/env`、`piAcp.claude.command/args/env` 与 sharedHistory 设置已经移除；请把 worker 配置移到这个文件。插件登录终端使用独立 loginCommand 设置。重启服务应用配置，关闭 VS Code 不影响任务。
+服务 PATH 必须能找到适配器；也可填写绝对路径。`harnesses.pi` 可覆盖顶层 Pi 启动配置。Codex/Claude 无配置时使用上述默认命令，环境覆盖彼此隔离。插件登录终端使用独立 loginCommand 设置。重启服务应用配置，关闭 VS Code 不影响任务。
 
 ```bash
 systemctl --user daemon-reload
@@ -60,15 +60,13 @@ systemctl --user status pi-sessions
 journalctl --user -u pi-sessions -f
 ```
 
-### 实现维护策略
+### 运行与维护
 
-Rust 是生产服务的唯一实现。终态 outbox 写失败会使请求失败并标记 interrupted 收据，不重新执行已运行的模型任务。TS daemon 入口、会话服务、队列、收据和 socket 服务端已删除；会话与偏好回归直接连接 Rust 进程。Telegram relay 同样只有 Rust 生产实现。模块职责见 [架构](architecture.md)，契约与真实双服务回归见 [测试](testing.md)，已有证据见 [验收记录](rust-acceptance.md)。
+Rust daemon 负责执行、历史与偏好。终态 outbox 写失败会使请求失败并标记 interrupted 收据，不重新执行已运行的模型任务。模块职责见[架构](architecture.md)，服务回归入口见[测试](testing.md)。
 
 桌面端「清空历史」会删除整个服务器账户的共享历史，并停止服务上的全部会话任务（包括 Telegram）；界面会进行二次确认。只想停止一个任务时请使用取消，而不是清空历史。
 
-### 从旧 Node 服务切换
-
-先等任务结束，停止 Telegram，再停止会话服务并备份数据目录；确认 Pi 子进程退出后执行 `npm run build:services`，更新两个 unit 的 `ExecStart` 并依次启动会话服务、Telegram。已有当前格式数据继续使用，不自动转换或删除。不要在服务运行时覆盖 `service-dist/`。回滚使用切换前的发布版本和备份，禁止新旧 daemon 共用同一 `--data-dir` 并行运行。
+升级与回滚时，先结束任务，按 Telegram → 会话服务的顺序停止，备份数据与配置，替换产物后按相反顺序启动。不要在服务运行时覆盖 `service-dist/`，或让不同版本共用同一数据目录并行运行。完整流程见[服务发布](service-release.md#校验安装与回滚)。
 
 退出 SSH 后仍运行，需要账户启用 linger：`loginctl enable-linger "$USER"`。服务未启动时插件会报连接错误，不会回退到直接启动 Pi。自定义数据目录用 daemon 的 `--data-dir`；插件设置 `piAcp.serviceSocket` 指向该目录下 `service/sessions.sock`，Telegram 可在配置中设置绝对路径 `serviceSocket` 连接此 socket，并使用自己的 `--data-dir` 保存话题和投递状态；省略时连接其数据目录下 `service/sessions.sock`。
 
@@ -96,9 +94,9 @@ Rust 是生产服务的唯一实现。终态 outbox 写失败会使请求失败�
 
 收据位于 `~/.pi/pi-acp-workbench/service/requests/`，历史位于 `history/`；目录/文件使用 0700/0600。Socket 限制为同账户使用，不监听公网端口。备份时保留历史、原生 Pi 会话和任务收据。不要在运行期间手工删除收据或抢锁。
 
-Pi 的模型与思考等级仅使用当前 ACP `configOptions`，不再从旧版 `modes` 推断。普通 Socket 状态订阅统一使用带 revision 的增量协议。
+Pi 的模型与思考等级使用 ACP `configOptions`。普通 Socket 状态订阅使用带 revision 的增量协议。
 
-升级旧版本时，先结束任务、关闭旧插件连接并停止旧 Telegram 服务，再启动新会话服务和新客户端。本次 Socket 增加会话订阅和分块响应，插件、会话服务与 Telegram 必须一起更新并重启，不能混用新旧客户端。插件要求 v4 服务（历史分页、Diff 引用与服务端撤回），不支持委托写入或直接文件写降级；启动新 daemon 前必须关闭旧版本插件，避免旧客户端写历史。已有当前格式的共享历史可直接继续；缺失必需元数据、完整快照标识或请求指纹的数据不受支持。仅存在于旧插件本地存储的记录不迁移。升级前备份数据；不兼容数据如需归档或改用新数据目录，应由操作者明确处理，不能删除收据后假定仍具备防重放保证。
+插件、会话服务与 Telegram relay 必须配套更新并重启。插件要求 v4 服务（历史分页、Diff 引用与服务端撤回），不支持客户端直接写入历史。已有当前格式的共享历史可继续使用；缺失必需元数据、完整快照标识或请求指纹的数据不受支持。升级前备份数据；遇到不兼容数据时，由操作者明确归档或选择新数据目录，不自动迁移或删除，也不能删除收据后假定仍具备防重放保证。
 
 ## 长期运行的资源边界
 
@@ -108,7 +106,7 @@ Pi 的模型与思考等级仅使用当前 ACP `configOptions`，不再从旧版
 
 本地 socket 最多 32 个连接、128 个处理中的请求；请求正文和未完成帧各受 32 MiB 总量限制，请求单帧上限 16 MiB。大历史响应按小帧顺序传输并等待背压，单个完整响应/单连接发送队列上限 64 MiB，全部连接发送队列上限 128 MiB。客户端按会话显式订阅，每连接最多 32 个会话；其他会话不会收到完整历史广播。
 
-超大响应返回明确错误，超大广播仅向相关订阅者报告错误，不再断开所有客户端。未完成帧、分块停顿或写入背压超过 10 秒时关闭对应连接；长任务本身没有这个超时。连接满额会记录日志并在 100 ms 内尝试读取不超过 64 KiB 的首帧，向该请求返回 `code: "busy"` 后关闭；没有及时发首帧或超限时直接关闭。accept 出错和满额拒绝均退避 100 ms，退出信号可以打断等待。队列超限会拒绝请求，发送队列或慢写超限会关闭对应连接，已提交任务不会因断线重放。分块传输仍需在客户端拼装完整历史，超过 64 MiB 的会话需要新建会话或离线检查原生记录，尚未实现 UI 历史分页。
+超大响应返回明确错误，超大广播仅向相关订阅者报告错误，不再断开所有客户端。未完成帧、分块停顿或写入背压超过 10 秒时关闭对应连接；长任务本身没有这个超时。连接满额会记录日志并在 100 ms 内尝试读取不超过 64 KiB 的首帧，向该请求返回 `code: "busy"` 后关闭；没有及时发首帧或超限时直接关闭。accept 出错和满额拒绝均退避 100 ms，退出信号可以打断等待。队列超限会拒绝请求，发送队列或慢写超限会关闭对应连接，已提交任务不会因断线重放。分块传输受单个响应大小限制；超限时应新建会话或离线检查原生记录。桌面通过 `historyPage` 分页加载更早消息，实时状态只携带最新窗口；冷读取仍需解析完整会话快照，见[持久化与恢复](persistence-recovery.md#容量与后续演进)。
 
 Telegram 发送队列最多 64 个请求，最多 32 个活动预览，5 分钟没有更新的预览会释放；每个预览仅保留约 3800 字符且独立复制，避免短子串间接保留整篇长回复。授权票据最多 128 个并定期过期；Pi 每个会话最多保留 32 个待授权请求，单个授权请求超过 256 KiB 时取消该授权。
 
@@ -128,7 +126,7 @@ worker 回调与会话操作边界捕获 panic 并关闭对应 worker；持锁�
 
 ## Codex / Claude 用量与上下文
 
-升级并重启会话 daemon 后，桌面的用量统计页可以读取 Codex / Claude ACP 返回的 token 明细，按模型、日期、会话汇总并沿用费用估算。需要上游适配器实际返回 `PromptResponse.usage` 或 `_meta.quota`。服务使用独立的 `usageInspection` 能力协商，旧 daemon 不会被误认为支持。
+桌面的用量统计页可读取 Codex / Claude ACP 返回的 token 明细，按模型、日期、会话汇总并沿用费用估算。需要上游适配器实际返回 `PromptResponse.usage` 或 `_meta.quota`。服务通过独立的 `usageInspection` 能力声明支持。
 
 统计从启用后的新轮次开始，服务重启或 worker 回收后仍可查询；不回填此前的原生历史。模型明细优先，避免与汇总重复计数。缺失数据、未知模型会明确提示；费用估算不是订阅额度或最终账单。
 
