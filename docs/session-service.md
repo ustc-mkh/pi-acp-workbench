@@ -30,7 +30,7 @@ Pi 的 Fast mode 通过随包扩展请求 OpenAI / OpenAI Codex Responses 的 `s
 | 字段                       | 作用与约束                                                                      |
 | -------------------------- | ------------------------------------------------------------------------------- |
 | `command` / `args` / `env` | 顶层 Pi worker 启动配置；缺省 command 使用内置 JS 适配器，服务 PATH 中须有 Node |
-| `maxWorkers`               | 全部 harness 共用的 worker 上限，默认 3，允许 1–16                              |
+| `maxWorkers`               | 全部 harness 共用的 worker 总数上限（执行中 + 空闲），默认 16，允许 1–16        |
 | `idleMs`                   | 空闲回收扫描周期，默认 900000 ms，至少 1000 ms；生命周期按活跃度分层（见下）    |
 | `harnesses`                | pi / codex / claude 各自的 command、args、env；显式 worker 的 command 不得为空  |
 
@@ -42,7 +42,7 @@ Pi 的 Fast mode 通过随包扩展请求 OpenAI / OpenAI Codex Responses 的 `s
 
 ```json
 {
-  "maxWorkers": 3,
+  "maxWorkers": 16,
   "idleMs": 900000,
   "harnesses": {
     "codex": { "command": "codex-acp", "args": [], "env": {} },
@@ -72,9 +72,9 @@ Rust daemon 负责执行、历史与偏好。终态 outbox 写失败会使请求
 
 ## 进程生命周期
 
-- 默认最多 3 个工作进程（`maxWorkers`，1–16）；同会话任务串行排队。加载新 worker 时优先回收空闲进程，全部 worker 忙碌则返回错误，需稍后重新提交。
+- 默认最多 16 个工作进程（`maxWorkers`，1–16），所有 harness 共用，包含执行中与空闲驻留进程；按需启动，不预先创建。同会话任务串行排队。加载新 worker 时若已达容量上限，优先回收最久未提交任务的空闲进程，不等待其驻留期限到期；全部 worker 忙碌则返回错误，需稍后重新提交。
 - 查看已有历史不启动 Pi；发送消息、修改设置或请求原生分支时按需加载。新建会话会短暂启动 Pi 取得原生 ID，并读取数据目录下 `preferences/{harness}.json` 的最近模型/thinking 组合。桌面与 Telegram 共用此记录；恢复旧会话不应用全局偏好，也不因浏览而覆盖它。成功修改设置或实际发送会更新记录，关闭历史显示不影响偏好。
-- 空闲进程按最近提交任务的时间分层回收：最近提交过 prompt 的 8 个进程可驻留 16 天，其余驻留 1 天；查看、设置修改等不算活跃（`idleMs` 仅控制扫描周期）。回收后下一次请求重新加载原生历史，不重放旧提示词。
+- 空闲进程按最近提交任务的时间分层回收：当前驻留进程中，最近提交过 prompt 的前 8 个空闲超时为 16 天，其余为 1 天；查看、设置修改等不算活跃（`idleMs` 仅控制扫描周期）。这是空闲超时，不保证驻留期限：容量压力下可提前回收。回收后下一次请求重新加载原生历史，不重放旧提示词。
 - 插件关闭、客户端断线、Telegram 重启均不终止已提交的任务。授权可以在任一端处理，5 分钟无人处理则取消授权。
 - 所有 harness 每轮结束后由服务采集并保存[本轮总 Diff](turn-diff.md)，正常完成、取消及 Agent 崩溃均尽量保存已发生的工作区净变化。
 - 停止 Pi 服务会中断任务；正常退出先清理工作进程。systemd 的 `KillMode=control-group` 在异常退出或超时时兜底清理整个服务控制组。

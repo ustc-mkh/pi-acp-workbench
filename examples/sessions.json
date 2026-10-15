@@ -1,5 +1,5 @@
 {
-  "maxWorkers": 3,
+  "maxWorkers": 16,
   "idleMs": 900000,
   "env": {}
 }

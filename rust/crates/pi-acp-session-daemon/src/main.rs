@@ -68,7 +68,7 @@ struct WorkerConfig {
     idle_ms: u64,
 }
 fn default_max_workers() -> usize {
-    3
+    16
 }
 fn default_idle_ms() -> u64 {
     900_000
@@ -287,7 +287,30 @@ mod config_tests {
         }
         let config: WorkerConfig =
             serde_json::from_str(r#"{"command":"node","args":null,"env":null}"#).unwrap();
-        assert_eq!(config.max_workers, 3);
+        assert_eq!(config.max_workers, 16);
         assert_eq!(config.idle_ms, 900_000);
+    }
+
+    #[test]
+    fn worker_capacity_defaults_to_sixteen_and_preserves_explicit_limits() {
+        let path =
+            std::env::temp_dir().join(format!("pi-worker-config-{}.json", uuid::Uuid::new_v4()));
+        for (body, expected) in [
+            (r#"{}"#, Some(16)),
+            (r#"{"command":"node"}"#, Some(16)),
+            (r#"{"command":"node","maxWorkers":1}"#, Some(1)),
+            (r#"{"command":"node","maxWorkers":3}"#, Some(3)),
+            (r#"{"command":"node","maxWorkers":16}"#, Some(16)),
+            (r#"{"command":"node","maxWorkers":0}"#, None),
+            (r#"{"command":"node","maxWorkers":17}"#, None),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let result = load_config(path.to_str().unwrap());
+            match expected {
+                Some(limit) => assert_eq!(result.unwrap().max_workers, limit, "{body}"),
+                None => assert!(result.is_err(), "{body}"),
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

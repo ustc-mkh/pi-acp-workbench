@@ -1,6 +1,6 @@
 # Telegram 接入
 
-Telegram relay 是独立的 Rust 常驻进程，通过 Unix socket 连接会话服务，关闭 VS Code 后仍可对话和执行任务。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知保存在服务器上。默认最多同时执行 3 个不同会话，同一会话一次执行一个任务。
+Telegram relay 是独立的 Rust 常驻进程，通过 Unix socket 连接会话服务，关闭 VS Code 后仍可对话和执行任务。一个私人群组 Topic 对应一个服务会话（Pi、Codex 或 Claude）；话题绑定、共享历史和待发送的完成通知保存在服务器上。默认最多同时执行 16 个不同会话，执行中与空闲驻留进程共用此上限，同一会话一次执行一个任务。
 
 支持文字输入、Pi slash 命令、节流流式回复、工具授权按钮、停止任务及完成/失败通知。暂不处理 Telegram 图片、语音或文件上传。回复将 Markdown 转成 Telegram 原生 entities；流式不完整片段按安全文本处理，长代码与中文 / emoji 分块保留格式。
 

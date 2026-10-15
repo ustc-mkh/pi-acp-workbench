@@ -62,7 +62,7 @@ systemctl --user enable --now pi-sessions
 
 需要退出 SSH 后仍运行时，为账户启用 linger：`loginctl enable-linger "$USER"`，是否需要管理员权限取决于服务器策略。
 
-默认最多 3 个 Agent 工作进程，空闲时按需回收；历史保存在服务账户的数据目录。完整配置与排障见[会话服务](docs/session-service.md)。
+默认最多 16 个 Agent 工作进程，包含执行中与空闲驻留进程；按需启动，不会预先启动 16 个。空闲进程按活跃度分层回收，容量满时可提前回收空闲进程。历史保存在服务账户的数据目录。完整配置与排障见[会话服务](docs/session-service.md)。
 
 ### 3. 安装插件并开始对话
 
