@@ -1,7 +1,7 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type { HarnessId } from '../src/harness';
 import type { UiMessage, OutputImageReply } from '../src/shared';
-import { MAX_ATTACHMENT_IMAGE_BYTES, type PastedImage } from '../src/images';
+import type { PastedImage } from '../src/images';
 import { imagePreview } from './image-paste';
 
 export function inlineImageData(source: string): PastedImage | undefined {
@@ -25,9 +25,15 @@ export function contentImage(block: acp.ContentBlock, name = '输出图片') {
   if (block.type === 'resource' && 'blob' in block.resource && block.resource.mimeType)
     return imagePreview(block.resource.mimeType, block.resource.blob, name);
 }
-function replaceImage(node: HTMLElement, image: PastedImage, changed?: () => void) {
+function replaceImage(
+  node: HTMLElement,
+  image: PastedImage,
+  changed?: () => void,
+  source?: string,
+) {
   const img = imagePreview(image.mimeType, image.data, node.textContent || image.name);
   if (!img) return;
+  if (source) img.dataset.outputImageSource = source;
   img.onload = () => changed?.();
   img.onerror = () => {
     img.replaceWith(node);
@@ -49,8 +55,6 @@ export class OutputImages {
   private scope = '';
   private harness: HarnessId = 'pi';
   private sessionId?: string;
-  private cache = new Map<string, PastedImage>();
-  private bytes = 0;
   private pending = new Map<string, { id?: string; nodes: Set<HTMLElement> }>();
   constructor(
     private send: (message: UiMessage) => void,
@@ -62,9 +66,18 @@ export class OutputImages {
     this.scope = scope;
     this.harness = harness;
     this.sessionId = sessionId;
-    this.cache.clear();
     this.pending.clear();
-    this.bytes = 0;
+  }
+  /** Re-read local files after a turn; ignore replies for pre-refresh reads. */
+  refresh(root: HTMLElement) {
+    this.pending.clear();
+    for (const img of root.querySelectorAll<HTMLImageElement>('img[data-output-image-source]')) {
+      const marker = document.createElement('span');
+      marker.dataset.imageSource = img.dataset.outputImageSource!;
+      marker.textContent = img.alt;
+      img.replaceWith(marker);
+    }
+    this.hydrate(root);
   }
   hydrate = (root: HTMLElement) => {
     for (const image of root.querySelectorAll<HTMLImageElement>('.pasted-image'))
@@ -77,11 +90,7 @@ export class OutputImages {
     }
   };
   private load(source: string, node: HTMLElement) {
-    const cached = this.cache.get(source);
-    if (cached) {
-      replaceImage(node, cached, this.changed);
-      return;
-    }
+    // Deduplicate in-flight reads only: a path is not a content identity.
     if (!this.pending.has(source) && this.pending.size >= 32) {
       node.textContent = '[图片数量过多]';
       return;
@@ -115,20 +124,7 @@ export class OutputImages {
     this.pending.delete(source);
     const image = reply.image;
     if (image && imagePreview(image.mimeType, image.data, image.name)) {
-      const size = image.data.length;
-      while (
-        this.cache.size &&
-        (this.bytes + size > MAX_ATTACHMENT_IMAGE_BYTES || this.cache.size >= 64)
-      ) {
-        const key = this.cache.keys().next().value!;
-        this.bytes -= this.cache.get(key)!.data.length;
-        this.cache.delete(key);
-      }
-      if (size <= MAX_ATTACHMENT_IMAGE_BYTES) {
-        this.cache.set(source, image);
-        this.bytes += size;
-      }
-      for (const node of request.nodes) replaceImage(node, image, this.changed);
+      for (const node of request.nodes) replaceImage(node, image, this.changed, source);
     } else
       for (const node of request.nodes) {
         node.textContent = '[图片不可用，点击重试]';

@@ -19,6 +19,7 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
   // Pin upstream and fail closed if its integration seam changes; keep our implementation in src/.
   const entry = resolve('node_modules/pi-acp/dist/index.js');
   let source = await readFile(entry, 'utf8');
+  source = source.replace(/^#![^\n]*\n/, '');
   assertRequestErrorBinding(source);
   source = replaceExactlyOnce(
     source,
@@ -101,6 +102,25 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
     'const timeoutMs = opts?.timeoutMs;',
     'const timeoutMs = opts?.timeoutMs ?? (cmd.type === "compact" ? undefined : 30000);',
   );
+  source = replaceExactlyOnce(
+    source,
+    '    const method = stringProp(ev, "method");',
+    '    const method = stringProp(ev, "method");\n    const todoPlan = todoWidgetPlan(ev);\n    if (todoPlan) { this.emit(todoPlan); return; }',
+  );
+  source =
+    `import {todoWidgetPlan} from ${JSON.stringify(resolve('src/pi-todo-widget.ts'))};\n` + source;
+  const inputStart = source.indexOf('    if (method === "input" || method === "editor") {');
+  const inputEnd = source.indexOf('    if (method === "notify") {', inputStart);
+  if (inputStart < 0 || inputEnd < inputStart)
+    throw new Error('pi-acp integration seam changed: extension input');
+  source = replaceExactlyOnce(
+    source,
+    source.slice(inputStart, inputEnd),
+    '    if (method === "input" || method === "editor") {\n      await handleExtensionInput(this, ev, id);\n      return;\n    }\n',
+  );
+  source =
+    `import {handleExtensionInput} from ${JSON.stringify(resolve('src/pi-extension-input.ts'))};\n` +
+    source;
   const compactStart = source.indexOf('      if (cmd === "compact") {');
   const compactEnd = source.indexOf('      if (cmd === "session") {', compactStart);
   if (compactStart < 0 || compactEnd < compactStart)

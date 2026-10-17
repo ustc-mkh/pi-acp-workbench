@@ -166,8 +166,13 @@ export class RemoteAgent implements Agent {
   async cancel(sessionId: string) {
     await this.client.call('cancel', { sessionId });
   }
-  permission(permissionId: string, optionId?: string) {
-    return this.client.call<boolean>('permission', { sessionId: this.id, permissionId, optionId });
+  permission(permissionId: string, optionId?: string, value?: string) {
+    return this.client.call<boolean>('permission', {
+      sessionId: this.id,
+      permissionId,
+      optionId,
+      value,
+    });
   }
   dispose() {
     this.isClosed = true;

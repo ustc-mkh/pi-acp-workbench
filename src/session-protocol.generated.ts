@@ -24,7 +24,10 @@ export type ServiceCommand =
   | { method: 'turnDiff'; params: { sessionId: string; entryId: string } }
   | { method: 'cancel'; params: { sessionId: string } }
   | { method: 'remove'; params: { sessionId: string } }
-  | { method: 'permission'; params: { sessionId: string; permissionId: string; optionId?: string } }
+  | {
+      method: 'permission';
+      params: { sessionId: string; permissionId: string; optionId?: string; value?: string };
+    }
   | {
       method: 'prompt';
       params: { sessionId: string; prompt: acp.ContentBlock[]; source?: PromptSource };

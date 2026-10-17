@@ -90,6 +90,7 @@ export class SessionCoordinator {
           modes: snapshot.modes,
           contextComplete: snapshot.contextComplete,
           usage: snapshot.usage,
+          plan: snapshot.plan || [],
           readOnly: true,
           connectionAttempted: true,
         },
@@ -199,6 +200,7 @@ export class SessionCoordinator {
         this.host.state.sessionNumber = snapshot.sessionNumber;
         this.host.state.contextComplete = snapshot.contextComplete;
         this.host.state.usage = snapshot.usage;
+        this.host.state.plan = snapshot.plan || [];
       }
       throw error;
     }
@@ -216,6 +218,7 @@ export class SessionCoordinator {
       nativeForks: snapshot.nativeForks,
       contextComplete: snapshot.contextComplete,
       usage: snapshot.usage,
+      plan: snapshot.plan || [],
       readOnly: true,
       connectionAttempted: true,
       error,

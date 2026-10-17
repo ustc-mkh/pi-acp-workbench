@@ -1,17 +1,23 @@
 import type { Entry } from '../src/shared';
 export type TranscriptBlock =
   | { kind: 'message'; entry: Entry }
-  | { kind: 'activity'; id: string; entries: Entry[] };
+  | { kind: 'activity'; id: string; entries: Entry[]; running: boolean };
 
 /** Stream narration in the live turn; fold adjacent tools/thoughts, then the settled trace. */
-export function transcriptBlocks(entries: Entry[], busy = false): TranscriptBlock[] {
+export function transcriptBlocks(
+  entries: Entry[],
+  busy = false,
+  activeTurnId?: string | null,
+): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   let turn: Entry[] = [];
+  let turnId: string | undefined;
   const flush = (running = false) => {
     if (running) {
       let steps: Entry[] = [];
       const flushSteps = () => {
-        if (steps.length) blocks.push({ kind: 'activity', id: steps[0].id, entries: steps });
+        if (steps.length)
+          blocks.push({ kind: 'activity', id: steps[0].id, entries: steps, running: true });
         steps = [];
       };
       for (const entry of turn) {
@@ -33,7 +39,8 @@ export function transcriptBlocks(entries: Entry[], busy = false): TranscriptBloc
         (entry, i) =>
           i < answer || (i > answer && (entry.role === 'tool' || entry.role === 'thought')),
       );
-      if (activity.length) blocks.push({ kind: 'activity', id: activity[0].id, entries: activity });
+      if (activity.length)
+        blocks.push({ kind: 'activity', id: activity[0].id, entries: activity, running: false });
       for (const entry of turn.slice(answer))
         if (entry.role !== 'tool' && entry.role !== 'thought')
           blocks.push({ kind: 'message', entry });
@@ -44,7 +51,12 @@ export function transcriptBlocks(entries: Entry[], busy = false): TranscriptBloc
       if (entry.role === 'tool' || entry.role === 'thought') last = i;
     });
     if (last >= 0)
-      blocks.push({ kind: 'activity', id: turn[0].id, entries: turn.slice(0, last + 1) });
+      blocks.push({
+        kind: 'activity',
+        id: turn[0].id,
+        entries: turn.slice(0, last + 1),
+        running: false,
+      });
     for (const entry of turn.slice(last + 1)) blocks.push({ kind: 'message', entry });
     turn = [];
   };
@@ -52,9 +64,16 @@ export function transcriptBlocks(entries: Entry[], busy = false): TranscriptBloc
     if (entry.role === 'user') {
       flush();
       blocks.push({ kind: 'message', entry });
-    } else turn.push(entry);
+      turnId = undefined;
+    } else {
+      if (entry.turnId && entry.turnId !== turnId) {
+        flush();
+        turnId = entry.turnId;
+      }
+      turn.push(entry);
+    }
   }
-  flush(busy);
+  flush(busy && (!activeTurnId || turnId === activeTurnId));
   return blocks;
 }
 
@@ -91,7 +110,7 @@ export class TranscriptView {
       if (expanded) group.renderBody();
     }
   }
-  update(entries: Entry[], busy: boolean) {
+  update(entries: Entry[], busy: boolean, activeTurnId?: string | null) {
     const ids = new Set(entries.map((entry) => entry.id));
     for (const [id, cached] of this.messages)
       if (!ids.has(id)) {
@@ -122,16 +141,32 @@ export class TranscriptView {
         cached = { entry, node };
         this.messages.set(entry.id, cached);
       }
+      cached.node.classList.toggle('running-turn', runningIds.has(entry.id));
       return cached.node;
     };
-    const blocks = transcriptBlocks(entries, busy),
+    const blocks = transcriptBlocks(entries, busy, activeTurnId),
       active = new Set<string>();
-    const nodes = blocks.map((block, index) => {
+    // The tail run alone is live; an autonomous wake is a new turn even without a user entry.
+    let start = 0;
+    let turnId: string | undefined;
+    entries.forEach((entry, index) => {
+      if (entry.role === 'user') {
+        start = index;
+        turnId = undefined;
+      } else if (entry.turnId && entry.turnId !== turnId) {
+        start = index;
+        turnId = entry.turnId;
+      }
+    });
+    const runningIds = new Set(
+      busy && (!activeTurnId || turnId === activeTurnId)
+        ? entries.slice(start).map((entry) => entry.id)
+        : [],
+    );
+    const nodes = blocks.map((block) => {
       if (block.kind === 'message') return message(block.entry);
       active.add(block.id);
-      const running =
-        busy &&
-        !blocks.slice(index + 1).some((b) => b.kind === 'message' && b.entry.role === 'user');
+      const running = block.running;
       let group = this.groups.get(block.id);
       if (!group) {
         const node = document.createElement('details');
@@ -177,12 +212,8 @@ export class TranscriptView {
         this.groups.delete(id);
       }
     reconcile(this.root, nodes);
-    this.runningEntries = new Set(
-      busy
-        ? entries
-            .slice(entries.map((entry) => entry.role).lastIndexOf('user') + 1)
-            .map((entry) => entry.id)
-        : [],
-    );
+    for (const [id, cached] of this.messages)
+      cached.node.classList.toggle('running-turn', runningIds.has(id));
+    this.runningEntries = runningIds;
   }
 }

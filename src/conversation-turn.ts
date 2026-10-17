@@ -227,6 +227,10 @@ export class TurnCoordinator {
 
   async onPermission(message: UiMessage & { type: 'permission' }): Promise<void> {
     if (this.host.agent)
-      await (this.host.agent as RemoteAgent).permission(message.id, message.optionId);
+      await (this.host.agent as RemoteAgent).permission(
+        message.id,
+        message.optionId,
+        message.value,
+      );
   }
 }

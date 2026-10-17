@@ -19,6 +19,8 @@ import { TranscriptView } from './transcript';
 import { PaintScheduler } from './paint-scheduler';
 import { installComposerResize } from './composer-resize';
 import { SlashCommands } from './slash-commands';
+import { extensionQuestion } from './extension-question';
+import { TodoPanel } from './todo-panel';
 interface UiState {
   drafts?: Partial<Record<HarnessId, string>>;
   composerHeight?: number;
@@ -26,6 +28,7 @@ interface UiState {
   historyOpen?: boolean;
   historyExpanded?: boolean;
   historyLimit?: number;
+  todoCollapsed?: boolean;
 }
 declare function acquireVsCodeApi(): {
   postMessage(message: UiMessage): void;
@@ -100,6 +103,7 @@ app.innerHTML = /* HTML */ `<header>
       </div>
       <div id="history-items"></div>
     </section>
+    <section id="plan" aria-label="待办清单" hidden></section>
     <div id="connection" hidden>
       <span class="status-dot"></span><span id="session-number" class="session-number" hidden></span
       ><span id="status" role="status"></span><button id="connect" hidden>重新连接</button>
@@ -146,7 +150,6 @@ app.innerHTML = /* HTML */ `<header>
         ↓
       </button>
     </div>
-    <section id="plan" aria-label="执行计划" hidden></section>
     <section id="permissions" aria-label="操作授权" aria-live="polite"></section>
     <div
       id="composer-resizer"
@@ -240,6 +243,9 @@ let activityExpanded = vscode.getState()?.activityExpanded || false;
 const outputImages = new OutputImages(send, () => {
   if (followBottom) el('transcript').scrollTop = el('transcript').scrollHeight;
 });
+const todoPanel = new TodoPanel(el('plan'), vscode.getState()?.todoCollapsed, (collapsed) =>
+  saveUi({ todoCollapsed: collapsed }),
+);
 const updateHistoryPaging = historyPaging(el('messages'), send);
 const transcriptView = new TranscriptView(
   el('messages'),
@@ -487,9 +493,10 @@ function paint() {
   input.disabled = connecting;
   updateSend();
   const messages = el('messages');
+  messages.classList.toggle('busy', busy);
   const visible = state.entries.filter((e) => e.role !== 'thought' || state!.showThoughts);
   updateHistoryPaging(state);
-  transcriptView.update(visible, busy);
+  transcriptView.update(visible, busy, state.activeTurnId);
   el('toggle-activity').hidden = !visible.some(
     (entry) => entry.role === 'tool' || entry.role === 'thought',
   );
@@ -538,14 +545,7 @@ function paint() {
     b.dataset.tooltip = '移除此上下文';
     attachments.append(b);
   }
-  const plan = el('plan');
-  plan.hidden = !state.plan.length;
-  plan.replaceChildren();
-  for (const item of state.plan) {
-    const p = document.createElement('div');
-    p.textContent = `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○'} ${item.content}`;
-    plan.append(p);
-  }
+  todoPanel.update(state.plan, state.sessionId);
   // Do not replace focused permission buttons on every streaming update.
   const permissions = el('permissions');
   const permissionSignature = JSON.stringify([state.permissions]);
@@ -553,6 +553,11 @@ function paint() {
     permissions.dataset.signature = permissionSignature;
     permissions.replaceChildren();
     for (const item of state.permissions) {
+      const question = extensionQuestion(item, send);
+      if (question) {
+        permissions.append(question);
+        continue;
+      }
       const card = document.createElement('div');
       card.className = 'permission-card';
       const h = document.createElement('strong');
@@ -650,9 +655,11 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (received.switched) followBottom = true;
+  const turnFinished = state?.status === 'busy' && received.state?.status !== 'busy';
   state = received.state;
   const nextHarness = state?.harness || 'pi';
   outputImages.setScope(nextHarness, state?.sessionId);
+  if (turnFinished && !received.switched) outputImages.refresh(el('messages'));
   if (nextHarness !== draftHarness) {
     saveDraft();
     draftHarness = nextHarness;

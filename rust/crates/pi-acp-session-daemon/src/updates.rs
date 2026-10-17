@@ -20,7 +20,13 @@ pub fn initial_state() -> ChatState {
 use pi_acp_core::util::js_truthy;
 
 /// Merge text into the last entry of the same role (except notices), honoring messageId.
-pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Option<&Value>) {
+fn append_run_text(
+    state: &mut ChatState,
+    role: &str,
+    text: &str,
+    message_id: Option<&Value>,
+    turn_id: Option<&str>,
+) {
     // A refused input is not a model turn boundary and must not split an
     // autonomous message that is still streaming around it.
     let last_index = state
@@ -31,6 +37,7 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
         .and_then(|index| state.entries.get(index))
         .is_some_and(|last| {
             last.role == role
+                && last.turn_id.as_deref() == turn_id
                 && role != "notice"
                 && (message_id.map(|m| !js_truthy(m)).unwrap_or(true)
                     || last.message_id == message_id.cloned())
@@ -46,6 +53,7 @@ pub fn append_text(state: &mut ChatState, role: &str, text: &str, message_id: Op
         state.entries.push(Entry {
             id: next_id(),
             role: role.to_string(),
+            turn_id: turn_id.map(str::to_string),
             text: Some(text.to_string()),
             send_error: None,
             message_id: message_id.cloned(),
@@ -85,7 +93,15 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             let decoded = pi_acp_core::acp::MessageContent::decode(&content);
             let ctype = decoded.kind.as_str();
             let text = decoded.display_text();
-            append_text(state, role, &text, update.get("messageId"));
+            append_run_text(
+                state,
+                role,
+                &text,
+                update.get("messageId"),
+                update
+                    .pointer("/_meta/pi-workbench-live")
+                    .and_then(Value::as_str),
+            );
             if ctype != "text" {
                 if let Some(entry) = state.entries.last_mut() {
                     if matches!(entry.role.as_str(), "user" | "assistant" | "thought") {
@@ -140,6 +156,10 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
                     state.entries.push(Entry {
                         id: next_id(),
                         role: "tool".to_string(),
+                        turn_id: update
+                            .pointer("/_meta/pi-workbench-live")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                         text: None,
                         send_error: None,
                         message_id: None,
@@ -194,6 +214,15 @@ pub fn apply_update(state: &mut ChatState, update: &Value, replay: bool) {
             }
         }
         "session_info_update" => {
+            if let Some(run) = update.pointer("/_meta/pi-workbench-run") {
+                if let Some(id) = run.get("id").and_then(Value::as_str) {
+                    if run.get("running").and_then(Value::as_bool) == Some(true) {
+                        state.active_turn_id = Some(id.to_string());
+                    } else if state.active_turn_id.as_deref() == Some(id) {
+                        state.active_turn_id = None;
+                    }
+                }
+            }
             if let Some(usage) = update.pointer("/_meta/pi-workbench-context") {
                 if usage.get("used") == Some(&Value::Null)
                     && usage
@@ -258,6 +287,61 @@ fn merge_terminal(previous: Option<Value>, meta: Option<&Value>) -> Option<Value
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn late_run_completion_does_not_clear_new_active_turn() {
+        let mut state = initial_state();
+        for (id, running) in [("first", true), ("wake", true), ("first", false)] {
+            apply_update(
+                &mut state,
+                &json!({"sessionUpdate":"session_info_update", "_meta":{"pi-workbench-run":{"id":id,"running":running}}}),
+                false,
+            );
+        }
+        assert_eq!(state.active_turn_id.as_deref(), Some("wake"));
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"session_info_update", "_meta":{"pi-workbench-run":{"id":"wake","running":false}}}),
+            false,
+        );
+        assert!(state.active_turn_id.is_none());
+    }
+
+    #[test]
+    fn independent_runs_never_merge_and_keep_persisted_boundaries() {
+        let mut state = initial_state();
+        for (run, text) in [
+            ("first", "answer"),
+            ("first", " tail"),
+            ("wake", "new answer"),
+        ] {
+            apply_update(
+                &mut state,
+                &json!({
+                    "sessionUpdate":"agent_message_chunk", "messageId":"same-id",
+                    "content":{"type":"text","text":text},
+                    "_meta":{"pi-workbench-live":run}
+                }),
+                false,
+            );
+        }
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.entries[0].text(), "answer tail");
+        assert_eq!(state.entries[0].turn_id.as_deref(), Some("first"));
+        assert_eq!(state.entries[1].turn_id.as_deref(), Some("wake"));
+        apply_update(
+            &mut state,
+            &json!({"sessionUpdate":"tool_call", "toolCallId":"t", "_meta":{"pi-workbench-live":"wake"}}),
+            false,
+        );
+        assert_eq!(state.entries[2].turn_id.as_deref(), Some("wake"));
+        let restored: Vec<Entry> =
+            serde_json::from_value(serde_json::to_value(&state.entries).unwrap()).unwrap();
+        assert_eq!(restored[1].turn_id.as_deref(), Some("wake"));
+        let legacy: Entry =
+            serde_json::from_value(json!({"id":"old","role":"assistant","text":"old"})).unwrap();
+        assert!(legacy.turn_id.is_none());
+    }
+
     #[test]
     fn config_catalogues_preserve_omissions_and_only_protect_empty_replays() {
         let known = vec![json!({"id":"model"})];

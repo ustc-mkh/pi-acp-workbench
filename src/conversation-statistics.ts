@@ -1,9 +1,9 @@
-import type { Memento } from 'vscode';
 import { validPriceModel, type PricePreferences, type PriceOverrides } from './price-preferences';
 import type { Agent } from './remote-agent';
 import type { ChatState, Snapshot } from './shared';
 import type { ClientOperations } from './conversation-history';
 import { HARNESSES, type HarnessId } from './harness';
+import type { UsageStorage } from './usage-storage';
 import {
   mergeUsage,
   validPrice,
@@ -48,11 +48,13 @@ export class ConversationStatistics {
     return [note, this.priceStorageNote].filter(Boolean).join('\n') || undefined;
   }
   private metadataHistory?: Snapshot[];
+  private persistedTitles: Record<string, string>;
+  private persistedSessionNumbers: Record<string, number>;
   private overrides: Record<string, Price>;
   private lastOverrides: PriceOverrides = {};
   private modelPrices: Record<string, Price> = {};
   constructor(
-    private storage: Memento,
+    private storage: UsageStorage,
     private persistence: ClientOperations,
     private current: () => StatisticsContext,
     private contextWindow: (value: number) => void,
@@ -67,8 +69,8 @@ export class ConversationStatistics {
       sessionNumbers: storage.get('usageSessionNumbers', {}),
       available: false,
     };
-    // Legacy bare prices need the already loaded records when expanding around
-    // a qualified model reset, including cold sessions with no model catalogue.
+    this.persistedTitles = { ...this.value.titles };
+    this.persistedSessionNumbers = { ...this.value.sessionNumbers };
     this.value.prices = this.prices();
   }
   reset(harness: HarnessId) {
@@ -112,8 +114,37 @@ export class ConversationStatistics {
     this.value = { ...this.value, titles: id ? titles : {} };
   }
   async persistTitles() {
-    await this.storage.update('usageTitles', this.value.titles);
-    await this.storage.update('usageSessionNumbers', this.value.sessionNumbers || {});
+    const patch = <T extends string | number>(
+      before: Record<string, T>,
+      after: Record<string, T>,
+    ) => {
+      const changes: Record<string, T | null> = {};
+      for (const id of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (!Object.hasOwn(after, id)) changes[id] = null;
+        else if (before[id] !== after[id]) changes[id] = after[id];
+      }
+      return changes;
+    };
+    if (!this.storage.patch) {
+      await this.storage.update('usageTitles', this.value.titles);
+      await this.storage.update('usageSessionNumbers', this.value.sessionNumbers || {});
+      return;
+    }
+    const titles = await this.storage.patch(
+      'usageTitles',
+      patch(this.persistedTitles, this.value.titles),
+    );
+    const numbers = await this.storage.patch(
+      'usageSessionNumbers',
+      patch(this.persistedSessionNumbers, this.value.sessionNumbers || {}),
+    );
+    this.persistedTitles = titles as Record<string, string>;
+    this.persistedSessionNumbers = numbers as Record<string, number>;
+    this.value = {
+      ...this.value,
+      titles: this.persistedTitles,
+      sessionNumbers: this.persistedSessionNumbers,
+    };
   }
   private readOverrides() {
     let raw: PriceOverrides;

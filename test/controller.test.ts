@@ -122,6 +122,10 @@ const activate = (context: TestContext) => {
 };
 let context: TestContext;
 let preferencesHome: string;
+const savedUsage = (): { usageRecords: UsageRecord[]; usageTitles: Record<string, string> } =>
+  JSON.parse(
+    readFileSync(resolve(preferencesHome, '.pi/pi-acp-workbench/preferences/usage.json'), 'utf8'),
+  );
 const savedPrice = (model: string) =>
   JSON.parse(
     readFileSync(
@@ -524,7 +528,8 @@ it('removes usage titles and does not recreate them after forgetting an active c
   await host.provider.perform({ type: 'new' });
   await host.provider.perform({ type: 'send', text: 'private message' });
   await host.provider.recordUsage([]);
-  expect(host.stored.get('usageTitles')).toEqual({ 'test-session': 'private message' });
+  expect(savedUsage().usageTitles).toEqual({ 'test-session': 'private message' });
+  expect(host.stored.has('usageTitles')).toBe(false);
   // Deletion is initiated from the history list; wait for its authoritative refresh,
   // rather than depending on the background poll having completed during send.
   await host.provider.refreshHistory();
@@ -539,7 +544,7 @@ it('removes usage titles and does not recreate them after forgetting an active c
   });
   await host.provider.perform({ type: 'deleteHistory', id: 'test-session' });
   await host.provider.recordUsage([]);
-  expect(host.stored.get('usageTitles')).toEqual({});
+  expect(savedUsage().usageTitles).toEqual({});
 });
 it.each(['codex', 'claude'] as const)(
   'shows %s turn diffs after the answer and opens native changes',
@@ -690,8 +695,9 @@ it('clears usage titles while preserving billed records and prices', async () =>
     return remove(id, after);
   });
   await host.provider.perform({ type: 'clearHistory' });
-  expect(host.stored.get('usageTitles')).toEqual({});
-  expect(host.stored.get('usageRecords')).toEqual([record]);
+  expect(savedUsage().usageTitles).toEqual({});
+  expect(savedUsage().usageRecords).toEqual([record]);
+  expect(host.stored.has('usageRecords')).toBe(false);
   expect(host.provider.statistics.prices).toEqual(prices);
 });
 it('does not create a session on ready, reconnect, or send; only explicit new does', async () => {
@@ -1117,22 +1123,18 @@ it('deduplicates billed requests and keeps native branch spending separate', asy
   };
   await host.provider.recordUsage([record]);
   await host.provider.recordUsage([record]);
-  expect(host.stored.get('usageRecords')).toHaveLength(1);
+  expect(savedUsage().usageRecords).toHaveLength(1);
   await host.provider.recordUsage([
     { ...record, id: 'next-request', sessionId: required(host.provider.snapshot().sessionId) },
   ]);
-  expect((host.stored.get('usageRecords') as UsageRecord[]).map((r) => r.sessionId)).toEqual([
-    original,
-    original,
-  ]);
+  expect(savedUsage().usageRecords.map((r) => r.sessionId)).toEqual([original, original]);
   await edit('branchMessage', host.provider.snapshot().entries[0].id);
   await host.provider.recordUsage([
     { ...record, id: 'branch-request', sessionId: required(host.provider.snapshot().sessionId) },
   ]);
-  expect(
-    (host.stored.get('usageRecords') as UsageRecord[]).find((r) => r.id === 'branch-request')!
-      .sessionId,
-  ).not.toBe(original);
+  expect(savedUsage().usageRecords.find((r) => r.id === 'branch-request')!.sessionId).not.toBe(
+    original,
+  );
 });
 it('cancels native branch preparation without discarding the original connection', async () => {
   await contextAgent('context-native');

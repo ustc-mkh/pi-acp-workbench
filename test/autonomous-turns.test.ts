@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { startRustService } from './rust-service';
 import type { ServiceState } from '../src/session-protocol';
 import { readOutbox } from './rust-utils';
+import { transcriptBlocks } from '../webview/transcript';
 let adapterDir: string;
 const cleanup: (() => Promise<unknown>)[] = [];
 beforeAll(async () => {
@@ -82,8 +83,18 @@ it('retains restore-time autonomous output and rejects user input without waitin
 });
 it('publishes autonomous busy state, displays the callback, persists final output and publishes completion', async () => {
   const f = await fixture();
+  const before = (await f.state()).snapshot.entries;
+  const previousAnswer = before.filter((entry) => entry.role === 'assistant').at(-1)!;
+  expect(previousAnswer.turnId).toEqual(expect.any(String));
   await f.signal('wake');
   await f.busy();
+  const during = (await f.state()).snapshot.entries;
+  const newAnswer = during.find(
+    (entry) => entry.role === 'assistant' && entry.text === '自主唤醒回复',
+  )!;
+  expect(newAnswer.turnId).toEqual(expect.any(String));
+  expect(newAnswer.turnId).not.toBe(previousAnswer.turnId);
+  expect(transcriptBlocks(during, true)).toContainEqual({ kind: 'message', entry: previousAnswer });
   expect((await f.state()).snapshot.entries).toContainEqual(
     expect.objectContaining({ role: 'notice', text: '后台任务已完成' }),
   );
@@ -103,6 +114,16 @@ it('publishes autonomous busy state, displays the callback, persists final outpu
     (await readdir(folder)).map((file) => readFile(join(folder, file), 'utf8')),
   );
   expect(saved.some((text) => text.includes('自主唤醒回复'))).toBe(true);
+  const persisted = saved
+    .map((text) => JSON.parse(text))
+    .find((snapshot) => snapshot.id === f.session.id);
+  expect(transcriptBlocks(persisted.entries)).toContainEqual({
+    kind: 'message',
+    entry: previousAnswer,
+  });
+  expect(persisted.entries.find((entry: { id: string }) => entry.id === newAnswer.id).turnId).toBe(
+    newAnswer.turnId,
+  );
   expect(await readOutbox(f.root)).toContainEqual(
     expect.objectContaining({
       id: expect.stringMatching(/^autonomous:/),

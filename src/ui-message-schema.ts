@@ -65,7 +65,7 @@ const schemas: Record<UiMessage['type'], Record<string, Check>> = {
   },
   send: { text: (v) => typeof v === 'string' && v.length <= 500000, id: optional(text) },
   dismissError: { error: text },
-  permission: { id: text, optionId: optional(text) },
+  permission: { id: text, optionId: optional(text), value: optional(text) },
   mode: { value: text },
   config: { id: text, value: text },
   setVisibleModels: {

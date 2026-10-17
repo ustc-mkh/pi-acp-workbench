@@ -64,6 +64,8 @@
 
 Snapshot 字段（含可选项）：`id`、`cwd`、`title`、`updated`(ms)、`entries`、`harness`、`sessionNumber`、`revision`、`conversationId`（fork 前原会话 id，编号按此归属）、`contextWindow`、`usage`（`{used:number|null,size:number}`，当前 context 占用，非累计计费）、`contextComplete`、`configs`、`modes`、`commands`、`nativeForks`、`usageRecords`、`stored`。未知字段容忍；必需字段缺失即拒绝。
 
+条目可带 `turnId:string`，取自适配器实时更新的 `_meta['pi-workbench-live']` run ID，用于区分没有用户输入的后台自主轮次。文本分片只在角色、messageId 和 turnId 相容时合并；工具条目记录创建时的 turnId，后续更新不改变归属。前端在 turnId 变化时结束上一轮，因此已完成回答与 Diff 不会并入下一次后台输出的执行过程。旧条目可省略该字段，不自动推断缺失的历史边界。
+
 乐观锁：`read` 记录 `seen[id]=revision`；`write` 要求拥有进程内运行时且当前 `revision` 等于 `seen`，写时生成新 `revision`（UUID），旧版本文件在 index commit 后删除。
 
 `sessionNumber` 分配：同一 `conversationId||id` 复用已有编号；否则取 `nextSessionNumber`（缺省 1）与现有最大编号+1 的较大者，写回 `nextSessionNumber=number+1`。

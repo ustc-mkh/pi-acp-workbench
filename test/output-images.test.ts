@@ -54,7 +54,7 @@ it('renders assistant, thought, tool, embedded resource and inline Markdown rast
   expect(unsafe.querySelector('img')).toBeNull();
   expect(unsafe.querySelector('[data-image-source]')).toBeNull();
 });
-it('deduplicates requests, queues to four reads, caches images, retries failures and ignores stale replies', () => {
+it('deduplicates in-flight requests, queues to four reads, re-reads paths, retries failures and ignores stale replies', () => {
   const send = vi.fn(),
     images = new OutputImages(send);
   images.setScope('pi', 'one');
@@ -74,16 +74,18 @@ it('deduplicates requests, queues to four reads, caches images, retries failures
   const cached = document.createElement('div');
   cached.innerHTML = render('![cached](./a.png)');
   images.hydrate(cached);
+  expect(cached.querySelector('img')).toBeNull();
+  expect(send).toHaveBeenCalledTimes(2);
+  images.receive({ type: 'outputImage', id: send.mock.calls[1][0].id, image });
   expect(cached.querySelector('img')).not.toBeNull();
-  expect(send).toHaveBeenCalledTimes(1);
   const queued = document.createElement('div');
   queued.innerHTML = render(Array.from({ length: 6 }, (_, i) => `![${i}](./${i}.png)`).join(' '));
   images.hydrate(queued);
-  expect(send).toHaveBeenCalledTimes(5);
-  images.receive({ type: 'outputImage', id: send.mock.calls[1][0].id, error: 'unavailable' });
   expect(send).toHaveBeenCalledTimes(6);
+  images.receive({ type: 'outputImage', id: send.mock.calls[2][0].id, error: 'unavailable' });
+  expect(send).toHaveBeenCalledTimes(7);
   expect(queued.querySelector('[role=button]')?.textContent).toContain('点击重试');
-  const old = send.mock.calls[2][0].id;
+  const old = send.mock.calls[3][0].id;
   images.setScope('codex', 'two');
   images.receive({ type: 'outputImage', id: old, image });
   expect(queued.querySelector('img')).toBeNull();
@@ -98,4 +100,28 @@ it('deduplicates requests, queues to four reads, caches images, retries failures
   expect(retry).not.toBe(failed);
   images.receive({ type: 'outputImage', id: retry, image });
   expect(fresh.querySelector('img')).not.toBeNull();
+});
+
+it('refreshes displayed local images after overwrite and ignores pre-refresh replies', () => {
+  const send = vi.fn();
+  const images = new OutputImages(send);
+  images.setScope('pi', 'one');
+  const root = document.createElement('div');
+  root.innerHTML = render('![preview](./preview.png)');
+  images.hydrate(root);
+  images.receive({ type: 'outputImage', id: send.mock.calls[0][0].id, image });
+  expect(root.querySelector('img')?.dataset.outputImageSource).toBe('./preview.png');
+  images.refresh(root);
+  const staleId = send.mock.calls.at(-1)![0].id;
+  images.refresh(root);
+  const freshId = send.mock.calls.at(-1)![0].id;
+  images.receive({ type: 'outputImage', id: staleId, image });
+  expect(root.querySelector('img')).toBeNull();
+  // A different valid PNG payload at the same path must replace the old pixels.
+  const updated = {
+    ...image,
+    data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  };
+  images.receive({ type: 'outputImage', id: freshId, image: updated });
+  expect(root.querySelector('img')?.src).toBe('data:image/png;base64,' + updated.data);
 });

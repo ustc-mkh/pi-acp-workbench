@@ -5,16 +5,18 @@ import type { TurnDiff } from './turn-diff';
 import type * as acp from '@agentclientprotocol/sdk';
 // Entries are replaced on update; the state channel uses their identity for change tracking.
 export type Entry = Readonly<
-  | {
-      id: string;
-      role: 'user' | 'assistant' | 'thought' | 'notice';
-      text: string;
-      sendError?: string;
-      messageId?: string | null;
-      contextBlocks?: acp.ContentBlock[];
-    }
-  | { id: string; role: 'tool'; tool: acp.ToolCall; terminal?: TerminalOutput }
-  | { id: string; role: 'diff'; text: string; diff: TurnDiff }
+  { turnId?: string } & (
+    | {
+        id: string;
+        role: 'user' | 'assistant' | 'thought' | 'notice';
+        text: string;
+        sendError?: string;
+        messageId?: string | null;
+        contextBlocks?: acp.ContentBlock[];
+      }
+    | { id: string; role: 'tool'; tool: acp.ToolCall; terminal?: TerminalOutput }
+    | { id: string; role: 'diff'; text: string; diff: TurnDiff }
+  )
 >;
 export interface OutputImageReply {
   type: 'outputImage';
@@ -38,6 +40,9 @@ export interface ContextUsage {
   size: number;
 }
 export interface Snapshot {
+  /** Live run ID; absent or null while idle. Not a persisted preference. */
+  activeTurnId?: string | null;
+  plan?: acp.PlanEntry[];
   /** Number of earlier transcript entries available through historyPage. */
   historyBefore?: number;
   /** Live list metadata only; absent in persisted snapshots and older daemons. */
@@ -63,6 +68,7 @@ export interface Snapshot {
   modes?: acp.SessionModeState;
 }
 export interface ChatState {
+  activeTurnId?: string | null;
   sessionTitle?: string;
   titleModel?: string;
   providerSettingsResult?: { id: string; provider: string; models: string[]; error?: string };
@@ -141,7 +147,7 @@ export type UiMessage =
     }
   | { type: 'send'; text: string; id?: string }
   | { type: 'dismissError'; error: string }
-  | { type: 'permission'; id: string; optionId?: string }
+  | { type: 'permission'; id: string; optionId?: string; value?: string }
   | { type: 'mode'; value: string }
   | { type: 'config'; id: string; value: string }
   | {

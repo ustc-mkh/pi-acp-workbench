@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 pub struct Entry {
     pub id: String,
     pub role: String, // user | assistant | thought | notice | tool | diff
+    /// Adapter run boundary, including extension-triggered rounds without user input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Rejected input is displayed in history but was never delivered to the model.
@@ -148,6 +151,7 @@ pub struct ChatState {
     pub native_forks: Option<BTreeMap<String, NativeBranchTarget>>,
     pub usage: Option<Value>,
     pub plan: Vec<Value>,
+    pub active_turn_id: Option<String>,
     pub usage_records: Vec<crate::usage::UsageRecord>,
 }
 
@@ -156,6 +160,7 @@ impl Entry {
         Entry {
             id,
             role: role.to_string(),
+            turn_id: None,
             text: Some(text),
             send_error: None,
             message_id: None,

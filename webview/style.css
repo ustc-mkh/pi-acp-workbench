@@ -573,15 +573,76 @@ select {
   padding-right: 5px;
 }
 #plan {
-  padding: 9px 18px;
-  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+  margin: 6px 12px 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input);
+  box-shadow: 0 3px 10px #0002;
   font-size: 11px;
-  color: var(--muted);
-  max-height: 100px;
-  overflow: auto;
 }
-#plan > div {
-  padding: 3px 0;
+.todo-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.todo-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  max-height: 90px; /* Five fixed-height rows. */
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vscode-scrollbarSlider-background, #536278) transparent;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  box-sizing: border-box;
+}
+.todo-list::-webkit-scrollbar {
+  width: 6px;
+}
+.todo-list::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, #536278);
+  border-radius: 3px;
+}
+.todo-list::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, #6b7b91);
+}
+.todo-circle {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  box-sizing: border-box;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+}
+.todo-item.completed .todo-circle {
+  color: #76bfa9;
+  border-color: #76bfa9;
+}
+.todo-item.in_progress .todo-circle {
+  border-color: #cfa56d;
+  box-shadow: inset 0 0 0 3px var(--input);
+  background: #cfa56d;
+}
+.todo-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.todo-item.completed .todo-label {
+  color: var(--muted);
+  text-decoration: line-through;
 }
 #permissions {
   max-height: 40vh;
@@ -608,6 +669,32 @@ select {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+.extension-question .permission-actions {
+  flex-direction: column;
+  align-items: stretch;
+}
+.extension-question .permission-actions button {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  max-height: none;
+  text-align: left;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+.extension-question .question-title {
+  margin-top: 6px;
+  font-weight: 600;
+}
+.extension-question textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  min-height: 64px;
+  resize: vertical;
 }
 .permission-actions button {
   font-size: 11px;
@@ -1018,6 +1105,10 @@ body.vscode-high-contrast-light button {
   gap: 2px;
   margin-top: 5px;
   color: var(--muted);
+}
+/* Actions belong to settled messages only; streaming can contain partial assistant entries. */
+#messages.busy .running-turn .message-actions {
+  display: none;
 }
 .message-actions button {
   padding: 3px 6px;

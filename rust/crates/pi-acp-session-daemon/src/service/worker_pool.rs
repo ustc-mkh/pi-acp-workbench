@@ -401,6 +401,12 @@ impl SessionService {
                 state.commands = snapshot.commands.clone().unwrap_or_default();
                 state.usage = snapshot.usage.clone();
                 state.usage_records = snapshot.usage_records.clone();
+                state.plan = snapshot
+                    .extra
+                    .get("plan")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 let rt = Arc::new(Mutex::new(Runtime {
                     snapshot: Snapshot {
                         entries: vec![],

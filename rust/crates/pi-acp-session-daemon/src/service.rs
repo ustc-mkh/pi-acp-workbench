@@ -103,7 +103,7 @@ pub struct Runtime {
     runs: autonomous::Runs,
     pub used: u64,
     /// permissionId → settle channel; send resolves the pending agent request.
-    pub permissions: HashMap<String, oneshot::Sender<Option<String>>>,
+    pub permissions: HashMap<String, oneshot::Sender<Option<Value>>>,
     pub error: Option<String>,
     snapshot_pending: bool,
 }
@@ -418,7 +418,7 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| r.snapshot.title.clone())
         };
-        Snapshot {
+        let mut snapshot = Snapshot {
             entries: r.state.entries.clone(),
             configs: r.state.configs.clone(),
             modes: r.state.modes.clone(),
@@ -435,7 +435,9 @@ async fn save_snapshot(store: &SharedHistoryStore, rt: &Rt) -> Result<(), String
             updated: now_ms(),
             title,
             ..r.snapshot.clone()
-        }
+        };
+        snapshot.extra.insert("plan".into(), json!(r.state.plan));
+        snapshot
     };
     let stub = store.write(&snapshot).await?;
     rt.lock_unpoisoned().snapshot = stub;
@@ -489,6 +491,10 @@ fn view_state(r: &Runtime) -> Value {
         ..r.snapshot.clone()
     };
     snapshot.extra.insert("historyBefore".into(), json!(before));
+    snapshot
+        .extra
+        .insert("activeTurnId".into(), json!(r.state.active_turn_id));
+    snapshot.extra.insert("plan".into(), json!(r.state.plan));
     serde_json::to_value(ServiceState {
         snapshot,
         busy: r.busy(),
@@ -525,7 +531,7 @@ async fn service_permission(
         .map(|v| v.len() > 256 * 1024)
         .unwrap_or(true);
     let id = Uuid::new_v4().to_string();
-    let (tx, rx) = oneshot::channel::<Option<String>>();
+    let (tx, rx) = oneshot::channel::<Option<Value>>();
     {
         let mut r = rt.lock_unpoisoned();
         if worker_epoch.is_some_and(|epoch| r.runs.worker_epoch != epoch)
@@ -563,7 +569,7 @@ async fn service_permission(
         broadcast(view_state_with_type(&r));
     }
     match chosen {
-        Some(option_id) => json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+        Some(response) => response,
         None => cancelled(),
     }
 }

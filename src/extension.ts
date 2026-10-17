@@ -24,6 +24,7 @@ import { initialState } from './state';
 import { ActiveConversation } from './active-conversation';
 import { ConversationHistory } from './conversation-history';
 import { ConversationStatistics } from './conversation-statistics';
+import { FileUsageStorage } from './usage-storage';
 import { HARNESS_IDS, isHarnessId, type HarnessId } from './harness';
 import { validPrice, type UsageRecord } from './telemetry';
 import type { Snapshot, UiMessage, Entry } from './shared';
@@ -189,6 +190,7 @@ export class ChatProvider
     this.state.usage = s.usage;
     this.active.replace({ contextWindow: s.contextWindow ?? s.usage?.size });
     this.state.plan = value.plan || [];
+    this.state.activeTurnId = s.activeTurnId;
     this.state.sessionNumber = s.sessionNumber;
     this.state.sessionTitle = s.title;
     if (this.history.some((item) => item.id === s.id && item.title !== s.title))
@@ -250,8 +252,9 @@ export class ChatProvider
           this.serviceClient.call('historyRemove', id ? { sessionId: id } : {}, undefined, 0),
       },
     });
+    const usageStorage = new FileUsageStorage(localPreferencesPath('usage.json'));
     this.telemetry = new ConversationStatistics(
-      context.workspaceState,
+      usageStorage,
       this.persistence,
       () => ({
         agent: this.agent,

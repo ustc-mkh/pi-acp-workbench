@@ -59,7 +59,8 @@ impl SessionService {
             "snapshot": snapshot,
             "busy": false,
             "permissions": [],
-            "commands": snapshot.commands.clone().unwrap_or_default(), "plan": [],
+            "commands": snapshot.commands.clone().unwrap_or_default(),
+            "plan": snapshot.extra.get("plan").cloned().unwrap_or_else(|| json!([])),
         });
         if interrupted {
             out["error"] = json!("上次任务被服务中断，未自动重放。");
@@ -126,6 +127,7 @@ impl SessionService {
             ServiceCommand::Permission {
                 permission_id,
                 option_id,
+                value,
                 ..
             } => {
                 let rt = self.runtimes.lock_unpoisoned().get(id).cloned();
@@ -148,7 +150,24 @@ impl SessionService {
                             .unwrap_or(false),
                         (Some(_), None) => true,
                     };
-                    if valid {
+                    let input = ticket.is_some_and(|t| {
+                        t.request.pointer("/_meta/pi-workbench-input") == Some(&Value::Bool(true))
+                            && matches!(
+                                t.request
+                                    .pointer("/toolCall/rawInput/method")
+                                    .and_then(Value::as_str),
+                                Some("input" | "editor")
+                            )
+                    });
+                    let valid_value = match value {
+                        Some(text) => {
+                            input
+                                && option_id.as_deref() == Some("submit")
+                                && text.encode_utf16().count() <= 10000
+                        }
+                        None => !input || option_id.is_none(),
+                    };
+                    if valid && valid_value {
                         r.permissions.remove(permission_id)
                     } else {
                         None
@@ -156,7 +175,15 @@ impl SessionService {
                 };
                 match sender {
                     Some(tx) => {
-                        let _ = tx.send(option_id.clone());
+                        let response = option_id.as_ref().map(|option| {
+                            let mut response =
+                                json!({"outcome": {"outcome": "selected", "optionId": option}});
+                            if let Some(text) = value {
+                                response["_meta"] = json!({"pi-workbench-input": {"value": text}});
+                            }
+                            response
+                        });
+                        let _ = tx.send(response);
                         Ok(Value::Bool(true))
                     }
                     None => Ok(Value::Bool(false)),

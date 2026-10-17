@@ -157,6 +157,9 @@ pub enum ServiceCommand {
         #[serde(default, deserialize_with = "optional_option")]
         #[ts(optional)]
         option_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        value: Option<String>,
     },
     Prompt {
         #[serde(deserialize_with = "session_text")]

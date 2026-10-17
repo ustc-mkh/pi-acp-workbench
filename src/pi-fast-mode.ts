@@ -1,5 +1,6 @@
 // Pi extension: keep the fast setting on the native branch, outside model context.
 import { installContextConfig, type ContextModel } from './pi-context-mode';
+import { installTodoBridge, type TodoExtensionApi } from './pi-todo';
 export const FAST_ENTRY = 'pi-acp-workbench/fast-mode';
 export const FAST_COMMAND = 'workbench-fast';
 export interface FastModel {
@@ -59,6 +60,7 @@ export interface FastExtensionApi {
 }
 export default function fastMode(pi: FastExtensionApi) {
   installContextConfig(pi);
+  installTodoBridge(pi as unknown as TodoExtensionApi);
   pi.on('before_provider_request', ({ payload }, context) => {
     if (!supportsFast(context.model) || !fastEnabled(context.sessionManager.getBranch())) return;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload))
