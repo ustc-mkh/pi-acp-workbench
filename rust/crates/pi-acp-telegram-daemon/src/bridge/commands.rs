@@ -170,9 +170,15 @@ impl Bridge {
                         .unwrap_or_default(),
                     3000,
                 );
+                let plan = format_plan(status.get("plan"));
+                let plan_suffix = if plan.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n{plan}")
+                };
                 self.send(
                     &format!(
-                        "会话 {}\n{}；排队消息：{queued}\n{body}",
+                        "会话 {}\n{}；排队消息：{queued}\n{body}{plan_suffix}",
                         binding.session_id,
                         if busy { "正在执行" } else { "空闲" },
                     ),
@@ -294,6 +300,33 @@ pub(super) const HELP: &str = "会话与历史
 /start — 显示本帮助
 
 在会话话题直接发文字即可对话。其他命令（如 /compact）原样转交当前 Agent；可用命令取决于 Agent 配置。";
+
+fn format_plan(value: Option<&Value>) -> String {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return String::new();
+    };
+    let lines = items
+        .iter()
+        .filter_map(|item| {
+            let content = item.get("content").and_then(Value::as_str)?;
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending");
+            let marker = match status {
+                "completed" => "✅",
+                "in_progress" => "🔄",
+                _ => "⏳",
+            };
+            Some(format!("{marker} {}", utf16_head(content, 500)))
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("📋 Todo\n{}", lines.join("\n"))
+    }
+}
 
 impl Bridge {
     async fn help_panel(&self, user: i64, thread: Option<i64>) -> Result<(), String> {

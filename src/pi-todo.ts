@@ -28,6 +28,9 @@ export function todoTasks(value: unknown): TodoTask[] | undefined {
   }
   return tasks;
 }
+export function normalizeTodoTasks(tasks: TodoTask[]): TodoTask[] {
+  return tasks.filter((task) => task.status !== 'completed' && task.status !== 'deleted');
+}
 export function branchTodos(branch: Iterable<unknown>): TodoTask[] {
   let custom: TodoTask[] | undefined;
   let result: TodoTask[] | undefined;
@@ -58,16 +61,12 @@ export interface TodoExtensionApi {
 }
 export function installTodoBridge(pi: TodoExtensionApi) {
   const publish = (ctx: TodoContext, tasks = branchTodos(ctx.sessionManager.getBranch())) => {
-    if (ctx.mode === 'rpc') ctx.ui.setWidget(TODO_WIDGET, [JSON.stringify({ tasks })]);
+    if (ctx.mode === 'rpc')
+      ctx.ui.setWidget(TODO_WIDGET, [JSON.stringify({ tasks: normalizeTodoTasks(tasks) })]);
   };
-  for (const event of [
-    'session_start',
-    'session_switch',
-    'session_tree',
-    'session_compact',
-    'message_end',
-  ])
+  for (const event of ['session_start', 'session_switch', 'session_tree', 'session_compact'])
     pi.on(event, (_, ctx) => publish(ctx));
+  pi.on('message_end', (_, ctx) => publish(ctx));
   pi.on('tool_result', (event, ctx) => {
     if (event.toolName !== 'todo') return;
     // A state-changing call already appended rpiv-todo-state, including nested calls.

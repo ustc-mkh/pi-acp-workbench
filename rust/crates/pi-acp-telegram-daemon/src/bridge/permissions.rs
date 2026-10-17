@@ -1,6 +1,19 @@
 //! Permission ticket lifecycle and notification menus.
 use super::*;
 
+fn is_text_question(request: &Value) -> bool {
+    let marked = request
+        .get("_meta")
+        .and_then(|meta| meta.get("pi-workbench-input"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let method = request
+        .pointer("/toolCall/rawInput/method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| matches!(method, "input" | "editor"));
+    marked && method
+}
+
 impl Bridge {
     pub(super) async fn show_permission(
         &self,
@@ -13,11 +26,13 @@ impl Bridge {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let options: Vec<Value> = permission
-            .pointer("/request/options")
+        let request = permission.get("request").unwrap_or(&Value::Null);
+        let options: Vec<Value> = request
+            .pointer("/options")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let input = is_text_question(request);
         let key = {
             let mut tickets = self.shared.tickets.lock().await;
             let now = now_ms();
@@ -44,6 +59,7 @@ impl Bridge {
                 // Refresh the option list on the same ticket, keeping its expiry.
                 if let Some(ticket) = tickets.get_mut(&k) {
                     ticket.options = opts;
+                    ticket.input = input;
                 }
                 k
             } else {
@@ -58,6 +74,7 @@ impl Bridge {
                         permission_id,
                         thread_id,
                         options: opts,
+                        input,
                         expires: now + TICKET_TTL_MS,
                     },
                 );
@@ -67,6 +84,7 @@ impl Bridge {
         let mut keyboard: Vec<Value> = options
             .iter()
             .enumerate()
+            .filter(|(_, o)| !input || o.get("optionId").and_then(Value::as_str) != Some("submit"))
             .map(|(i, o)| {
                 json!([{ "text": utf16_head(o.get("name").and_then(Value::as_str).unwrap_or("允许"), 60), "callback_data": format!("p:{key}:{i}") }])
             })
@@ -87,15 +105,53 @@ impl Bridge {
             .unwrap_or_default(),
             2600,
         );
+        let body = if input {
+            format!(
+                "Agent 正在等待你的回答：{title}\n请直接发送文本回答；也可以点击取消。\n{detail}"
+            )
+        } else {
+            format!("需要授权：{title}\n{detail}")
+        };
         if let Err(e) = self
             .send(
-                &format!("需要授权：{title}\n{detail}"),
+                &body,
                 Some(thread_id),
                 json!({ "reply_markup": { "inline_keyboard": keyboard } }),
             )
             .await
         {
             self.report(&e.message).await;
+        }
+    }
+
+    pub(super) async fn answer_input(&self, session_id: &str, thread_id: i64, text: &str) -> bool {
+        if text.encode_utf16().count() > 10000 {
+            return false;
+        }
+        let ticket = {
+            let tickets = self.shared.tickets.lock().await;
+            tickets.iter().find_map(|(key, ticket)| {
+                (ticket.session_id == session_id
+                    && ticket.thread_id == thread_id
+                    && ticket.input
+                    && ticket.expires > now_ms())
+                .then(|| (key.clone(), ticket.permission_id.clone()))
+            })
+        };
+        let Some((key, permission_id)) = ticket else {
+            return false;
+        };
+        match self
+            .shared
+            .host
+            .permission(session_id, &permission_id, Some("submit"), Some(text))
+            .await
+        {
+            Ok(true) => {
+                self.shared.tickets.lock().await.shift_remove(&key);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -135,7 +191,7 @@ impl Bridge {
             match self
                 .shared
                 .host
-                .permission(&session_id, &permission_id, option.as_deref())
+                .permission(&session_id, &permission_id, option.as_deref(), None)
                 .await
             {
                 Ok(true) => {

@@ -170,6 +170,7 @@ pub(super) fn observe(r: &mut Runtime, rt: &Rt, update: &Value, host: &Host) {
             let _ = settle.send(None);
         }
         r.state.permissions.clear();
+        crate::updates::finish_plan(&mut r.state);
     }
     if error.is_some() {
         r.error = error.clone();

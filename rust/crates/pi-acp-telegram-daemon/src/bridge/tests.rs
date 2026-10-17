@@ -233,6 +233,7 @@ async fn failed_switch_dispatch_has_no_menu_or_live_side_effects_and_expired_tic
             permission_id: "permission".into(),
             thread_id: 101,
             options: vec![Some("yes".into())],
+            input: false,
             expires: 0,
         },
     );
@@ -339,6 +340,7 @@ async fn previews_are_bounded_and_abandoned_streams_and_tickets_expire() {
                 permission_id: "permission".into(),
                 thread_id: 101,
                 options: vec![Some("yes".into())],
+                input: false,
                 expires,
             },
         );
@@ -440,12 +442,14 @@ async fn pending_messages_survive_restart_but_started_work_is_reported_without_r
                     update: incoming(1, "uncertain"),
                     phase: InboxPhase::Started,
                     prompt: None,
+                    answer: false,
                 },
                 InboxItem {
                     id: 2,
                     update: incoming(2, "pending"),
                     phase: InboxPhase::Pending,
                     prompt: None,
+                    answer: false,
                 },
             ];
         })
@@ -479,6 +483,7 @@ async fn full_inbox_rejects_visibly_and_failed_checkpoint_never_dispatches() {
                     update: incoming(id, "queued"),
                     phase: InboxPhase::Pending,
                     prompt: None,
+                    answer: false,
                 })
                 .collect()
         })

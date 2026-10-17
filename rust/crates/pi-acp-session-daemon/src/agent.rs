@@ -2,6 +2,7 @@
 //! Requests, permissions and writes are independently tracked; prompts have no timeout.
 //! Shutdown signals the process group and escalates before reaping its leader.
 use crate::harness::Harness;
+use crate::interaction::UserRequest;
 use pi_acp_core::sync::MutexExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -20,7 +21,7 @@ pub type UpdateCb = Arc<dyn Fn(Value) + Send + Sync>;
 /// Async permission bridge: the reader task spawns `cb(params)` per inbound
 /// `session/request_permission` and writes `{id, result: <resolved>}` back.
 pub type PermissionCb =
-    Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Value> + Send>> + Send + Sync>;
+    Arc<dyn Fn(UserRequest) -> Pin<Box<dyn Future<Output = Value> + Send>> + Send + Sync>;
 pub type LogCb = Arc<dyn Fn(&str) + Send + Sync>;
 pub type ClosedCb = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -69,6 +70,15 @@ struct Inner {
     exit_rx: watch::Receiver<bool>,
 }
 
+fn client_capabilities(harness: Harness) -> Value {
+    match harness {
+        Harness::Claude | Harness::Codex => json!({
+            "plan": {},
+            "elicitation": {"form": {}},
+        }),
+        Harness::Pi => json!({"plan": {}}),
+    }
+}
 fn send_wire(inner: &Inner, message: Value) -> bool {
     inner
         .write_tx
@@ -311,15 +321,24 @@ fn handle_line(inner: &Arc<Inner>, line: &[u8]) -> bool {
                 return false;
             }
         };
-        if method == "session/request_permission" {
+        // Inbound requests that require a user response are bridged through the
+        // same host callback. Claude uses `elicitation/create` for
+        // AskUserQuestion forms.
+        let is_elicitation = method == "elicitation/create";
+        if method == "session/request_permission" || is_elicitation {
             let inner = inner.clone();
             tokio::spawn(async move {
+                let params = if is_elicitation {
+                    UserRequest::Form(params)
+                } else {
+                    UserRequest::Permission(params)
+                };
                 let result =
                     pi_acp_core::panic_guard::run(async { (inner.permission)(params).await }).await;
                 let result = match result {
                     Ok(value) => value,
                     Err(_) => {
-                        fail(&inner, "ACP 授权处理异常，工作进程已关闭。".into());
+                        fail(&inner, "ACP 用户提问处理异常，工作进程已关闭。".into());
                         return;
                     }
                 };
@@ -713,7 +732,7 @@ impl AgentProcess {
                     json!({
                         "protocolVersion": 1,
                         "clientInfo": {"name": "pi-acp-workbench", "title": "Pi ACP Workbench", "version": "1.0.0"},
-                        "clientCapabilities": {},
+                        "clientCapabilities": client_capabilities(self.inner.harness),
                     }),
                 ),
                 20_000,
@@ -841,6 +860,19 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc as tmpsc;
 
+    #[test]
+    fn capabilities_advertise_only_supported_user_request_modes() {
+        for harness in [Harness::Codex, Harness::Claude] {
+            let capabilities = client_capabilities(harness);
+            assert!(capabilities.get("plan").is_some());
+            assert!(capabilities.pointer("/elicitation/form").is_some());
+            assert!(capabilities.pointer("/elicitation/url").is_none());
+        }
+        assert!(client_capabilities(Harness::Pi)
+            .get("elicitation")
+            .is_none());
+    }
+
     /// test/contract-agent.mjs lives at the repo root, three levels up from
     /// this crate's manifest dir.
     fn agent_path() -> String {
@@ -873,7 +905,9 @@ mod tests {
                 permission: Arc::new(move |request| {
                     let perm_tx = perm_tx.clone();
                     Box::pin(async move {
-                        let _ = perm_tx.send(request);
+                        if let UserRequest::Permission(request) = request {
+                            let _ = perm_tx.send(request);
+                        }
                         // Same shape the service resolves ({outcome:…}).
                         json!({"outcome": {"outcome": "selected", "optionId": "yes"}})
                     })

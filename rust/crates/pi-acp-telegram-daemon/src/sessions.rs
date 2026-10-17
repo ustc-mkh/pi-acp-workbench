@@ -290,6 +290,7 @@ impl Sessions {
             "busy": state.busy,
             "permissions": state.permissions,
             "text": text,
+            "plan": state.plan,
             "error": state.error,
         }))
     }
@@ -382,15 +383,19 @@ impl Sessions {
         id: &str,
         permission_id: &str,
         option_id: Option<&str>,
+        value: Option<&str>,
     ) -> Result<bool, WireError> {
         self.authorize(id).await?;
-        let option = option_id.map(Value::from).unwrap_or(Value::Null);
+        let mut params = json!({"sessionId": id, "permissionId": permission_id});
+        if let Some(option) = option_id {
+            params["optionId"] = json!(option);
+        }
+        if let Some(value) = value {
+            params["value"] = json!(value);
+        }
         Ok(self
             .client
-            .call(
-                "permission",
-                json!({ "sessionId": id, "permissionId": permission_id, "optionId": option }),
-            )
+            .call("permission", params)
             .await?
             .as_bool()
             .unwrap_or(false))
@@ -464,7 +469,10 @@ mod tests {
         assert!(host.create(outside.to_str()).await.is_err());
         assert!(host.state("outside").await.is_err());
         assert!(host.cancel("outside").await.is_err());
-        assert!(host.permission("outside", "p", Some("yes")).await.is_err());
+        assert!(host
+            .permission("outside", "p", Some("yes"), None)
+            .await
+            .is_err());
         assert!(host
             .run("outside", "prompt".into())
             .result

@@ -370,6 +370,120 @@ test('permission requests surface in state and resolve via the permission method
   assert.equal(result.stopReason, 'end_turn');
 });
 
+test('turn completion persists only active Todo entries', async () => {
+  const c = state.client;
+  await c.call('prompt', {
+    sessionId: state.sessionId,
+    prompt: [{ type: 'text', text: 'plan-report' }],
+  });
+  const view = await c.call('state', { sessionId: state.sessionId });
+  assert.deepEqual(
+    view.plan.map((p) => p.status),
+    ['in_progress', 'pending'],
+  );
+  const index = JSON.parse(await readFile(join(dataDir, 'history', 'index.json'), 'utf8'));
+  const saved = index.sessions.find((s) => s.id === state.sessionId);
+  assert.deepEqual(saved.plan, view.plan);
+});
+
+test('Claude-style elicitation requests use safe choice IDs and return form content', async () => {
+  const c = state.client;
+  const pending = c.call(
+    'prompt',
+    { sessionId: state.sessionId, prompt: [{ type: 'text', text: 'elicitation' }] },
+    { timeout: 0 },
+  );
+  let ticket;
+  for (let i = 0; i < 100; i++) {
+    const snapshot = await c.call('state', { sessionId: state.sessionId });
+    if (snapshot.permissions.length) {
+      ticket = snapshot.permissions[0];
+      break;
+    }
+    await delay(50);
+  }
+  assert(ticket, 'elicitation never surfaced');
+  assert.equal(
+    ticket.request.options.some((o) => o.optionId === 'choice:0'),
+    true,
+  );
+  assert.equal(
+    ticket.request.options.some((o) => o.optionId === 'field:question_0:a:b'),
+    false,
+  );
+  assert.equal(
+    await c.call('permission', {
+      sessionId: state.sessionId,
+      permissionId: ticket.id,
+      optionId: 'choice:0',
+    }),
+    true,
+  );
+  const result = await pending;
+  assert.equal(result.stopReason, 'end_turn');
+  const snapshot = await c.call('state', { sessionId: state.sessionId });
+  const transcript = snapshot.snapshot.entries.map((entry) => entry.text ?? '').join('\n');
+  assert.equal(transcript.includes('question_0'), true);
+  assert.equal(transcript.includes('a:b'), true);
+});
+
+test('form interaction supports text, multiple fields, multi-select, decline and cancel', async () => {
+  const c = state.client;
+  for (const scenario of [
+    {
+      prompt: 'elicitation-text',
+      answers: [{ optionId: 'submit', value: 'typed answer' }],
+      result: { action: 'accept', content: { question_0: 'typed answer' } },
+    },
+    {
+      prompt: 'elicitation-multi',
+      answers: [
+        { optionId: 'choice:0' },
+        { optionId: 'choice:1' },
+        { optionId: 'done' },
+        { optionId: 'submit', value: 'second answer' },
+      ],
+      result: {
+        action: 'accept',
+        content: { question_0: ['a:b', '其它'], question_1: 'second answer' },
+      },
+    },
+    { prompt: 'elicitation', answers: [{ optionId: 'decline' }], result: { action: 'decline' } },
+    { prompt: 'elicitation', answers: [{}], result: { action: 'cancel' } },
+  ]) {
+    const pending = c.call(
+      'prompt',
+      { sessionId: state.sessionId, prompt: [{ type: 'text', text: scenario.prompt }] },
+      { timeout: 0 },
+    );
+    let previous;
+    for (const answer of scenario.answers) {
+      let ticket;
+      for (let i = 0; i < 100; i++) {
+        const view = await c.call('state', { sessionId: state.sessionId });
+        ticket = view.permissions.find((p) => p.id !== previous);
+        if (ticket) break;
+        await delay(20);
+      }
+      assert(ticket, `no next field for ${scenario.prompt}`);
+      previous = ticket.id;
+      assert.equal(
+        await c.call('permission', {
+          sessionId: state.sessionId,
+          permissionId: ticket.id,
+          ...answer,
+        }),
+        true,
+      );
+    }
+    await pending;
+    const view = await c.call('state', { sessionId: state.sessionId });
+    const last = view.snapshot.entries.filter((e) => e.role === 'assistant').at(-1);
+    assert.deepEqual(JSON.parse(last.text), scenario.result);
+    assert.equal(view.permissions.length, 0);
+  }
+});
+
 test('cancel resolves a held prompt as cancelled', async () => {
   const c = state.client;
   const pending = c.call(

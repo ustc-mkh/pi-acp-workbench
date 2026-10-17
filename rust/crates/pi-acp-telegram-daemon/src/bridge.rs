@@ -58,6 +58,7 @@ struct Ticket {
     permission_id: String,
     thread_id: i64,
     options: Vec<Option<String>>,
+    input: bool,
     expires: u64,
 }
 

@@ -97,10 +97,23 @@ impl Bridge {
     }
     pub(super) async fn accept_update(&self, id: i64, update: Value) -> Result<(), String> {
         let accepted = self.authorized(&update);
+        // Answers must bypass the prompt lane: that lane is currently waiting
+        // for this very answer. Decide at admission so old queued prompts never
+        // turn into answers when a question appears later.
+        let answer = accepted
+            && update
+                .pointer("/message/text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.starts_with('/'))
+            && self.shared.tickets.lock().await.values().any(|ticket| {
+                ticket.input
+                    && ticket.expires > now_ms()
+                    && Some(ticket.thread_id) == thread_of(&update)
+            });
         let full = accepted
             && self.shared.store.read().await.inbox.len()
                 >= INBOX_LIMIT
-                    + if InputClass::classify(&update) == InputClass::Control {
+                    + if answer || InputClass::classify(&update) == InputClass::Control {
                         CONTROL_LIMIT
                     } else {
                         0
@@ -121,6 +134,7 @@ impl Bridge {
                     update,
                     phase: InboxPhase::Pending,
                     prompt: None,
+                    answer,
                 });
             }
             s.offset = Some(id + 1);
@@ -177,6 +191,18 @@ impl Bridge {
                         if item.phase == InboxPhase::Interrupted {
                             bridge.send_plain("服务重启前有一条消息的处理结果未确认，未自动重放。请先用 /status 检查，再决定是否重发。", thread_of(&item.update))
                                 .await.map_err(|e| e.message)
+                        } else if item.answer {
+                            let topic = bridge.shared.store.read().await.topics.iter()
+                                .find(|t| Some(t.thread_id) == thread_of(&item.update)).cloned();
+                            let text = item.update.pointer("/message/text").and_then(Value::as_str).unwrap_or_default();
+                            let answered = if let Some(topic) = topic {
+                                bridge.answer_input(&topic.session_id, topic.thread_id, text).await
+                            } else { false };
+                            if !answered {
+                                bridge.send_plain("回答未提交，问题可能已过期；请用 /status 查看后重试。", thread_of(&item.update))
+                                    .await.map_err(|e| e.message)?;
+                            }
+                            Ok(())
                         } else if let Some(prompt) = &item.prompt {
                             let topic = bridge.shared.store.read().await.topics.iter()
                                 .find(|t| Some(t.thread_id) == thread_of(&item.update)).cloned()

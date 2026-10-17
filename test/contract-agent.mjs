@@ -48,6 +48,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const outcome = r.result?.outcome;
       reply(pending, { stopReason: outcome?.outcome === 'cancelled' ? 'cancelled' : 'end_turn' });
       pending = undefined;
+    } else if (r.id === 'elicitation-1' && pending) {
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: JSON.stringify(r.result) },
+      });
+      reply(pending, { stopReason: r.result?.action === 'cancel' ? 'cancelled' : 'end_turn' });
+      pending = undefined;
     }
     return;
   }
@@ -82,11 +89,61 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       });
       return;
     }
+    if (text === 'plan-report') {
+      update({
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'done', status: 'completed', priority: 'medium' },
+          { content: 'active', status: 'in_progress', priority: 'medium' },
+          { content: 'pending', status: 'pending', priority: 'medium' },
+        ],
+      });
+      reply(r.id, { stopReason: 'end_turn' });
+      return;
+    }
     if (text === 'wait') {
       pending = r.id;
       return;
     }
     if (text === 'crash') process.exit(7);
+    if (text.startsWith('elicitation')) {
+      pending = r.id;
+      send({
+        jsonrpc: '2.0',
+        id: 'elicitation-1',
+        method: 'elicitation/create',
+        params: {
+          sessionId,
+          mode: 'form',
+          message: '选择一个值',
+          requestedSchema: {
+            type: 'object',
+            required: text === 'elicitation-multi' ? ['question_0', 'question_1'] : ['question_0'],
+            properties:
+              text === 'elicitation-text'
+                ? { question_0: { type: 'string' } }
+                : text === 'elicitation-multi'
+                  ? {
+                      question_0: {
+                        type: 'array',
+                        items: { anyOf: [{ const: 'a:b' }, { const: '其它' }] },
+                      },
+                      question_1: { type: 'string' },
+                    }
+                  : {
+                      question_0: {
+                        type: 'string',
+                        oneOf: [
+                          { const: 'a:b', title: '含冒号' },
+                          { const: '其它', title: '其它' },
+                        ],
+                      },
+                    },
+          },
+        },
+      });
+      return;
+    }
     if (text === 'permission') {
       pending = r.id;
       send({

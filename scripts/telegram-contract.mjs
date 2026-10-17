@@ -304,6 +304,7 @@ function snapshot(s) {
     entries: s.entries,
     configs: s.configs || defaultConfigs(),
     stored: true,
+    plan: s.plan || [],
   };
 }
 function notifyWatchers(sessionId, event) {
@@ -326,6 +327,11 @@ function startSessionMock(socketPath, outboxDir) {
     await writeFile(file, JSON.stringify(event));
   };
   const server = createSocketServer((socket) => {
+    // The relay may close a long-poll connection during shutdown while the
+    // mock is still preparing its reply. Ignore only expected disconnects.
+    socket.on('error', (error) => {
+      if (!['EPIPE', 'ECONNRESET'].includes(error.code)) throw error;
+    });
     let buffer = '';
     socket.setEncoding('utf8');
     socket.on('data', async (data) => {
@@ -408,6 +414,7 @@ function startSessionMock(socketPath, outboxDir) {
                 busy: false,
                 harness: item.params.harness || 'pi',
                 configs: defaultConfigs(),
+                plan: [],
                 updated: Date.now(),
               };
               sessions.list.set(s.id, s);
@@ -417,7 +424,12 @@ function startSessionMock(socketPath, outboxDir) {
             case 'state': {
               const s = sessions.list.get(item.params.sessionId);
               if (!s) return fail('会话不存在');
-              ok({ snapshot: snapshot(s), busy: s.busy, permissions: s.permissions || [] });
+              ok({
+                snapshot: snapshot(s),
+                busy: s.busy,
+                permissions: s.permissions || [],
+                plan: s.plan || [],
+              });
               break;
             }
             case 'request': {
@@ -453,16 +465,24 @@ function startSessionMock(socketPath, outboxDir) {
               s.busy = true;
               const turn = new Promise((resolve) => sessions.pending.set(s.id, { resolve }));
               (async () => {
-                if (text === 'ask') {
+                if (text === 'ask' || text === 'ask-input') {
                   s.permissions = [
                     {
-                      id: 'perm-1',
+                      id: text === 'ask-input' ? 'perm-input' : 'perm-1',
                       request: {
-                        options: [
-                          { optionId: 'yes', name: '允许执行' },
-                          { optionId: 'no', name: '拒绝' },
-                        ],
-                        toolCall: { title: '执行工具', kind: 'execute' },
+                        options:
+                          text === 'ask-input'
+                            ? [{ optionId: 'submit', name: '提交' }]
+                            : [
+                                { optionId: 'yes', name: '允许执行' },
+                                { optionId: 'no', name: '拒绝' },
+                              ],
+                        ...(text === 'ask-input' ? { _meta: { 'pi-workbench-input': true } } : {}),
+                        toolCall: {
+                          title: '执行工具',
+                          kind: 'execute',
+                          ...(text === 'ask-input' ? { rawInput: { method: 'input' } } : {}),
+                        },
                       },
                     },
                   ];
@@ -472,7 +492,7 @@ function startSessionMock(socketPath, outboxDir) {
                     permissions: s.permissions,
                   });
                 }
-                if (text !== 'wait') {
+                if (text !== 'wait' && text !== 'ask-input') {
                   // 'ask' resolves once permission arrives; others complete now.
                   if (text !== 'ask') {
                     s.entries.push({
@@ -516,6 +536,10 @@ function startSessionMock(socketPath, outboxDir) {
               if (!s?.permissions?.length) {
                 ok(false);
                 break;
+              }
+              if (s.entries.at(-1)?.text === 'ask-input') {
+                assert.equal(item.params.optionId, 'submit');
+                assert.equal(item.params.value, 'typed answer');
               }
               s.permissions = [];
               completePrompt(s, 'end_turn');
@@ -673,6 +697,36 @@ test('permission cards carry buttons and callbacks reach the service', async () 
   assert.equal(s.busy, false);
 });
 
+test('ordinary text answers an active input without deadlocking behind its prompt', async () => {
+  const start = sessions.calls.length;
+  message('ask-input', { thread: state.threadId });
+  await waitSent('sendMessage', { text: (t) => t.includes?.('Agent 正在等待你的回答') });
+  message('typed answer', { thread: state.threadId });
+  await waitUntil(
+    () =>
+      sessions.calls
+        .slice(start)
+        .some(
+          (c) =>
+            c.method === 'permission' &&
+            c.params.permissionId === 'perm-input' &&
+            c.params.value === 'typed answer',
+        ),
+    'text answer never reached service',
+  );
+  const session = [...sessions.list.values()][0];
+  await waitUntil(() => !session.busy, 'input prompt remained blocked');
+  assert(
+    !sessions.calls
+      .slice(start)
+      .some((c) => c.method === 'prompt' && c.params.prompt[0].text === 'typed answer'),
+  );
+  await waitUntil(
+    async () => ((await savedState()).inbox || []).length === 0,
+    'answer inbox did not drain',
+  );
+});
+
 test('/stop cancels an in-flight turn and drops queued work', async () => {
   message('wait', { thread: state.threadId });
   await delay(300);
@@ -734,11 +788,21 @@ test('/notifications toggles persist and suppress outbox delivery', async () => 
 });
 
 test('/status reports the bound session state', async () => {
+  const s = [...sessions.list.values()][0];
+  s.plan = [
+    { id: 'todo-1', content: '编写契约测试', status: 'completed' },
+    { id: 'todo-2', content: '修复上下文显示', status: 'in_progress' },
+    { id: 'todo-3', content: '待处理事项', status: 'pending' },
+  ];
   message('/status', { thread: state.threadId });
   const replies = await waitSent('sendMessage', {
     text: (t) => t.includes?.('空闲') || t.includes?.('正在执行'),
   });
   assert.match(replies.at(-1).params.text, /排队消息/);
+  assert.match(replies.at(-1).params.text, /Todo/);
+  assert.match(replies.at(-1).params.text, /✅ 编写契约测试/);
+  assert.match(replies.at(-1).params.text, /🔄 修复上下文显示/);
+  assert.match(replies.at(-1).params.text, /⏳ 待处理事项/);
 });
 
 test('duplicate update IDs are checkpointed once and never execute two prompts', async () => {

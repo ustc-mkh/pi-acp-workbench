@@ -35,6 +35,8 @@ pub(crate) struct InboxItem {
     pub(super) phase: InboxPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) prompt: Option<String>,
+    #[serde(default)]
+    pub(super) answer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,6 +17,32 @@ pub fn initial_state() -> ChatState {
     ChatState::default()
 }
 
+/// Terminal plans retain only actionable entries before persistence/publication.
+pub fn finish_plan(state: &mut ChatState) {
+    state.plan.retain(|entry| {
+        !matches!(
+            entry.get("status").and_then(Value::as_str),
+            Some("completed" | "deleted")
+        )
+    });
+}
+
+#[test]
+fn completed_plan_cleanup_is_idempotent() {
+    let mut state = initial_state();
+    state.plan = vec![
+        serde_json::json!({"content":"done", "status":"completed"}),
+        serde_json::json!({"content":"active", "status":"in_progress"}),
+        serde_json::json!({"content":"deleted", "status":"deleted"}),
+    ];
+    finish_plan(&mut state);
+    finish_plan(&mut state);
+    assert_eq!(
+        state.plan,
+        vec![serde_json::json!({"content":"active", "status":"in_progress"})]
+    );
+}
+
 use pi_acp_core::util::js_truthy;
 
 /// Merge text into the last entry of the same role (except notices), honoring messageId.

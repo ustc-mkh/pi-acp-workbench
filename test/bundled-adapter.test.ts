@@ -303,10 +303,12 @@ it('negotiates real bundled ACP extensions, reads native billing/context and rep
       });
     await new Promise((resolve) => setTimeout(resolve, 1400));
     expect(completed).toBe(false);
+    // Occupancy is a completion snapshot, not a streaming polling result.
+    expect(updates.some((update) => update.sessionUpdate === 'usage_update')).toBe(false);
+    await live;
     expect(
       updates.some((update) => update.sessionUpdate === 'usage_update' && update.used === 1020),
     ).toBe(true);
-    await live;
     updates.length = 0;
     expect(
       await agent.prompt(sessionId, [{ type: 'text', text: '/compact keep decisions' }]),

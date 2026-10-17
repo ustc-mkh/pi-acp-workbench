@@ -69,8 +69,8 @@ type OpFuture<'a> =
 /// Permission callback that always resolves 'cancelled' — transient workers.
 fn auto_cancel_permission() -> crate::agent::PermissionCb {
     Arc::new(
-        |_| -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
-            Box::pin(async { json!({ "outcome": { "outcome": "cancelled" } }) })
+        |request| -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+            Box::pin(async move { request.cancelled() })
         },
     )
 }
@@ -574,9 +574,13 @@ async fn service_permission(
     }
 }
 
+mod interactions;
+use interactions::service_interaction;
+
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
     #[tokio::test]
     async fn panicking_operation_restores_committed_history_and_releases_the_worker() {
         let root = std::env::temp_dir().join(format!("pi-runtime-recovery-{}", Uuid::new_v4()));

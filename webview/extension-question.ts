@@ -16,7 +16,7 @@ export function extensionQuestion(
   const card = document.createElement('section');
   card.className = 'permission-card extension-question';
   const heading = document.createElement('strong');
-  heading.textContent = 'Pi · 等待你的回答';
+  heading.textContent = 'Agent · 等待你的回答';
   const title = document.createElement('div');
   title.className = 'question-title';
   title.textContent = tool.title || '请选择';
@@ -48,7 +48,7 @@ export function extensionQuestion(
         type: 'permission',
         id: item.id,
         optionId,
-        ...(optionId && editor ? { value: editor.value } : {}),
+        ...(optionId === 'submit' && editor ? { value: editor.value } : {}),
       });
       for (const b of card.querySelectorAll('button')) b.disabled = true;
     };

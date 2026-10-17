@@ -41,7 +41,9 @@ impl InputClass {
 
 impl InboxItem {
     fn class(&self) -> InputClass {
-        if self.prompt.is_some() {
+        if self.answer {
+            InputClass::Control
+        } else if self.prompt.is_some() {
             InputClass::Prompt
         } else {
             InputClass::classify(&self.update)
@@ -100,6 +102,7 @@ mod tests {
             update: json!({"message":{"text":text,"message_thread_id":thread}}),
             phase: InboxPhase::Pending,
             prompt: None,
+            answer: false,
         }
     }
     #[test]
@@ -123,6 +126,24 @@ mod tests {
         assert!(items[2].priority());
         assert!(!items[4].priority());
     }
+    #[test]
+    fn admitted_answers_bypass_waiting_prompts_but_remain_ordered_with_controls() {
+        let mut prompt = item(1, "ask", 10);
+        prompt.phase = InboxPhase::Started;
+        let mut answer = item(3, "answer", 10);
+        answer.answer = true;
+        let items = vec![
+            prompt,
+            item(2, "queued prompt", 10),
+            answer,
+            item(4, "/stop", 10),
+        ];
+        assert!(!items[1].ready(&items));
+        assert!(items[2].ready(&items));
+        assert!(items[2].priority());
+        assert!(!items[3].ready(&items));
+    }
+
     #[test]
     fn deferred_interrupt_is_a_prompt_even_when_its_text_is_a_relay_command() {
         let mut pending = item(1, "/interrupt /stop", 10);

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { branchTodos, installTodoBridge, TODO_WIDGET } from '../src/pi-todo';
+import { normalizeTodoTasks, branchTodos, installTodoBridge, TODO_WIDGET } from '../src/pi-todo';
 import { todoWidgetPlan } from '../src/pi-todo-widget';
 
 const tasks = [{ id: 1, subject: '实现功能', status: 'completed' }];
@@ -29,6 +29,15 @@ it('maps RPC snapshots to plans, including empty plans and deleted tasks', () =>
   expect(todoWidgetPlan({ ...event, widgetLines: ['invalid'] })).toBeUndefined();
   expect(todoWidgetPlan({ ...event, widgetKey: 'other' })).toBeUndefined();
 });
+it('clears completed and deleted tasks when an interaction ends', () => {
+  expect(
+    normalizeTodoTasks([
+      { id: 1, subject: '已完成', status: 'completed' },
+      { id: 2, subject: '进行中', status: 'in_progress' },
+      { id: 3, subject: '已删除', status: 'deleted' },
+    ]),
+  ).toEqual([{ id: 2, subject: '进行中', status: 'in_progress' }]);
+});
 it('publishes branch-local snapshots in RPC only', () => {
   const handlers = new Map<string, Function>();
   installTodoBridge({
@@ -45,7 +54,15 @@ it('publishes branch-local snapshots in RPC only', () => {
     ui: { setWidget: (_key: string, value: string[]) => lines.push(value) },
   };
   handlers.get('session_start')!({}, ctx);
-  expect(JSON.parse(lines[0][0]).tasks).toEqual(tasks);
+  expect(JSON.parse(lines[0][0]).tasks).toEqual([]);
   handlers.get('session_start')!({}, { ...ctx, mode: 'tui' });
   expect(lines).toHaveLength(1);
+  handlers.get('message_end')!({}, ctx);
+  expect(JSON.parse(lines[1][0]).tasks).toEqual([]);
+  handlers.get('session_switch')!({}, ctx);
+  expect(JSON.parse(lines[2][0]).tasks).toEqual([]);
+  for (const event of ['session_tree', 'session_compact', 'tool_result']) {
+    handlers.get(event)!({ toolName: 'todo', details: { tasks } }, ctx);
+    expect(JSON.parse(lines.at(-1)![0]).tasks).toEqual([]);
+  }
 });

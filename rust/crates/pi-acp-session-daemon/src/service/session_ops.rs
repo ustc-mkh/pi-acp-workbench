@@ -137,53 +137,22 @@ impl SessionService {
                 let sender = {
                     let mut r = rt.lock_unpoisoned();
                     let ticket = r.state.permissions.iter().find(|p| &p.id == permission_id);
-                    let valid = match (ticket, option_id) {
-                        (None, _) => false,
-                        (Some(t), Some(opt)) => t
-                            .request
-                            .get("options")
-                            .and_then(Value::as_array)
-                            .map(|opts| {
-                                opts.iter()
-                                    .any(|o| o.get("optionId").and_then(Value::as_str) == Some(opt))
-                            })
-                            .unwrap_or(false),
-                        (Some(_), None) => true,
-                    };
-                    let input = ticket.is_some_and(|t| {
-                        t.request.pointer("/_meta/pi-workbench-input") == Some(&Value::Bool(true))
-                            && matches!(
-                                t.request
-                                    .pointer("/toolCall/rawInput/method")
-                                    .and_then(Value::as_str),
-                                Some("input" | "editor")
-                            )
+                    let response = ticket.and_then(|ticket| {
+                        crate::interaction::permission_response(
+                            &ticket.request,
+                            option_id.as_deref(),
+                            value.as_deref(),
+                        )
                     });
-                    let valid_value = match value {
-                        Some(text) => {
-                            input
-                                && option_id.as_deref() == Some("submit")
-                                && text.encode_utf16().count() <= 10000
-                        }
-                        None => !input || option_id.is_none(),
-                    };
-                    if valid && valid_value {
-                        r.permissions.remove(permission_id)
-                    } else {
-                        None
-                    }
+                    response.and_then(|response| {
+                        r.permissions
+                            .remove(permission_id)
+                            .map(|sender| (sender, response))
+                    })
                 };
                 match sender {
-                    Some(tx) => {
-                        let response = option_id.as_ref().map(|option| {
-                            let mut response =
-                                json!({"outcome": {"outcome": "selected", "optionId": option}});
-                            if let Some(text) = value {
-                                response["_meta"] = json!({"pi-workbench-input": {"value": text}});
-                            }
-                            response
-                        });
-                        let _ = tx.send(response);
+                    Some((tx, response)) => {
+                        let _ = tx.send(Some(response));
                         Ok(Value::Bool(true))
                     }
                     None => Ok(Value::Bool(false)),

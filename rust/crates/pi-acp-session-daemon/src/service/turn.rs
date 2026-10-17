@@ -557,6 +557,7 @@ impl SessionService {
             if let Some(active) = r.phase.active_mut() {
                 active.step = Step::Finishing;
             }
+            crate::updates::finish_plan(&mut r.state);
             r.phase.stop_cancel_timer();
         }
         if agent.is_closed() {

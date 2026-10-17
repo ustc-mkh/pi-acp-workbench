@@ -89,8 +89,6 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
       turns.add(turn);
       this.turns.set(params.sessionId, turns);
       let session: PiSession | undefined;
-      let timer: NodeJS.Timeout | undefined;
-      let refresh: (() => Promise<void>) | undefined;
       try {
         session = await this.restoreSession(params.sessionId);
         if (turn.cancelled) return { stopReason: 'cancelled' };
@@ -98,18 +96,6 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         if (await refreshPiModels(session.proc))
           await this.publishConfigOptions(session).catch(() => {});
         if (turn.cancelled) return { stopReason: 'cancelled' };
-        const current = session;
-        let refreshing: Promise<void> | undefined;
-        refresh = () =>
-          (refreshing ??= current.publishContextUsage().finally(() => {
-            refreshing = undefined;
-          }));
-        // Only bounded context metadata, never billing/tree inspection here.
-        const poll = refresh;
-        timer = setInterval(() => {
-          void poll().catch(() => {});
-        }, 1000);
-        timer.unref();
         // The pinned adapter checks this guard after its own restore await and
         // at startTurn, before clearing cancelRequested or sending to Pi.
         return await super.prompt(params, () => turn.cancelled);
@@ -124,11 +110,9 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         const detail = error instanceof Error ? error.message : String(error);
         throw Errors.internalError({}, providerError(detail));
       } finally {
-        clearInterval(timer);
         turns.delete(turn);
         if (!turns.size && this.turns.get(params.sessionId) === turns)
           this.turns.delete(params.sessionId);
-        if (refresh) await refresh().catch(() => {});
       }
     }
     async cancel(params: acp.CancelNotification): Promise<void> {

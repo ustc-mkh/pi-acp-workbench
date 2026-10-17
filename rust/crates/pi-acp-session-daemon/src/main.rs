@@ -12,6 +12,7 @@ mod error;
 mod harness;
 mod history;
 mod history_page;
+mod interaction;
 mod journal;
 mod native;
 mod outbox;

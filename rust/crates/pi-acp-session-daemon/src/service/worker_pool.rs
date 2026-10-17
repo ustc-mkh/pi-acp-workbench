@@ -305,15 +305,15 @@ impl SessionService {
                 let rt = weak.clone();
                 let broadcast = broadcast.clone();
                 let closed = self.closed.clone();
-                Arc::new(move |request: Value| {
+                Arc::new(move |request: crate::interaction::UserRequest| {
                     let rt = rt.clone();
                     let broadcast = broadcast.clone();
                     let closed = closed.clone();
                     Box::pin(async move {
                         let Some(rt) = rt.upgrade() else {
-                            return json!({ "outcome": { "outcome": "cancelled" } });
+                            return request.cancelled();
                         };
-                        service_permission(&rt, request, broadcast, &closed, Some(epoch)).await
+                        service_interaction(&rt, request, broadcast, &closed, Some(epoch)).await
                     })
                         as std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>>
                 })
