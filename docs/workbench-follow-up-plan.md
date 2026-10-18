@@ -219,6 +219,17 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 对最新显式 GNU 产物运行 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19项通过；`node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：15项通过。日志 `.test-results/t04/production-{ipc,telegram}-payload-stage2-final.log`。未运行 musl、offline SDK 或最终规模/soak，未把默认 ignored 算作已执行；未发布、未 push。
 - 下一步严格执行第3步 OutboxStore，再推进 history state/entries/delivery 单事务、Telegram inbox/effect 和 SessionStore。生产 history/outbox/Telegram 仍有文件协议，**此提交仅完成第2步；T04 不勾选、不完成面板任务，不进入 T05，禁止发布此中间版本**。
 
+**阶段3a执行记录（Outbox SQL 基础设施；实现提交 `124c66c`；尚未切换生产 facade）：**
+
+- 新增唯一 Database executor 内的 typed delivery enqueue/target-head/ack/fail 请求；每次写入为事务，不增加线程、连接或任意 SQL 入口。enqueue 与既有 SessionCommit 共用 `query::put_delivery`，统一强类型 target/payload 校验、持久化 order_seq、高水位及 immutable identity 比较；ack tombstone 不会被相同 intent 重放复活，fail 的 attempt 饱和且保留明确 failure/retry 时间。
+- target head 查询先排除同一持久化 target 的前驱，再按 readiness/order 应用最多1024项窗口；deferred head 不能让同 target 后续记录越过，1101项同 target 积压也不占满另一 target 的查询窗口。1024只限制读取窗口，不限制持久化 admission。该 API 明确命名 `delivery_target_heads`：**不是动态 Telegram topic resolver**；Session 与 Telegram target 经当前 binding 汇合的 topic FIFO，仍由现有生产调度保证，尚未声称 SQL 查询已覆盖这一集成语义。后续 facade 切换必须保留 deferred heads/当前 binding 的屏障，不能把 ready-only target heads 直接替换现有 topic 调度输入。
+- 所有读取/replay/ack/fail 都验证 typed JSON、target_key、整数、原始身份；新增 unsafe Telegram整数、Turn范围/源session不匹配、非Text notice、坏JSON/target key、缺失event及序列耗尽拒绝。恶意/损坏记录不会被 ack 或 fail 静默改写。图像/文本归档协议未改变。
+- 将 target-order 索引补齐为 `(target_key,status,order_seq)`，避免每个待投递候选反复扫历史 ack。与阶段2a一致，内部旧 v3 root 的索引结构若不符则明确拒绝，不自动迁移或重建；新增回归验证源 DB bytes 不变。此版本仍禁止发布，后续验收使用新隔离 root。
+- 新增7项 SQL 回归：真实 close/join/reopen 的 retry/ack/replay/order、高水位、1102项积压跨 target 进展与有界结果、SQL ABORT 后 intent/sequence 都回滚、observer 丢弃仍提交、损坏JSON/key读写/replay均拒绝且DB bytes不变、整数/范围/身份校验、attempt饱和与序列耗尽、旧内部索引不迁移。首次完整门禁准确发现新增测试误用了 SQL-only image kind 的公共 ContentKind 名称，已修正为实际存在的 ToolText 来验证非文本 notice 拒绝；日志 `.test-results/t04/rewrite-delivery-sql-stage3.log` 保留。
+- 最新 `npm run test:rewrite` 全部通过：check/audit/build/format/clippy、Rust workspace242项（daemon240+core2，既有 offline SDK1项默认 ignored）、TS187、runner40、IPC19、Telegram15、真实SIGKILL3、Chromium9，以及GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-delivery-sql-stage3-final.log`、`.test-results/run-RV35kH/`。最初6项定向 SQL 回归通过的日志另存 `.test-results/t04/delivery-sql-stage3.log`；后补的第7项以最新完整门禁为证据。
+- 最新 GNU 产物显式运行 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：分别19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-delivery-sql-stage3.log`。未运行 musl、offline SDK、最终 scale/soak，未发布、未 push。
+- **生产 OutboxStore 仍为原文件 facade，尚未使用本次 SQL API；第3步不算完成。** 下一步统一生产 DeliveryIntent 与 facade/调用依赖，保留当前绑定后的 topic FIFO 与失败 ack join/lease 安全测试，不增加旧/新 payload JSON 双reader。随后按顺序完成 history 单事务、Telegram inbox/effect、SessionStore 及删除清单。T04 不完成、不进入 T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
