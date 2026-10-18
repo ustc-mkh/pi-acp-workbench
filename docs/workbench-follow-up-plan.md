@@ -92,7 +92,17 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 
 新增测试必须证明显式错误路径不会运行 debug binary。全新 CI 中旧脚本引用为零。不要把本任务与存储修改混在一个提交。
 
-## T02 [ ] 固定新数据契约、字节预算和回归用例
+## T02 [x] 固定新数据契约、字节预算和回归用例
+
+**执行记录（实现提交 `b71244c`）：**
+
+- 新增 `domain/query.rs`、`domain/transition.rs` 与共享 `test/fixtures/rewrite/ipc-v3.json`；Rust/TS 固定 summary/view/entry/tool/content/receipt/batch/page/cursor 契约及预算。序列值使用 JS safe-integer 边界，写集为强类型，不包含任意 JSON Value。
+- 新增 9 项 Rust `domain::query_tests` 和 7 项 TS `test/workbench-protocol.test.ts`，覆盖 Unicode/JSON 转义实际字节数、16KiB inline 边界、坏 ref/hash/kind/path、64MiB 单条 ref、溢出、v2 请求拒绝、cursor scope、页/slice 限制、512KiB view/1MiB metadata/batch 和32项 interaction 上限。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd domain::query_tests`：早期7项通过；后补2项随完整 rewrite workspace 测试通过。
+- `npx vitest run test/workbench-protocol.test.ts`：7项通过；`npm run check`、`npm run audit:workbench`、`npm run format:check`：通过。
+- `npm run clippy` 首次发现 Loaded 回执 enum 体积差异，改用 wire 等价的 `Box<SessionView>`，随后完整 rewrite 中 clippy 通过，未添加 lint 豁免。
+- `npm run test:rewrite`：通过；209项 Rust 通过、1项既有 offline SDK 默认 ignored；187项 TS、runner37、IPC19、Telegram15、SIGKILL3、Chromium9及 GNU artifact smoke 通过。日志 `.test-results/t02/rewrite.log`、`.test-results/run-sCzy2F/`。
+- 剩余阻塞：本项无实现/验收阻塞。类型目前独立定义，旧生产 reducer/state/IPC/UI 尚未切换，**本项没有修复大历史问题**；存储与外部v3切换按 T03–T08执行。任务状态 API 参数互斥问题仍在，未手工改写 goal 账本。
 
 **读取：** `domain/{session,transcript,event,command,reducer,tool,fork,fork_messages}.rs`、`transport/vscode.rs`、`src/workbench-{protocol,schema,session,ui}.ts`。
 
