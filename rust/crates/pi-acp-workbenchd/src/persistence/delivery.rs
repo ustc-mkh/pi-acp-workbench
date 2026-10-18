@@ -105,7 +105,7 @@ pub(super) fn validate_intent(intent: &DeliveryIntent) -> Result<(), StoreError>
         _ => Ok(()),
     }
 }
-const COLUMNS: &str = "d.delivery_id,d.order_seq,d.target_key,d.target_json,d.payload_json,d.attempt,d.next_retry,d.last_failure";
+const COLUMNS: &str = "d.delivery_id,d.order_seq,d.target_key,d.target_json,d.payload_json,d.attempt,d.next_retry,d.last_failure,d.revision";
 fn pending(row: &Row<'_>) -> Result<PendingDelivery, StoreError> {
     let id = DeliveryId::new(row.get::<_, String>(0)?)
         .map_err(|_| StoreError::Invalid("invalid delivery identity"))?;
@@ -115,6 +115,7 @@ fn pending(row: &Row<'_>) -> Result<PendingDelivery, StoreError> {
     }
     let intent = DeliveryIntent {
         id,
+        revision: row.get(8)?,
         target: serde_json::from_str(&row.get::<_, String>(3)?)?,
         payload: serde_json::from_str(&row.get::<_, String>(4)?)?,
     };
@@ -174,7 +175,7 @@ pub(super) fn record(
     if &record.intent.id != id {
         return Err(StoreError::Invalid("delivery identity mismatch"));
     }
-    let is_pending = match row.get::<_, String>(8)?.as_str() {
+    let is_pending = match row.get::<_, String>(9)?.as_str() {
         "Pending" => true,
         "Acked" => false,
         _ => return Err(StoreError::Invalid("invalid delivery status")),

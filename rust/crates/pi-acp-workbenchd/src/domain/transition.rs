@@ -54,6 +54,8 @@ pub struct ToolUpdate {
 #[serde(deny_unknown_fields)]
 pub struct DeliveryIntent {
     pub id: DeliveryId,
+    /// Source revision is immutable identity, not a cross-source ordering key.
+    pub revision: SafeInteger,
     pub target: DeliveryTarget,
     pub payload: DeliveryPayload,
 }

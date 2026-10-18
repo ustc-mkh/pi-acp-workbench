@@ -57,6 +57,7 @@ CREATE TABLE operations (
 CREATE TABLE deliveries (
     delivery_id TEXT PRIMARY KEY,
     order_seq INTEGER NOT NULL UNIQUE CHECK (order_seq BETWEEN 1 AND 9007199254740991),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
     target_key TEXT NOT NULL,
     target_json TEXT NOT NULL CHECK (json_valid(target_json)),
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),

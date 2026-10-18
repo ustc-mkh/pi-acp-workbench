@@ -113,6 +113,9 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     if delivery_index != ["target_key", "status", "order_seq"] {
         return Err(StoreError::Invalid("unsupported delivery index"));
     }
+    connection
+        .prepare("SELECT revision FROM deliveries LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported delivery schema"))?;
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(StoreError::Invalid("SQLite quick_check failed"));

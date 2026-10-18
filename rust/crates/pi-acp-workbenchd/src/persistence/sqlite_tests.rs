@@ -220,6 +220,7 @@ fn entry(id: &str, text: &str) -> NewEntry {
 fn delivery(view: &SessionView, id: &str) -> DeliveryIntent {
     DeliveryIntent {
         id: DeliveryId::new(id).unwrap(),
+        revision: view.revision,
         target: DeliveryTarget::Session {
             session: view.id.clone(),
             cwd: view.cwd.clone(),

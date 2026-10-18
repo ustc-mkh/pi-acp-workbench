@@ -177,14 +177,16 @@ pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(
     let target = encode(&intent.target)?;
     let payload = encode(&intent.payload)?;
     if let Some((old, _)) = super::delivery::record(db, &intent.id)? {
-        if (encode(&old.intent.target)?, encode(&old.intent.payload)?) != (target, payload) {
+        if old.intent.revision != intent.revision
+            || (encode(&old.intent.target)?, encode(&old.intent.payload)?) != (target, payload)
+        {
             return Err(StoreError::Conflict);
         }
         return Ok(());
     }
     let key = super::delivery::target_key(&intent.target);
     let order = next_counter(db, "delivery_seq")?;
-    db.execute("INSERT INTO deliveries(delivery_id,order_seq,target_key,target_json,payload_json,status) VALUES (?1,?2,?3,?4,?5,'Pending')", params![intent.id.as_str(), order, key, target, payload])?;
+    db.execute("INSERT INTO deliveries(delivery_id,order_seq,revision,target_key,target_json,payload_json,status) VALUES (?1,?2,?3,?4,?5,?6,'Pending')", params![intent.id.as_str(), order, intent.revision, key, target, payload])?;
     Ok(())
 }
 pub(super) fn list(

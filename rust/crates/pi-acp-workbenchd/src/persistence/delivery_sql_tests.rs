@@ -13,6 +13,7 @@ use crate::domain::{
 fn intent(thread: i64) -> DeliveryIntent {
     DeliveryIntent {
         id: DeliveryId::generate(),
+        revision: at(1),
         target: DeliveryTarget::Telegram {
             bot_id: 1,
             chat: -100,
@@ -46,6 +47,7 @@ async fn sql_delivery_retry_ack_replay_and_sequence_survive_physical_restart() {
     let rows = db.delivery_target_heads(at(100), 16).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].intent.id, first.id);
+    assert_eq!(rows[0].intent.revision, first.revision);
     assert_eq!(rows[0].order.get(), 1);
     assert_eq!(rows[0].attempt, 1);
     assert_eq!(rows[0].last_failure, Some(Failure::RateLimited));
@@ -57,6 +59,12 @@ async fn sql_delivery_retry_ack_replay_and_sequence_survive_physical_restart() {
     db.fail_delivery(first.id.clone(), Failure::Transport, at(1000))
         .await
         .unwrap();
+    let mut changed_revision = first.clone();
+    changed_revision.revision = at(2);
+    assert!(matches!(
+        db.enqueue_delivery(changed_revision).await,
+        Err(StoreError::Conflict)
+    ));
     let mut changed = first.clone();
     changed.payload = DeliveryPayload::Entry {
         entry: EntryId::generate(),
@@ -349,6 +357,24 @@ async fn sql_delivery_failed_ack_and_fail_leave_exact_pending_record_and_can_ret
         }
         db.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn sql_delivery_missing_revision_schema_is_refused_without_migration() {
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    db.shutdown().await.unwrap();
+    let file = root.data().join("workbench.sqlite3");
+    let sql = rusqlite::Connection::open(&file).unwrap();
+    sql.execute_batch("ALTER TABLE deliveries DROP COLUMN revision")
+        .unwrap();
+    drop(sql);
+    let before = std::fs::read(&file).unwrap();
+    assert!(matches!(
+        Database::open(root.data(), &lease).await,
+        Err(StoreError::Invalid("unsupported delivery schema"))
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
 #[tokio::test]
