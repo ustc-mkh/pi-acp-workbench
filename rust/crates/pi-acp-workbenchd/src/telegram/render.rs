@@ -181,7 +181,7 @@ pub async fn render(
     now: u64,
 ) -> Result<Vec<DeliveryPart>, DomainError> {
     match &event.payload {
-        DeliveryPayload::SessionCompleted { turn, entries } => {
+        DeliveryPayload::Entries { turn, entries } => {
             let mut text = String::new();
             let mut parts = Vec::new();
             let mut previous_message = None;
@@ -215,7 +215,7 @@ pub async fn render(
             }
             Ok(parts)
         }
-        DeliveryPayload::AgentMessage { entry } => {
+        DeliveryPayload::Entry { entry } => {
             let entry = payloads.entry(entry).await?;
             let mut parts = Vec::new();
             if let Some(image) = entry.image {
@@ -227,9 +227,12 @@ pub async fn render(
             parts.extend(text_parts(topic, &entry.text));
             Ok(parts)
         }
-        DeliveryPayload::Notice { notice } => {
-            Ok(text_parts(topic, &payloads.notice(notice).await?.text))
+        DeliveryPayload::Notice { content } => {
+            Ok(text_parts(topic, &payloads.content(content).await?))
         }
+        DeliveryPayload::Turn { .. } => Err(DomainError::Persistence(
+            "range delivery renderer not yet connected".into(),
+        )),
         DeliveryPayload::Interaction { interaction } => {
             let Some(snapshot) =
                 snapshot.filter(|snapshot| snapshot.pending_interactions.contains_key(interaction))

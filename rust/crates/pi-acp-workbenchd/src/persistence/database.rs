@@ -401,6 +401,38 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
+    pub async fn pending_delivery_records(
+        &self,
+        now: SafeInteger,
+        limit: usize,
+    ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::All { now, limit, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn delivery_topic_heads(
+        &self,
+        now: SafeInteger,
+        limit: usize,
+        bindings: Vec<(SessionId, i64, i64)>,
+        bot_id: i64,
+    ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::TopicHeads {
+                now,
+                limit,
+                bindings,
+                bot_id,
+                reply,
+            },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
     pub async fn ack_delivery(&self, id: crate::domain::DeliveryId) -> Result<(), StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Delivery(Box::new(

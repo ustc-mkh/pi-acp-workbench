@@ -5,7 +5,7 @@ use crate::{
     domain::{image::ImageAsset, DeliveryId},
     persistence::{
         format::StorageLease,
-        outbox::{DeliveryEvent, DeliveryPayload, DeliveryTarget},
+        outbox::{DeliveryEvent, DeliveryPayload},
     },
 };
 use std::sync::{
@@ -116,8 +116,8 @@ async fn blocked_media_does_not_block_other_topics_same_topic_stays_fifo_and_can
         .delivery_store()
         .enqueue(DeliveryEvent {
             id: DeliveryId::generate(),
-            revision: 10,
-            target: DeliveryTarget::Telegram(topic(101)),
+            revision: crate::domain::query::SafeInteger::new(10).unwrap(),
+            target: topic(101).delivery_target(99, config().workspace),
             payload: DeliveryPayload::Image {
                 image: asset.image().id().clone(),
             },

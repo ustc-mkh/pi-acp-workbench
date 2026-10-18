@@ -35,6 +35,7 @@ pub(super) enum Request {
     Deliveries {
         now: u64,
         limit: usize,
+        bindings: Option<crate::persistence::delivery::TopicSnapshot>,
         reply: oneshot::Sender<Result<Vec<DeliveryRecord>, DomainError>>,
     },
 }
@@ -307,13 +308,26 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
             };
             let _ = reply.send(result);
         }
-        Request::Deliveries { now, limit, reply } => {
+        Request::Deliveries {
+            now,
+            limit,
+            bindings,
+            reply,
+        } => {
             let result = async {
                 if core.closed.load(Ordering::Acquire) {
                     return Err(stopping());
                 }
                 core.history.project_outbox().await?;
-                core.history.outbox.pending(now, limit).await
+                match bindings {
+                    Some((bindings, bot_id)) => {
+                        core.history
+                            .outbox
+                            .topic_heads(limit, bindings, bot_id)
+                            .await
+                    }
+                    None => core.history.outbox.pending(now, limit).await,
+                }
             }
             .await;
             let _ = reply.send(result);

@@ -48,6 +48,33 @@ pub struct TopicKey {
     pub chat: ChatId,
     pub thread: Option<TopicId>,
 }
+impl TopicKey {
+    pub(crate) fn from_delivery(
+        chat: i64,
+        thread: i64,
+    ) -> Result<Self, crate::domain::error::DomainError> {
+        Ok(Self {
+            chat: ChatId::new(chat)?,
+            thread: if thread == 0 {
+                None
+            } else {
+                Some(TopicId::new(thread)?)
+            },
+        })
+    }
+    pub(crate) fn delivery_target(
+        &self,
+        bot_id: i64,
+        cwd: crate::domain::WorkspacePath,
+    ) -> crate::domain::transition::DeliveryTarget {
+        crate::domain::transition::DeliveryTarget::Telegram {
+            bot_id,
+            chat: self.chat.get(),
+            thread: self.thread.map_or(0, |thread| thread.get()),
+            cwd,
+        }
+    }
+}
 impl fmt::Display for TopicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:", self.chat.get())?;

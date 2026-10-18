@@ -490,7 +490,7 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
             transcript::{EntryRole, TranscriptEntry},
             DeliveryId, EntryId, ProviderMessageId, TurnId,
         },
-        persistence::outbox::{DeliveryEvent, DeliveryPayload, DeliveryTarget},
+        persistence::outbox::{DeliveryEvent, DeliveryPayload},
     };
     let root = root();
     let app = app(&root);
@@ -528,9 +528,9 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
     app.delivery_store()
         .enqueue(DeliveryEvent {
             id: DeliveryId::generate(),
-            target: DeliveryTarget::Telegram(topic.clone()),
-            revision: 1,
-            payload: DeliveryPayload::SessionCompleted { turn, entries: ids },
+            target: topic.delivery_target(99, config().workspace),
+            revision: crate::domain::query::SafeInteger::new(1).unwrap(),
+            payload: DeliveryPayload::Entries { turn, entries: ids },
         })
         .await
         .unwrap();
@@ -542,8 +542,8 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
     app.delivery_store()
         .enqueue(DeliveryEvent {
             id: DeliveryId::generate(),
-            target: DeliveryTarget::Telegram(topic),
-            revision: 2,
+            target: topic.delivery_target(99, config().workspace),
+            revision: crate::domain::query::SafeInteger::new(2).unwrap(),
             payload: DeliveryPayload::Image {
                 image: asset.image().id().clone(),
             },

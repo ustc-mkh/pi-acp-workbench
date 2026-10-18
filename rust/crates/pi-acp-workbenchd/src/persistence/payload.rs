@@ -95,6 +95,20 @@ impl PayloadStore {
         }
         Ok(asset)
     }
+    pub fn notice_ref(notice: &NoticeContent) -> Result<ContentRef, DomainError> {
+        text(
+            content_id("notice", notice.id.as_str()).map_err(failure)?,
+            notice.text.clone(),
+        )
+        .map(|value| value.content)
+        .map_err(failure)
+    }
+    pub async fn content(&self, reference: &ContentRef) -> Result<String, DomainError> {
+        self.database
+            .content(reference.clone())
+            .await
+            .map_err(failure)
+    }
     pub async fn put_notice(&self, notice: &NoticeContent) -> Result<(), DomainError> {
         self.put(Payload::Notice(notice.clone())).await
     }

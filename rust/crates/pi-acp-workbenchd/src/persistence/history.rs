@@ -37,7 +37,7 @@ impl HistoryStore {
         let root = root.into();
         Self::with_delivery(
             root.clone(),
-            OutboxStore::new(root.join(".outbox"), 1024),
+            OutboxStore::new(database.clone(), 1024),
             PayloadStore::new(database),
         )
     }
@@ -88,7 +88,7 @@ impl HistoryStore {
         }
         for (id, event) in &snapshot.delivery_events {
             if id != &event.id
-                || event.revision > snapshot.revision
+                || event.revision.get() > snapshot.revision
                 || event.target
                     != (DeliveryTarget::Session {
                         session: snapshot.session.id.clone(),
@@ -150,11 +150,11 @@ impl HistoryStore {
             .map_err(|error| error.to_string())?;
         let id = format!("notice-{:x}", Sha256::digest(identity));
         let notice = NoticeId::new(id.clone()).map_err(|error| error.to_string())?;
+        let notice_content = NoticeContent { id: notice, text };
+        let content =
+            PayloadStore::notice_ref(&notice_content).map_err(|error| error.to_string())?;
         self.payloads
-            .put_notice(&NoticeContent {
-                id: notice.clone(),
-                text,
-            })
+            .put_notice(&notice_content)
             .await
             .map_err(|error| error.to_string())?;
         Ok(DeliveryEvent {
@@ -163,8 +163,9 @@ impl HistoryStore {
                 session: session.clone(),
                 cwd: state.cwd.clone(),
             },
-            revision: state.revision,
-            payload: DeliveryPayload::Notice { notice },
+            revision: crate::domain::query::SafeInteger::new(state.revision)
+                .map_err(|error| error.to_string())?,
+            payload: DeliveryPayload::Notice { content },
         })
     }
     pub async fn save(&self, state: &SessionState) -> Result<(), String> {
@@ -209,8 +210,9 @@ impl HistoryStore {
                             session: session.clone(),
                             cwd: state.cwd.clone(),
                         },
-                        revision: state.revision,
-                        payload: DeliveryPayload::SessionCompleted {
+                        revision: crate::domain::query::SafeInteger::new(state.revision)
+                            .map_err(|error| error.to_string())?,
+                        payload: DeliveryPayload::Entries {
                             turn: turn.clone(),
                             entries,
                         },
@@ -231,7 +233,8 @@ impl HistoryStore {
                             session: session.clone(),
                             cwd: state.cwd.clone(),
                         },
-                        revision: state.revision,
+                        revision: crate::domain::query::SafeInteger::new(state.revision)
+                            .map_err(|error| error.to_string())?,
                         payload: DeliveryPayload::Interaction {
                             interaction: interaction.id.clone(),
                         },

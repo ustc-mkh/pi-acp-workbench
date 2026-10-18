@@ -212,7 +212,7 @@ async fn committed_delivery_recovers_without_agent_reexecution_and_survives_sess
     let restarted = app_at(&root);
     let deliveries = restarted.pending_deliveries(0, 16).await.unwrap();
     assert_eq!(deliveries.len(), 1);
-    let crate::persistence::outbox::DeliveryPayload::SessionCompleted { entries, .. } =
+    let crate::persistence::outbox::DeliveryPayload::Entries { entries, .. } =
         &deliveries[0].event.payload
     else {
         panic!("completion reference");

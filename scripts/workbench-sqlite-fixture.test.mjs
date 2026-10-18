@@ -9,6 +9,8 @@ import {
   imageArchive,
   noticeText,
   archivedEntry,
+  contentText,
+  deliveryRecords,
 } from './lib/workbench-sqlite-fixture.mjs';
 import { createHash } from 'node:crypto';
 
@@ -94,6 +96,61 @@ test('payload fixture checks exact SQL BLOB/hash/identities, is read-only and bi
       .run(Buffer.alloc(pixels.length), image.id);
     corrupt.close();
     assert.throws(() => imageArchive(root, image.id));
+  });
+});
+
+test('delivery SQL fixture preserves immutable scope/revision/retry/order and text refs without writes', async () => {
+  await fixture(async (root) => {
+    const file = join(root, 'workbench.sqlite3');
+    const db = new DatabaseSync(file);
+    db.exec(
+      'PRAGMA user_version=3; CREATE TABLE deliveries(delivery_id TEXT,order_seq INTEGER,revision INTEGER,target_key TEXT,target_json TEXT,payload_json TEXT,status TEXT,attempt INTEGER,next_retry INTEGER,last_failure TEXT); CREATE TABLE contents(id TEXT,kind TEXT,sha256 TEXT,bytes INTEGER,data BLOB,image_ref_json TEXT)',
+    );
+    const bytes = Buffer.from('exact 🌏 notice');
+    const reference = {
+      id: 'text',
+      kind: 'Text',
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      bytes: bytes.length,
+    };
+    db.prepare('INSERT INTO contents VALUES (?,?,?,?,?,NULL)').run(
+      reference.id,
+      reference.kind,
+      reference.sha256,
+      reference.bytes,
+      bytes,
+    );
+    const target = { Telegram: { bot_id: 99, chat: -100, thread: 101, cwd: '/tmp' } };
+    const payload = { Notice: { content: reference } };
+    db.prepare('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?,?,?)').run(
+      'notice',
+      7,
+      999,
+      'telegram:99:-100:101',
+      JSON.stringify(target),
+      JSON.stringify(payload),
+      'Pending',
+      2,
+      100,
+      'RateLimited',
+    );
+    db.close();
+    const before = await readFile(file);
+    assert.deepEqual(deliveryRecords(root), [
+      {
+        event: { id: 'notice', revision: 999, target, payload },
+        target_key: 'telegram:99:-100:101',
+        sequence: 7,
+        status: 'Pending',
+        attempt: 2,
+        retry_at: 100,
+        last_failure: 'RateLimited',
+      },
+    ]);
+    assert.equal(contentText(root, reference), bytes.toString('utf8'));
+    assert.throws(() => contentText(root, { ...reference, sha256: '0'.repeat(64) }));
+    assert.throws(() => contentText(root, { ...reference, id: "text' OR 1=1 --" }));
+    assert.deepEqual(await readFile(file), before);
   });
 });
 

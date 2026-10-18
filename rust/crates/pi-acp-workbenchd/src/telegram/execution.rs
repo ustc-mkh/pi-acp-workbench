@@ -13,7 +13,7 @@ use crate::{
         SessionId,
     },
     persistence::{
-        outbox::{DeliveryEvent, DeliveryPayload, DeliveryTarget},
+        outbox::{DeliveryEvent, DeliveryPayload},
         payload::NoticeContent,
     },
 };
@@ -328,22 +328,29 @@ async fn queue_notice(
     text: String,
 ) -> Result<(), DomainError> {
     let notice = NoticeId::new(format!("reply-{}", record.id.get()))?;
+    let notice_content = NoticeContent { id: notice, text };
+    let content = crate::persistence::payload::PayloadStore::notice_ref(&notice_content)?;
     context
         .app
         .delivery_payloads()
-        .put_notice(&NoticeContent {
-            id: notice.clone(),
-            text,
-        })
+        .put_notice(&notice_content)
         .await?;
+    let bot_id = context
+        .store
+        .snapshot()
+        .await?
+        .bot
+        .ok_or_else(|| DomainError::Persistence("missing Telegram bot identity".into()))?
+        .get();
     context
         .app
         .delivery_store()
         .enqueue(DeliveryEvent {
             id: DeliveryId::new(format!("reply-{}", record.id.get()))?,
-            revision: record.id.get(),
-            target: DeliveryTarget::Telegram(topic),
-            payload: DeliveryPayload::Notice { notice },
+            revision: crate::domain::query::SafeInteger::new(record.id.get())
+                .map_err(|error| DomainError::Persistence(error.to_string()))?,
+            target: topic.delivery_target(bot_id, context.config.workspace.clone()),
+            payload: DeliveryPayload::Notice { content },
         })
         .await
 }

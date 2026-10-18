@@ -35,7 +35,26 @@ pub(super) async fn deliver_record(
         return Ok(());
     }
     let (topic, snapshot) = match &record.event.target {
-        DeliveryTarget::Telegram(topic) => (Some(topic.clone()), None),
+        DeliveryTarget::Telegram {
+            bot_id,
+            chat,
+            thread,
+            cwd,
+        } => {
+            if context.store.snapshot().await?.bot.map(|bot| bot.get()) != Some(*bot_id) {
+                return Err(
+                    DomainError::Persistence("delivery bot identity mismatch".into()).into(),
+                );
+            }
+            if authorize_workspace(cwd, &context.config.workspace)
+                .await
+                .is_err()
+            {
+                outbox.ack(&record.event.id).await?;
+                return Ok(());
+            }
+            (Some(TopicKey::from_delivery(*chat, *thread)?), None)
+        }
         DeliveryTarget::Session { session, cwd } => {
             let state = context.store.snapshot().await?;
             let topic = state

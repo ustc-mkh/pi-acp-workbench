@@ -115,13 +115,12 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
         };
         let mut recovered_notice = None;
         for record in app.pending_deliveries(0, 100).await.unwrap() {
-            if let DeliveryPayload::Notice { notice } = &record.event.payload {
+            if let DeliveryPayload::Notice { content: notice } = &record.event.payload {
                 if app
                     .delivery_payloads()
-                    .notice(notice)
+                    .content(notice)
                     .await
                     .unwrap()
-                    .text
                     .contains(expected)
                 {
                     let notice = notice.clone();
@@ -144,10 +143,9 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
         app.command(DomainCommand::RemoveSession(id)).await.unwrap();
         assert!(app
             .delivery_payloads()
-            .notice(&notice)
+            .content(&notice)
             .await
             .unwrap()
-            .text
             .contains(expected));
         assert_eq!(
             tokio::fs::read_to_string(trace)
@@ -223,13 +221,12 @@ async fn cancellation_and_removal_terminal_publication_follow_physical_worker_jo
         let notices = app.pending_deliveries(0, 100).await.unwrap();
         let mut found = false;
         for record in notices {
-            if let DeliveryPayload::Notice { notice } = record.event.payload {
+            if let DeliveryPayload::Notice { content: notice } = record.event.payload {
                 found |= app
                     .delivery_payloads()
-                    .notice(&notice)
+                    .content(&notice)
                     .await
                     .unwrap()
-                    .text
                     .contains("cancelled");
             }
         }

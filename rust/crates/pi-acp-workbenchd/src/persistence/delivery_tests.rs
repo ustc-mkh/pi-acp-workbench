@@ -124,7 +124,7 @@ async fn history_commit_before_outbox_projection_recovers_and_archive_survives_s
     let deliveries = restarted.outbox.pending(0, 16).await.unwrap();
     assert_eq!(deliveries.len(), 1);
     assert!(
-        matches!(&deliveries[0].event.payload, outbox::DeliveryPayload::SessionCompleted { entries, .. } if entries == &vec![entry.clone()])
+        matches!(&deliveries[0].event.payload, outbox::DeliveryPayload::Entries { entries, .. } if entries == &vec![entry.clone()])
     );
     restarted.remove(state.id.as_str()).await.unwrap();
     assert_eq!(
@@ -146,7 +146,7 @@ async fn projection_replay_preserves_durable_ack_and_capacity_defers_without_los
     let defaults = HistoryStore::fixture(&root);
     let store = HistoryStore::with_delivery(
         root.join("history"),
-        outbox::OutboxStore::new(root.join("outbox"), 1),
+        defaults.outbox.with_window(1),
         defaults.payloads.clone(),
     );
     let mut state = state();
@@ -154,8 +154,8 @@ async fn projection_replay_preserves_durable_ack_and_capacity_defers_without_los
     finish(&store, &mut state, "second").await;
     store.project_outbox().await.unwrap();
     assert_eq!(store.outbox.pending(0, 16).await.unwrap().len(), 1);
-    assert!(store.remove(state.id.as_str()).await.is_err());
-    assert!(store.load(state.id.as_str()).await.unwrap().is_some());
+    store.remove(state.id.as_str()).await.unwrap();
+    assert!(store.load(state.id.as_str()).await.unwrap().is_none());
     let pending = store.outbox.pending(0, 16).await.unwrap();
     store.outbox.ack(&pending[0].event.id).await.unwrap();
     store.project_outbox().await.unwrap();

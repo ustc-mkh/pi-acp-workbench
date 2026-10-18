@@ -43,14 +43,19 @@ async fn join(tasks: &mut JoinSet<Completion>) -> Result<(), AdapterError> {
     }
     result
 }
-fn resolve(target: &DeliveryTarget, bindings: &BTreeMap<TopicKey, SessionId>) -> Option<TopicKey> {
-    match target {
-        DeliveryTarget::Telegram(topic) => Some(topic.clone()),
+fn resolve(
+    target: &DeliveryTarget,
+    bindings: &BTreeMap<TopicKey, SessionId>,
+) -> Result<Option<TopicKey>, DomainError> {
+    Ok(match target {
+        DeliveryTarget::Telegram { chat, thread, .. } => {
+            Some(TopicKey::from_delivery(*chat, *thread)?)
+        }
         DeliveryTarget::Session { session, .. } => bindings
             .iter()
             .find(|(_, bound)| *bound == session)
             .map(|(topic, _)| topic.clone()),
-    }
+    })
 }
 pub(super) async fn dispatch(
     context: &Context<impl BotApi>,
@@ -69,28 +74,42 @@ pub(super) async fn dispatch(
     let mut tick = interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut rescan = true;
-    let result = loop {
+    let result = 'dispatch: loop {
         if stop.is_cancelled() || context.app.is_closing() {
             break Ok(());
         }
         if rescan && tasks.len() < CAPACITY {
             rescan = false;
             let outbox = context.app.delivery_store();
-            // Include deferred heads and the complete bounded pending capacity;
-            // otherwise a 64-record prefix can starve independent topics.
+            let state = match context.store.snapshot().await {
+                Ok(state) => state,
+                Err(error) => break Err(error.into()),
+            };
+            let Some(bot_id) = state.bot.map(|bot| bot.get()) else {
+                break Err(DomainError::Persistence("missing Telegram bot identity".into()).into());
+            };
+            let bindings = state.bindings;
+            let query_bindings = bindings
+                .iter()
+                .map(|(topic, session)| {
+                    (
+                        session.clone(),
+                        topic.chat.get(),
+                        topic.thread.map_or(0, |thread| thread.get()),
+                    )
+                })
+                .collect();
+            // Resolve bindings in SQL BEFORE LIMIT, retaining deferred heads.
+            // A long queue for one topic must not hide an independent topic.
             let records = match context
                 .app
-                .pending_deliveries(u64::MAX, outbox.capacity())
+                .pending_topic_deliveries(outbox.capacity(), query_bindings, bot_id)
                 .await
             {
                 Ok(records) => records,
                 Err(DomainError::Backpressure) if !once => {
                     continue;
                 }
-                Err(error) => break Err(error.into()),
-            };
-            let bindings = match context.store.snapshot().await {
-                Ok(state) => state.bindings,
                 Err(error) => break Err(error.into()),
             };
             let mut seen = BTreeSet::new();
@@ -100,15 +119,22 @@ pub(super) async fn dispatch(
                 }
                 // If a binding changed, reserve its new destination too until
                 // the prior physical job joins. Never route into an active lane.
-                if let Some(topic) = resolve(target, &bindings) {
-                    seen.insert(topic);
+                match resolve(target, &bindings) {
+                    Ok(Some(topic)) => {
+                        seen.insert(topic);
+                    }
+                    Ok(None) => {}
+                    Err(error) => break 'dispatch Err(error.into()),
                 }
             }
             for record in records {
                 if active.contains_key(&record.event.id) {
                     continue;
                 }
-                let topic = resolve(&record.event.target, &bindings);
+                let topic = match resolve(&record.event.target, &bindings) {
+                    Ok(topic) => topic,
+                    Err(error) => break 'dispatch Err(error.into()),
+                };
                 if let Some(topic) = &topic {
                     // Reserve even a deferred head so later records cannot
                     // overtake it on this destination.

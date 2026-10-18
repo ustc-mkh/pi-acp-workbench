@@ -1,8 +1,13 @@
-import { archivedEntry, imageArchive, noticeText } from './lib/workbench-sqlite-fixture.mjs';
+import {
+  archivedEntry,
+  imageArchive,
+  contentText,
+  deliveryRecords,
+} from './lib/workbench-sqlite-fixture.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
@@ -240,15 +245,14 @@ async function stop(child) {
   client = undefined;
   child.kill('SIGTERM');
   assert.equal(await child.done, 0);
+  await assert.rejects(stat(join(data, 'outbox')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(data, 'payloads')), { code: 'ENOENT' });
   assert(!child.output.includes(token), 'bot token must never appear in daemon output');
 }
 async function rateLimitedPending() {
-  for (const name of await readdir(join(data, 'outbox'))) {
-    if (!name.endsWith('.json')) continue;
-    const { body } = JSON.parse(await readFile(join(data, 'outbox', name), 'utf8'));
-    if (body.status === 'Pending' && body.last_failure === 'RateLimited') return true;
-  }
-  return false;
+  return deliveryRecords(data).some(
+    (body) => body.status === 'Pending' && body.last_failure === 'RateLimited',
+  );
 }
 async function trace() {
   try {
@@ -348,11 +352,9 @@ try {
   text('/help', thread);
   let laterNotice;
   await until(async () => {
-    for (const name of await readdir(join(data, 'outbox'))) {
-      if (!name.endsWith('.json')) continue;
-      const { body } = JSON.parse(await readFile(join(data, 'outbox', name), 'utf8'));
+    for (const body of deliveryRecords(data)) {
       if (body.status === 'Pending' && body.event.target.Telegram && body.event.payload.Notice) {
-        laterNotice = noticeText(data, body.event.payload.Notice.notice);
+        laterNotice = contentText(data, body.event.payload.Notice.content);
         return true;
       }
     }
@@ -551,11 +553,9 @@ try {
   );
   await until(() => mediaClosed === 1, 'cancelled image HTTP socket closed');
   let pendingImage;
-  for (const name of await readdir(join(data, 'outbox'))) {
-    if (!name.endsWith('.json')) continue;
-    const { body } = JSON.parse(await readFile(join(data, 'outbox', name), 'utf8'));
-    if (body.status !== 'Pending' || !body.event.payload.SessionCompleted) continue;
-    for (const entry of body.event.payload.SessionCompleted.entries) {
+  for (const body of deliveryRecords(data)) {
+    if (body.status !== 'Pending' || !body.event.payload.Entries) continue;
+    for (const entry of body.event.payload.Entries.entries) {
       const archived = archivedEntry(data, entry);
       if (archived.image) pendingImage = archived.image;
     }

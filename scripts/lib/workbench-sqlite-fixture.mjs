@@ -64,6 +64,39 @@ export function noticeText(root, id) {
     return new TextDecoder('utf-8', { fatal: true }).decode(row.data);
   });
 }
+export function contentText(root, reference) {
+  return inspect(root, (database) => {
+    const row = content(database, reference.id);
+    assert.equal(row.kind, 'Text');
+    assert.equal(reference.kind, 'Text');
+    assert.equal(row.sha256, reference.sha256);
+    assert.equal(row.bytes, reference.bytes);
+    return new TextDecoder('utf-8', { fatal: true }).decode(row.data);
+  });
+}
+export function deliveryRecords(root) {
+  return inspect(root, (database) =>
+    database
+      .prepare(
+        'SELECT delivery_id,order_seq,revision,target_key,target_json,payload_json,status,attempt,next_retry,last_failure FROM deliveries ORDER BY order_seq',
+      )
+      .all()
+      .map((row) => ({
+        event: {
+          id: row.delivery_id,
+          revision: row.revision,
+          target: JSON.parse(row.target_json),
+          payload: JSON.parse(row.payload_json),
+        },
+        target_key: row.target_key,
+        sequence: row.order_seq,
+        status: row.status,
+        attempt: row.attempt,
+        retry_at: row.next_retry,
+        last_failure: row.last_failure,
+      })),
+  );
+}
 export function archivedEntry(root, id) {
   return inspect(root, (database) => {
     const row = database

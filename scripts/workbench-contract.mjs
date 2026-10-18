@@ -76,6 +76,8 @@ async function stop(child) {
   const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
   try {
     assert.equal(await child.done, 0, child.output);
+    await assert.rejects(stat(join(data, 'outbox')), { code: 'ENOENT' });
+    await assert.rejects(stat(join(data, 'payloads')), { code: 'ENOENT' });
   } finally {
     clearTimeout(timer);
   }

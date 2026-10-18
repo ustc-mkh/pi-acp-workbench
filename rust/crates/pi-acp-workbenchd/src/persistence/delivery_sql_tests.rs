@@ -360,6 +360,76 @@ async fn sql_delivery_failed_ack_and_fail_leave_exact_pending_record_and_can_ret
 }
 
 #[tokio::test]
+async fn sql_delivery_topic_heads_merge_session_and_direct_targets_before_window_and_preserve_deferred_fifo(
+) {
+    use crate::domain::SessionId;
+    let root = Root::new();
+    let (_lease, db) = open(&root.data()).await;
+    let session = SessionId::generate();
+    let mut first = intent(101);
+    first.target = DeliveryTarget::Session {
+        session: session.clone(),
+        cwd: WorkspacePath::new("/tmp").unwrap(),
+    };
+    db.enqueue_delivery(first.clone()).await.unwrap();
+    db.fail_delivery(first.id.clone(), Failure::RateLimited, at(100))
+        .await
+        .unwrap();
+    for _ in 0..1100 {
+        db.enqueue_delivery(intent(101)).await.unwrap();
+    }
+    let other = intent(102);
+    db.enqueue_delivery(other.clone()).await.unwrap();
+    let bindings = vec![(session.clone(), -100, 101)];
+    let rows = db
+        .delivery_topic_heads(at(99), 1024, bindings.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].intent.id, other.id, "deferred session head fences ready direct-topic successors, not another topic beyond 1024 rows");
+    let rows = db
+        .delivery_topic_heads(at(100), 1024, bindings.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].intent.id, first.id);
+    db.ack_delivery(first.id).await.unwrap();
+    let rows = db
+        .delivery_topic_heads(at(0), 1024, bindings.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].order < rows[1].order);
+    assert!(db
+        .delivery_topic_heads(
+            at(0),
+            1024,
+            vec![(session.clone(), -100, 101), (session, -100, 102)],
+            1
+        )
+        .await
+        .is_err());
+    // A new binding must not retain a stale session/topic merge.
+    let another = SessionId::generate();
+    let mut session_intent = intent(103);
+    session_intent.target = DeliveryTarget::Session {
+        session: another.clone(),
+        cwd: WorkspacePath::new("/tmp").unwrap(),
+    };
+    db.enqueue_delivery(session_intent).await.unwrap();
+    let rows = db
+        .delivery_topic_heads(at(0), 1024, vec![(another, -100, 104)], 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "caller snapshot, not a cached prior binding, resolves topic heads"
+    );
+    db.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn sql_delivery_missing_revision_schema_is_refused_without_migration() {
     let root = Root::new();
     let (lease, db) = open(&root.data()).await;

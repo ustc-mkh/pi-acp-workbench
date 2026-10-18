@@ -116,7 +116,7 @@ impl WorkbenchApp {
         }
         let history = HistoryStore::with_delivery(
             config.storage.root.join("history"),
-            crate::persistence::outbox::OutboxStore::new(config.storage.root.join("outbox"), 1024),
+            crate::persistence::outbox::OutboxStore::new(database.clone(), 1024),
             crate::persistence::payload::PayloadStore::new(database.clone()),
         );
         let core = Arc::new(CommandCore {
@@ -147,8 +147,27 @@ impl WorkbenchApp {
         limit: usize,
     ) -> Result<Vec<crate::persistence::outbox::DeliveryRecord>, DomainError> {
         let (reply, wait) = tokio::sync::oneshot::channel();
-        self.ingress
-            .submit(Request::Deliveries { now, limit, reply })?;
+        self.ingress.submit(Request::Deliveries {
+            now,
+            limit,
+            bindings: None,
+            reply,
+        })?;
+        wait.await.map_err(|_| ingress::interrupted())?
+    }
+    pub(crate) async fn pending_topic_deliveries(
+        &self,
+        limit: usize,
+        bindings: Vec<(SessionId, i64, i64)>,
+        bot_id: i64,
+    ) -> Result<Vec<crate::persistence::outbox::DeliveryRecord>, DomainError> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        self.ingress.submit(Request::Deliveries {
+            now: u64::MAX,
+            limit,
+            bindings: Some((bindings, bot_id)),
+            reply,
+        })?;
         wait.await.map_err(|_| ingress::interrupted())?
     }
     /// Read immutable bytes through the bounded query ingress. This never

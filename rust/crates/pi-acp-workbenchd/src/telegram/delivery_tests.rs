@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     domain::{DeliveryId, NoticeId},
     persistence::{
-        outbox::{DeliveryEvent, DeliveryPayload, DeliveryTarget},
+        outbox::{DeliveryEvent, DeliveryPayload},
         payload::NoticeContent,
     },
 };
@@ -22,9 +22,11 @@ pub(super) async fn notice(
     app.delivery_store()
         .enqueue(DeliveryEvent {
             id: id.clone(),
-            revision,
-            target: DeliveryTarget::Telegram(topic.clone()),
-            payload: DeliveryPayload::Notice { notice: notice.id },
+            revision: crate::domain::query::SafeInteger::new(revision).unwrap(),
+            target: topic.delivery_target(99, config().workspace),
+            payload: DeliveryPayload::Notice {
+                content: crate::persistence::payload::PayloadStore::notice_ref(&notice).unwrap(),
+            },
         })
         .await
         .unwrap();
@@ -34,6 +36,69 @@ pub(super) fn topic(thread: i64) -> TopicKey {
     TopicKey {
         chat: ChatId::new(-100).unwrap(),
         thread: Some(TopicId::new(thread).unwrap()),
+    }
+}
+
+#[tokio::test]
+async fn direct_topic_intents_check_frozen_bot_and_workspace_before_reading_missing_archive() {
+    use crate::{
+        domain::{error::DomainError, query::SafeInteger, ImageId, WorkspacePath},
+        telegram::runtime::AdapterError,
+    };
+    for wrong_bot in [true, false] {
+        let root = root();
+        let app = app(&root);
+        let api = Fake::default();
+        let context = Context::new(app.clone(), api.clone(), &root.join("telegram"), config())
+            .await
+            .unwrap();
+        let journal = app.journal_snapshot().await.unwrap();
+        let destination = topic(101).delivery_target(
+            if wrong_bot { 98 } else { 99 },
+            if wrong_bot {
+                config().workspace
+            } else {
+                WorkspacePath::new("/").unwrap()
+            },
+        );
+        app.delivery_store()
+            .enqueue(DeliveryEvent {
+                id: DeliveryId::generate(),
+                revision: SafeInteger::new(1).unwrap(),
+                target: destination,
+                payload: DeliveryPayload::Image {
+                    image: ImageId::generate(),
+                },
+            })
+            .await
+            .unwrap();
+        let result = deliver_once(&context).await;
+        if wrong_bot {
+            assert!(
+                matches!(result, Err(AdapterError::Domain(DomainError::Persistence(message))) if message == "delivery bot identity mismatch")
+            );
+            assert_eq!(
+                app.delivery_store()
+                    .pending(u64::MAX, 16)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        } else {
+            result.unwrap();
+            assert!(app
+                .delivery_store()
+                .pending(u64::MAX, 16)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        assert!(api.0.lock().await.sent.is_empty());
+        assert!(api.0.lock().await.media.is_empty());
+        assert_eq!(app.journal_snapshot().await.unwrap(), journal);
+        app.shutdown_checked().await.unwrap();
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
 
@@ -51,7 +116,11 @@ async fn deferred_head_survives_restart_blocks_its_topic_but_does_not_hide_a_top
     let head = notice(&first, &a, "A:0".into(), 9999).await;
     first
         .delivery_store()
-        .fail(&head, DeliveryFailure::RateLimited, u64::MAX)
+        .fail(
+            &head,
+            DeliveryFailure::RateLimited,
+            crate::domain::query::MAX_SAFE_INTEGER,
+        )
         .await
         .unwrap();
     for i in 1..70 {

@@ -20,6 +20,24 @@ export function imageArchive(
   id: string,
 ): { format_version: 1; image: ArchiveImageRef; data: string };
 export function noticeText(root: string, id: string): string;
+export function contentText(
+  root: string,
+  reference: { id: string; kind: string; sha256: string; bytes: number },
+): string;
+export function deliveryRecords(root: string): Array<{
+  event: {
+    id: string;
+    revision: number;
+    target: Record<string, unknown>;
+    payload: Record<string, unknown>;
+  };
+  target_key: string;
+  sequence: number;
+  status: string;
+  attempt: number;
+  retry_at: number;
+  last_failure: string | null;
+}>;
 export function archivedEntry(
   root: string,
   id: string,

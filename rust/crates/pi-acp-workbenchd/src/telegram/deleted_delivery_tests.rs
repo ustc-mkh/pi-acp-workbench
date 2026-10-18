@@ -168,7 +168,7 @@ async fn archived_scope_does_not_authorize_outside_workspace_unbound_or_disallow
         app.delivery_store()
             .enqueue(DeliveryEvent {
                 id: DeliveryId::generate(),
-                revision: 1,
+                revision: crate::domain::query::SafeInteger::new(1).unwrap(),
                 target: DeliveryTarget::Session {
                     session,
                     cwd: crate::domain::WorkspacePath::new(cwd.to_str().unwrap()).unwrap(),
@@ -228,7 +228,7 @@ async fn a_live_session_cannot_be_delivered_under_a_different_frozen_workspace_i
     app.delivery_store()
         .enqueue(DeliveryEvent {
             id: DeliveryId::generate(),
-            revision: 1,
+            revision: crate::domain::query::SafeInteger::new(1).unwrap(),
             target: DeliveryTarget::Session {
                 session,
                 cwd: crate::domain::WorkspacePath::new(wrong.to_str().unwrap()).unwrap(),

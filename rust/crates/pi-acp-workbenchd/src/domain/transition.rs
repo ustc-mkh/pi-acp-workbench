@@ -50,7 +50,7 @@ pub struct ToolUpdate {
     pub header: ToolHeader,
     pub contents: Vec<NewContent>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryIntent {
     pub id: DeliveryId,
@@ -59,7 +59,7 @@ pub struct DeliveryIntent {
     pub target: DeliveryTarget,
     pub payload: DeliveryPayload,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum DeliveryTarget {
     Session {
@@ -73,9 +73,14 @@ pub enum DeliveryTarget {
         cwd: WorkspacePath,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum DeliveryPayload {
+    /// Immutable archive references; no session snapshot is required to render.
+    Entries {
+        turn: TurnId,
+        entries: Vec<EntryId>,
+    },
     Turn {
         session: SessionId,
         turn: TurnId,
