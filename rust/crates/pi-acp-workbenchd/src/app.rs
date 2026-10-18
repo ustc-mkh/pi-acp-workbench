@@ -117,7 +117,7 @@ impl WorkbenchApp {
         let history = HistoryStore::with_delivery(
             config.storage.root.join("history"),
             crate::persistence::outbox::OutboxStore::new(config.storage.root.join("outbox"), 1024),
-            crate::persistence::payload::PayloadStore::new(config.storage.root.join("payloads")),
+            crate::persistence::payload::PayloadStore::new(database.clone()),
         );
         let core = Arc::new(CommandCore {
             runtime: make_runtime(history.clone(), config.sessions.mailbox),

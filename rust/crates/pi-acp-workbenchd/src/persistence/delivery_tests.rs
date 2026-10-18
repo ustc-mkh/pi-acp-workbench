@@ -34,7 +34,7 @@ fn state() -> SessionState {
 async fn stale_or_conflicting_history_revision_cannot_overwrite_state_or_create_invalid_delivery_ledger(
 ) {
     let root = root();
-    let store = HistoryStore::new(&root);
+    let store = HistoryStore::fixture(&root);
     let mut state = state();
     store.save(&state).await.unwrap();
     let stale = state.clone();
@@ -57,7 +57,7 @@ async fn stale_or_conflicting_history_revision_cannot_overwrite_state_or_create_
 async fn workspace_identity_is_immutable_and_its_delivery_scope_is_validated_even_with_a_matching_checksum(
 ) {
     let root = root();
-    let store = HistoryStore::new(&root);
+    let store = HistoryStore::fixture(&root);
     let mut state = state();
     finish(&store, &mut state, "scoped output").await;
     let path = root.join(format!("{}.json", state.id));
@@ -114,11 +114,12 @@ async fn finish(store: &HistoryStore, state: &mut SessionState, text: &str) -> E
 #[tokio::test]
 async fn history_commit_before_outbox_projection_recovers_and_archive_survives_session_removal() {
     let root = root();
-    let store = HistoryStore::new(&root);
+    let store = HistoryStore::fixture(&root);
     let mut state = state();
     let entry = finish(&store, &mut state, "你好 immutable output").await;
     assert!(store.outbox.pending(0, 16).await.unwrap().is_empty()); // crash before projection
-    let restarted = HistoryStore::new(&root);
+    store.payloads.shutdown().await;
+    let restarted = HistoryStore::fixture(&root);
     restarted.project_outbox().await.unwrap();
     let deliveries = restarted.outbox.pending(0, 16).await.unwrap();
     assert_eq!(deliveries.len(), 1);
@@ -133,21 +134,20 @@ async fn history_commit_before_outbox_projection_recovers_and_archive_survives_s
     assert!(restarted.load(state.id.as_str()).await.unwrap().is_none());
     assert_eq!(restarted.outbox.pending(0, 16).await.unwrap().len(), 1);
     restarted.outbox.ack(&deliveries[0].event.id).await.unwrap();
-    assert!(HistoryStore::new(&root)
-        .outbox
-        .pending(0, 16)
-        .await
-        .unwrap()
-        .is_empty());
+    restarted.payloads.shutdown().await;
+    let reopened = HistoryStore::fixture(&root);
+    assert!(reopened.outbox.pending(0, 16).await.unwrap().is_empty());
+    reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
 async fn projection_replay_preserves_durable_ack_and_capacity_defers_without_losing_history() {
     let root = root();
+    let defaults = HistoryStore::fixture(&root);
     let store = HistoryStore::with_delivery(
         root.join("history"),
         outbox::OutboxStore::new(root.join("outbox"), 1),
-        payload::PayloadStore::new(root.join("payloads")),
+        defaults.payloads.clone(),
     );
     let mut state = state();
     finish(&store, &mut state, "first").await;
@@ -171,7 +171,7 @@ async fn projection_replay_preserves_durable_ack_and_capacity_defers_without_los
 #[tokio::test]
 async fn immutable_payload_conflict_and_tampered_projection_do_not_silently_replace_records() {
     let root = root();
-    let store = HistoryStore::new(&root);
+    let store = HistoryStore::fixture(&root);
     let mut state = state();
     let entry = finish(&store, &mut state, "original").await;
     let mut altered = state.transcript.entries[0].clone();

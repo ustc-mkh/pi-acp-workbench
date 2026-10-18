@@ -185,7 +185,10 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
         .is_err());
     assert_eq!(inspect(&app, &id).await.revision, revision);
     app.shutdown().await;
-    let persisted = HistoryStore::new(root.join("history"))
+    let persisted = app
+        .core
+        .history
+        .clone()
         .load(id.as_str())
         .await
         .unwrap()

@@ -34,7 +34,7 @@ mod tests {
     async fn cancelled_worker_epoch_cannot_publish_a_late_crash_before_or_after_replacement() {
         use crate::domain::{command::AgentEvent, Prompt, SessionStatus};
         let root = temp("cancel-epoch");
-        let runtime = Runtime::start(HistoryStore::new(&root), 8);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
         let id = create(&runtime).await;
         runtime
             .registry
@@ -116,7 +116,7 @@ mod tests {
     #[tokio::test]
     async fn failed_commit_does_not_publish_or_replace_owned_state() {
         let root = temp("failed-commit");
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         // Replace the storage directory temporarily to force the commit to fail.
@@ -167,7 +167,7 @@ mod tests {
     async fn durable_cancelling_state_fences_notifications_and_worker_reattachment_until_terminal_commit(
     ) {
         let root = temp("cancelling-fence");
-        let runtime = Runtime::start(HistoryStore::new(&root), 8);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
         let id = create(&runtime).await;
         let started = runtime
             .registry
@@ -237,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn load_does_not_replace_live_owner_and_restart_interrupts_turn() {
         let root = temp("load-owner");
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn removal_is_durable_and_shutdown_rejects_late_commands() {
         let root = temp("remove");
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn list_and_inspect_expose_committed_domain_projection_without_workers() {
         let root = temp("list-state");
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -375,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn independent_sessions_accept_one_hundred_commands() {
         let root = temp("concurrent-sessions");
-        let runtime = Runtime::start(HistoryStore::new(&root), 128);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 128);
         let mut ids = vec![];
         for _ in 0..16 {
             ids.push(create(&runtime).await);
@@ -417,7 +417,7 @@ mod tests {
     async fn replacement_worker_fences_late_events_and_obsolete_attachments() {
         use crate::domain::command::AgentEvent;
         let root = temp("epoch-fence");
-        let runtime = Runtime::start(HistoryStore::new(&root), 8);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
         let id = create(&runtime).await;
         let started = runtime
             .registry
@@ -491,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn checked_shutdown_commits_cancellation_and_reports_failed_final_write() {
         let root = temp("shutdown-commit");
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn registry_owns_session_and_routes_commands() {
         let root = temp("route");
-        let runtime = Runtime::start(HistoryStore::new(&root), 4);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 4);
         let events = runtime
             .registry
             .command(DomainCommand::CreateSession {
@@ -568,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn agent_events_update_owned_state() {
         let root = temp("agent");
-        let runtime = Runtime::start(HistoryStore::new(&root), 4);
+        let runtime = Runtime::start(HistoryStore::fixture(&root), 4);
         let events = runtime
             .registry
             .command(DomainCommand::CreateSession {

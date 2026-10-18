@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
-import { operationRecords } from './lib/workbench-sqlite-fixture.mjs';
+import { operationRecords, imageArchive } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -221,15 +221,14 @@ try {
   assert.equal(image.image.mime, 'image/png');
   assert(image.image.bytes > 0 && image.image.bytes <= 4 * 1024 * 1024);
   assert(!JSON.stringify(image).includes('iVBOR'));
-  const imagePath = join(data, 'payloads', `image-${image.image.id}.json`);
-  const imageArchive = await readFile(imagePath, 'utf8');
-  assert.equal(JSON.parse(imageArchive).body.image.sha256, image.image.sha256);
+  const imageRecord = imageArchive(data, image.image.id);
+  assert.equal(imageRecord.image.sha256, image.image.sha256);
   check(
     'agent image bytes are archived before metadata-only IPC publication and never in snapshots',
   );
   const journalBeforeImageRead = await journal();
   const readImage = await client.call({ method: 'image', image: image.image });
-  assert.deepEqual(readImage, JSON.parse(imageArchive).body);
+  assert.deepEqual(readImage, imageRecord);
   await assert.rejects(
     client.call({ method: 'image', image: image.image }, 'do-not-journal-pixels'),
     /invalid_input/,
@@ -290,7 +289,7 @@ try {
   await client.call({ method: 'load', session });
   const loaded = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
   assert.deepEqual(loaded.transcript, before.transcript);
-  assert.equal(await readFile(imagePath, 'utf8'), imageArchive);
+  assert.deepEqual(imageArchive(data, image.image.id), imageRecord);
   check('SIGTERM joins adapters, removes its socket and preserves versioned history');
   await client.call({ method: 'subscribe', session });
   const resumed = client.waitFor((event) => event.TurnFinished);
@@ -316,9 +315,9 @@ try {
   await client.call({ method: 'remove', session });
   await assert.rejects(client.call({ method: 'inspect', session }), /not_found/);
   assert.equal((await client.call({ method: 'list' }))[0].SessionsListed.length, 1);
-  assert.equal(
-    await readFile(imagePath, 'utf8'),
-    imageArchive,
+  assert.deepEqual(
+    imageArchive(data, image.image.id),
+    imageRecord,
     'immutable image survives source removal for pending delivery/history references',
   );
   assert.deepEqual(await client.call({ method: 'image', image: image.image }), readImage);

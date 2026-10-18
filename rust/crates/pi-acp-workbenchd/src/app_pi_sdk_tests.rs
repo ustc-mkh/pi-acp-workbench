@@ -107,11 +107,13 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
     };
     // Initial cold bootstrap fixture only: no live actor or real data is edited,
     // no old snapshot is mixed with another revision's delivery ledger.
-    let lease = StorageLease::acquire(&fixture.root).unwrap();
-    HistoryStore::new(fixture.root.join("history"))
+    let lease = StorageLease::lock(&fixture.root).unwrap();
+    let database = Database::open(&fixture.root, &lease).await.unwrap();
+    HistoryStore::new(fixture.root.join("history"), database.clone())
         .save(&state)
         .await
         .unwrap();
+    database.shutdown().await.unwrap();
     drop(lease);
     let mut config = config_at(
         &fixture.root,

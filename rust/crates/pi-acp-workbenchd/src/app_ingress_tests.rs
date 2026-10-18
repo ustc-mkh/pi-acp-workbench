@@ -315,7 +315,10 @@ async fn root_abort_during_adapter_drain_joins_protocol_owners_outside_map_and_s
         .is_err());
     assert!(caller.await.unwrap().is_err());
     assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
-    let state = HistoryStore::new(root.join("history"))
+    let state = app
+        .core
+        .history
+        .clone()
         .load(id.as_str())
         .await
         .unwrap()
@@ -349,7 +352,10 @@ async fn owned_task_panic_is_fatal_and_cleanup_retains_lease_until_host_shutdown
     assert!(crate::persistence::format::StorageLease::acquire(&root).is_err());
     assert!(app.shutdown_checked().await.is_err());
     assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
-    let state = HistoryStore::new(root.join("history"))
+    let state = app
+        .core
+        .history
+        .clone()
         .load(id.as_str())
         .await
         .unwrap()

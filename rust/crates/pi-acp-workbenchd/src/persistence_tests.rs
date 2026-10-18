@@ -31,7 +31,7 @@ mod tests {
     async fn history_rejects_wrong_version_identity_revision_and_checksum() {
         let state = state();
         let root = std::env::temp_dir().join(format!("workbench-history-{}", state.id));
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         store.save(&state).await.unwrap();
         let path = root.join(format!("{}.json", state.id));
         let original: HistorySnapshot =
@@ -75,7 +75,7 @@ mod tests {
     async fn leftover_temporary_file_is_not_a_commit() {
         let mut state = state();
         let root = std::env::temp_dir().join(format!("workbench-history-temp-{}", state.id));
-        let store = HistoryStore::new(&root);
+        let store = HistoryStore::fixture(&root);
         store.save(&state).await.unwrap();
         state.revision += 1;
         let snapshot = HistorySnapshot {

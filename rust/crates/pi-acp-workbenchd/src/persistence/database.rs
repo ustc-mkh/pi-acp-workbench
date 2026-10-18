@@ -106,6 +106,7 @@ pub(super) enum StoreRequest {
         content: ContentRef,
         reply: Reply<String>,
     },
+    Payload(Box<super::payload::Request>),
     Journal(Box<super::journal::Request>),
     ArchiveImage {
         asset: crate::domain::image::ImageAsset,
@@ -203,6 +204,9 @@ impl Database {
                         }
                         StoreRequest::Image { id, reply } => {
                             let _ = reply.send(super::content::image(&connection, &id));
+                        }
+                        StoreRequest::Payload(request) => {
+                            super::payload::execute(&mut connection, *request);
                         }
                         StoreRequest::Journal(request) => {
                             super::journal::execute(&mut connection, *request);
@@ -311,6 +315,15 @@ impl Database {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Test(
             super::sqlite_tests::TestRequest::RejectJournalAdmission { operation, reply },
+        ))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    #[cfg(test)]
+    pub(crate) async fn corrupt_image(&self, id: crate::domain::ImageId) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Test(
+            super::sqlite_tests::TestRequest::CorruptImage { id, reply },
         ))
         .await?;
         result.await.map_err(|_| StoreError::Closed)?

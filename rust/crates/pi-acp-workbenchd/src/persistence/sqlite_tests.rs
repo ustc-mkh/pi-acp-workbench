@@ -35,6 +35,10 @@ pub(super) enum TestRequest {
         commit: Box<SessionCommit>,
         reply: TestReply<()>,
     },
+    CorruptImage {
+        id: crate::domain::ImageId,
+        reply: TestReply<()>,
+    },
     Hold {
         commit: Box<SessionCommit>,
         ready: PathBuf,
@@ -61,6 +65,22 @@ pub(super) fn execute(db: &mut Connection, request: TestRequest) {
                 )?;
                 Ok(())
             })();
+            let _ = reply.send(result);
+        }
+        TestRequest::CorruptImage { id, reply } => {
+            let result = db
+                .execute(
+                    "UPDATE contents SET data=zeroblob(bytes) WHERE id=?1 AND kind='Image'",
+                    [id.as_str()],
+                )
+                .map_err(StoreError::from)
+                .and_then(|changed| {
+                    if changed == 1 {
+                        Ok(())
+                    } else {
+                        Err(StoreError::NotFound)
+                    }
+                });
             let _ = reply.send(result);
         }
         TestRequest::Pause { entered, resume } => {
@@ -119,9 +139,9 @@ fn seed(db: &mut Connection, session: &SessionId, count: u64) -> Result<(), Stor
     tx.commit()?;
     Ok(())
 }
-struct Root(PathBuf);
+pub(super) struct Root(PathBuf);
 impl Root {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let template = CString::new(
             std::env::temp_dir()
                 .join("workbench-sqlite-XXXXXX")
@@ -140,7 +160,7 @@ impl Root {
         fs::create_dir(path.join("data")).unwrap();
         Self(path)
     }
-    fn data(&self) -> PathBuf {
+    pub(super) fn data(&self) -> PathBuf {
         self.0.join("data")
     }
 }
@@ -209,7 +229,7 @@ fn update(mut view: SessionView, id: &str, text: &str) -> SessionCommit {
         view_changed: true,
     }
 }
-async fn open(root: &Path) -> (StorageLease, Database) {
+pub(super) async fn open(root: &Path) -> (StorageLease, Database) {
     let lease = StorageLease::lock(root).unwrap();
     let db = Database::open(root, &lease).await.unwrap();
     (lease, db)

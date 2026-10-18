@@ -23,7 +23,7 @@ impl Store {
             std::env::temp_dir().join(format!("workbench-registry-{}", uuid::Uuid::new_v4()));
         (
             Self {
-                history: HistoryStore::new(&root),
+                history: HistoryStore::fixture(&root),
                 mode: Arc::new(AtomicU8::new(0)),
                 entered: Arc::new(Semaphore::new(0)),
                 release: Arc::new(Semaphore::new(0)),

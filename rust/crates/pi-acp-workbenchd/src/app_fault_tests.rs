@@ -98,7 +98,10 @@ async fn provider_rpc_error_description_cannot_escape_into_domain_or_persisted_h
     .unwrap();
     assert!(error.contains("session/prompt"));
     assert!(!error.contains("SENSITIVE_PROVIDER_DESCRIPTION"));
-    let persisted = HistoryStore::new(root.join("history"))
+    let persisted = app
+        .core
+        .history
+        .clone()
         .load(id.as_str())
         .await
         .unwrap()

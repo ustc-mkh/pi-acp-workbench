@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { operationRecords } from './lib/workbench-sqlite-fixture.mjs';
+import {
+  operationRecords,
+  imageArchive,
+  noticeText,
+  archivedEntry,
+} from './lib/workbench-sqlite-fixture.mjs';
+import { createHash } from 'node:crypto';
 
 async function fixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'workbench-sqlite-fixture-'));
@@ -39,6 +45,55 @@ test('operation fixture reads exact immutable rows and binds the operation filte
     assert.deepEqual(operationRecords(root, 'z'), [rows[1]]);
     assert.deepEqual(operationRecords(root, "z' OR 1=1 --"), []);
     assert.deepEqual(await readFile(file), before);
+  });
+});
+
+test('payload fixture checks exact SQL BLOB/hash/identities, is read-only and binds IDs', async () => {
+  await fixture(async (root) => {
+    const file = join(root, 'workbench.sqlite3');
+    const database = new DatabaseSync(file);
+    database.exec(
+      'PRAGMA user_version=3; CREATE TABLE contents(id TEXT PRIMARY KEY,kind TEXT,sha256 TEXT,bytes INTEGER,data BLOB,image_ref_json TEXT); CREATE TABLE entries(entry_id TEXT PRIMARY KEY,content_id TEXT,metadata_json TEXT)',
+    );
+    const hash = (data) => createHash('sha256').update(data).digest('hex');
+    const pixels = Buffer.from('GIF89a01000100');
+    const image = { id: 'image', mime: 'image/gif', bytes: pixels.length, sha256: hash(pixels) };
+    const insert = database.prepare('INSERT INTO contents VALUES (?,?,?,?,?,?)');
+    insert.run(image.id, 'Image', image.sha256, image.bytes, pixels, JSON.stringify(image));
+    const text = '独立 SQL \"fixture\" 🌏';
+    const bytes = Buffer.from(text);
+    const reference = { id: 'text', kind: 'Text', sha256: hash(bytes), bytes: bytes.length };
+    insert.run(reference.id, 'Text', reference.sha256, reference.bytes, bytes, null);
+    insert.run(
+      `archive-notice-${hash('notice')}`,
+      'Text',
+      reference.sha256,
+      reference.bytes,
+      bytes,
+      null,
+    );
+    database
+      .prepare('INSERT INTO entries VALUES (?,?,?)')
+      .run('entry', 'text', JSON.stringify({ id: 'entry', text: reference, image }));
+    database.close();
+    const before = await readFile(file);
+    assert.deepEqual(imageArchive(root, 'image'), {
+      format_version: 1,
+      image,
+      data: pixels.toString('base64'),
+    });
+    assert.equal(noticeText(root, 'notice'), text);
+    assert.deepEqual(archivedEntry(root, 'entry'), { id: 'entry', text, image });
+    assert.throws(() => imageArchive(root, "image' OR 1=1 --"));
+    assert.throws(() => archivedEntry(root, "entry' OR 1=1 --"));
+    assert.throws(() => noticeText(root, 'missing'));
+    assert.deepEqual(await readFile(file), before);
+    const corrupt = new DatabaseSync(file);
+    corrupt
+      .prepare('UPDATE contents SET data=? WHERE id=?')
+      .run(Buffer.alloc(pixels.length), image.id);
+    corrupt.close();
+    assert.throws(() => imageArchive(root, image.id));
   });
 });
 

@@ -1,3 +1,4 @@
+import { archivedEntry, imageArchive, noticeText } from './lib/workbench-sqlite-fixture.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -351,12 +352,7 @@ try {
       if (!name.endsWith('.json')) continue;
       const { body } = JSON.parse(await readFile(join(data, 'outbox', name), 'utf8'));
       if (body.status === 'Pending' && body.event.target.Telegram && body.event.payload.Notice) {
-        laterNotice = JSON.parse(
-          await readFile(
-            join(data, 'payloads', `notice-${body.event.payload.Notice.notice}.json`),
-            'utf8',
-          ),
-        ).body.text;
+        laterNotice = noticeText(data, body.event.payload.Notice.notice);
         return true;
       }
     }
@@ -376,10 +372,8 @@ try {
   const imageRow = (
     await client.call({ method: 'inspect', session })
   )[0].SessionLoaded.transcript.entries.find((entry) => entry.image);
-  const imageRecord = JSON.parse(
-    await readFile(join(data, 'payloads', `image-${imageRow.image.id}.json`), 'utf8'),
-  );
-  assert.deepEqual(mediaSent[0].file.bytes, Buffer.from(imageRecord.body.data, 'base64'));
+  const imageRecord = imageArchive(data, imageRow.image.id);
+  assert.deepEqual(mediaSent[0].file.bytes, Buffer.from(imageRecord.data, 'base64'));
   assert.equal(mediaSent[0].thread, thread);
   assert.equal(mediaSent[0].chat, -100);
   assert.equal(mediaSent[0].method, 'sendPhoto');
@@ -562,9 +556,7 @@ try {
     const { body } = JSON.parse(await readFile(join(data, 'outbox', name), 'utf8'));
     if (body.status !== 'Pending' || !body.event.payload.SessionCompleted) continue;
     for (const entry of body.event.payload.SessionCompleted.entries) {
-      const archived = JSON.parse(
-        await readFile(join(data, 'payloads', `entry-${entry}.json`), 'utf8'),
-      ).body;
+      const archived = archivedEntry(data, entry);
       if (archived.image) pendingImage = archived.image;
     }
   }
@@ -596,9 +588,7 @@ try {
     'archived image delivery after source deletion and restart',
   );
   const deletedMedia = mediaSent.at(-1);
-  const deletedAsset = JSON.parse(
-    await readFile(join(data, 'payloads', `image-${pendingImage.id}.json`), 'utf8'),
-  ).body;
+  const deletedAsset = imageArchive(data, pendingImage.id);
   assert.deepEqual(deletedMedia.file.bytes, Buffer.from(deletedAsset.data, 'base64'));
   assert.equal(deletedMedia.file.filename, `${pendingImage.id}.png`);
   assert.equal(deletedMedia.thread, thread);

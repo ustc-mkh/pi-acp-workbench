@@ -33,13 +33,23 @@ pub struct HistoryStore {
     pub payloads: PayloadStore,
 }
 impl HistoryStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<PathBuf>, database: super::database::Database) -> Self {
         let root = root.into();
         Self::with_delivery(
             root.clone(),
             OutboxStore::new(root.join(".outbox"), 1024),
-            PayloadStore::new(root.join(".payloads")),
+            PayloadStore::new(database),
         )
+    }
+    /// Isolated legacy-history fixtures only; production always supplies the
+    /// host's existing Database. Removed with the file history store in T04.
+    #[cfg(test)]
+    pub(crate) fn fixture(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let data = root.join(".sqlite");
+        let lease = super::format::StorageLease::lock(&data).unwrap();
+        let database = super::database::Database::open_sync(&data, &lease).unwrap();
+        Self::new(root, database)
     }
     pub fn with_delivery(
         root: impl Into<PathBuf>,

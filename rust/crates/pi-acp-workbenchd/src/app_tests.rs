@@ -111,7 +111,7 @@ async fn restart_loads_same_provider_session_without_replaying_history() {
     let mut events = app.subscribe();
     prompt(&app, &id, "before restart").await;
     wait_finished(&mut events).await;
-    let store = HistoryStore::new(root.join("history"));
+    let store = app.core.history.clone();
     let before = store.load(id.as_str()).await.unwrap().unwrap();
     assert!(before.provider_session.is_some());
     app.shutdown().await;
@@ -324,7 +324,10 @@ async fn app_initializes_worker_and_persists_two_consecutive_turns() {
             .count(),
         2
     );
-    let history = HistoryStore::new(root.join("history"))
+    let history = app
+        .core
+        .history
+        .clone()
         .load(id.as_str())
         .await
         .unwrap()
@@ -466,7 +469,7 @@ async fn worker_crash_is_persisted_and_replacement_resumes_native_session() {
     })
     .await
     .unwrap();
-    let store = HistoryStore::new(root.join("history"));
+    let store = app.core.history.clone();
     let failed = store.load(id.as_str()).await.unwrap().unwrap();
     assert!(matches!(failed.status, SessionStatus::Failed(_)));
     assert!(failed.active_turn.is_none());

@@ -96,13 +96,11 @@ async fn image_query_is_read_only_validates_full_reference_and_corruption_and_ne
     assert!(
         matches!(app.image(&wrong).await, Err(DomainError::Persistence(message)) if message == "image payload identity mismatch")
     );
-    tokio::fs::write(
-        root.join("payloads")
-            .join(format!("image-{}.json", asset.image().id())),
-        b"{corrupt",
-    )
-    .await
-    .unwrap();
+    app.core
+        .database
+        .corrupt_image(asset.image().id().clone())
+        .await
+        .unwrap();
     assert!(matches!(
         app.image(asset.image()).await,
         Err(DomainError::Persistence(_))
