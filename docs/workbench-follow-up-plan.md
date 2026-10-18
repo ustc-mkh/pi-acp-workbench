@@ -1,305 +1,355 @@
-# Workbench 重构后续调整计划
+# Workbench 后续调整：可直接执行的实施计划
+
+> 本文件替代先前的方向性建议。执行者按 T01 → T11 顺序实施，不重新选型、不增加兼容层、不同时实施两个方案。
+>
+> 重构基线：`af6d138`（`refactor: replace legacy daemons with unified workbench runtime`）。该提交已保存此前全部未忽略改动，未 push。本文件此次修订发生在基线提交之后。
+>
+> 本计划不是完成报告。下面所有任务初始均为未完成，只有实际通过对应验证才能勾选。
+
+## 0. 已作出的决定：不要再讨论选型
+
+1. **采用 SQLite 单库**，Rust 依赖固定 `rusqlite = { version = "=0.40.2", features = ["bundled"] }`。不采用 SQLx、ORM、事件数据库、自建 WAL 或 JSON/SQLite 可配置 backend。
+2. **存储格式升至 3，外部 IPC 升至 3。** 不读格式 2，不自动迁移、不双写、不自动清理真实目录。独立实现显式离线 export；不在本任务中开发导入器。
+3. **一个数据库执行线程、一个连接、一个有界任务队列。** 所有 DB 工作在该线程执行；没有连接池、共享 Connection Mutex、每请求 spawn_blocking 或第二个数据库 actor。先用最简单可验证的实现。
+4. **所有持久化业务记录，包括图像 BLOB，进入同一数据库。** 不保留独立 payload 文件、history JSON、journal/results 文件或 Telegram state JSON。这样避免跨 DB/文件引用提交和 GC 协议。
+5. **SessionActor 只持有热状态，不持有完整历史。** reducer 返回增量写集，不扫描或克隆旧 transcript。完整历史在数据库，按页查询。
+6. **列表只读摘要；详情只读当前视图；历史独立分页；命令回执独立类型。** 禁止外部返回完整 SessionSnapshot。
+7. **一次会话提交只发布一个 committed batch，以 revision 排序。** 不新增独立 event_seq、不持久化可重放事件日志。断线或缺口重新 attach。
+8. **保留现有 host ingress、Registry、SessionActor、worker 和 Telegram 调度。** 本轮不合并 actor、不重写调度算法。只删除因文件存储/快照同步而产生的冗余路径。
+9. **不做 token 批量延迟提交。** 每个 accepted 更新仍先提交再发布；先用增量事务消除全量写放大。不得默默降低耐久性。
+10. **本轮不自动过期 operation 回执，不自动回收 archive。** 先保留全部；仅保留已有、安全可解释的 Telegram completed inbox/expired callback 离线压缩。容量/磁盘不足明确失败，不静默丢弃。
 
-## 1. 目标与结论
+### 0.1 已验证什么
 
-本计划基于当前工作区的独立验收，不关联或推进既有 goal。本文是实施建议，不代表以下调整已完成。
+在仓库外 `/tmp/workbench-plan-proof-nlD59b` 建立并运行真实 Rust 小原型，未修改项目依赖或实现：
 
-目标按优先级排序：
+- `rusqlite 0.40.2` bundled SQLite 在当前 GNU 环境编译运行成功。
+- WAL + synchronous=FULL，一次事务写入 session、100,000 条 entries 和 delivery intent 成功。
+- keyset 查询读取 100 条，`EXPLAIN QUERY PLAN` 为 `SEARCH ... USING INDEX`。
+- 杀死持有未提交事务的子进程，重开数据库后 session revision、entries 和 deliveries 一起回滚；`PRAGMA integrity_check` 返回 `ok`。
+- 本机该原型 100,000 行批量插入约 108 ms，**不是 Workbench 性能承诺**，没有测量每 token fsync、16 worker 或实际 UI。
+- 另用隔离 SQLite 验证了按实际 JSON 字节截页：1,000 条含中文/emoji/转义的记录分16页返回，无重无漏；首请求后追加的新条目不混入固定历史边界。
+- 验证了UTF-8按字节分片后可精确重组，以及不checkpoint、直接复制静止数据库主文件与WAL后恢复成功，源文件hash不变。这验证T07/T10的基础算法，不代表已实现对应生产接口。
+- 尝试 musl 编译失败：本机缺少目标 Rust 标准库（E0463）。GNU 成功不能算作 musl 验收；T11 必须在具备目标工具链的 CI 执行。
+
+现有工作区验收证据：`npm run test:rewrite` 通过；200 项 Rust、180 项 TS、19 IPC、15 Telegram、3 SIGKILL、9 Chromium 和 GNU artifact smoke 通过；1 项 SDK 测试默认忽略。日志见 `/tmp/workbench-acceptance/rewrite.log` 和 `.test-results/run-Zu6yfb/`，临时日志可能被清理。
 
-1. 消除已复现的正确性和发布阻断问题。
-2. 减少同一业务事实的多份表示、持久化协议和恢复分支。
-3. 让内存、磁盘写入、查询成本随实际工作量增长，而非随全部历史反复增长。
-4. 保留明确的状态所有权、外部副作用不确定性、取消栅栏和物理进程回收语义。
-5. 利用破坏性重构窗口直接更新协议和存储，不为旧版本增加透明兼容、隐式迁移或双写路径。
+已复现缺陷：真实 daemon + synthetic ACP peer，42 轮各 100,000 字符 prompt 后，约 8.43 MB 历史导致 inspect EOF。CI、release 仍引用已删除文件。原型证明方案的基础能力，不代表下列集成任务已完成。
 
-**不把行数减少、文件减少或“全测试通过”单独作为成功标准。** 优先删除不必要的协议、事务边界和状态副本；安全所需的状态机不能为了短代码而删除。
+## 1. 执行规则
 
-当前建议：修复发布链路 → 固化新查询/事件契约 → 存储方案决策及实现 → 精简前端同步 → 收拢生命周期与调度 → 保留策略和完整验收。不要同时推进多套替代实现。
+- 每次只执行一个 T 任务；先读指定文件，再改实现，再补测试，最后运行命令。
+- 不修改真实 `~/.pi` 数据；所有测试使用 mkdtemp 的独立 root、独立 HOME 和 synthetic peer。
+- 不通过删测试、改为 ignored、放宽超时/帧上限、吞错误或返回空历史使门禁变绿。
+- 现有实现相关测试可以改成新 schema/API，但原有安全断言必须保留；测试替身不算旧生产实现。
+- 中间提交允许后续任务尚未完成，**禁止中间版本发布**。T04 起是内部切换区；不要为了让中间版本对外可用临时写兼容 backend。
+- 每项结束在本文件勾选，并记录 commit、实际命令/结果、剩余阻塞。没有证据不得写 PASS。
+- 如果与本文具体约束冲突，停下记录冲突，不自行引入第二种设计。
+
+### 不可削弱的六项保证
+
+1. epoch/turn 栅栏拒绝迟到 worker 更新。
+2. observer 断连不取消已接受操作；mutation 不自动重发。
+3. 相同 operation + 相同请求回放原回执，不同请求冲突；Started 不自动重执行。
+4. committed batch 只在 DB commit 成功后发布。
+5. cancel/remove 的终态发布前已停止并 join 对应物理 worker。
+6. 外部 native fork/createForumTopic/HTTP 副作用仍有 uncertain/interrupted 状态；SQLite 不提供跨远端 exactly-once。
+
+## T01 [x] 修复 CI、二进制选择和发布入口
+
+**执行记录（实现提交 `b746c3f`）：**
+
+- `npm run test:runner`：37 项通过，包含 release 纯校验 fixture 和四入口显式坏路径不 fallback；默认 binary 存在/不存在均使用隔离 fixture 验证。
+- `npm run format:check`：通过；`.pi/` 已排除，未修改 goal 账本。
+- `npm run test:rewrite`：通过；200 项 Rust 通过、1 项既有 SDK 测试默认 ignored、180 项 TS、19 IPC、15 Telegram、3 SIGKILL、9 Chromium 及 GNU artifact smoke 通过。完整日志 `.test-results/t01/rewrite.log`，并行 suites 日志 `.test-results/run-1D6hxr/`。
+- `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19 项通过，日志 `.test-results/t01/production-ipc.log`。
+- `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：15 项通过，日志 `.test-results/t01/production-telegram.log`。
+- CI 中旧 browser/service contract 和 `PI_CONTRACT_DAEMON` 引用为零；发布准备已改校验 `extension/docs/workbench-release.md`，删除历史双 daemon/旧验收文档承诺。
+- 剩余阻塞：本项无实现/验收阻塞。这里只验证本地 GNU 产物与发布校验 fixture，未创建 GitHub release；musl 实际产物和显式 offline SDK 门禁待 T11，不计作本次通过。任务状态 API 的单项/批量参数互斥校验拒绝更新，实际完成证据以本记录和提交为准。
 
-## 2. 基线与证据分级
+**读取：** `.github/workflows/ci.yml`、`scripts/{test-rewrite,test-full,prepare-release,service-artifact-smoke,workbench-contract,workbench-telegram-contract,workbench-process-loss,workbench-browser-smoke}.mjs`。
 
-### 2.1 本轮已确认
+**实施：**
 
-- `npm run test:rewrite` 通过：类型检查、源码审计、构建、Rust fmt/Clippy、200 项 Rust 测试（另有 1 项 SDK 测试忽略）、19 项 IPC、15 项 Telegram、3 项实际 SIGKILL、9 项 Chromium、完整测试、GNU 生产包及产物冒烟。
-- TypeScript 为 29 个测试文件、180 项通过。
-- `git diff --check` 通过。
-- 完整日志：`/tmp/workbench-acceptance/rewrite.log`；分套件日志：`.test-results/run-Zu6yfb/`。这些是本地临时证据，不应成为长期文档唯一依据。
-- 使用真实 daemon 和 synthetic ACP peer，第 42 轮合法的 100,000 字符提示词后，历史文件约 8.43 MB，`inspect` 因响应超限直接 EOF。没有改写真实业务数据。
-- CI 仍引用被删除的脚本和旧 daemon；发布脚本仍要求被删除的文档。
-- `npm run format:check` 仅因 `.pi/` 运行时状态文件格式失败，生产源码未报格式问题。
+1. 新增 `scripts/lib/workbench-binary.mjs`，导出 `resolveWorkbenchBinary(explicit)`：显式参数必须绝对、存在、可执行；未指定才解析 `rust/target/debug/pi-acp-workbenchd`。错误立即抛出，不 fallback。
+2. 四个 `workbench-*-contract/process-loss/browser-smoke` 脚本统一支持 `--binary ABSOLUTE`，实际 spawn 只能用此 helper 的结果；保留各自其他参数。
+3. CI browser job 安装 Rust 后执行 `npm run test:browser`。删旧 `scripts/browser-smoke.mjs` 调用。
+4. CI production job 在 artifact smoke 后执行新 IPC 和 Telegram 契约，均传 `--binary "$PWD/service-dist/pi-acp-workbenchd"`；删旧 `service-contract.mjs` 和 `PI_CONTRACT_DAEMON`。
+5. `prepare-release.mjs` 校验 `extension/docs/workbench-release.md`；发布说明改为单 daemon，删除 rust-acceptance.md 失效链接和未经本次验证的承诺。
+6. `.prettierignore` 排除 `.pi/`。不改写、删除 goal 账本。
+7. 新增 `scripts/workbench-binary.test.mjs`、`scripts/prepare-release.test.mjs`。把发布脚本拆出纯校验函数以 fixture 测试；不能要求真的发布 GitHub release。覆盖版本/tag、文档、dirty/provenance、哈希和 smoke report。
+8. 更新 `test:runner`、`test-full.mjs` runner 列表。`test-rewrite.mjs` 加入 `npm run format:check`，替代单独 Rust fmt 步骤。
+
+**验收：**
+
+```bash
+npm run test:runner
+npm run format:check
+npm run test:rewrite
+node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"
+node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"
+```
 
-### 2.2 源码确认的结构性成本
+新增测试必须证明显式错误路径不会运行 debug binary。全新 CI 中旧脚本引用为零。不要把本任务与存储修改混在一个提交。
+
+## T02 [ ] 固定新数据契约、字节预算和回归用例
+
+**读取：** `domain/{session,transcript,event,command,reducer,tool,fork,fork_messages}.rs`、`transport/vscode.rs`、`src/workbench-{protocol,schema,session,ui}.ts`。
+
+**新增：** `domain/query.rs`、`domain/transition.rs`、`test/fixtures/rewrite/ipc-v3.json`。
+
+固定以下类型，Rust/TS 同名字段，不让执行者自行设计另一套：
+
+- `SessionSummary { id, harness, cwd, status, revision, created_seq }`，不含历史/完整工具内容。
+- `SessionView`：当前 native identity、status、config/configuration_intent、catalogue、plan、usage、pending_interactions、origin、revision、last_entry_seq；不含 transcript 或历史 tools。
+- `EntryHeader { seq, id, turn, role, message, text: TextBody, image }`。
+- `TextBody = Inline { text } | Archived { content: ContentRef }`。文本总是存 DB，wire 编码时 ≤16 KiB UTF-8 的文本 inline，否则只返回 ref。
+- `ContentRef { id, sha256, bytes, kind }`。kind 用 enum，不接受文件路径/URL。
+- `ToolHeader` 保留 id/turn/status/kind/title/locations；text/diff/resource 大字段改用 ContentRef，不在 header 放完整结果。
+- `CommandReceipt = Created { summary } | Loaded { view } | Accepted { session, revision } | Forked { summary } | Removed { session } | ForkCancelRequested { source, operation }`。错误独立 typed error。回执不含历史。
+- `Transition { next: SessionState, append: Vec<NewEntry>, tool_updates: Vec<ToolUpdate>, deliveries: Vec<DeliveryIntent>, view_changed: bool }`。每项 payload 有具体 typed 结构，不用 serde_json::Value。
+- `CommitBatch { session, revision, view: Option<SessionView>, entries: Vec<EntryHeader>, tools: Vec<ToolHeader>, removed: bool }`。每个 revision **只发这一条消息**，不再逐项发布多个生命周期事件。
+
+**预算固定：** frame 8 MiB；普通 query/batch 完整 JSON ≤1 MiB；list 默认/最大 50/100 项；history 默认/最大 100/200 项；content slice 默认/最大 64 KiB 原始字节；Inline 文本阈值16 KiB；SessionView 编码 ≤512 KiB；单个不可变文本/工具内容 ≤64 MiB；图像继续 ≤4 MiB。所有 JSON 限制按实际序列化字节检查。view 超限以明确 protocol/resource error 结束相关更新，不能截断授权字段。
+
+- 超长工具 title/detail/路径等 metadata 无法转 ref 时明确拒绝；不要静默截断用于身份或授权的值。
+- seq/revision 使用非负整数，写入前拒绝超过 JS MAX_SAFE_INTEGER；Rust 和 TS 上限相同。
+- pending_interactions 继续沿用32上限，provider catalog/plan/view 共享上述512 KiB硬边界。
 
-- `actor_registry.rs` 的 `list` 对全部 SessionState 生成完整快照；`inspect` 返回完整快照。
-- `persistence/history.rs` 每次提交读取前一快照、校验，克隆并序列化完整状态及累计 delivery ledger，最后原子替换文件。
-- `HistoryStore::project_outbox` 扫描历史快照及其 delivery ledger。需测量实际调用频率和规模成本，不能据此直接声称已出现生产性能事故。
-- `workbench-session.ts` 在事件后将视图标记 stale，并用 50 ms 合并窗口反复 inspect；事件本身没有 revision，客户端无法可靠定位快照与事件的先后关系。
-- `persistence/io.rs` 读取记录限制为 64 MiB，但写入未见对称限制；历史读取又使用另一条实现。这属于需要补充测试验证的边界风险，不是本轮已复现的数据损坏。
-- `JournalStore` 有覆盖文件 I/O 的全局 Mutex。是否构成吞吐瓶颈需要测量，不应立即增加分片锁。
+**测试：**新增 `domain/query_tests.rs` 和 `test/workbench-protocol.test.ts`，包含 Unicode、JSON 转义、坏 ref、溢出、版本2拒绝、超大单条 content 引用。定义新类型后可暂不连生产，但不得声明此时已经修复大历史。
 
-### 2.3 本轮没有证明的事项
+## T03 [ ] 建立唯一 SQLite Store
 
-真实付费模型/真实 Bot、实际 VS Code Extension Host、musl 发布、夜间长时间运行、大规模真实历史、任意 hung-disk 与整个外部进程树场景。不要把 synthetic 契约或历史验收记录当作本版本的全部生产证明。
+**修改：** daemon `Cargo.toml`、`persistence.rs`、`persistence/format.rs`。
+**新增：** `persistence/{database,schema,content,query,sqlite_tests}.rs`。SQL 放 `persistence/schema.sql`，编译时 include_str。
 
-## 3. 设计约束：哪些保留，哪些删除
+### 3.1 执行器
 
-### 保留的核心不变量
+- `Database::open(root)` 在已持有现有 host flock 的前提下启动一个专用 OS 线程；线程自己创建/拥有/关闭 Connection。
+- `StoreRequest` 用明确 enum，不暴露任意 SQL/任意 closure 给业务层。Tokio 有界 mpsc 容量256，执行线程 blocking_recv，回应用 oneshot。
+- 内部提交已进入 store 队列后，即使 reply receiver 丢弃也完成事务。shutdown 关闭 sender 并 drain 队列后 join 线程；不得 abort DB write。
+- SQL 读写均在此线程。没有 await/网络/provider 调用进入事务。
+- `journal_mode=WAL`、`synchronous=FULL`、`foreign_keys=ON`、busy_timeout=5000ms；校验 PRAGMA 实际值。
+- DB 路径固定 `ROOT/workbench.sqlite3`；user_version=3。旧格式 root 在打开/创建 DB 前拒绝；保留现有 lock inode 和 socket 权限检查。
+- 新 root 初始化失败不得留下“已完成格式初始化”的假标记；重启必须能区分空 root、初始化中断和有效 DB。
 
-- SessionActor 是会话可变业务状态的唯一所有者；transport 不修改领域状态。
-- 外部 worker epoch/turn 栅栏阻止迟到消息污染新状态。
-- 接受命令与调用方 observer 分离：断连不撤销已接受工作，不自动重放 mutation。
-- operation id 相同且请求相同只回放原回执；请求不同必须冲突。
-- 取消完成意味着相关物理 worker 已按协议停下并完成 join，不能只改 UI 状态。
-- 本地提交先于 committed event 发布；投递失败不能重新执行 agent。
-- 对外部副作用的不确定结果明确标记 uncertain，不承诺跨数据库、provider 和 Telegram 的 exactly-once。
-- 数据版本不兼容必须明确拒绝，正常启动不隐式删除或迁移数据。
+### 3.2 schema（这些实体必须存在）
 
-### 主动避免/删除
+| 表                 | 主键/索引                                                   | 内容与规则                                                                                |
+| ------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| sessions           | id PK；created_seq UNIQUE                                   | revision、last_entry_seq、hot_state_json、摘要列；hot JSON 禁止历史                       |
+| contents           | id PK                                                       | kind、sha256、bytes、data BLOB；相同 id 不可变且逐字节验证                                |
+| entries            | entry_id PK                                                 | turn/role/message、content_id/image_id、不可变 metadata；不 cascade 删除                  |
+| session_entries    | (session,seq) PK；(session,entry_id) UNIQUE                 | session 到不可变 entry 的归属/顺序；fork 可复用同一 entry                                 |
+| tools              | (session,turn,tool_id) PK                                   | 当前该 turn 的工具投影，大内容均为 ref                                                    |
+| operations         | operation PK                                                | fingerprint、Started/Completed/Failed/Tombstone、原始 typed receipt/error bytes、checksum |
+| deliveries         | delivery_id PK；(status,next_retry)；(target_key,order_seq) | typed target/payload refs、attempt、retry、Pending/Acked；保留 Acked防重                  |
+| telegram_meta      | bot_id PK                                                   | offset/归属                                                                               |
+| telegram_bindings  | (bot_id,chat,thread) PK；(bot_id,session) UNIQUE            | topic/session 绑定                                                                        |
+| telegram_inbox     | (bot_id,update_id) PK                                       | typed command、operation、callback ref、status/outcome                                    |
+| telegram_callbacks | (bot_id,key) PK                                             | binding、expires_at、used_by                                                              |
+| telegram_effects   | effect_id PK                                                | topic creation 的 Started/Completed/Failed/Uncertain 回执                                 |
 
-- 旧 daemon、旧 socket client、旧数据读取器、双协议兼容和双写。
-- 无实际调用者的通用 task/actor/store 抽象；按变更原因组织模块，不按行数拆文件。
-- 前端复制完整领域 reducer、从时间戳/文本猜身份、自动重试 mutation。
-- 为提升吞吐先增加队列层数、actor 层数、锁分片和后台任务。
-- 自建通用数据库/WAL/事务框架、任意 JSON 业务容器、仅为测试增加生产协议分支。
+- JSON 列只序列化强类型 DTO；读出必须反序列化并校验 id/revision/ref。禁止 Value 重新进入业务层。
+- 不对 entries/contents/operations/deliveries 设置会随 session 删除的 FK cascade；源会话删除后仍可回放/投递/读取归档。
+- schema 必须显式约束唯一性/非负长度/status合法值；所有 SQL 参数绑定。
+- 不增加冗余 checksummed JSON 外壳。不可变 content 和 operation 原始回执仍校验 sha256；SQLite integrity_check不替代业务身份校验。
 
-## 4. 阶段 A：恢复可靠的工程入口（P0）
+**本任务必须形成可重跑证据：**把0.1节原型检查改写为仓库内Rust测试，包括100k索引分页、真实子进程持事务被kill后的恢复；不要依赖`/tmp`里的原型继续存在。测试没有权力修改真实业务root。
 
-### A1. CI 全量迁移
+**测试：**事务整体 rollback、重复不可变 id冲突、队列 observer丢弃仍提交、shutdown drain、空/旧/损坏root拒绝、两host lease排他。用测试钩子触发失败，生产不引入故障注入IPC。
 
-涉及 `.github/workflows/ci.yml`、`scripts/workbench-*-contract.mjs` 和构建脚本。
+**命令：** `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sqlite`、`npm run clippy`。
 
-- 删除 `scripts/browser-smoke.mjs`、`scripts/service-contract.mjs`、旧 daemon 路径的引用。
-- browser job 调用当前浏览器入口，并显式准备 Rust 工具链和 Workbench binary。
-- 为需要真实二进制的脚本统一一个显式 `--binary ABSOLUTE` 参数；无参数时才允许使用约定的本地 debug 路径。
-- production job 的契约必须用本次打出的 musl 二进制，不得隐式回落 debug。
-- 缺失或不可执行的显式二进制必须立即失败。
+## T04 [ ] 迁移所有持久化业务，删除多文件协议
 
-### A2. 发布脚本与文档
+**读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
-涉及 `scripts/prepare-release.mjs`、`docs/workbench-release.md`、VSIX/package 清单。
+执行顺序固定：
 
-- 更新 `extension/docs/service-release.md` 的断言为实际发布文档。
-- 清除双 daemon 升级说明、失效链接和未对本次产物执行的验证承诺。
-- 区分 GNU 本地验收与 musl 生产验收。
-- 增加离线发布准备测试：fixture 产物、版本/tag、source commit、dirty 标志、文档清单、哈希和报告；不需要真正创建 GitHub release。
+1. `JournalStore` 改为共享 `Database` handle 的 typed facade。begin/lookup/finish/expire 在 SQL 事务中实现相同语义。Started 重启后仍 OperationInterrupted，不重跑。result保存原始字节且回放相同内容，不重新构造依赖当前状态的 receipt。
+2. `PayloadStore` 改为 contents/entries 查询 facade；图像signature/MIME/hash等现有校验保留，debug 不输出 pixels。
+3. `OutboxStore` 改为 deliveries 查询 facade；order_seq 持久化。同 topic deferred head 仍阻塞后续，同 topic最多一个发送者。
+4. **history commit直接在同一事务插入 delivery intent**；删除 `project_outbox`、历史delivery_events ledger和恢复时扫全部history重建outbox的路径。
+5. outbox 的1024容量改为“同时派发/载入的工作窗口”，不是拒绝保存committed intent的上限。磁盘记录不得因窗口满丢失。pending查询保持每topic head排序。
+6. `TelegramStore` 的 offset、callback used_by、inbox admission 同事务；不能改成三个独立SQL调用。按现有 expected_binding 再验证以防TOCTOU。
+7. Telegram topic effect在调用HTTP前写Started；remote结果不确定不重复createForumTopic。completed之后inbox恢复只查effect/operation，源session已删除也不重做。
+8. facade只包typed SQL方法，不再各有root/path/Arc<Mutex>。所有facade必须来自同一个Database，不得为每个store开连接。
+9. 替换 `HistoryStore` 为 `SessionStore`；调整 `SessionPersistence` 到新commit contract，保留一个测试用MemoryStore。删除 filesystem HistorySnapshot、checksum快照外壳和 `persistence/io.rs`。
+10. 更新 format维护测试/fixture。format2只保留 frozen拒绝样本；不能保留reader当作迁移。
 
-### A3. 工程状态隔离
+**暂不改：**Telegram execution/delivery的并发算法、worker spawn协议、credentials scrub和native fork外部协议。
 
-- 在 `.prettierignore` 中排除 `.pi/` 等运行时状态；禁止用 format 改写 goal 账本。
-- 根据团队需求决定 `.pi/` 是否入 `.gitignore`，不擅自删除用户状态。
-- 统一高层门禁清单，CI、`test:rewrite`、发布使用同一套命名入口；避免再写一个任意解析 shell/YAML 的大型审计框架。
-- 门禁应包含 format:check 和发布准备测试，而不仅是 Rust fmt。
+**验收：**原journal replay、删除源后投递、429/restart、callback重放、坏hash拒绝、队列满不丢intent、topic FIFO所有断言保留。用SQL事务故障替代旧rename故障。真实daemon停止后root只应含lease、format marker、DB及其合法WAL辅助文件，不出现新history/journal/payload JSON。
 
-**验收：**全新 checkout 中所有 job 的文件入口存在；错误 binary 参数测试失败；当前生产 binary 确实被契约启动；离线发布准备成功且不引用旧文档；格式检查不扫描运行时账本。
+## T05 [ ] 从 SessionActor 中移除完整历史
 
-## 5. 阶段 B：重设有界查询与同步协议（P0/P1）
+**修改：** `domain/{session,transcript,reducer,transition}.rs`、`actor.rs`、`actor_registry.rs`、`actor_runtime.rs`、`app.rs`、`persistence/interface.rs`。
 
-这是已复现长会话问题的根治，不采用单纯扩大 8 MiB 上限的修补。
+1. `SessionState` 删除 `transcript.entries` 和全历史 `transcript.tools`。保留origin、last_entry_seq、当前turn必要tool状态/ref及其他热字段。
+2. reducer从`apply(&mut state)`改成`transition(&state, command, now) -> Transition`；clone只复制有硬预算的热状态。
+3. prompt/text/thought/image创建NewEntry；tool partial update只合并当前turn的已知metadata/ref，旧turn工具通过SQL查询。
+4. actor执行顺序固定：epoch/turn检查 → 纯transition → 一次store.commit(expected_revision, transition) → 成功后替换state → 发布一个CommitBatch。失败保持内存state不变，不发布成功事件。
+5. DB事务使用revision CAS，只有旧revision相等才写；同revision相同内容允许明确的幂等分支，冲突必须拒绝。
+6. `commit`同时更新hot state、append entries/contents、tool updates、delivery intent，分配连续entry seq；不能先保存image再单独更新history。
+7. turn结束后清理actor当前turn工具内存，不删除DB工具历史。cancel两阶段、configuration intent恢复语义不变。
+8. registry cold list/inspect不得创建actor/启动worker；load只读取热状态。worker恢复继续使用provider native load，不文本重播。
+9. 删除旧SessionState::snapshot中复制transcript的实现。内部测试如果确需全集，显式使用仅测试helper按页收集，不在production保留full_snapshot。
 
-### B1. 分离三种数据模型
+**测试硬断言：**给同一session预置100,000旧entries后，transition/commit不得读取旧entries、不得序列化旧entries；用store spy记录读取条数，不只用耗时推测。失败commit不改内存、不发布；late epoch不写DB；cold query不spawn。
 
-1. `SessionSummary`：id、harness、cwd、status、revision、更新时间和短标题；不含 transcript、完整工具结果或 delivery ledger。
-2. `SessionView`：当前状态、catalogue、plan、usage、pending interactions、活动工具摘要、历史边界；不携带全部历史。
-3. `TranscriptPage`：有限数量且有限序列化字节的不可变历史条目。
+## T06 [ ] 保持 native fork 语义但不再构造全量分支快照
 
-- `list` 返回 summary 页；不得先读取/反序列化全部历史再切片。
-- 初次选择会话只读取当前视图和最近一页；滚动时读取更早页。
-- 稳定游标基于 session、顺序号和查询边界，不基于文本、数组 offset 或时间戳。
-- 删除、并发追加、无效/过期游标和视图 revision 变化的行为写入协议。
-- 单条超大工具内容等必须支持有界内容读取，或在产生时明确拒绝；不能只按条目数量分页。
-- 命令结果使用独立 typed result；不要继续把查询快照、生命周期事件和持久化回执统一塞进 `Vec<DomainEvent>`。
+**读取/修改：** `domain/{fork,fork_messages}.rs`、`app_fork*.rs`、`actor_registry.rs`。
 
-### B2. 统一事件信封与断线语义
+1. source lane仍在fork期间独占，prepare记录source id/native/revision和选中entry seq；拒绝active_turn/configuration_intent。
+2. 把现有grouping/重复文本/partial assistant/image拒绝规则提取为incremental scanner：按session_entries.seq升序分页，维护当前contiguous group的SHA256、末entry、role和media标志，不收集全部文字。
+3. 扫描目标group和所有其他group/单row，检查与目标同role同digest的重复歧义；保留“其他单row等于目标完整文本也拒绝”的现有规则。缺group/非末row/图像group不变地拒绝。
+4. fresh provider candidates匹配仍要求唯一、安全、相同role和digest；不把message id当native id。
+5. prepare产物`ForkPlan`只含source/source_native/source_revision/target/entry_seq/new_session_id/origin；不含snapshot或复制的prefix。
+6. 远端成功后一个SQL adoption事务：验证source revision → 插入branch热状态 → `INSERT ... SELECT`复制prefix的session_entries链接 → 复制严格早于切点turn的tools。entries/content本身不可变且复用，不复制大BLOB。
+7. 分支清空plan/interactions/usage/config/catalogue，保留新的native identity、origin和历史prefix，与现有语义一致。
+8. operation回执只存branch summary；uncertain/unadopted/cancel-fork语义、one-worker限制下先join source adapter均保留。
 
-建议事件元数据包含 `session`、`revision` 和独立 `event_seq`。一个 revision 可能发布多项事件，不能假定两者相同。只有在实现证明每次提交恰好一个事件批次后，才合并两个概念。
+**必须先做等价测试：**对既有fork fixture及生成的小序列，同时运行旧vector算法与新scanner，比较接受/拒绝和target；测试完成后删旧production算法，可在test-only保留oracle。覆盖重复文本、跨turn重用message id、thought、同turn工具、image、同role单row歧义、源删除和restart replay。
 
-- attach 的快照边界与订阅边界必须无丢失窗口；通过 session actor 提供有界握手，不在 adapter 中凭空拼接一致性。
-- 客户端按序追加历史/更新显示投影，重复事件可丢弃，缺口触发一次重新 attach。
-- 慢订阅者明确收到 resync 或断连；内存不允许无限缓存。
-- 不强制增加 durable event replay 服务：第一版可通过重新读取有界视图和历史页恢复，减少保留策略与后台任务。
-- committed domain event 与可选 ephemeral token preview 严格分开，后者不可作为 fork、授权或操作回执依据。
+## T07 [ ] 实现IPC v3的有界查询与无缺口attach
 
-### B3. 明确字节预算
+**修改：** `transport/vscode.rs`、`app_query_tests.rs`、`domain/query.rs`、`persistence/query.rs`、`docs/workbench-ipc.md`。
 
-- 保留 IPC 总帧上限，并设更小的页面目标预算，为 envelope/JSON 转义预留空间。
-- Unicode、控制字符转义、大工具结果都按实际 wire bytes 验证，不只按字符数估算。
-- 可预判超限的查询返回 typed error，不应以 EOF 代替正常错误。
-- 对事件、命令结果、图像、存储记录分别规定输入/输出上限和超限语义。
+### 7.1 固定查询
 
-**验收：**42 轮复现转为必过回归；100,000 条合成历史可列出/读取任意页；列表体积不随 transcript 字节增长；跨页无重无漏；巨大单条内容、并发追加、断线和慢读均有测试；fork 只能使用服务端确认的真实 entry id。
+- `list { cursor?, limit? } -> { sessions, next_cursor? }`。排序created_seq DESC；首请求冻结max_created_seq，cursor携带version/max_created_seq/before_seq。不用OFFSET，不读entry表。
+- `inspect { session } -> SessionView`。冷读，仅查hot state。
+- `history { session, cursor?, limit? } -> { entries, next_cursor? }`。首请求冻结max_entry_seq，按seq DESC选，页面内部返回升序。next_cursor记录最后已返回的最小seq和初始max；并发新append不混入旧页。
+- `tools { session, turn, cursor?, limit? }` 对该turn的工具按tool_id keyset分页；页面同样有1MiB实际字节预算。
+- `content { ref, offset, length? } -> { text, next_offset?, sha256, total_bytes }`。ref必须匹配存储身份/hash/长度；UTF-8字节offset必须在字符边界，结束裁到合法边界；不能对whole BLOB from_utf8后再切，也不能读取任意路径。
+- image继续typed archive API，验证完整ref，图像响应允许使用8MiB总帧预算，不放进普通1MiB页。
+- cursor为明确typed字段或其编码形式；解码验证version/session/bounds/limit。cursor不是权限凭证，不需要新加加密密钥。
+- 不信任client ref授权文件/网络。IPC同UID仍使用已有访问模型，VSCode UI只允许已加载view中的引用；Telegram仍校验topic/workspace。
 
-## 6. 阶段 C：收敛持久化，消除全量快照写放大（P1）
+分页实现必须边构造边测完整JSON大小，放不下的row留到下一页，不能跳过；单项因metadata超过预算时返回明确TooLarge，不无限返回空页。数据库SQL LIMIT必须使用，不能先查全表。
 
-### C1. 先做短期 ADR 和可丢弃原型
+### 7.2 attach与batch
 
-**推荐优先验证 SQLite 单库方案**，而不是继续扩建自定义 JSON 快照、ledger、outbox 和 journal 协作协议。
+- `attach { session } -> { view, recent_page }`并建立订阅，替代subscribe+全量inspect组合。
+- transport先注册现有broadcast receiver，再发一致性read事务读取view/recent_page（同revision边界）；缓冲到达消息有界。完成reply后丢弃revision≤view.revision，依序转发更大的batch。
+- 会话owner在commit成功后、处理下一个会话命令前同步发送batch，防止同会话发布顺序倒置。
+- 收到revision>last+1、buffer满或broadcast lag，发送resync_required并关闭该连接。客户端显式重新attach，不自动重放mutation。
+- 一次commit只有一个batch，所以不需要event_seq。无状态修改的command不增revision、不制造空batch。
+- `remove`发单一removed batch，operation receipt仍可回放；attach不存在返回NotFound。
+- `write_message`超限不能只返回io error：能归属request的超限先返回小型typed error；超大batch属于实现违约，记录脱敏错误并要求resync。
 
-推荐原因：历史条目、会话状态、投递 intent 和操作回执之间大量本地事务可以交给同一个数据库；减少 rename/fsync/多文件崩溃前缀和扫描恢复的业务代码。代价是增加数据库依赖、schema 和维护约束，必须量化，不能把第二次大重写当成默认正确。
+**测试：**并发append跨页无重无漏；list只读summary；单row长文本可展开；attach期间commit不丢；重复batch忽略、缺口resync；慢连接有界；旧v2拒绝；100k历史能取最后/中间/第一页。
 
-原型只验证：
+## T08 [ ] 前端切换到v3并删除inspect风暴
 
-- 一次 session commit 原子写入状态、增量历史、delivery intent。
-- 历史页/summary 索引查询与备份恢复。
-- 16 活跃会话下单写者吞吐、读写延迟和取消/控制命令响应。
-- 断电/进程终止后的事务恢复及数据库完整性。
-- GNU/musl 构建和 bundled SQLite 的供应链/产物影响。
+**修改：** `src/workbench-{protocol,client,session,controller,ui}.ts`、`webview/workbench-main.ts`、相关TS/Chromium测试。
 
-ADR 必须列出相对当前实现可以删除的实际模块/状态机以及新增复杂度。通过后只保留一种正式存储实现；不在生产运行时支持 JSON/SQLite 可选 backend。
+1. protocol schema与T02/T07一致；mutation ticket.result变成CommandReceipt，删除按`SessionCreated`等event数组查结果的代码。
+2. WorkbenchSession.start调用attach一次，保存view和recent_page。正常batch以revision去重/检测缺口；view字段存在时整体替换，entry按id追加。不是重新运行domain reducer。
+3. 删除dirty/50ms inspect合并timer，以及每个mutation结束后的全量list+inspect链。summary由create/fork/remove回执或显式refresh更新；其他客户端的变化在显式refresh发现即可，本轮不新增全局列表事件服务。
+4. v3 mutation授权路径仍先检查workspace trust和realpath containment；fork entry必须来自服务端已加载page，不让webview伪造native path。
+5. history缓存最多1,000 headers/4MiB（先触到哪个就淘汰远端页）；DOM最多300条，使用已有滚动容器的上/下占位与页窗口，不引入UI框架。
+6. Archived文本默认显示大小和“展开”，展开按64KiB content页读取；每个展开项内存最多256KiB，超出提供继续翻页，不自动把64MiB整个载入。
+7. 图片cache按decoded原始bytes总32MiB LRU，切会话/销毁时释放引用/对象URL。image id/hash验证保持。
+8. resync/断连显示明确状态并停止接收旧generation结果；用户显式选择会话或refresh触发attach。没有自动重发prompt。
 
-若原型未达到要求，回到一个明确的、范围受限的替代方案：增量 transcript + 小型状态快照，并单独设计原子提交协议。不要同时维护该替代方案和 SQLite。两者择一后再实施 C2。
+**测试：**正常500条text更新inspect调用数=0；attach一次；重复/缺口batch；切会话期间慢content不串图/串文本；dispose无timer/observer泄漏；100k历史Chromium滚动；大工具diff按ref读；42轮各100k prompt后session仍可打开和继续prompt。
 
-### C2. 推荐落地结构
+## T09 [ ] Telegram只依赖新查询，保持现有投递保证
 
-建议逻辑实体，而非预先冻结具体 SQL：sessions、entries、当前工具状态、interactions、operations、deliveries。immutable blobs 可保留 content-addressed 文件，但不应再次复制整份 transcript。
+**修改：** `telegram/{runtime,execution,render,delivery,delivery_scheduler,execution_scheduler}.rs`。
 
-- 一个有界数据库写入执行器，串行事务；actor 不持有连接或跨 provider I/O 的事务。
-- 数据库阻塞工作放到专用线程或有界 blocking 执行器，不阻塞 Tokio reactor；不要每条 token 无限制 spawn_blocking。
-- provider/HTTP 调用始终在数据库事务之外。
-- operation Started → 外部调用 → result 的不确定窗口仍然存在，不能因引入数据库而删除 uncertain/interrupted 状态。
-- 本地事务提交成功后才发布 committed event；客户端断连不取消事务。
-- blob 先写完并验证，再提交引用；失败只允许留下可识别的孤儿，不能留下指向缺失 blob 的有效提交。
-- 读模型、操作回执、投递结果不保存包含全部会话历史的大快照。
-- 普通启动只做数据库完整性/版本检查和必要恢复，不全量加载所有历史到内存。
+- `/list`读取summary页，`/status`读取SessionView，plan只在显式/status展示；不得通过测试helper偷偷加载全部history。
+- turn完成delivery只存typed不可变entry refs或turn范围，render按seq分页获取，不先收集整个turn为Vec<String>。
+- 每次只载入一个待发送text片段/一张image；Unicode按现有UTF-16 Telegram限制切片，parts不无限预展开到内存。
+- delivery scope仍使用已持久化cwd/topic，即使session删除也可投递；不因v3 view变化丢掉冻结授权信息。
+- 保留八lane并发、同topicFIFO、deferred head barrier、429 retry及at-least-once说明。不得承诺multipart或crash-after-send不重复。
+- host operation receipt改为新typed结果；topic创建/绑定/offset/callback的durable语义与T04一致。
 
-### C3. 流式提交与历史粒度
+**测试：**迁移现有15项binary契约及runtime regressions；追加大turn文本+image流式render内存边界、删除源后restart投递、相邻topic不被大历史/status拖住。
 
-先定义产品语义：是否承诺每个已显示 token 都耐久。默认建议保留已发布 committed 数据的耐久性，不默默降低保证。
+## T10 [ ] 离线维护、shutdown和删除清单
 
-- transport chunk 与 durable entry 解耦，provider message id/entry id/turn id 各负其责。
-- 增量写入，避免每个 chunk 重写所有历史。
-- 仅在测量证明必要时增加有界批处理；明确最大等待、字节量、flush 条件和错误处理。
-- permission/form、tool 生命周期、cancel、turn finish、fork 边界必须强制 flush。
-- 若引入即时 preview，UI 明示它未提交；preview 不进入可分叉/可回放历史。
-- 不为了合并展示修改已发布 entry 身份或历史字节。
+### 10.1 维护命令
 
-### C4. 版本和旧数据
+保留同一binary `storage export|gc|reset --root ABSOLUTE --confirm`。
 
-- 新存储使用明确的新版本标记；路径中检测到旧数据时拒绝启动并给出离线处理说明。
-- 默认不写迁移器，不双写，不静默重置。
-- 实施前导出已有新格式数据。若实际使用者必须保留，单独批准离线导入范围及测试，不把它隐藏在正常启动流程中。
+- 所有操作先取同一flock；活跃host直接拒绝。DB handle全部关闭后才允许释放lease。
+- export保持“exact bytes + hashes”的现有承诺：在持锁且无host的情况下复制DB、存在的WAL/journal等必要辅助文件和marker；不能只copy主DB。禁目标重叠/symlink/special-file，目标不覆盖。用复制结果恢复验证完整性。不要执行checkpoint后谎称源bytes未变。
+- gc只事务删除completed inbox和不被pending引用的expired callbacks；保持offset/unexpired consumed bindings。**本轮不删operations、deliveries、entries或contents**。
+- reset继续只接受marker-only/empty root；非空DB拒绝并说明先export后人工处理，不把reset偷偷升级为递归删库。
+- 维护测试须覆盖有效WAL未checkpoint的导出、corrupt DB拒绝、active lease拒绝、导出/失败后源bytes不变。
 
-**验收：**崩溃点测试证明状态/历史/intent 原子性；operation 回放不重复外部调用；历史大小增加时单次提交不再重写全部历史；冷列表不读取 transcript；存储新版本显式拒绝旧格式；删除被替代的生产实现。
+### 10.2 生命周期
 
-## 7. 阶段 D：简化前端同步与渲染（P1）
+只收敛相同cleanup实现，不重排安全顺序：close_admission → worker停止/join → settle已接受工作 → transport/runtime/DB队列drain与线程join → socket cleanup → lease释放。
 
-涉及 `src/workbench-session.ts`、`src/workbench-controller.ts`、`webview/workbench-main.ts`。
+检查启动失败：DB初始化失败、Telegram startup失败、Telegram已启动而IPC bind失败、启动中SIGTERM。加入对应真实进程测试；不在此任务自动删除stale socket。
 
-- 用阶段 B 的 attach/seq 协议替代“每个事件 stale → 50 ms inspect 全快照”。
-- 前端仅维护 bounded read projection，不复制领域合法性判断；必要的信任/工作区授权仍在入口执行，最终合法性由宿主决定。
-- 删除为缺少 revision 而设置的重复 committed/provisional 对账分支；如保留 preview，单独管理且有硬上限。
-- UI 加载最近页并限制 DOM 行数；较长 transcript 不全量 Markdown 重渲染。
-- 图片缓存按字节和生命周期限额；切会话/关闭视图撤销不再使用的对象 URL 和 observer。
-- 明确所有请求是否有 timeout、是否可能已提交、是否允许显式查回执；不新增自动重发 mutation。
-- 移除多余 refresh 链条，让 create/fork/remove 的结果直接驱动最小列表/选择更新；发现序列缺口时才重新取权威状态。
+### 10.3 必须删除/不再可达
 
-**验收：**正常流式回合无按 token inspect；事件/渲染成本与新内容有关，而非全部历史；切换和销毁时无遗留 observer；同文重复消息、乱序/重复/缺口、图片失败和断连明确展示；真实 Chromium 大历史测试。
+- filesystem `HistorySnapshot`、`history.delivery_events`、`project_outbox`、persistence/io.rs。
+- facade内的path/new(root)/全局文件Mutex和任意旧JSON reader。
+- production全量SessionSnapshot查询/回执、SessionState完整transcript、ForkProjection.snapshot。
+- v2 wire decoder、旧subscribe+inspect同步和50ms inspect timer。
+- 直接读fixture JSON路径断言“新持久化成功”的测试：改查typed store或独立SQL，不能为测试恢复旧格式。
 
-## 8. 阶段 E：收拢所有权、调度和异常路径（P2）
+更新 `audit-workbench.mjs` 只检查这些具体边界，不写通用lint框架。更新 `docs/{workbench-ipc,workbench-storage,workbench-release,workbench-vscode,workbench-telegram,persistence-recovery}.md`、README、CHANGELOG、examples；不把本计划当使用说明。
 
-不能以删除压力测试覆盖过的 join/epoch/fence 换取表面简化。先画出现有任务和队列所有权图，再调整。
+## T11 [ ] 性能/破坏性回归、CI和发布验收
 
-### E1. 单一生命周期模型
+**新增：** `scripts/workbench-scale.mjs`、`test/workbench-scale.test.ts`、Rust scale/transaction故障测试。fixture通过独立测试工具/typed store生成；不增加生产造数命令。
 
-- 文档化 root supervisor → transport/Telegram/ingress/runtime → session/worker 的拥有关系。
-- 把“关闭 admission → 停物理 worker → settle 已接受事务 → join → 释放 lease/socket”的顺序收敛到一个入口。
-- 核对启动半失败路径，尤其 Telegram 已启动但 IPC bind 失败、signal 发生在启动中、清理自身失败。不能只覆盖正常 SIGTERM。
-- 若多个 helper 实现同样的任务保留/join 机制，合并为一个小型具体组件；不扩建通用 supervisor 框架。
+固定场景和通过条件：
 
-### E2. 减少重复调度层
+| 场景                                          | 硬通过条件                                                                 |
+| --------------------------------------------- | -------------------------------------------------------------------------- |
+| 100k entries，Unicode/escaped text/large tool | 所有页≤1MiB；无重无漏；长内容可切片；inspect/list无transcript              |
+| 10k sessions，每页100                         | SQL只读summary并LIMIT；页内存不依赖全部entries                             |
+| 同样1k新chunks分别追加到1k/100k历史           | store spy证明读取旧entries=0；无全量state clone/序列化；记录提交bytes与p95 |
+| 42轮合法100k字符prompt                        | 所有轮完成；restart后attach/history/content正常；继续下一prompt            |
+| 16活跃workers/32 interactions                 | query/control reserve、cancel物理join和跨session进展保持                   |
+| SQLITE_FULL/只读/事务失败                     | 不发布成功batch；state不推进；operation不重做；其他可读session可诊断       |
+| 真实SIGKILL：事务前/中/后、外部副作用后       | 一致性、interrupted/uncertain、回执、native identity和archive保持          |
+| 大历史Chromium                                | ≤300 DOM rows；cache有界；正常流式inspect=0                                |
+| live WAL export                               | 复制的独立root可恢复所有committed数据；源bytes/hash不变                    |
 
-- 列清 host ingress、Registry、SessionActor、IPC pools、Telegram execution/delivery 的职责、容量、reject 语义和排队顺序。
-- transport 只负责连接/资源预算；会话 FIFO、业务取消和 worker 容量只由明确的业务 owner 决定。
-- 删除重复的业务 FIFO/队列，仅在压力和取消测试证明等价后实施。
-- 保留 control/query reserve，避免取消和交互回答被普通任务堵住；不要把所有请求塞进单队列。
-- 不盲目合并 Telegram 的 execution 与 delivery：其外部失败与 FIFO 语义不同。
+性能报告存 `.test-results/scale-*/report.json`：机器/版本、数据量、重复5次的median/p95、峰值RSS、页wire bytes、每commit写入bytes、DB排队时间。108ms原型不是目标。以上结构性断言是必过；另要求100k相较1k历史的“同样1k新增chunks”中位耗时和峰值增量内存≤2倍，超出先查索引/隐式扫描而不是加缓存掩盖。
 
-### E3. 错误和配置
+执行顺序：
 
-- 明确区分 invalid input、backpressure、conflict、not found、interrupted、uncertain、storage failure；只在边界编码，不用字符串匹配驱动状态机。
-- 归并散落的容量和超时常量，先用一份静态 Limits 定义；没有运维需求的参数不暴露配置。
-- 单会话损坏应隔离并显示 typed health 信息；不能静默当作不存在。索引可列出该会话的失败摘要，安全相关的全局格式损坏仍 fail closed。
+```bash
+npm run format:check
+npm run audit:workbench
+npm run check
+npm run clippy
+npm run test:runner
+npm run test:rewrite
+npm run test:workbench:scale  # 本任务加入package.json，运行上述scale脚本
+npm run test:workbench:soak -- --duration-seconds 600
+```
 
-**验收：**保留现有取消/饱和/observer 丢弃/Registry abort 回归；补齐启动失败矩阵；提交前后任务/队列图可解释、重复 owner 减少；没有新增无界队列或后台任务。
+- CI安装x86_64-unknown-linux-musl标准库、musl-tools，重新build-services，并对**该musl产物**执行artifact、IPC和Telegram契约及发布准备测试。任何缺目标依赖不得标PASS。
+- 显式执行已有offline真实Pi SDK/native-fork入口；报告ignored默认测试是否真的执行。真实Bot/model不作为默认门禁，但必须列未验证。
+- 生产准备通过前不得发布；旧format2数据要先export，切换root到全新format3目录。二进制回退同时回退独立数据root，不能让旧binary打开新DB。
 
-## 9. 阶段 F：有界保留、维护与可观测性（P2）
+## 2. 提交顺序与最终验收
 
-### F1. 保留策略
+建议每个T一个提交；T04/T05/T07/T08可按文件再拆，但不要乱序开启新的架构方向。提交消息分别以 `fix(ci)`、`feat(protocol)`、`feat(storage)`、`refactor(session)`、`refactor(fork)`、`feat(ipc)`、`refactor(ui)`、`refactor(telegram)`、`fix(storage)`、`test(scale)`标识。
 
-- 先定义 replay retention，而不是先删文件：有效回执、过期 tombstone 和原生分叉 uncertainty 的保存期限分别明确。
-- operation 过期后不得重新执行；压缩后仍需有防重执行的 durable 记录或明确的全局 epoch/ID 接受策略。
-- deliveries 按已确认、待重试、uncertain 区分；pending 不因达到容量被静默删除。
-- blob GC 由 typed 引用和事务边界驱动；不按文件名字符串猜引用。
-- 第一版离线 maintenance 足够，不自动新增后台 GC daemon。提供 dry-run、备份/导出和同一 lease 排他。
-- 删除会话是否保留未投递内容、归档和回执写成公开规则。
+完成后必须能回答：
 
-### F2. 最小诊断面
+- [ ] 旧CI入口/发布文档引用全部消除，当前实际产物被测试。
+- [ ] 只有一个SQLite backend、一个数据库线程；无格式2读者/双写。
+- [ ] 热actor不拥有历史，普通提交不读/写全部历史。
+- [ ] list/view/history/content/command receipt用途分离，wire预算有真实测试。
+- [ ] attach无丢失窗口，一个revision一个batch，正常流式无inspect风暴。
+- [ ] fork hash/歧义/历史设置/取消/uncertain语义与基线等价。
+- [ ] state/entries/delivery intent同事务；源删除后回执/投递/归档仍可用。
+- [ ] 所有mutation仍不自动重放，cancel终态前物理join。
+- [ ] 维护不隐式删数据，WAL导出恢复成功，GC范围没有越权扩大。
+- [ ] GNU、musl、规模、故障、浏览器、offline SDK结果与未验证项均如实记录。
 
-增加少量可直接服务排错/性能验收的结构化指标：
-
-- admission/pool 使用量、reject 次数、每阶段排队和执行时长。
-- commit 次数/字节、查询读取条数/字节、每页 wire bytes。
-- worker 数量/epoch、join 耗时、outbox age/retry、resync 次数。
-
-日志可关联 operation/session/turn/epoch，但不得含 token、凭证、默认完整 prompt 或未经脱敏的 provider 错误。暂不引入完整分布式追踪系统。
-
-**验收：**长运行后容量有明确上限或可执行保留策略；过期回执不能重复副作用；GC 不破坏 pending/uncertain 引用；日志能定位等待与存储瓶颈且无敏感信息。
-
-## 10. 测试与性能验收
-
-### 10.1 测试组织
-
-- 保留独立 synthetic peer/mock Bot，它们是测试替身，不是旧生产实现。
-- Domain 测试负责合法转换；storage 测试负责事务/崩溃边界；contract 测试负责 wire/真实进程；浏览器测试负责实际 UI 路径。
-- 同一不变量不必在每层穷举，但不能把所有独立契约替换成内部 mock。
-- 对取消、operation replay、跨页读取和投递状态增加状态机/性质测试，避免仅依靠固定时序 sleep。
-- offline 默认门禁与 opt-in SDK/live 验收明确分开，报告必须列出 skipped 项。
-- 把发布准备、当前入口完整性和大历史用例加入默认门禁。
-
-### 10.2 固定基准集
-
-记录机器、版本、cold/warm、数据量、重复次数；报告 median/p95 和峰值，不能只跑一次。
-
-| 场景                                                 | 验收重点                                           |
-| ---------------------------------------------------- | -------------------------------------------------- |
-| 1k/10k/100k 历史条目，含 Unicode/工具大结果/图片引用 | 有界分页，单次查询不随全部历史增长                 |
-| 100/1k/10k 会话摘要，固定页大小                      | 不读取 transcript，内存按页增长                    |
-| 相同新增文本分别写入短/长会话                        | 不反复改写全部历史；记录写入字节及 fsync           |
-| 1/16 活跃 worker，含等待 permission                  | control/query 可用，跨会话不被 provider I/O 串行化 |
-| 慢 socket、慢 HTTP、429、连接丢失                    | 有界内存，无自动重执行，取消有进展                 |
-| 提交前后 SIGKILL、启动半失败                         | 恢复原子性、回执不变、lease/进程正确释放           |
-| 大历史 Chromium 滚动和流式渲染                       | 有界 DOM/图片缓存，无持续全量重渲染                |
-
-先保存当前基线。绝对延迟指标在同一机器完成基线后冻结，不编造未经测量的毫秒目标。架构硬门槛为：列表不读历史、页面按 bytes 有界、提交不写全部历史、内存不靠历史全集增长、控制请求不无限等待普通任务。
-
-## 11. 建议交付顺序与拆分
-
-1. **PR A：CI、发布、格式范围修复。** 独立可合并，直接解除已确认阻断。
-2. **PR B：数据契约 ADR、预算定义、42 轮与大历史回归、性能基线。** 先锁定可验证目标；不一次新增一套未使用的生产 API。
-3. **PR C：存储原型结论。** 只选一个 backend，明确格式、事务、线程与删除清单。
-4. **PR D：单一存储实现及新版本门禁。** 原有外部入口暂时可由新 store 服务，但不并存双写；预发布阶段不部署。
-5. **PR E：有界 list/view/history + attach/event_seq + typed command result。** Rust、TS、browser、Telegram 和 fixture 同步更新；彻底删除旧全量对外协议。
-6. **PR F：前端投影/渲染简化。** 删除 inspect 风暴和冗余对账；加入浏览器规模回归。
-7. **PR G：生命周期/调度收敛。** 以所有权图和等价测试证明每次删除安全，避免混入存储事务改动。
-8. **PR H：维护策略、指标、性能对比与最终发布验收。** GNU/musl 实际产物、离线 SDK、必要的真实客户端验收。
-
-说明：若阶段 B 的有界查询可在现有存储上低成本完成，可提前修复 8 MiB 故障，但最终查询必须下推到 store，不能把“先读全量再分页”当作完成。不要为短期修复建设以后还要保留的第二套索引和恢复协议。
-
-## 12. 最终 Done 标准
-
-- 本轮三项 P1 问题有真实回归，CI/发布链路通过。
-- 没有旧生产协议、旧存储 reader、双写和隐式迁移。
-- list、view、history、command result 的用途清晰且资源有界。
-- 历史/状态/delivery intent 的本地一致性由一个清晰的提交机制保证。
-- 前端不运行领域 reducer，不以高频完整 inspect 追流。
-- operation、cancel、fork uncertainty、投递 at-least-once 和 join 的保证未削弱。
-- 性能报告证明随历史增长的主要放大路径已消除；没有仅凭测试数量宣称性能改善。
-- 数据导出、格式拒绝、回滚二进制与数据不兼容的操作说明齐全。
-- 实测范围与未验证项明确，不把临时日志、旧记录或 synthetic 覆盖包装成真实生产验收。
-
-## 13. 暂不建议做的事
-
-- 再引入 actor 框架、微服务拆分、消息中间件或自建事件数据库。
-- 一开始就实现无限事件回放、全量在线迁移、分布式 exactly-once 或自动恢复所有外部进程状态。
-- 未经测量调整并发度、给所有缓存加锁分片、为每个小任务增加 Tokio task。
-- 通过扩大帧大小、吞掉损坏记录、自动删 stale socket/旧数据来掩盖设计问题。
-- 为追求更小 diff 保留过时生产路径；也不为了追求更少代码删掉证明安全所需的栅栏和持久化状态。
+**这份计划不授权：**恢复旧兼容路径、重写worker/调度框架、引入ORM/连接池/事件日志服务、自动清理stale socket/真实数据、在线迁移或自动过期防重回执。需要这些功能时另立明确需求，不让执行模型顺手扩展。
