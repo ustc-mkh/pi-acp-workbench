@@ -1,6 +1,9 @@
 pub const FORMAT_VERSION: u32 = 3;
 mod content;
 pub mod database;
+pub mod delivery;
+#[cfg(test)]
+mod delivery_sql_tests;
 pub mod format;
 mod history;
 pub mod inbox;

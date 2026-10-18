@@ -66,7 +66,7 @@ CREATE TABLE deliveries (
     last_failure TEXT CHECK (last_failure IN ('Transport', 'RateLimited', 'InvalidTarget', 'PayloadUnavailable'))
 ) STRICT;
 CREATE INDEX deliveries_retry ON deliveries(status, next_retry);
-CREATE INDEX deliveries_topic_order ON deliveries(target_key, order_seq);
+CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq);
 CREATE TABLE telegram_meta (
     bot_id INTEGER PRIMARY KEY CHECK (bot_id >= 0),
     offset INTEGER NOT NULL CHECK (offset BETWEEN 0 AND 9007199254740991),

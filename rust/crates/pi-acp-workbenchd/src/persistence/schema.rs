@@ -106,6 +106,13 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     connection
         .prepare("SELECT image_ref_json FROM contents LIMIT 0")
         .map_err(|_| StoreError::Invalid("unsupported contents schema"))?;
+    let delivery_index = connection
+        .prepare("PRAGMA index_info(deliveries_topic_order)")?
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if delivery_index != ["target_key", "status", "order_seq"] {
+        return Err(StoreError::Invalid("unsupported delivery index"));
+    }
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(StoreError::Invalid("SQLite quick_check failed"));

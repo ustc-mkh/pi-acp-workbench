@@ -3,11 +3,7 @@ use super::{
     content,
     database::{encode, SessionCommit, StoreError},
 };
-use crate::domain::{
-    query::*,
-    transition::{DeliveryIntent, DeliveryTarget},
-    Harness, SessionId,
-};
+use crate::domain::{query::*, transition::DeliveryIntent, Harness, SessionId};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub(super) const HISTORY_SQL: &str = "SELECT se.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes <= 16384 THEN c.data ELSE NULL END FROM session_entries se JOIN entries e ON e.entry_id = se.entry_id JOIN contents c ON c.id = e.content_id WHERE se.session = ?1 AND se.seq <= ?2 AND se.seq < ?3 ORDER BY se.seq DESC LIMIT ?4";
@@ -177,30 +173,16 @@ fn validate_tool_refs(db: &Connection, header: &ToolHeader) -> Result<(), StoreE
     Ok(())
 }
 pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(), StoreError> {
+    super::delivery::validate_intent(intent)?;
     let target = encode(&intent.target)?;
     let payload = encode(&intent.payload)?;
-    let existing: Option<(String, String)> = db
-        .query_row(
-            "SELECT target_json,payload_json FROM deliveries WHERE delivery_id=?1",
-            [intent.id.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if let Some(old) = existing {
-        if old != (target, payload) {
+    if let Some((old, _)) = super::delivery::record(db, &intent.id)? {
+        if (encode(&old.intent.target)?, encode(&old.intent.payload)?) != (target, payload) {
             return Err(StoreError::Conflict);
         }
         return Ok(());
     }
-    let key = match &intent.target {
-        DeliveryTarget::Session { session, .. } => format!("session:{session}"),
-        DeliveryTarget::Telegram {
-            bot_id,
-            chat,
-            thread,
-            ..
-        } => format!("telegram:{bot_id}:{chat}:{thread}"),
-    };
+    let key = super::delivery::target_key(&intent.target);
     let order = next_counter(db, "delivery_seq")?;
     db.execute("INSERT INTO deliveries(delivery_id,order_seq,target_key,target_json,payload_json,status) VALUES (?1,?2,?3,?4,?5,'Pending')", params![intent.id.as_str(), order, key, target, payload])?;
     Ok(())

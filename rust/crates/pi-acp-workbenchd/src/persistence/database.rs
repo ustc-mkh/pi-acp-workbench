@@ -106,6 +106,7 @@ pub(super) enum StoreRequest {
         content: ContentRef,
         reply: Reply<String>,
     },
+    Delivery(Box<super::delivery::Request>),
     Payload(Box<super::payload::Request>),
     Journal(Box<super::journal::Request>),
     ArchiveImage {
@@ -204,6 +205,9 @@ impl Database {
                         }
                         StoreRequest::Image { id, reply } => {
                             let _ = reply.send(super::content::image(&connection, &id));
+                        }
+                        StoreRequest::Delivery(request) => {
+                            super::delivery::execute(&mut connection, *request);
                         }
                         StoreRequest::Payload(request) => {
                             super::payload::execute(&mut connection, *request);
@@ -354,6 +358,58 @@ impl Database {
             return Err(StoreError::Invalid("image reference identity mismatch"));
         }
         Ok(asset)
+    }
+    pub async fn enqueue_delivery(
+        &self,
+        intent: crate::domain::transition::DeliveryIntent,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::Enqueue { intent, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    /// Heads for immutable persisted targets, including deferred heads when
+    /// now=MAX_SAFE_INTEGER. Dynamic Telegram binding resolution stays with
+    /// the adapter until its own store migration; this is not a topic resolver.
+    pub async fn delivery_target_heads(
+        &self,
+        now: SafeInteger,
+        limit: usize,
+    ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::Heads { now, limit, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn ack_delivery(&self, id: crate::domain::DeliveryId) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::Ack { id, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn fail_delivery(
+        &self,
+        id: crate::domain::DeliveryId,
+        failure: super::delivery::Failure,
+        retry_at: SafeInteger,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::Fail {
+                id,
+                failure,
+                retry_at,
+                reply,
+            },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn shutdown(&self) -> Result<(), StoreError> {
         let _shutdown = self.inner.shutdown.lock().await;
