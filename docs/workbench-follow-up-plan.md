@@ -128,7 +128,18 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 
 **测试：**新增 `domain/query_tests.rs` 和 `test/workbench-protocol.test.ts`，包含 Unicode、JSON 转义、坏 ref、溢出、版本2拒绝、超大单条 content 引用。定义新类型后可暂不连生产，但不得声明此时已经修复大历史。
 
-## T03 [ ] 建立唯一 SQLite Store
+## T03 [x] 建立唯一 SQLite Store
+
+**执行记录（实现提交 `17279b4`）：**
+
+- 固定 `rusqlite = { version = "=0.40.2", features = ["bundled"] }` 并更新 lockfile；新增 `persistence/{database,schema,content,query,sqlite_tests}.rs` 和编译时包含的 `schema.sql`。
+- Database 只有一个专用 OS 线程/Connection、256项 Tokio mpsc 和 typed StoreRequest；持有同一 host lease，禁止同 lease 第二个 executor。observer 丢弃不取消已入队事务，shutdown/最后 handle drop 都关闭 sender、drain、close Connection、join；没有连接池、Connection Mutex、任意 SQL/closure 业务 API 或每请求 spawn_blocking。
+- SQLite 验证 WAL/FULL/foreign_keys/busy_timeout=5000 的实际值、user_version=3、必要表、quick_check/foreign_key_check；所有写入参数绑定。热视图/entry/content/tool/delivery 增量提交在一个事务中，带 revision CAS、不可变内容逐字节校验及实际 batch/view 字节预算。list 只读摘要列，history 使用有 LIMIT 的索引 keyset，长文本 header 不读取整个 BLOB。
+- format3 初始化在数据库成功后才完成 marker；pending 明确区分中断，旧/未标记/损坏/symlink root 拒绝且不自动删除。保留稳定 flock inode，DB 线程关闭前不释放 lease。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sqlite`：最终15项通过（含供子进程调用的 test entry）。覆盖100k Unicode/转义 entries 全分页无重无漏及 EXPLAIN SEARCH 索引、真实子进程持未提交事务被 SIGKILL 后 revision/entries/content/delivery 同时回滚且 integrity_check=ok、真实第二进程 lease 拒绝、队列有界/observer丢弃/drain、初始化中断、坏hash/不可变id冲突、图像/长文本/tool/delivery原子提交与 schema约束。
+- `npm run clippy`、`npm run format:check`、`npm run audit:workbench`：最终复跑通过；日志 `.test-results/t03/{sqlite,clippy,format,audit}.log`。
+- 本项期间 `npm run test:rewrite` 通过：224项 Rust、187项 TS、runner37、IPC19、Telegram15、SIGKILL3、Chromium9及 GNU artifact smoke；1项既有 offline SDK 默认 ignored。日志 `.test-results/t03/rewrite.log`、`.test-results/run-I1NXOP/`。随后额外收紧 SQL status约束和 shutdown失败路径 join，最终使用上述 sqlite/clippy/format/audit 复验，未把此后的完整 rewrite 声称为已重跑。
+- 剩余阻塞：本项无实现/验收阻塞。新 DB 尚未接入旧生产 facade，未增加可选 backend；旧生产格式标记与文件路径在 T04 切换/删除，不能将本次旧生产 artifact smoke 作为“已迁移 SQLite”的证据。任务状态 API 参数互斥问题仍在，未手工改写 goal 账本。
 
 **修改：** daemon `Cargo.toml`、`persistence.rs`、`persistence/format.rs`。
 **新增：** `persistence/{database,schema,content,query,sqlite_tests}.rs`。SQL 放 `persistence/schema.sql`，编译时 include_str。
