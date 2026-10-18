@@ -250,6 +250,108 @@ async fn sql_delivery_invalid_scope_range_notice_and_unsafe_target_never_allocat
 }
 
 #[tokio::test]
+async fn sql_delivery_accepted_ack_survives_observer_drop_and_shutdown_retains_lease_until_drain() {
+    use super::format::StorageLease;
+    use std::time::Duration;
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    let event = intent(101);
+    db.enqueue_delivery(event.clone()).await.unwrap();
+    let pause = db.pause_executor().await.unwrap();
+    let (reply, wait) = tokio::sync::oneshot::channel();
+    db.enqueue(StoreRequest::Delivery(Box::new(Request::Ack {
+        id: event.id.clone(),
+        reply,
+    })))
+    .await
+    .unwrap();
+    drop(wait); // The accepted ack is no longer owned by a request observer.
+    drop(lease);
+    let closing = db.clone();
+    let mut shutdown = tokio::spawn(async move { closing.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), &mut shutdown)
+            .await
+            .is_err()
+    );
+    assert!(
+        StorageLease::lock(&root.data()).is_err(),
+        "the DB thread still owns the host lease"
+    );
+    drop(pause);
+    shutdown.await.unwrap().unwrap();
+    let lease = StorageLease::lock(&root.data()).unwrap();
+    let restarted = Database::open(root.data(), &lease).await.unwrap();
+    restarted.enqueue_delivery(event).await.unwrap();
+    assert!(
+        restarted
+            .delivery_target_heads(at(0), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "accepted ack must commit despite abandoned observer"
+    );
+    restarted.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn sql_delivery_failed_ack_and_fail_leave_exact_pending_record_and_can_retry_after_reopen() {
+    for ack in [true, false] {
+        let root = Root::new();
+        let (lease, db) = open(&root.data()).await;
+        let event = intent(101);
+        db.enqueue_delivery(event.clone()).await.unwrap();
+        db.shutdown().await.unwrap();
+        let file = root.data().join("workbench.sqlite3");
+        let sql = rusqlite::Connection::open(&file).unwrap();
+        sql.execute_batch("CREATE TRIGGER reject_delivery_update BEFORE UPDATE ON deliveries BEGIN SELECT RAISE(ABORT,'test ack/fail failure'); END").unwrap();
+        drop(sql);
+        let before = std::fs::read(&file).unwrap();
+        let db = Database::open(root.data(), &lease).await.unwrap();
+        let result = if ack {
+            db.ack_delivery(event.id.clone()).await
+        } else {
+            db.fail_delivery(event.id.clone(), Failure::Transport, at(123))
+                .await
+        };
+        assert!(result.is_err());
+        let pending = db.delivery_target_heads(at(0), 1).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intent.id, event.id);
+        assert_eq!(pending[0].attempt, 0);
+        assert_eq!(pending[0].retry_at, at(0));
+        assert_eq!(pending[0].last_failure, None);
+        db.shutdown().await.unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "failed SQL transaction must not alter record/sequence"
+        );
+        let sql = rusqlite::Connection::open(&file).unwrap();
+        sql.execute_batch("DROP TRIGGER reject_delivery_update")
+            .unwrap();
+        drop(sql);
+        let db = Database::open(root.data(), &lease).await.unwrap();
+        if ack {
+            db.ack_delivery(event.id).await.unwrap();
+            assert!(db.delivery_target_heads(at(0), 1).await.unwrap().is_empty());
+        } else {
+            db.fail_delivery(event.id, Failure::Transport, at(123))
+                .await
+                .unwrap();
+            assert!(db
+                .delivery_target_heads(at(122), 1)
+                .await
+                .unwrap()
+                .is_empty());
+            let pending = db.delivery_target_heads(at(123), 1).await.unwrap();
+            assert_eq!(pending[0].attempt, 1);
+            assert_eq!(pending[0].last_failure, Some(Failure::Transport));
+        }
+        db.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn sql_delivery_old_internal_index_is_refused_without_rewrite() {
     let root = Root::new();
     let (lease, db) = open(&root.data()).await;

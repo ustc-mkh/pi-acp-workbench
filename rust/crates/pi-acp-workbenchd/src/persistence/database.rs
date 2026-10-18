@@ -324,6 +324,22 @@ impl Database {
         result.await.map_err(|_| StoreError::Closed)?
     }
     #[cfg(test)]
+    pub(crate) async fn pause_executor(
+        &self,
+    ) -> Result<super::sqlite_tests::ExecutorPause, StoreError> {
+        let (entered, ready) = oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        self.enqueue(StoreRequest::Test(
+            super::sqlite_tests::TestRequest::Pause {
+                entered,
+                resume: wait,
+            },
+        ))
+        .await?;
+        ready.await.map_err(|_| StoreError::Closed)?;
+        Ok(super::sqlite_tests::ExecutorPause::new(resume))
+    }
+    #[cfg(test)]
     pub(crate) async fn corrupt_image(&self, id: crate::domain::ImageId) -> Result<(), StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Test(

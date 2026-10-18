@@ -22,6 +22,22 @@ use std::{
 use tokio::sync::oneshot;
 
 type TestReply<T> = oneshot::Sender<Result<T, StoreError>>;
+/// Test-only RAII pause of the sole executor. Drop releases it even when a
+/// test assertion unwinds, so Database's physical join cannot deadlock cleanup.
+pub(crate) struct ExecutorPause(Option<std::sync::mpsc::Sender<()>>);
+impl ExecutorPause {
+    pub(crate) fn new(resume: std::sync::mpsc::Sender<()>) -> Self {
+        Self(Some(resume))
+    }
+}
+impl Drop for ExecutorPause {
+    fn drop(&mut self) {
+        if let Some(resume) = self.0.take() {
+            let _ = resume.send(());
+        }
+    }
+}
+
 pub(super) enum TestRequest {
     RejectJournalAdmission {
         operation: crate::domain::OperationId,
