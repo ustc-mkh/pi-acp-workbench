@@ -5,8 +5,6 @@ import {
   nativePath,
   nativeForkPoints,
   nativePrefixHash,
-  nativeTextKey,
-  bindNativeForks,
   type NativeEntry,
 } from '../src/native-branch';
 function chain(items: Partial<NativeEntry>[]): NativeEntry[] {
@@ -108,6 +106,15 @@ it('honors omitted attempts and excludes error responses as branch targets', () 
   ]);
   expect(nativeForkPoints(entries).map((p) => p.safe)).toEqual([false, true, true]);
 });
+it('preserves distinct native nodes for equal text and equal timestamps without display-row binding', () => {
+  const points = nativeForkPoints(
+    chain([msg('assistant', 'same', 10), msg('assistant', 'same', 10)]),
+  );
+  expect(points.map((point) => point.entryId)).toEqual(['0', '1']);
+  expect(points[0].key).toBe(points[1].key);
+  expect(points[0].timestamp).toBe(points[1].timestamp);
+  expect(points[0].hash).not.toBe(points[1].hash);
+});
 it('allows native label re-chaining without changing the context fingerprint', () => {
   const entries = chain([
     msg('user', 'a'),
@@ -124,55 +131,4 @@ it('allows native label re-chaining without changing the context fingerprint', (
       ...(e.type === 'compaction' ? { firstKeptEntryId: '2' } : {}),
     }));
   expect(nativePrefixHash(entries)).toBe(nativePrefixHash(copied));
-});
-it('fails closed on duplicate display text, but uses timestamps or previously verified mappings', () => {
-  const native = chain([msg('assistant', 'same', 10), msg('assistant', 'same', 20)]),
-    points = nativeForkPoints(native);
-  const rows = [
-    { id: 'a', role: 'assistant' as const, text: 'same' },
-    { id: 'b', role: 'assistant' as const, text: 'same' },
-  ];
-  expect(bindNativeForks(rows, points)).toEqual({});
-  expect(
-    bindNativeForks(
-      rows.map((r, i) => ({ ...r, messageId: String((i + 1) * 10) })),
-      points,
-    ),
-  ).toMatchObject({ a: { entryId: '0' }, b: { entryId: '1' } });
-  expect(
-    bindNativeForks(rows, points, { a: { entryId: '0', hash: points[0].hash } }),
-  ).toMatchObject({ a: { entryId: '0' } });
-});
-it('matches embedded context and image-bearing user messages without re-encoding native images', () => {
-  const native = chain([
-    {
-      message: {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'look\n[Embedded Context] file:///a (text/plain)\ncode' },
-          { type: 'image', data: 'native-resized-image' },
-        ],
-        timestamp: 1,
-      },
-    },
-  ]);
-  const rows = [
-    {
-      id: 'user',
-      role: 'user' as const,
-      text: 'look 📎a',
-      contextBlocks: [
-        { type: 'text' as const, text: 'look' },
-        {
-          type: 'resource' as const,
-          resource: { uri: 'file:///a', mimeType: 'text/plain', text: 'code' },
-        },
-        { type: 'image' as const, mimeType: 'image/png', data: 'original-image' },
-      ],
-    },
-  ];
-  expect(bindNativeForks(rows, nativeForkPoints(native))).toMatchObject({ user: { entryId: '0' } });
-  expect(nativeForkPoints(native)[0].key).toBe(
-    nativeTextKey('user', 'look\n[Embedded Context] file:///a (text/plain)\ncode'),
-  );
 });

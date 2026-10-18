@@ -1,0 +1,12 @@
+[Unit]
+Description=Pi ACP Workbench (single process)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/absolute/path/to/pi-acp-workbench/service-dist/pi-acp-workbenchd --config %h/.config/pi-acp-workbench/workbench.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

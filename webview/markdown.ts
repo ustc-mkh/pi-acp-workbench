@@ -5,7 +5,6 @@ import hljs from 'highlight.js/lib/common';
 import taskLists from 'markdown-it-task-lists';
 import footnotes from 'markdown-it-footnote';
 import createDOMPurify, { type WindowLike } from 'dompurify';
-import { imageMarkerSource } from './output-images';
 
 const escaped = (s: string, i: number) => {
   let n = 0;
@@ -179,14 +178,10 @@ md.block.ruler.before(
 md.renderer.rules.pi_math = (tokens, i) => mathHtml(tokens[i].content, !!tokens[i].meta?.display);
 md.renderer.rules.pi_math_block = (tokens, i) =>
   `<div class="math-block">${mathHtml(tokens[i].content, true)}</div>\n`;
-// Only explicit raster data or host-validated local paths may become images.
-md.renderer.rules.image = (tokens, i) => {
-  const source = String(tokens[i].attrGet('src') || '');
-  const marker = imageMarkerSource(source)
-    ? ` data-image-source="${md.utils.escapeHtml(source)}"`
-    : '';
-  return `<span class="image-placeholder"${marker}>[图片: ${md.utils.escapeHtml(tokens[i].content || 'image')}]</span>`;
-};
+// Markdown image URLs/paths/data are display-only. Only the separate typed
+// archive UI may request bytes; no hidden marker can authorize later I/O.
+md.renderer.rules.image = (tokens, i) =>
+  `<span class="image-placeholder">[图片: ${md.utils.escapeHtml(tokens[i].content || 'image')}]</span>`;
 
 export function createRenderer(window: Window) {
   const purify = createDOMPurify(window as Window & WindowLike);
@@ -196,7 +191,5 @@ export function createRenderer(window: Window) {
       FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'img', 'foreignObject'],
       FORBID_ATTR: ['src', 'srcset', 'onerror', 'onclick'],
       ALLOW_DATA_ATTR: false,
-      ADD_ATTR: ['data-image-source'],
-      ADD_URI_SAFE_ATTR: ['data-image-source'],
     });
 }

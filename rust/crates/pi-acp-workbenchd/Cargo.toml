@@ -1,0 +1,23 @@
+[package]
+name = "pi-acp-workbenchd"
+version = "0.2.0"
+edition = "2021"
+description = "Single-process ACP Workbench runtime"
+license = "Apache-2.0"
+
+[dependencies]
+pi-acp-core = { path = "../pi-acp-core" }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+
+[[bin]]
+name = "pi-acp-workbenchd"
+path = "src/main.rs"

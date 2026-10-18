@@ -30,6 +30,8 @@ try {
     args: [resolve('dist/pi-adapter.mjs')],
     cwd: root,
     env: {
+      // Opt-in manual SDK smoke; default test fixtures do not inherit this.
+      ...process.env,
       PI_ACP_PI_COMMAND: process.env.PI_ACP_PI_COMMAND || 'pi',
       PI_ACP_WORKBENCH_STATE_DIR: join(root, 'adapter-state'),
       PI_CODING_AGENT_DIR: join(root, 'pi-data'),

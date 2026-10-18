@@ -61,11 +61,7 @@
       },
       {
         "command": "piAcp.login",
-        "title": "Pi Workbench: Open Current Harness Login Terminal"
-      },
-      {
-        "command": "piAcp.preview",
-        "title": "Pi: Preview Markdown & Math"
+        "title": "Pi Workbench: Provider Login Instructions"
       },
       {
         "command": "piAcp.logs",
@@ -99,78 +95,53 @@
     "configuration": {
       "title": "Pi ACP",
       "properties": {
-        "piAcp.codex.loginCommand": {
-          "type": "string",
-          "default": "codex",
-          "scope": "machine",
-          "description": "Interactive Codex CLI used by Open Login Terminal (runs codex login). This is separate from codex-acp."
-        },
-        "piAcp.showThoughts": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show thought chunks when the agent emits them."
-        },
-        "piAcp.persistHistory": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show history in this client. The session service persists tasks for every harness; Delete History removes server records."
-        },
-        "piAcp.maxContextChars": {
-          "type": "number",
-          "default": 60000,
-          "minimum": 1000,
-          "maximum": 500000,
-          "description": "Maximum characters in an attached editor selection or file."
-        },
-        "piAcp.serviceSocket": {
+        "piAcp.workbenchSocket": {
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Pi session service Unix socket. Empty uses ~/.pi/pi-acp-workbench/service/sessions.sock. Pi processes and model environment are configured in sessions.json; reload the window after changing this path."
-        },
-        "piAcp.claude.loginCommand": {
-          "type": "string",
-          "default": "claude-agent-acp",
-          "scope": "machine",
-          "description": "Executable used by the login terminal (--cli /login). Worker commands belong in sessions.json."
+          "description": "IPC v2 socket of pi-acp-workbenchd. Empty uses ~/.pi/pi-acp-workbench/workbench.sock. Configure workers/storage in workbench.json; reload after changing this path. No legacy socket fallback."
         }
       }
     }
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:services": "npm run build && node scripts/build-services.mjs",
-    "build:service:test": "cargo build --manifest-path rust/Cargo.toml --workspace",
+    "build:workbenchd": "cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd",
+    "run:workbenchd": "cargo run --manifest-path rust/Cargo.toml -p pi-acp-workbenchd --",
+    "build:services": "node scripts/build-services.mjs",
+    "build:service:test": "cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd",
     "check": "tsc --noEmit",
+    "audit:workbench": "node scripts/audit-workbench.mjs",
     "format": "prettier --write . && cargo fmt --manifest-path rust/Cargo.toml --all",
     "format:check": "prettier --check . && cargo fmt --manifest-path rust/Cargo.toml --all -- --check",
     "test": "npm run check && npm run build:service:test && vitest run",
+    "test:rewrite": "node scripts/test-rewrite.mjs",
     "test:changed": "npm run check && npm run build:service:test && vitest run --changed --passWithNoTests",
     "test:all": "npm run check && npm run build:service:test && vitest run",
     "test:full": "node scripts/test-full.mjs",
-    "test:runner": "node --test scripts/test-pool.test.mjs scripts/test-reports.test.mjs scripts/ci-failure-diagnostics.test.mjs scripts/telegram-setup.test.mjs",
+    "test:runner": "node --test scripts/test-pool.test.mjs scripts/test-reports.test.mjs scripts/ci-failure-diagnostics.test.mjs scripts/typescript-graph.test.mjs",
     "verify": "npm run clippy && npm run test:full && npm run test:browser",
     "package": "vsce package --no-dependencies --allow-missing-repository --out pi-acp-workbench-$npm_package_version.vsix",
     "vscode:prepublish": "npm run check && npm run build",
-    "test:browser": "npm run build && node scripts/browser-smoke.mjs",
+    "test:browser": "npm run build && cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd && node scripts/workbench-browser-smoke.mjs",
     "test:harness": "node scripts/harness-reconnect-smoke.mjs",
     "test:native-fork": "npm run build && node scripts/native-fork-smoke.mjs",
+    "test:native-fork:offline": "npm run build && node scripts/native-fork-offline.mjs",
     "test:pi-fast": "node scripts/pi-fast-smoke.mjs",
-    "test:contract": "npm run build:service:test && node scripts/service-contract.mjs",
-    "test:contract:telegram": "cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/telegram-contract.mjs",
-    "test:integration:rust": "npm run build:service:test && cargo build --manifest-path rust/Cargo.toml --features pi-acp-telegram-daemon/contract-test --target-dir rust/target/contract && node scripts/rust-integration.mjs",
-    "telegram": "node scripts/run-service.mjs telegram",
-    "sessions": "node scripts/run-service.mjs sessions",
-    "test:memory": "npm run build:service:test && node scripts/memory-smoke.mjs",
-    "generate:protocol": "npm run build:service:test && node scripts/generate-service-types.mjs",
-    "check:protocol": "node scripts/generate-service-types.mjs --check",
-    "test:service:rollback": "node scripts/service-rollback.mjs",
-    "test:service:soak": "node scripts/service-soak.mjs",
+    "test:contract": "npm run test:contract:workbench",
+    "test:contract:workbench": "cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd && node scripts/workbench-contract.mjs",
+    "test:contract:workbench:telegram": "cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd && node scripts/workbench-telegram-contract.mjs",
+    "test:contract:telegram": "npm run test:contract:workbench:telegram",
+    "test:integration:rust": "npm run test:contract:workbench:telegram",
+    "workbenchd": "npm run build:service:test && cargo run --manifest-path rust/Cargo.toml -p pi-acp-workbenchd --",
+    "workbench:storage": "node scripts/workbench-storage.mjs",
+    "test:workbench:storage": "npm run build:workbenchd && vitest run test/workbench-storage.test.ts",
+    "test:workbench:process-loss": "npm run build:workbenchd && node scripts/workbench-process-loss.mjs",
+    "test:workbench:soak": "npm run build:workbenchd && node scripts/workbench-soak.mjs",
+    "check:protocol": "npm run check",
     "test:service:artifact": "node scripts/service-artifact-smoke.mjs",
     "package:services": "node scripts/package-services.mjs",
-    "clippy": "cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings",
-    "fixtures": "node scripts/export-fixtures.mjs",
-    "telegram:setup": "node scripts/setup-telegram.mjs"
+    "clippy": "cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings"
   },
   "overrides": {
     "katex": "$katex"

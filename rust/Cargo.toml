@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pi-acp-core", "crates/pi-acp-telegram-daemon", "crates/pi-acp-session-daemon"]
+members = ["crates/pi-acp-core", "crates/pi-acp-workbenchd"]
 
 [profile.release]
 lto = true

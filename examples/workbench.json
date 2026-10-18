@@ -1,0 +1,21 @@
+{
+  "workers": {
+    "pi": {
+      "command": "pi-acp",
+      "args": [],
+      "env": {}
+    },
+    "codex": null,
+    "claude": null
+  },
+  "sessions": {
+    "mailbox": 128,
+    "max_workers": 16
+  },
+  "storage": {
+    "root": "/home/USER/.pi/pi-acp-workbench"
+  },
+  "limits": {
+    "pending_interactions": 32
+  }
+}

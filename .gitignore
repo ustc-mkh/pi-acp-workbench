@@ -8,3 +8,4 @@ playwright-report/
 test-results/
 .test-results/
 rust/target/
+.pi

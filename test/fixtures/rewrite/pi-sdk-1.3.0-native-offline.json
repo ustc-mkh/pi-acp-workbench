@@ -1,0 +1,100 @@
+{
+  "provenance": {
+    "sdk": "@earendil-works/pi-coding-agent",
+    "version": "1.3.0",
+    "syntheticHistory": true,
+    "networkAttempts": 0,
+    "realModelRequests": 0,
+    "scope": "real Pi CLI and bundled ACP adapter, not new Rust host"
+  },
+  "capabilities": {
+    "loadSession": true,
+    "mcpCapabilities": {
+      "http": false,
+      "sse": false
+    },
+    "promptCapabilities": {
+      "image": true,
+      "audio": false,
+      "embeddedContext": false
+    },
+    "sessionCapabilities": {
+      "list": {},
+      "delete": {}
+    },
+    "_meta": {
+      "pi-workbench": {
+        "version": 1,
+        "inspect": true,
+        "nativeFork": true,
+        "title": true,
+        "autonomousRuns": true
+      }
+    }
+  },
+  "inspection": {
+    "forkPoints": [
+      {
+        "entryId": "u1",
+        "hash": "8441d8b5e5b5c0b82b14dbebcc16ba3337a8499eaf407a8d0958c6db8c6438fb",
+        "role": "user",
+        "key": "user:e1e98cdfb94f6e0abecd6de608e2cc514c5197dd3d472a352e059c7c279031d9",
+        "timestamp": 2,
+        "safe": true
+      },
+      {
+        "entryId": "a1",
+        "hash": "fe80f7b91a7852db1f703cc333f30e85054d7f87fef379ba653e7abc54ec93ca",
+        "role": "assistant",
+        "key": "assistant:858e1de4482d4284f9a003cd573b0e3fc5c7c6d9342ca5898c12319c4a1271f0",
+        "timestamp": 3,
+        "safe": true
+      },
+      {
+        "entryId": "u2",
+        "hash": "0387dfbeedf325d5729679734fdcb16a285b3243681218525839dfec02ccbcc0",
+        "role": "user",
+        "key": "user:06c629733ca646f168d4775acb5f6d0dd11ebc7191153700e6252c53fa38943b",
+        "timestamp": 4,
+        "safe": true
+      },
+      {
+        "entryId": "a2",
+        "hash": "",
+        "role": "assistant",
+        "key": "assistant:8a9ef880e33815b9ff09af5cc9ba3ed5602d6c4464f266f9208e0d3090990ba7",
+        "timestamp": 5,
+        "safe": false
+      },
+      {
+        "entryId": "a2done",
+        "hash": "94cb6cb12edce57362b1857c878094979d829d791eb51f0a4c57f7483e9f059c",
+        "role": "assistant",
+        "key": "assistant:1809ed5293a3c146697ad251c8ca297e7887e905d3f5c956be2b6f5eddff2af4",
+        "timestamp": 5,
+        "safe": true
+      },
+      {
+        "entryId": "u3",
+        "hash": "6911877a8d91d7ce2a180f610335b087c1ea7490250ba0e41818a65bf11b0da0",
+        "role": "user",
+        "key": "user:698f96d57ebccb970baa5957efc13dc9bd4fbd8610fd7dd70062db9bc43574e8",
+        "timestamp": 6,
+        "safe": true
+      },
+      {
+        "entryId": "a3",
+        "hash": "66da97c712b0f1c6c8a16fc8c5a63eaad0487411ea92e2ad6474b9a3657c02b5",
+        "role": "assistant",
+        "key": "assistant:f90c4504080637759487b0ed3b03f4e59cbd7baf81e1b636902e7ebd849e60f6",
+        "timestamp": 7,
+        "safe": true
+      }
+    ]
+  },
+  "forkResponses": [
+    {
+      "sessionId": "01a14bcb-32ae-77f6-a19c-048bc2d3b471"
+    }
+  ]
+}

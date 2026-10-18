@@ -34,6 +34,8 @@ try {
         command,
         args,
         cwd,
+        // Explicit manual live-provider command, never part of fixture gates.
+        env: { ...process.env },
         requestTimeoutMs: 60000,
         update: (n) => {
           if (n.update.sessionUpdate === 'available_commands_update')
@@ -59,7 +61,7 @@ try {
       await agent.initialize();
       const restored = await agent.createSession(id);
       await delay(500);
-      assert(restored.sessionId.startsWith(`workbench:${harness}:`));
+      assert.equal(restored.sessionId, id, `${harness}: native identity changed`);
       assert(commands.length > 0, `${harness}: no commands after reconnect`);
       console.log(
         JSON.stringify({

@@ -1,0 +1,352 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { WorkbenchError, WORKBENCH_LIMITS } from '../src/workbench-client';
+import {
+  clientCommand,
+  domainEvent,
+  entryId,
+  imageRef,
+  operationId,
+  sessionId,
+  sessionSnapshot,
+} from '../src/workbench-protocol';
+import { emptySnapshot, workbenchPeer } from './helpers/workbench-peer';
+
+const peers: Awaited<ReturnType<typeof workbenchPeer>>[] = [];
+async function fixture() {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  return peer;
+}
+const session = sessionId.parse('session');
+const query = { method: 'inspect' as const, session };
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const partialMs = WORKBENCH_LIMITS.partialMs;
+afterEach(async () => {
+  WORKBENCH_LIMITS.partialMs = partialMs;
+  for (const peer of peers.splice(0)) await peer.close();
+});
+
+it('correlates out-of-order replies, live events and resync without a legacy envelope', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const events: unknown[] = [];
+  let resync = 0,
+    observerErrors = 0;
+  client.observe({
+    event() {
+      throw new Error('bad UI observer');
+    },
+    observerError() {
+      observerErrors++;
+    },
+  });
+  client.observe({ event: (event) => events.push(event), resync: () => resync++ });
+  const operation = operationId.parse('stable-operation');
+  const first = client.request({ method: 'prompt', session, prompt: 'hello 世界' }, { operation });
+  const second = client.request(query);
+  await expect.poll(() => peer.requests.length).toBe(2);
+  expect(peer.requests.map(({ socket: _, ...request }) => request)).toMatchObject([
+    { version: 2, id: first.id, operation, command: { method: 'prompt', prompt: 'hello 世界' } },
+    { version: 2, id: second.id, command: query },
+  ]);
+  expect(peer.requests[1].operation).toBeUndefined();
+  peer.reply(peer.requests[1], [{ SessionLoaded: emptySnapshot() }]);
+  peer.send(peer.requests[0].socket, {
+    type: 'event',
+    event: {
+      AgentText: {
+        session,
+        turn: 'turn',
+        entry: 'entry',
+        message: 'opaque group',
+        text: '你好😀',
+      },
+    },
+  });
+  peer.send(peer.requests[0].socket, { type: 'resync_required' });
+  const result = await second.result;
+  expect(result).toHaveLength(1);
+  peer.reply(peer.requests[0]);
+  await first.result;
+  expect(events).toHaveLength(1);
+  expect(resync).toBe(1);
+  expect(observerErrors).toBe(1);
+  expect(first.operation).toBe(operation);
+});
+
+it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quotas', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ordinary = Array.from({ length: 16 }, () =>
+    client.request({ method: 'prompt', session, prompt: 'held' }),
+  );
+  const control = Array.from({ length: 4 }, () => client.request({ method: 'cancel', session }));
+  const queries = Array.from({ length: 4 }, () => client.request(query));
+  await expect.poll(() => peer.requests.length).toBe(24);
+  for (const command of [
+    { method: 'prompt', session, prompt: 'overflow' },
+    { method: 'cancel', session },
+    query,
+  ] as const)
+    expect(() => client.request(command)).toThrow('pool is full');
+  const abandoned = expect(ordinary[0].result).rejects.toMatchObject({
+    code: 'abandoned',
+    sideEffectPossible: true,
+  });
+  ordinary[0].abandon();
+  await abandoned;
+  expect(() => client.request({ method: 'prompt', session, prompt: 'still full' })).toThrow(
+    'pool is full',
+  );
+  peer.reply(peer.requests[0]);
+  await expect
+    .poll(() => {
+      try {
+        const t = client.request({ method: 'prompt', session, prompt: 'replacement' });
+        t.result.catch(() => {});
+        return t.id;
+      } catch {
+        return 0;
+      }
+    })
+    .toBeGreaterThan(24);
+  // Old response IDs cannot consume the replacement's observer.
+  peer.reply(peer.requests[0]);
+  for (const request of peer.requests.slice(1)) peer.reply(request);
+  await Promise.all([...ordinary.slice(1), ...control, ...queries].map((t) => t.result));
+});
+
+it('abandonment before connection sends nothing and does not generate cancellation', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ticket = client.request({
+    method: 'fork',
+    session,
+    request: { entry: entryId.parse('entry') },
+  });
+  const failed = expect(ticket.result).rejects.toMatchObject({
+    operation: ticket.operation,
+    sideEffectPossible: false,
+  });
+  ticket.abandon();
+  await failed;
+  await pause(30);
+  expect(peer.requests).toHaveLength(0);
+  const read = client.request(query);
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.reply(peer.requests[0]);
+  await read.result;
+  expect(peer.requests[0].command.method).toBe('inspect');
+});
+
+it('observer timeout retains its operation and never emits cancel or retries', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ticket = client.request(
+    { method: 'prompt', session, prompt: 'slow provider' },
+    { timeoutMs: 80 },
+  );
+  const failed = expect(ticket.result).rejects.toMatchObject({
+    code: 'timeout',
+    operation: ticket.operation,
+    sideEffectPossible: true,
+  });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  await failed;
+  peer.reply(peer.requests[0]);
+  await pause(20);
+  expect(peer.requests).toHaveLength(1);
+});
+
+it('disconnect rejects accepted observers and explicit reconnect does not resend/subcribe', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const first = client.request({ method: 'create', harness: 'Pi', cwd: '/workspace' });
+  const failed = expect(first.result).rejects.toMatchObject({
+    code: 'disconnected',
+    operation: first.operation,
+    sideEffectPossible: true,
+  });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.requests[0].socket.destroy();
+  await failed;
+  await pause(20);
+  expect(peer.requests).toHaveLength(1);
+  const next = client.request({ method: 'list' });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  expect(next.id).toBeGreaterThan(first.id);
+  expect(peer.requests[1].command.method).toBe('list');
+  peer.reply(peer.requests[1], [{ SessionsListed: [] }]);
+  await next.result;
+});
+
+it.each([
+  Buffer.from('{"type":"reply","id":"legacy-string","events":[]}\n'),
+  Buffer.from('{"type":"reply","id":9007199254740992,"events":[]}\n'),
+  Buffer.from('{"type":"unknown"}\n'),
+  Buffer.from([0xff, 10]),
+  Buffer.from('\n'),
+])('fails closed on malformed or unsupported frames without content echo (%#)', async (frame) => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ticket = client.request(query);
+  const failed = expect(ticket.result).rejects.toMatchObject({ code: 'protocol' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.requests[0].socket.write(frame);
+  await failed;
+});
+
+it('preserves split UTF-8 and does not slide an incomplete-frame deadline', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ticket = client.request(query);
+  await expect.poll(() => peer.requests.length).toBe(1);
+  const body = Buffer.from(
+    JSON.stringify({
+      type: 'reply',
+      id: ticket.id,
+      events: [{ SessionError: { session, error: '😀世界' } }],
+    }) + '\n',
+  );
+  const split = body.indexOf(Buffer.from('😀')) + 2;
+  peer.requests[0].socket.write(body.subarray(0, split));
+  await pause(10);
+  peer.requests[0].socket.write(body.subarray(split));
+  expect(await ticket.result).toEqual([{ SessionError: { session, error: '😀世界' } }]);
+  WORKBENCH_LIMITS.partialMs = 50;
+  const held = client.request(query),
+    failed = expect(held.result).rejects.toMatchObject({ code: 'protocol' });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  peer.requests[1].socket.write('{');
+  const trickle = setInterval(() => peer.requests[1].socket.write(' '), 15);
+  try {
+    await failed;
+  } finally {
+    clearInterval(trickle);
+  }
+});
+
+it('rejects an oversized unfinished frame before parsing', async () => {
+  const peer = await fixture(),
+    client = peer.client();
+  const ticket = client.request(query),
+    failed = expect(ticket.result).rejects.toMatchObject({ code: 'protocol' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.requests[0].socket.write(Buffer.alloc(WORKBENCH_LIMITS.frameBytes + 1, 32));
+  await failed;
+});
+
+function asset(mime = 'image/png', size = 24) {
+  const bytes = Buffer.alloc(size);
+  if (mime === 'image/png') {
+    Buffer.from('\x89PNG\r\n\x1a\n', 'latin1').copy(bytes);
+    bytes.write('IHDR', 12);
+  } else if (mime === 'image/jpeg') Buffer.from([0xff, 0xd8, 0xff]).copy(bytes);
+  else if (mime === 'image/gif') bytes.write('GIF89a');
+  else {
+    bytes.write('RIFF');
+    bytes.write('WEBP', 8);
+  }
+  const image = imageRef.parse({
+    id: 'image',
+    mime,
+    bytes: size,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  });
+  return { format_version: 1, image, data: bytes.toString('base64') };
+}
+it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])(
+  'verifies archive response identity/hash/canonical base64/signature for %s',
+  async (mime) => {
+    const peer = await fixture(),
+      client = peer.client(),
+      payload = asset(mime);
+    const ticket = client.request({ method: 'image', image: payload.image });
+    expect(ticket.operation).toBeUndefined();
+    await expect.poll(() => peer.requests.length).toBe(1);
+    peer.send(peer.requests[0].socket, { type: 'image', id: ticket.id, asset: payload });
+    expect(await ticket.result).toEqual(payload);
+  },
+);
+
+it('roundtrips the 4 MiB signature fixture under the 8 MiB frame (not full image decoding)', async () => {
+  const peer = await fixture(),
+    client = peer.client(),
+    payload = asset('image/png', 4 * 1024 * 1024);
+  const tickets = [
+    client.request({ method: 'image', image: payload.image }),
+    client.request({ method: 'image', image: payload.image }),
+  ];
+  await expect.poll(() => peer.requests.length).toBe(2);
+  for (const ticket of tickets)
+    peer.send(peer.requests[0].socket, { type: 'image', id: ticket.id, asset: payload });
+  for (const ticket of tickets) expect((await ticket.result).image).toEqual(payload.image);
+});
+
+it.each(['hash', 'identity', 'base64', 'signature', 'reply-kind'])(
+  'rejects invalid image response: %s',
+  async (failure) => {
+    const peer = await fixture(),
+      client = peer.client(),
+      payload = asset();
+    if (failure === 'signature') {
+      const bytes = Buffer.alloc(24);
+      payload.data = bytes.toString('base64');
+      payload.image.sha256 = createHash('sha256').update(bytes).digest('hex');
+    }
+    const ticket = client.request({ method: 'image', image: payload.image });
+    const failed = expect(ticket.result).rejects.toMatchObject({ code: 'protocol' });
+    await expect.poll(() => peer.requests.length).toBe(1);
+    const wire = structuredClone(payload);
+    if (failure === 'hash') wire.data = Buffer.alloc(24).toString('base64');
+    if (failure === 'identity') wire.image.id = imageRef.parse({ ...wire.image, id: 'other' }).id;
+    if (failure === 'base64') wire.data += '\n';
+    peer.send(
+      peer.requests[0].socket,
+      failure === 'reply-kind'
+        ? { type: 'reply', id: ticket.id, events: [] }
+        : { type: 'image', id: ticket.id, asset: wire },
+    );
+    await failed;
+  },
+);
+
+describe('boundary validation', () => {
+  it('rejects paths/URIs, native fork targets, invalid IDs, pixel events and unsafe integers', () => {
+    for (const value of [
+      { method: 'image', path: '/secret.png' },
+      { method: 'image', uri: 'https://example.invalid/no' },
+      { method: 'fork', session, request: { entry: 'entry', native_path: '/secret' } },
+      { method: 'inspect', session: '../escape' },
+    ])
+      expect(() => clientCommand.parse(value)).toThrow();
+    expect(() =>
+      domainEvent.parse({ AgentText: { session, turn: 'turn', text: 'missing entry' } }),
+    ).toThrow();
+    expect(() =>
+      domainEvent.parse({
+        AgentImage: { session, turn: 'turn', entry: 'entry', image: asset().image, data: 'pixels' },
+      }),
+    ).toThrow();
+    expect(() => domainEvent.parse({ ForkPrepared: {} })).toThrow();
+    expect(() =>
+      sessionSnapshot.parse({ ...emptySnapshot(), revision: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toThrow();
+    expect(() =>
+      sessionSnapshot.parse({ ...emptySnapshot(), cwd: '/workspace/../elsewhere' }),
+    ).toThrow();
+  });
+  it('forbids operation IDs on image/subscription requests before connecting', async () => {
+    const peer = await fixture(),
+      client = peer.client(),
+      operation = operationId.parse('op');
+    for (const command of [
+      { method: 'image' as const, image: asset().image },
+      { method: 'subscribe' as const, session },
+    ])
+      expect(() => client.request(command, { operation })).toThrow(WorkbenchError);
+    await pause(10);
+    expect(peer.sockets.size).toBe(0);
+  });
+});

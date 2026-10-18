@@ -5,7 +5,7 @@ await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
 await Promise.all([
   build({
-    entryPoints: ['src/extension.ts'],
+    entryPoints: ['src/workbench-extension.ts'],
     outfile: 'dist/extension.cjs',
     bundle: true,
     platform: 'node',
@@ -15,7 +15,7 @@ await Promise.all([
     sourcemap: true,
   }),
   build({
-    entryPoints: ['webview/main.ts'],
+    entryPoints: ['webview/workbench-main.ts'],
     outdir: 'dist',
     entryNames: 'webview',
     chunkNames: 'chunks/[name]-[hash]',
@@ -27,7 +27,7 @@ await Promise.all([
     minify: true,
     sourcemap: true,
   }),
-  copyFile('webview/style.css', 'dist/style.css'),
+  copyFile('webview/workbench-style.css', 'dist/style.css'),
   copyFile('node_modules/katex/dist/katex.min.css', 'dist/katex.min.css'),
   cp('node_modules/katex/dist/fonts', 'dist/fonts', { recursive: true }),
 ]);

@@ -1,72 +1,48 @@
 import { it, expect } from 'vitest';
-import { groupUsage, mergeUsage, priceFor, validPrice, type UsageRecord } from '../src/telemetry';
+import { validPrice, validRecord, type UsageRecord } from '../src/telemetry';
 import { usageRecord } from '../src/pi-enhancements';
-const r = (id: string, values: Partial<UsageRecord> = {}): UsageRecord => ({
-  id,
-  sessionId: 's1',
+
+const record: UsageRecord = {
+  id: 'native-entry',
+  sessionId: 'native-session',
   model: 'anthropic/claude-sonnet-4-6',
-  timestamp: new Date(2026, 9, 3, 12).getTime(),
+  timestamp: 1000,
   kind: 'inference',
   input: 100,
   output: 20,
   cacheRead: 800,
   cacheWrite: 100,
-  ...values,
+};
+it('validates provider usage records without a UI aggregation/cache projection', () => {
+  expect(validRecord(record)).toBe(true);
+  expect(validRecord({ ...record, reportedCost: 0 })).toBe(true);
+  for (const invalid of [
+    null,
+    {},
+    { ...record, id: 'x'.repeat(500) },
+    { ...record, model: 'x'.repeat(300) },
+    { ...record, timestamp: 0 },
+    { ...record, timestamp: Infinity },
+    { ...record, input: -1 },
+    { ...record, output: 0.5 },
+    { ...record, cacheRead: Number.MAX_SAFE_INTEGER + 1 },
+    { ...record, cacheWrite: NaN },
+    { ...record, reportedCost: -1 },
+    { ...record, reportedCost: NaN },
+  ])
+    expect(validRecord(invalid)).toBe(false);
 });
-const prices = { 'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } };
-it('deduplicates repeated inspections, including compaction usage', () => {
-  expect(
-    mergeUsage([r('1')], [r('1'), r('2', { kind: 'compaction' }), r('bad', { input: -1 })]),
-  ).toHaveLength(2);
-});
-it('caps retained usage records at the newest 5000', () => {
-  const many = Array.from({ length: 6000 }, (_, i) => r(`u${i}`, { timestamp: i }));
-  const merged = mergeUsage(many.slice(0, 3000), many.slice(3000));
-  expect(merged).toHaveLength(5000);
-  expect(merged[0].id).toBe('u1000');
-  expect(merged.at(-1)!.id).toBe('u5999');
-});
-it('uses total input inclusive of both caches and weighted cache hit rates', () => {
-  const groups = groupUsage(
-    [r('1'), r('2', { input: 1000, cacheRead: 0, cacheWrite: 0 })],
-    prices,
-    'model',
-  );
-  expect(groups[0]).toMatchObject({
-    input: 1100,
-    cacheRead: 800,
-    cacheWrite: 100,
-    totalInput: 2000,
-    output: 40,
-    cacheRate: 0.4,
-    calls: 2,
-    unpriced: 0,
-    unreported: 2,
-  });
-  expect(groups[0].cost).toBeCloseTo((1100 * 3 + 800 * 0.3 + 100 * 3.75 + 40 * 15) / 1e6);
-});
-it('keeps missing prices and reported costs distinct from zero and supports provider overrides', () => {
-  expect(priceFor('reseller/claude-sonnet-4-6', prices)).toBeUndefined();
-  const override = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  expect(priceFor(r('1').model, { ...prices, [r('1').model]: override })).toEqual(override);
-  const group = groupUsage(
-    [r('1', { reportedCost: 0 }), r('2', { model: 'unknown/model' })],
-    prices,
-    'session',
-  )[0];
-  expect(group).toMatchObject({ unpriced: 1, unreported: 1, reportedCost: 0 });
-  expect(validPrice({ ...override, input: NaN })).toBe(false);
-});
-it('groups different models by local date and logical conversation', () => {
-  const records = [
-    r('a'),
-    r('b', { sessionId: 'branch', timestamp: new Date(2026, 9, 2, 12).getTime(), model: 'other' }),
-  ];
-  expect(groupUsage(records, prices, 'day').map((g) => g.key)).toEqual([
-    '2026-10-03',
-    '2026-10-02',
-  ]);
-  expect(groupUsage(records, prices, 'session')).toHaveLength(2);
+it('keeps zero reported provider prices distinct from absent or invalid prices', () => {
+  const price = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  expect(validPrice(price)).toBe(true);
+  for (const invalid of [
+    undefined,
+    {},
+    { ...price, input: NaN },
+    { ...price, output: -1 },
+    { ...price, cacheWrite: 1000001 },
+  ])
+    expect(validPrice(invalid)).toBe(false);
 });
 it('normalizes Pi native usage without using context-window occupancy', () => {
   expect(

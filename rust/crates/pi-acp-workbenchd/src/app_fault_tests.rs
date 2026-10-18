@@ -1,0 +1,111 @@
+use super::*;
+use crate::domain::interaction::{InteractionAnswer, InteractionResponse};
+
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
+    let events = app
+        .command(DomainCommand::Inspect(id.clone()))
+        .await
+        .unwrap();
+    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
+        panic!("inspect")
+    };
+    snapshot.clone()
+}
+
+#[tokio::test]
+async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_and_replays_failure(
+) {
+    for full in [false, true] {
+        let (app, root) = app();
+        let id = create(&app).await;
+        let mut events = app.subscribe();
+        prompt(&app, &id, "permission").await;
+        let interaction = wait_interaction(&mut events).await;
+        let old = app.core.adapters.lock().await.remove(&id).unwrap();
+        old.stop().await;
+        let answer = InteractionAnswer {
+            interaction: interaction.id,
+            response: InteractionResponse::Permission {
+                option: "yes".into(),
+            },
+        };
+        if full {
+            let (tx, rx) = mpsc::channel(1);
+            tx.try_send(AdapterCommand::Answer(answer.clone()))
+                .unwrap_or_else(|_| panic!("fixture queue"));
+            let stop = CancellationToken::new();
+            let task_stop = stop.clone();
+            let task = app
+                .core
+                .adapter_tasks
+                .spawn(async move {
+                    task_stop.cancelled().await;
+                    drop(rx);
+                })
+                .unwrap();
+            app.core.adapters.lock().await.insert(
+                id.clone(),
+                super::super::AdapterHandle {
+                    tx,
+                    stop,
+                    worker_completion: task.clone(),
+                    task,
+                },
+            );
+        }
+        let operation = crate::domain::OperationId::generate();
+        let command = DomainCommand::AnswerInteraction {
+            session: id.clone(),
+            answer,
+        };
+        assert!(app
+            .command_durable(operation.clone(), command.clone())
+            .await
+            .is_err());
+        assert!(!app.core.adapters.lock().await.contains_key(&id));
+        let failed = inspect(&app, &id).await;
+        assert!(matches!(failed.status, SessionStatus::Failed(_)));
+        assert!(failed.active_turn.is_none());
+        assert!(failed.pending_interactions.is_empty());
+        assert!(app.command_durable(operation, command).await.is_err());
+        assert_eq!(inspect(&app, &id).await.revision, failed.revision);
+        let mut saw_failure = false;
+        while let Ok(event) = events.try_recv() {
+            saw_failure |= matches!(event, DomainEvent::SessionError { .. });
+        }
+        assert!(saw_failure);
+        prompt(&app, &id, "replacement after failed answer").await;
+        wait_finished(&mut events).await;
+        app.shutdown().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn provider_rpc_error_description_cannot_escape_into_domain_or_persisted_history() {
+    let (app, root) = app();
+    let id = create(&app).await;
+    let mut events = app.subscribe();
+    prompt(&app, &id, "rpc-error-secret").await;
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let DomainEvent::SessionError { error, .. } = events.recv().await.unwrap() {
+                break error;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(error.contains("session/prompt"));
+    assert!(!error.contains("SENSITIVE_PROVIDER_DESCRIPTION"));
+    let persisted = HistoryStore::new(root.join("history"))
+        .load(id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!serde_json::to_string(&persisted)
+        .unwrap()
+        .contains("SENSITIVE_PROVIDER_DESCRIPTION"));
+    app.shutdown().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}

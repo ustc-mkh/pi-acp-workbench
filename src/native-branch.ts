@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import type { Entry } from './shared';
 export const NATIVE_FORK_MARKER = 'pi-acp-workbench/native-fork';
 /** Fields consumed from Pi RPC/native history; preserve unknown fields when hashing. */
 export interface NativeContent {
@@ -40,11 +39,9 @@ export interface NativeEntry {
   data?: { sourceSessionId?: string; [key: string]: unknown };
   [key: string]: unknown;
 }
-export interface NativeBranchTarget {
+export interface NativeForkPoint {
   entryId: string;
   hash: string;
-}
-export interface NativeForkPoint extends NativeBranchTarget {
   role: 'user' | 'assistant';
   key: string;
   timestamp?: number;
@@ -167,49 +164,4 @@ export function nativeForkPoints(path: NativeEntry[]): NativeForkPoint[] {
     });
   }
   return points;
-}
-/** Same text encoding as the pinned pi-acp promptToPiMessage; no model or image transformations. */
-function uiText(entry: Extract<Entry, { text: string }>) {
-  if (entry.role !== 'user' || !entry.contextBlocks) return entry.text;
-  return entry.contextBlocks
-    .map((b) => {
-      if (b.type === 'text') return b.text;
-      if (b.type === 'resource_link') return `\n[Context] ${b.uri}`;
-      if (b.type === 'resource' && 'text' in b.resource)
-        return `\n[Embedded Context] ${b.resource.uri} (${b.resource.mimeType || 'text/plain'})\n${b.resource.text}`;
-      return '';
-    })
-    .join('');
-}
-/** Ambiguous old display rows fail closed instead of guessing a native cut point. */
-export function bindNativeForks(
-  entries: Entry[],
-  points: NativeForkPoint[],
-  previous: Record<string, NativeBranchTarget> = {},
-) {
-  const out: Record<string, NativeBranchTarget> = {},
-    keys = new Map<string, number>();
-  for (const e of entries)
-    if ((e.role === 'user' || e.role === 'assistant') && !e.sendError) {
-      const k = nativeTextKey(e.role, uiText(e));
-      keys.set(k, (keys.get(k) || 0) + 1);
-    }
-  for (const e of entries) {
-    if ((e.role !== 'user' && e.role !== 'assistant') || e.sendError) continue;
-    const key = nativeTextKey(e.role, uiText(e)),
-      matches = points.filter((p) => p.key === key);
-    const saved = matches.find(
-      (p) => p.entryId === previous[e.id]?.entryId && p.hash === previous[e.id]?.hash,
-    );
-    const timed = e.messageId ? matches.filter((p) => String(p.timestamp) === e.messageId) : [];
-    const point =
-      saved ||
-      (timed.length === 1
-        ? timed[0]
-        : matches.length === 1 && keys.get(key) === 1
-          ? matches[0]
-          : undefined);
-    if (point?.safe) out[e.id] = { entryId: point.entryId, hash: point.hash };
-  }
-  return out;
 }

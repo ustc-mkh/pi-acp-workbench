@@ -1,35 +1,23 @@
-// Verify an actual Linux x86_64 production package.
-// All networking is loopback, including the rejected TLS connection via CONNECT.
+// Verify the single production pi-acp-workbenchd artifact with an isolated synthetic ACP peer.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { createServer } from 'node:http';
-import { createServer as createTlsServer } from 'node:tls';
 import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { ContractWire } from './lib/contract-wire.mjs';
+import { createConnection } from 'node:net';
 
-const { values } = parseArgs({
-  options: { dir: { type: 'string' }, report: { type: 'string' } },
-});
+const { values } = parseArgs({ options: { dir: { type: 'string' }, report: { type: 'string' } } });
 assert(values.dir, '--dir is required');
-const directory = resolve(values.dir),
-  manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+const directory = resolve(values.dir);
+const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
 assert.equal(manifest.production, true);
 assert.deepEqual(manifest.features, []);
 assert.equal(manifest.platform, 'linux');
 assert.equal(manifest.arch, 'x64');
-assert(['x86_64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'].includes(manifest.target));
-const expected = [
-  'pi-acp-session-daemon',
-  'pi-acp-telegram-daemon',
-  'pi-adapter.mjs',
-  'pi-native-fork.mjs',
-  'pi-fast-mode.mjs',
-];
-assert.deepEqual(Object.keys(manifest.files).sort(), expected.sort());
+const expected = ['pi-acp-workbenchd'];
+assert.deepEqual(Object.keys(manifest.files).sort(), expected);
 for (const file of expected)
   assert.equal(
     createHash('sha256')
@@ -37,232 +25,253 @@ for (const file of expected)
       .digest('hex'),
     manifest.files[file],
   );
-const root = await mkdtemp(join(tmpdir(), 'pi-artifact-smoke-'));
-const children = [],
-  checks = [],
-  sockets = new Set();
-const token = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const root = await mkdtemp(join(tmpdir(), 'pi-workbench-artifact-'));
+const children = [];
+const checks = [];
+const check = (message) => {
+  checks.push(message);
+  console.log(`ok   ${message}`);
+};
 const execute = (name, args, options = {}) => {
-  const binary = join(directory, name);
-  const child = spawn(binary, args, {
+  const child = spawn(join(directory, name), args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options,
   });
-  children.push(child);
   child.output = '';
   child.errors = '';
-  child.stdout.on('data', (chunk) => (child.output = (child.output + chunk).slice(-16000)));
-  child.stderr.on('data', (chunk) => (child.errors = (child.errors + chunk).slice(-16000)));
+  child.stdout.on('data', (chunk) => (child.output += chunk));
+  child.stderr.on('data', (chunk) => (child.errors += chunk));
   child.done = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code) => resolve(code));
   });
+  children.push(child);
   return child;
 };
 async function stop(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child || child.exitCode !== null) return;
   child.kill('SIGTERM');
-  const timeout = setTimeout(() => child.kill('SIGKILL'), 8000);
+  const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
   try {
-    assert.equal(await child.done, 0, `shutdown failed: ${child.errors}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-const delay = (ms) => new Promise((done) => setTimeout(done, ms));
-async function until(check, label) {
-  const end = Date.now() + 20000;
-  while (Date.now() < end) {
-    if (await check()) return;
-    await delay(25);
-  }
-  throw new Error(`artifact timeout: ${label}`);
-}
-const check = (text) => {
-  checks.push(text);
-  console.log(`ok   ${text}`);
-};
-let client, proxy, tlsServer;
-try {
-  for (const name of ['pi-acp-session-daemon', 'pi-acp-telegram-daemon']) {
-    const child = execute(name, ['--help']);
-    assert.equal(await child.done, 0);
-    assert(child.output.includes('--config'), `help missing: ${name}`);
-  }
-  check(`${manifest.target}: manifest hashes and both production entrypoints`);
-  const config = join(root, 'sessions.json'),
-    workspace = join(root, 'workspace');
-  await mkdir(workspace);
-  execFileSync('git', ['init', '-q', workspace]);
-  await writeFile(
-    config,
-    JSON.stringify({
-      command: process.execPath,
-      args: [resolve('test/contract-agent.mjs')],
-      maxWorkers: 1,
-      idleMs: 1000,
-    }),
-  );
-  const launch = async () => {
-    const child = execute('pi-acp-session-daemon', ['--config', config, '--data-dir', root]);
-    await until(() => {
-      if (child.exitCode !== null) throw new Error(child.errors);
-      return child.output.includes('ready');
-    }, 'production service ready');
-    client = await ContractWire.open(join(root, 'service', 'sessions.sock'));
-    return child;
-  };
-  let service = await launch();
-  const session = await client.call('create', { cwd: workspace });
-  const params = {
-    sessionId: session.id,
-    prompt: [{ type: 'text', text: 'artifact-acceptance' }],
-    source: 'desktop',
-  };
-  const reply = await client.call('prompt', params, 'artifact-request');
-  const entries = (await client.call('state', { sessionId: session.id })).snapshot.entries;
-  assert(entries.some((entry) => entry.text === 'echo: artifact-acceptance'));
-  client.close();
-  await stop(service);
-  service = await launch();
-  assert.deepEqual(
-    (await client.call('state', { sessionId: session.id })).snapshot.entries,
-    entries,
-  );
-  assert.deepEqual(await client.call('prompt', params, 'artifact-request'), reply);
-  client.close();
-  await stop(service);
-  check(`${manifest.target}: actual worker, durable history, restart and no replay`);
-  const certificate = join(root, 'self-signed.pem'),
-    key = join(root, 'self-signed.key');
-  execFileSync(
-    'openssl',
-    [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-days',
-      '1',
-      '-subj',
-      '/CN=api.telegram.org',
-      '-addext',
-      'subjectAltName=DNS:api.telegram.org',
-      '-addext',
-      'basicConstraints=critical,CA:FALSE',
-      '-addext',
-      'extendedKeyUsage=serverAuth',
-      '-keyout',
-      key,
-      '-out',
-      certificate,
-    ],
-    { stdio: 'ignore' },
-  );
-  let connects = 0,
-    accepted = 0,
-    rejected = 0,
-    plain = 0;
-  const tlsErrors = [];
-  tlsServer = createTlsServer(
-    { key: await readFile(key), cert: await readFile(certificate) },
-    (socket) => {
-      accepted++;
-      socket.end('HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n');
-    },
-  );
-  tlsServer.on('tlsClientError', (error) => {
-    rejected++;
-    tlsErrors.push({ code: error.code, message: error.message });
-  });
-  proxy = createServer((req, res) => {
-    plain++;
-    res.writeHead(500);
-    res.end();
-  });
-  proxy.on('connection', (socket) => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-  });
-  proxy.on('connect', (request, socket, head) => {
-    assert.equal(request.url, 'api.telegram.org:443');
-    connects++;
-    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-    if (head.length) socket.unshift(head);
-    tlsServer.emit('connection', socket);
-  });
-  await new Promise((done) => proxy.listen(0, '127.0.0.1', done));
-  const telegram = join(root, 'telegram.json');
-  await writeFile(
-    telegram,
-    JSON.stringify({ chatId: -1009999, allowedUserIds: [42], workspaces: { main: workspace } }),
-  );
-  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
-  const daemon = execute('pi-acp-telegram-daemon', ['--config', telegram, '--data-dir', root], {
-    env: {
-      ...process.env,
-      PI_TELEGRAM_BOT_TOKEN: token,
-      // Production must ignore mock endpoint and pacing, even when present.
-      PI_TELEGRAM_API_BASE: proxyUrl,
-      PI_TELEGRAM_PACE_MS: '1',
-      HTTPS_PROXY: proxyUrl,
-      https_proxy: proxyUrl,
-      HTTP_PROXY: '',
-      http_proxy: '',
-      ALL_PROXY: '',
-      all_proxy: '',
-      NO_PROXY: '',
-      no_proxy: '',
-      SSL_CERT_FILE: certificate,
-    },
-  });
-  const timer = setTimeout(() => daemon.kill('SIGKILL'), 25000);
-  try {
-    assert.equal(await daemon.done, 1, `invalid certificate was accepted: ${daemon.errors}`);
+    assert.equal(await child.done, 0, child.errors);
   } finally {
     clearTimeout(timer);
   }
-  assert.equal(connects, 1);
-  assert.equal(accepted, 0);
-  assert.equal(plain, 0);
-  await until(() => rejected === 1, 'TLS untrusted certificate rejection');
-  assert(
-    tlsErrors.some((error) => /unknown.ca/i.test(error.code + error.message)),
-    `TLS failure must be a certificate rejection: ${JSON.stringify(tlsErrors)}`,
+}
+const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+async function until(predicate, label, child) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    if (child?.exitCode !== null) throw new Error(`${label}: ${child.errors}`);
+    await delay(25);
+  }
+  throw new Error(`${label}: stdout=${child?.output || ''}; stderr=${child?.errors || ''}`);
+}
+class ArtifactWire {
+  static async open(path) {
+    const socket = createConnection(path);
+    await new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    return new ArtifactWire(socket);
+  }
+  constructor(socket) {
+    this.socket = socket;
+    this.nextId = 0;
+    this.pending = new Map();
+    let buffer = '';
+    socket.setEncoding('utf8');
+    socket.on('error', () => {});
+    socket.on('data', (data) => {
+      buffer += data;
+      let end;
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        try {
+          const item = JSON.parse(line);
+          if (item.type === 'event') continue;
+          const pending = this.pending.get(item.id);
+          if (!pending) continue;
+          this.pending.delete(item.id);
+          clearTimeout(pending.timer);
+          if (item.type === 'error')
+            pending.reject(Object.assign(new Error(item.message), { code: item.code }));
+          else pending.resolve(item.events);
+        } catch (error) {
+          socket.destroy(error);
+        }
+      }
+    });
+    socket.once('close', () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('artifact IPC closed'));
+      }
+      this.pending.clear();
+    });
+  }
+  call(command, options = {}) {
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`artifact timeout: ${command.method}`));
+      }, 10000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket.write(
+        JSON.stringify({
+          version: 2,
+          id,
+          command,
+          ...(options.operation ? { operation: options.operation } : {}),
+        }) + '\n',
+      );
+    });
+  }
+  close() {
+    this.socket.destroy();
+  }
+}
+let client;
+try {
+  const help = execute('pi-acp-workbenchd', ['--help']);
+  assert.equal(await help.done, 0);
+  assert(help.output.includes('--config'));
+  check(`${manifest.target}: manifest hashes and single production entrypoint`);
+  const workspace = join(root, 'workspace'),
+    data = join(root, 'data'),
+    home = join(root, 'home');
+  await Promise.all([mkdir(workspace), mkdir(home)]);
+  const config = join(root, 'workbench.json');
+  await writeFile(
+    config,
+    JSON.stringify({
+      workers: {
+        pi: { command: process.execPath, args: [resolve('test/contract-agent.mjs')], env: {} },
+        codex: null,
+        claude: null,
+      },
+      sessions: { mailbox: 128, max_workers: 1 },
+      telegram: null,
+      storage: { root: data },
+      limits: { pending_interactions: 32 },
+    }),
   );
-  assert(daemon.errors.includes('网络请求失败'));
-  assert(!daemon.errors.includes(token));
-  assert(!daemon.errors.includes('https://'));
+  const launch = async () => {
+    const child = execute('pi-acp-workbenchd', ['--config', config], {
+      env: { ...process.env, HOME: home },
+    });
+    await until(
+      () => `${child.output}\n${child.errors}`.includes('ready:'),
+      'workbenchd ready',
+      child,
+    );
+    client = await ArtifactWire.open(join(data, 'workbench.sock'));
+    return child;
+  };
+  let service = await launch();
+  const created = await client.call({ method: 'create', harness: 'Pi', cwd: workspace });
+  const session = created.find((event) => event.SessionCreated)?.SessionCreated;
+  assert(session);
+  const sessionId = session.id;
+  const prompt = { method: 'prompt', session: sessionId, prompt: 'artifact-acceptance' };
+  const reply = await client.call(prompt, { operation: 'artifact-request' });
+  let inspected, entries;
+  await until(
+    async () => {
+      inspected = await client.call({ method: 'inspect', session: sessionId });
+      entries =
+        inspected.find((event) => event.SessionLoaded)?.SessionLoaded.transcript.entries || [];
+      return entries.some((entry) => entry.text === 'echo: artifact-acceptance');
+    },
+    'artifact prompt completion',
+    service,
+  );
+  client.close();
+  await stop(service);
+  service = await launch();
+  const restarted = await client.call({ method: 'inspect', session: sessionId });
+  assert.deepEqual(
+    restarted.find((event) => event.SessionLoaded)?.SessionLoaded.transcript.entries,
+    entries,
+  );
+  assert.deepEqual(await client.call(prompt, { operation: 'artifact-request' }), reply);
+  check(`${manifest.target}: worker, durable history, restart and no replay`);
+  const activeMaintenance = execute('pi-acp-workbenchd', [
+    'storage',
+    'gc',
+    '--root',
+    data,
+    '--confirm',
+  ]);
+  assert.notEqual(await activeMaintenance.done, 0, 'maintenance must respect the live host lease');
+  client.close();
+  await stop(service);
+  const destination = join(root, 'export');
+  const exported = execute('pi-acp-workbenchd', [
+    'storage',
+    'export',
+    '--root',
+    data,
+    '--destination',
+    destination,
+    '--confirm',
+  ]);
+  assert.equal(await exported.done, 0, exported.errors);
+  const exportedManifest = JSON.parse(
+    await readFile(join(destination, 'EXPORT-MANIFEST.json'), 'utf8'),
+  );
+  assert(exportedManifest.files.length > 0);
+  assert(!exportedManifest.files.some((file) => file.path === '.workbench.lock'));
+  for (const file of exportedManifest.files) {
+    const original = await readFile(join(data, file.path));
+    assert.deepEqual(await readFile(join(destination, file.path)), original);
+    assert.equal(file.bytes, original.length);
+    assert.equal(file.sha256, createHash('sha256').update(original).digest('hex'));
+  }
+  const compacted = execute('pi-acp-workbenchd', ['storage', 'gc', '--root', data, '--confirm']);
+  assert.equal(await compacted.done, 0, compacted.errors);
+  assert.deepEqual(JSON.parse(compacted.output), { removed_inbox: 0, removed_callbacks: 0 });
   check(
-    `${manifest.target}: production official endpoint, TLS rejects untrusted certificate, token redacted`,
+    `${manifest.target}: same-binary offline maintenance, live lease exclusion and byte/hash export`,
   );
-  if (values.report) {
-    await mkdir(resolve(values.report, '..'), { recursive: true });
+  const badConfig = join(root, 'bad.json');
+  await writeFile(
+    badConfig,
+    JSON.stringify({
+      workers: {
+        pi: { command: process.execPath, args: [resolve('test/contract-agent.mjs')], env: {} },
+        codex: null,
+        claude: null,
+      },
+      sessions: { mailbox: 128, max_workers: 1 },
+      telegram: null,
+      storage: { root: join(root, 'bad-data') },
+      limits: { pending_interactions: 32 },
+    }),
+  );
+  await mkdir(join(root, 'bad-data'));
+  await writeFile(join(root, 'bad-data', 'legacy.bin'), 'old format');
+  const malformed = execute('pi-acp-workbenchd', ['--config', badConfig]);
+  await until(() => malformed.exitCode !== null, 'malformed shutdown', malformed);
+  assert.notEqual(malformed.exitCode, 0);
+  assert(!malformed.errors.includes('https://'));
+  check(`${manifest.target}: invalid startup fails closed without credentials or remote URL`);
+  if (values.report)
     await writeFile(
       values.report,
       JSON.stringify(
-        {
-          passed: true,
-          target: manifest.target,
-          checks,
-          files: manifest.files,
-          abi: manifest.abi,
-          tls: { connects, accepted, rejected, mockEndpointCalls: plain, errors: tlsErrors },
-          mockBot: true,
-          mockAcp: true,
-        },
+        { passed: true, target: manifest.target, checks, files: manifest.files, abi: manifest.abi },
         null,
         2,
       ) + '\n',
     );
-  }
   console.log('PASS production artifact smoke');
 } finally {
   client?.close();
   for (const child of children.reverse()) await stop(child);
-  for (const socket of sockets) socket.destroy();
-  if (proxy?.listening) await new Promise((done) => proxy.close(done));
-  tlsServer?.close();
   await rm(root, { recursive: true, force: true });
 }

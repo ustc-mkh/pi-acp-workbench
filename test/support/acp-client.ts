@@ -1,11 +1,14 @@
-// Test-only ACP/format fixture; never imported by the extension.
+// Independent standard ACP fixture; no workbench wire, storage or ID translation.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import { localSessionId, nativeSessionId, HARNESSES, type HarnessId } from '../../src/harness';
+type FixtureProfile = 'pi' | 'codex' | 'claude';
 
 export interface AgentOptions {
-  harness?: HarnessId;
+  harness?: FixtureProfile;
   commandSetting?: string;
   requestTimeoutMs?: number;
   command: string;
@@ -20,9 +23,10 @@ export interface AgentOptions {
 /** Standard ACP v1, newline-delimited JSON-RPC over child-process stdio. */
 export class AgentProcess {
   private child: ChildProcessWithoutNullStreams;
+  private readonly home = mkdtempSync(join(tmpdir(), 'workbench-acp-fixture-home-'));
   readonly connection: acp.ClientConnection;
   info?: acp.InitializeResponse;
-  readonly harness: HarnessId;
+  readonly harness: FixtureProfile;
   private disposed = false;
   private exited = false;
   private termination: Promise<void> = Promise.resolve();
@@ -33,7 +37,15 @@ export class AgentProcess {
     this.harness = options.harness || 'pi';
     this.child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      // Default fixtures never inherit accounts, Bot keys, proxies or Node hooks.
+      // Opt-in SDK/live smoke drivers must explicitly provide their environment.
+      env: {
+        PATH: process.env.PATH,
+        LANG: 'C.UTF-8',
+        HOME: this.home,
+        USERPROFILE: this.home,
+        ...options.env,
+      },
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -43,15 +55,8 @@ export class AgentProcess {
     // The SDK owns stdout; diagnostics belong on stderr, never on the protocol stream.
     this.connection = acp
       .client({ name: 'pi-acp-workbench' })
-      .onNotification('session/update', ({ params }) =>
-        options.update({ ...params, sessionId: localSessionId(this.harness, params.sessionId) }),
-      )
-      .onRequest('session/request_permission', ({ params }) =>
-        options.permission({
-          ...params,
-          sessionId: localSessionId(this.harness, params.sessionId),
-        }),
-      )
+      .onNotification('session/update', ({ params }) => options.update(params))
+      .onRequest('session/request_permission', ({ params }) => options.permission(params))
       .connect(
         acp.ndJsonStream(
           Writable.toWeb(this.child.stdin) as WritableStream<Uint8Array>,
@@ -60,9 +65,7 @@ export class AgentProcess {
         ),
       );
     this.child.on('error', (error) =>
-      this.fail(
-        `无法启动 ${HARNESSES[this.harness].name} ACP 进程：${error.message}。请检查 ${options.commandSetting || 'piAcp.command'} 和远端 PATH。安装：${HARNESSES[this.harness].install}`,
-      ),
+      this.fail(`Cannot start ${this.harness} ACP fixture: ${error.message}`),
     );
     this.child.on('exit', (code, signal) => {
       this.exited = true;
@@ -82,30 +85,14 @@ export class AgentProcess {
   ): Promise<acp.AgentRequestResponsesByMethod[Method]>;
   request<Response = unknown, Params = unknown>(method: string, params?: Params): Promise<Response>;
   async request(method: string, params?: unknown): Promise<unknown> {
-    const outgoing =
-      params &&
-      typeof params === 'object' &&
-      'sessionId' in params &&
-      typeof params.sessionId === 'string'
-        ? { ...params, sessionId: nativeSessionId(this.harness, params.sessionId) }
-        : params;
-    const result = await this.connection.agent.request(method, outgoing);
-    if (
-      method === 'session/new' &&
-      result &&
-      typeof result === 'object' &&
-      'sessionId' in result &&
-      typeof result.sessionId === 'string'
-    )
-      return { ...result, sessionId: localSessionId(this.harness, result.sessionId) };
-    return result;
+    return this.connection.agent.request(method, params);
   }
   async initialize() {
     try {
       this.info = await this.withTimeout(
         this.request('initialize', {
           protocolVersion: 1,
-          clientInfo: { name: 'pi-acp-workbench', title: 'Pi ACP Workbench', version: '0.9.4' },
+          clientInfo: { name: 'independent-acp-fixture', version: '1' },
           // Adapters must handle their own files/terminals. Never advertise unimplemented delegation.
           clientCapabilities: {},
         }),
@@ -152,7 +139,7 @@ export class AgentProcess {
   }
   cancel(sessionId: string) {
     return this.connection.agent.notify('session/cancel', {
-      sessionId: nativeSessionId(this.harness, sessionId),
+      sessionId,
     });
   }
   /** Wait until process-group escalation has run before reusing a worker slot. */
@@ -168,8 +155,14 @@ export class AgentProcess {
     this.child.stdout.destroy();
     this.child.stderr.destroy();
     const pid = this.child.pid;
-    if (!pid) return;
+    if (!pid) {
+      rmSync(this.home, { recursive: true, force: true });
+      return;
+    }
     if (process.platform === 'win32') {
+      this.termination = this.exited
+        ? Promise.resolve()
+        : new Promise((resolve) => this.child.once('exit', () => resolve()));
       if (!this.exited)
         spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on(
           'error',
@@ -201,5 +194,10 @@ export class AgentProcess {
         /* already gone */
       }
     }
+    // Remove only our own private directory after physical child termination,
+    // never options.env.HOME (which an explicit smoke driver may override).
+    this.termination = this.termination.then(() => {
+      rmSync(this.home, { recursive: true, force: true });
+    });
   }
 }

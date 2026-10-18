@@ -1,54 +1,38 @@
-# 持久化提交与恢复契约
+# 持久化提交与恢复契约（workbench format 2）
 
-本页区分“请求已收到”“副作用已发生”“结果已 durable 提交”。socket 断线不等于任务取消，客户端不得自动换请求 ID 重发有副作用操作。
+本页只描述当前单宿主。旧索引/Diff reader、跨 daemon ack token、自动 orphan cleanup 和协议 v4 不适用于本实现。
 
-## 组件职责
+## Durable ordering
 
-- **journal**：请求 ID + fingerprint 防重放；不是工作树事务日志。
-- **history**：会话视图与不可变 revision，index 是可达性的提交点。
-- **Diff 内容库**：`history/diffs/<sha256>.json` 保存不可变正文；快照只存摘要及引用。哈希基于 Rust 对完整 TurnDiff 的紧凑 JSON 序列化，不等同于请求 fingerprint 的 canonical 算法。
-- **outbox**：服务已接受任务的投递状态；ack 只确认读到的版本。
-- **preferences**：成功设置的账户偏好，不决定任务是否执行。
+| 组件           | 提交顺序与故障行为                                                                                                                                                                                                                                         |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Journal        | `operation` + typed command fingerprint → durable `Started` → 副作用 → immutable result → `Completed`/`Failed`。已开始但结果未知时不自动执行第二次；corrupt/missing/mismatched result、conflict、interrupted、expired 均 fail-closed。                     |
+| History        | Actor 验证 epoch/reducer → immutable entry/interaction/image/notice archive → atomic versioned/checksummed snapshot（state + delivery intents）→ actor 换 state 并发布。保存失败不发布新 state；可能留下安全 orphan，不能产生已发布的 dangling reference。 |
+| Revision       | session identity/cwd 必须保持；更低 revision、同 revision 内容冲突、checksum/format/ID 不匹配均拒绝。Cold inspect/list 不创建 worker，不进行 native load。                                                                                                 |
+| Outbox         | 从 history ledger 投影到 typed record；durable admission sequence 决定 FIFO，不使用跨源 revision 当时钟。ack 保留 delivered tombstone，阻止 ledger 再投影并保留 sequence high-water。满容量时 ledger 继续持有未投影 intent。                               |
+| Remove         | 先停止/join worker、drain actor，把 intents 转移到 outbox 后才 unlink history。归档继续保留；既有 session scope 不绕过当前 Telegram binding/chat/workspace 授权。                                                                                          |
+| Telegram inbox | update offset、冻结 command 分类、callback consumption 原子提交。执行失败/重启不将旧 answer 重新解释为 prompt。通知进入 durable outbox 后 inbox 才 complete。                                                                                              |
+| Cancel/config  | durable intermediate intent 在远端动作前；停止/恢复与最终 commit 失败不能谎报成功。worker physical join 和所有 accepted 文件事务完成后才释放 host lease。                                                                                                  |
 
-这些组件保持独立，不引入数据库、跨服务事务或第二套客户端磁盘写路径。
+IPC numeric request ID 只关联连接上的响应；durable `operation` 才负责跨连接/重启 replay。断开、超时和取消 observer 不证明副作用撤销，不自动换 operation 重发。普通 query 不写 journal；image query 禁止 operation，pixels 只在专用 response 中返回。
 
-## 提交顺序与失败矩阵
+## 文件与媒体
 
-| 操作                   | 顺序 / 提交点                                                                                  | 故障后的行为                                                                                                |
-| ---------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| 新建、发送、设置、撤回 | durable `running` 收据 → 执行 → durable `completed` 收据 → 响应                                | 写首条收据失败不执行。执行失败标记 interrupted。同 ID 完成请求返回旧结果；中断请求不重放                    |
-| 历史保存               | durable Diff body → durable revision 快照 → durable index → 删除旧快照                         | index 前失败不发布新 revision；可能留下孤立文件。index 后崩溃以新 revision 为准                             |
-| 历史删除               | durable tombstone/index → 删除旧快照                                                           | 不恢复已删除会话；旧快照残留由启动清理处理                                                                  |
-| Diff 读取              | 校验引用格式 → 有界读取 → 反序列化 → 核对内容哈希                                              | 缺失/损坏不猜测、不回退当前工作树，不执行撤回                                                               |
-| 撤回文件               | 无写入预检 → 私有临时文件 → 设置最终普通权限并 fsync → 逐文件复核与 rename/unlink → 目录 fsync | **不是多文件原子事务**。磁盘故障/进程中断可能只恢复部分文件；收据禁止自动重放，用户检查工作区后决定后续操作 |
-| outbox                 | running 合并写入 → durable 终态 → 消费者版本 ack                                               | 旧 ack 不删除新事件；投递失败不重跑模型任务                                                                 |
-| preferences            | 解析旧偏好 → durable 临时文件及 rename                                                         | 损坏旧文件拒绝覆盖；写失败不假装保存成功                                                                    |
+History、journal、outbox、inbox 使用强类型 version/checksum 格式（history checksum 覆盖 state + intent ledger）；不接受 ACP/Telegram raw JSON 业务对象。图片 byte archive 自身另有格式、hash、MIME、size/identity/signature 验证。URI/path 不授权 fetch/read；signature 校验不是完整解码或 sanitization。Payload 外置，不进入 snapshot/event/journal 的 base64。
 
-收据和会话最近标记是两个文件，先写收据再写标记；最后标记失败仍可能已有副作用或已完成收据，必须按请求 ID 查询/检查，而不是猜测没有执行。大成功结果先 durable 写不可变正文，再以 `completed_ref` 收据引用并提交最近标记；重试从校验后的正文返回原结果，不依赖当前会话状态，删除会话或重启也不会重跑操作。此状态使不支持外置结果的旧 daemon 拒绝读取，而不是错误返回 null；回滚需恢复升级前备份。
+Multipart 投递为 at-least-once：部分发送成功、取消或响应未知时重试可能重复先前 parts，但不会重跑 Agent。不同 topic 可并发，同 topic 的 backoff head 阻止后续记录越过。
 
-## 启动清理与保留策略
+## 离线维护与保留
 
-`SharedHistoryStore.recover_orphans` 只在服务接收请求前运行：
+正常启动不自动迁移、reset 或扫描删除 orphan。所有数据目录由 host-wide flock 排他拥有；维护必须使用同一 binary 的 `storage` subcommand，不能 unlink `.workbench.lock` 绕过 lease。
 
-1. 验证索引、全部引用快照及其 Diff 内容；任一引用缺失/损坏时停止清理并报错。
-2. 在 conversations/diffs 中仅删除符合本服务哈希命名的不可达普通文件，不跟随符号链接，不处理未知名字。
-3. 活跃运行时可能持有尚未写入索引的引用，因此运行中不执行该清理。**删除历史后的孤立 Diff 正文将在下次正常启动清理，不能把 UI 删除解释为即时安全擦除。**
-4. 清理不删除 tombstone，也不改变 journal 原有的 30 天防重放窗口及 outbox 原有保留策略。手动删除收据会破坏防重放保证。
-5. `.pi-undo-*` 是工作区中的撤回暂存文件，普通错误会清理；进程被杀可能留下文件。服务不在重启后递归扫描/删除用户工作区文件，需人工检查。
+显式 export、marker-only reset 与 typed Telegram GC 见 [存储维护](workbench-storage.md)。GC 仅原子删除 completed inbox 与不被 pending inbox 引用的 expired callbacks，保留 offset 和未过期的 consumed bindings。Archive reachability、projection ledger、outbox tombstone/high-water 的 GC 尚未实现，全部保留。Journal 的 typed `expire` API 先写 tombstone 再删除 result；不可直接手动删除 operation 收据来恢复执行。
 
-旧 inline Diff 可读，读时生成独立正文和内存摘要，不原地改写旧快照；下一次正常提交才保存引用格式。降级前需备份：旧客户端不理解引用与分页，因此协议升级为 **v4**，插件、session daemon、Telegram relay 必须成套更新。
+整个 snapshot/list 暂无 paging，仍受 bounded IPC frame 限制；browser 的窗口化不是存储分页。三 provider 的真实 host SIGKILL 已有独立隔离测试：验证 stale socket 拒绝后，仅 fixture 显式确认并删除自己的死 host socket，随后 cold recovery、receipt/image 保持和同 native ID 继续。它不证明自动 stale-socket 恢复或任意 provider descendants 在 host 被杀后的清理。持续 synthetic soak 与短 gate 分开记录；长期磁盘故障、live provider/Bot、完整 storage retention 仍需额外证据。
 
-## 容量与后续演进
+## 验证入口
 
-实时状态只携带最新历史窗口（最多 100 条，目标正文预算 16 MiB；单条不拆分），更早消息通过稳定 entry ID 锚点分页。Diff 全文不随高频广播发送，单个 Diff 内容读取硬上限 32 MiB。单条超大消息仍受 transport 的 64 MiB 上限约束，不保证任意大小消息可读取。
-
-正文历史仍以完整会话快照保存，冷读取仍需解析该快照；不保证恒定内存，也并非全部附件都存为内容对象。后续存储演进应依据实际规模与压测结果评估分段日志或 SQLite，并验证事务边界。
-
-## 回归入口
-
-- Rust `history::diff_content`：引用读写与内容损坏拒绝。
-- Rust `history::recovery`：损坏索引保留证据、不可达内容清理。
-- Rust `journal` / `atomic`：提交失败、取消、重启、防重放。
-- Rust `undo` / `workspace_gate`：有界读取、权限、路径及跨目录互斥。
-- `test/rust-sessions.test.ts`：真实 daemon 撤回及同 ID 重试只执行一次。
-- `test/transcript-window.test.ts`：分页合并与迟到回复隔离。
+- `cargo test --manifest-path rust/Cargo.toml --workspace`：typed stores、actor commit failures、replay、cancel/config、recovery、joined cleanup。
+- `npm run test:workbench:storage`：实际 binary 的确认、flock exclusion、私有 byte export、symlink/overlap、marker-only reset、corrupt-state refusal。
+- `npm run test:contract:workbench` / `npm run test:contract:workbench:telegram`：真实 daemon + synthetic ACP/local mock Bot。
+- [验收 ledger](rewrite-verification.md)：完整 gate 与独立 offline SDK 的当前证据，不把 historical baseline 当作 current release acceptance。

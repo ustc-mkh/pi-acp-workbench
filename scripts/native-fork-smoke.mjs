@@ -9,6 +9,24 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 const root = await mkdtemp(join(tmpdir(), 'pi-native-fork-')),
   children = [];
+async function stopChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((done) => child.once('exit', done));
+  child.stdin.end();
+  for (const signal of [undefined, 'SIGTERM', 'SIGKILL']) {
+    if (signal) child.kill(signal);
+    let timer;
+    const done = await Promise.race([
+      exited.then(() => true),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), signal === 'SIGKILL' ? 5000 : 250);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (done) return;
+  }
+  throw new Error('native fixture child failed to exit');
+}
 try {
   const agentModule = join(root, 'agent.cjs');
   await build({
@@ -60,12 +78,12 @@ try {
       timestamp: 2,
     },
   });
-  const assistant = (text, timestamp) => ({
+  const assistant = (text, timestamp, model = process.env.PI_MODEL || 'gpt-5.4') => ({
     role: 'assistant',
     content: [{ type: 'text', text }],
     provider: process.env.PI_PROVIDER || 'openai-codex',
-    model: process.env.PI_MODEL || 'gpt-5.4',
-    api: 'openai-codex-responses',
+    model,
+    api: process.env.PI_NATIVE_API || 'openai-codex-responses',
     stopReason: 'stop',
     timestamp,
     usage: {
@@ -77,17 +95,46 @@ try {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
   });
+  add('bookmark', 'label', { targetId: 'u1', label: 'offline fixture bookmark' });
   add('a1', 'message', { message: assistant('first answer', 3) });
   add('u2', 'message', { message: { role: 'user', content: 'second question', timestamp: 4 } });
-  add('a2', 'message', { message: assistant('second answer', 5) });
+  add('a2', 'message', {
+    message: {
+      ...assistant('reading fixture', 5),
+      content: [
+        { type: 'text', text: 'reading fixture' },
+        { type: 'toolCall', id: 'fixture-read', name: 'read', arguments: { path: 'fixture.txt' } },
+      ],
+      stopReason: 'toolUse',
+    },
+  });
+  add('t2', 'message', {
+    message: {
+      role: 'toolResult',
+      toolCallId: 'fixture-read',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'synthetic fixture result' }],
+      isError: false,
+      timestamp: 5,
+    },
+  });
+  add('a2done', 'message', { message: assistant('second answer', 5) });
   add('compact', 'compaction', {
     summary: 'native summary preserved verbatim',
     firstKeptEntryId: 'u2',
     tokensBefore: 50000,
     systemMessage: { role: 'system', content: 'original system', timestamp: 1 },
   });
+  const futureModel = process.env.PI_NATIVE_FUTURE_MODEL;
+  if (futureModel) {
+    add('future-model', 'model_change', {
+      provider: process.env.PI_PROVIDER || 'openai-codex',
+      modelId: futureModel,
+    });
+    add('future-thinking', 'thinking_level_change', { thinkingLevel: 'low' });
+  }
   add('u3', 'message', { message: { role: 'user', content: 'latest question', timestamp: 6 } });
-  add('a3', 'message', { message: assistant('latest answer', 7) });
+  add('a3', 'message', { message: assistant('latest answer', 7, futureModel) });
   const original =
     [{ type: 'session', version: 3, id: sessionId, timestamp: now, cwd }, ...entries]
       .map((e) => JSON.stringify(e))
@@ -146,6 +193,10 @@ try {
     try {
       const state = await rpc({ type: 'get_state' });
       assert.equal(state.sessionId, sessionId);
+      if (futureModel) {
+        assert.equal(state.model.id, futureModel);
+        assert.equal(state.thinkingLevel, 'low');
+      }
       const point = nativeForkPoints(entries).find((p) => p.entryId === entryId);
       assert(point?.safe);
       await rpc({
@@ -154,9 +205,29 @@ try {
       });
       const fork = await rpc({ type: 'get_state' });
       assert.notEqual(fork.sessionId, sessionId);
-      assert.equal(fork.thinkingLevel, 'high');
+      assert.equal(fork.thinkingLevel, entryId === 'a3' && futureModel ? 'low' : 'high');
+      if (process.env.PI_MODEL)
+        assert.equal(
+          fork.model.id,
+          entryId === 'a3' && futureModel ? futureModel : process.env.PI_MODEL,
+        );
       const copied = await rpc({ type: 'get_entries' });
       assert.equal(nativePrefixHash(copied.entries), point.hash, JSON.stringify(copied.entries));
+      assert.deepEqual(
+        copied.entries.find((entry) => entry.id === 'u1').message.content,
+        entries.find((entry) => entry.id === 'u1').message.content,
+        'Native image content must be copied byte-for-byte',
+      );
+      if (entryId !== 'u1')
+        assert.ok(
+          copied.entries.some(
+            (entry) =>
+              entry.type === 'label' &&
+              entry.targetId === 'u1' &&
+              entry.label === 'offline fixture bookmark',
+          ),
+          'SDK must recreate the inherited bookmark',
+        );
       await rpc({
         type: 'prompt',
         message:
@@ -179,8 +250,7 @@ try {
         }),
       );
     } finally {
-      child.stdin.end();
-      child.kill('SIGTERM');
+      await stopChild(child);
     }
   }
   const store = join(root, 'store');
@@ -196,7 +266,9 @@ try {
     command: process.execPath,
     args: [resolve('dist/pi-adapter.mjs')],
     cwd,
-    env: { PI_ACP_WORKBENCH_STATE_DIR: store },
+    // Explicit opt-in driver. The offline runner supplies an isolated, guarded
+    // environment; preserve that guard/dummy configuration for its ACP children.
+    env: { ...process.env, PI_ACP_WORKBENCH_STATE_DIR: store },
     log: () => {},
     closed: () => {},
     update: () => {},
@@ -205,7 +277,7 @@ try {
   const agent = new AgentProcess(options),
     candidate = new AgentProcess(options);
   try {
-    await agent.initialize();
+    const initialization = await agent.initialize();
     await agent.createSession(sessionId);
     const inspection = await agent.request('_pi_workbench/inspect', { sessionId });
     const point = inspection.forkPoints.find((p) => p.entryId === 'a3');
@@ -226,6 +298,99 @@ try {
     const header = JSON.parse((await readFile(registered.sessionFile, 'utf8')).split('\n')[0]);
     assert.equal(header.parentSession, source);
     assert.equal(await readFile(source, 'utf8'), original);
+    let rustHost;
+    if (process.env.PI_OFFLINE_RUST_HOST === '1') {
+      const fixture = join(root, 'rust-fixture.json');
+      const rows = entries
+        .filter(
+          (entry) =>
+            entry.type === 'message' && ['user', 'assistant'].includes(entry.message?.role),
+        )
+        .map(({ message }) => ({
+          role: message.role === 'user' ? 'User' : 'Agent',
+          text:
+            typeof message.content === 'string'
+              ? message.content
+              : message.content
+                  .filter((block) => block.type === 'text')
+                  .map((block) => block.text)
+                  .join(''),
+        }));
+      await writeFile(
+        fixture,
+        JSON.stringify({
+          root: join(root, 'rust-workbench'),
+          cwd,
+          source,
+          native: sessionId,
+          node: process.execPath,
+          adapter: resolve('dist/pi-adapter.mjs'),
+          store,
+          sourceModel: `${process.env.PI_PROVIDER}/${futureModel}`,
+          rows,
+        }),
+        { flag: 'wx' },
+      );
+      const cargo = spawn(
+        'cargo',
+        [
+          'test',
+          '--offline',
+          '--manifest-path',
+          resolve('rust/Cargo.toml'),
+          '-p',
+          'pi-acp-workbenchd',
+          '--lib',
+          'app::tests::pi_sdk_tests::real_pi_sdk_native_fork_restores_prefix_settings_and_receipts',
+          '--',
+          '--ignored',
+          '--exact',
+          '--nocapture',
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, PI_OFFLINE_HOST_FIXTURE: fixture },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      );
+      children.push(cargo);
+      let log = '';
+      for (const stream of [cargo.stdout, cargo.stderr])
+        stream.setEncoding('utf8').on('data', (text) => {
+          log = (log + text).slice(-128 * 1024);
+        });
+      const code = await new Promise((done, reject) => {
+        cargo.once('error', reject);
+        cargo.once('exit', done);
+      });
+      assert.equal(code, 0, `new Rust host real Pi SDK fixture failed:\n${log}`);
+      rustHost = JSON.parse(await readFile(`${fixture}.result`, 'utf8'));
+      assert.equal(rustHost.sourceUnchanged, true);
+      assert.equal(rustHost.modelPrompts, 0);
+      assert.equal(rustHost.groupedNativePrefix, true);
+      assert.equal(await readFile(source, 'utf8'), original);
+      console.log(
+        JSON.stringify({
+          newRustHostNativeFork: true,
+          historicalSettings: rustHost.historicalSettings,
+          durableRestartReplay: rustHost.durableRestartReplay,
+          groupedNativePrefix: rustHost.groupedNativePrefix,
+          sourceUnchanged: rustHost.sourceUnchanged,
+          modelPrompts: rustHost.modelPrompts,
+        }),
+      );
+    }
+    if (process.env.PI_NATIVE_FORK_REPORT)
+      await writeFile(
+        process.env.PI_NATIVE_FORK_REPORT,
+        JSON.stringify({
+          capabilities: initialization.agentCapabilities,
+          inspection: { forkPoints: inspection.forkPoints },
+          forkResponses: [fork],
+          rustHost,
+        }),
+        { flag: 'wx' },
+      );
     console.log(
       JSON.stringify({
         bundledAdapterFork: true,
@@ -235,12 +400,9 @@ try {
       }),
     );
   } finally {
-    agent.dispose();
-    candidate.dispose();
-    await new Promise((r) => setTimeout(r, 1800));
+    await Promise.all([agent.stop(), candidate.stop()]);
   }
 } finally {
-  for (const child of children) child.kill('SIGTERM');
-  await new Promise((r) => setTimeout(r, 500));
+  await Promise.all(children.map(stopChild));
   await rm(root, { recursive: true, force: true });
 }

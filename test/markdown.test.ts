@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { createRenderer } from '../webview/markdown';
-import { demoMarkdown } from '../src/demo';
+import { demoMarkdown } from './helpers/markdown-demo';
 const window = new JSDOM('').window;
 const render = createRenderer(window as unknown as Window);
 const doc = (source: string) => new JSDOM(render(source)).window.document;
@@ -70,6 +70,20 @@ describe('Markdown and mathematics', () => {
     expect(d.querySelector('.footnotes')).not.toBeNull();
     expect(d.querySelector('.hljs-keyword')).not.toBeNull();
   });
+  it.each([
+    'https://tracker.invalid/a.png',
+    'file:///etc/passwd',
+    '/tmp/secret.png',
+    '../secret.png',
+    'data:image/png;base64,iVBORw0KGgo=',
+    'workbench-image://not-an-archive',
+  ])('keeps Markdown image metadata display-only without an I/O marker: %s', (source) => {
+    const d = doc(
+      `![display only](${source})\n\n<span data-image-source="${source}">forged</span>`,
+    );
+    expect(d.querySelector('img,[src],[srcset],[data-image-source]')).toBeNull();
+    expect(d.querySelector('script,iframe,object')).toBeNull();
+  });
   it('blocks HTML, unsafe links, remote images and trusted KaTeX commands', () => {
     const d = doc(
       '<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n![remote](https://tracker.invalid/a.png)\n\n$\\href{javascript:alert(1)}{x}$\n\n$\\includegraphics{https://tracker.invalid/a.png}$',
@@ -77,7 +91,7 @@ describe('Markdown and mathematics', () => {
     expect(d.querySelector('script,img,iframe')).toBeNull();
     expect([...d.querySelectorAll('a')].some((a) => a.href.startsWith('javascript:'))).toBe(false);
   });
-  it('renders the shipped offline demo without broken math or code', () => {
+  it('renders the offline Markdown fixture without broken math or code', () => {
     const d = doc(demoMarkdown);
     expect(d.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(7);
     expect(d.querySelector('.math-fallback')).toBeNull();

@@ -23,18 +23,12 @@ assert.equal(manifest.platform, 'linux');
 assert.equal(manifest.arch, 'x64');
 assert(/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(manifest.version));
 assert(['x86_64-unknown-linux-musl', 'x86_64-unknown-linux-gnu'].includes(manifest.target));
-const files = [
-  'pi-acp-session-daemon',
-  'pi-acp-telegram-daemon',
-  'pi-adapter.mjs',
-  'pi-native-fork.mjs',
-  'pi-fast-mode.mjs',
-];
+const files = ['pi-acp-workbenchd'];
 assert.deepEqual(Object.keys(manifest.files).sort(), files.toSorted());
 for (const file of files) {
   const bytes = await readFile(join(source, file));
   assert.equal(createHash('sha256').update(bytes).digest('hex'), manifest.files[file]);
-  if (file.endsWith('-daemon'))
+  if (file === 'pi-acp-workbenchd')
     assert(
       bytes.subarray(0, 4).toString('hex') === '7f454c46' &&
         bytes[4] === 2 &&
@@ -54,22 +48,16 @@ try {
   // Never copy an operator's added config/token/history into a release archive.
   for (const file of [...files, 'manifest.json']) await cp(join(source, file), join(staging, file));
   await cp('LICENSE', join(staging, 'LICENSE'));
-  await cp('docs/service-release.md', join(staging, 'README.md'));
-  await cp('docs/service-release.md', join(staging, 'service-release.md'));
-  await cp('docs/rust-acceptance.md', join(staging, 'rust-acceptance.md'));
-  await cp('docs/telegram.md', join(staging, 'telegram.md'));
-  await mkdir(join(staging, 'scripts/lib'), { recursive: true });
-  await cp('scripts/setup-telegram.mjs', join(staging, 'scripts/setup-telegram.mjs'));
-  await cp('scripts/lib/telegram-setup.mjs', join(staging, 'scripts/lib/telegram-setup.mjs'));
+  await cp('docs/workbench-release.md', join(staging, 'README.md'));
+  await cp('docs/workbench-release.md', join(staging, 'workbench-release.md'));
+  await cp('docs/workbench-vscode.md', join(staging, 'workbench-vscode.md'));
+  await cp('docs/workbench-ipc.md', join(staging, 'workbench-ipc.md'));
+  await cp('docs/workbench-telegram.md', join(staging, 'workbench-telegram.md'));
+  await cp('docs/workbench-storage.md', join(staging, 'workbench-storage.md'));
   await cp('THIRD_PARTY_NOTICES.txt', join(staging, 'THIRD_PARTY_NOTICES.txt'));
   await writeRustNotices(manifest.target, staging);
   await mkdir(join(staging, 'examples'));
-  for (const file of [
-    'pi-sessions.service',
-    'pi-telegram.service',
-    'sessions.json',
-    'telegram.json',
-  ])
+  for (const file of ['pi-acp-workbenchd.service', 'workbench.json'])
     await cp(join('examples', file), join(staging, 'examples', file));
   const sums = [];
   async function checksums(directory = '') {

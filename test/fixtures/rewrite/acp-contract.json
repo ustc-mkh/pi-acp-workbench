@@ -1,0 +1,29 @@
+{
+  "provenance": "Synthetic contract-derived ACP 1 fixtures; not recordings of live provider traffic",
+  "providers": [
+    { "harness": "Pi", "agentInfo": { "name": "pi-acp", "version": "fixture" } },
+    { "harness": "Codex", "agentInfo": { "name": "codex-acp", "version": "fixture" } },
+    { "harness": "Claude", "agentInfo": { "name": "claude-agent-acp", "version": "fixture" } }
+  ],
+  "messages": [
+    { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": 1, "clientInfo": { "name": "workbench-contract", "version": "2" }, "clientCapabilities": {} } },
+    { "jsonrpc": "2.0", "id": 1, "result": { "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "promptCapabilities": { "image": true, "embeddedContext": true } }, "authMethods": [] } },
+    { "jsonrpc": "2.0", "id": 2, "method": "session/new", "params": { "cwd": "/tmp", "mcpServers": [] } },
+    { "jsonrpc": "2.0", "id": 2, "result": { "sessionId": "native-session" } },
+    { "jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": { "sessionId": "native-session", "prompt": [{ "type": "text", "text": "你好 🌏" }] } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hello" } } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "thinking" } } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Read", "status": "pending" } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "tool_call_update", "toolCallId": "tool-1", "status": "completed" } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "plan", "entries": [{ "content": "实现", "status": "in_progress", "priority": "medium" }, { "content": "验证", "status": "pending", "priority": "high" }] } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "usage_update", "used": 500, "size": 200000 } } },
+    { "jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission", "params": { "sessionId": "native-session", "toolCall": { "toolCallId": "tool-1", "title": "Read", "status": "pending" }, "options": [{ "optionId": "allow", "kind": "allow_once", "name": "Allow once" }, { "optionId": "reject", "kind": "reject_once", "name": "Reject" }] } },
+    { "jsonrpc": "2.0", "id": "permission-1", "result": { "outcome": { "outcome": "selected", "optionId": "allow" } } },
+    { "jsonrpc": "2.0", "id": "form-1", "method": "elicitation/create", "params": { "sessionId": "native-session", "mode": "form", "message": "选择一个值", "requestedSchema": { "type": "object", "required": ["question"], "properties": { "question": { "type": "string", "oneOf": [{ "const": "a:b", "title": "含冒号" }, { "const": "其它", "title": "其它" }] } } } } },
+    { "jsonrpc": "2.0", "id": "form-1", "result": { "action": "accept", "content": { "question": "其它" } } },
+    { "jsonrpc": "2.0", "method": "session/cancel", "params": { "sessionId": "native-session" } },
+    { "jsonrpc": "2.0", "id": 3, "result": { "stopReason": "cancelled", "usage": { "inputTokens": 100, "outputTokens": 20, "cachedReadTokens": 50, "totalTokens": 170 } } },
+    { "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "native-session", "update": { "sessionUpdate": "future_provider_update", "extra": "opaque" } } }
+  ],
+  "disconnect": { "kind": "eof", "expected": "interrupt active turn and cancel pending interactions" }
+}

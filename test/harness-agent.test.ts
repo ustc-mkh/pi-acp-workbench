@@ -3,9 +3,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AgentProcess } from './support/acp-client';
-import { localSessionId } from '../src/harness';
 it.each(['codex', 'claude'] as const)(
-  '%s translates IDs for load, prompts, notifications, permissions, config and cancellation',
+  '%s standard ACP fixture preserves raw native IDs for load, prompts, updates, permissions, config and cancel',
   async (harness) => {
     const dir = await mkdtemp(join(tmpdir(), 'pi-harness-wire-')),
       file = join(dir, 'wire.jsonl');
@@ -28,7 +27,7 @@ it.each(['codex', 'claude'] as const)(
     try {
       await agent.initialize();
       const session = await agent.createSession();
-      const id = localSessionId(harness, 'test-session');
+      const id = 'test-session';
       expect(session.sessionId).toBe(id);
       await agent.createSession(id);
       await agent.prompt(id, [{ type: 'text', text: 'hello' }]);
@@ -54,7 +53,7 @@ it.each(['codex', 'claude'] as const)(
       expect(wire.find((r) => r.method === 'initialize').params.clientCapabilities).toEqual({});
       expect(wire.some((r) => r.method?.startsWith('_pi_workbench/'))).toBe(false);
     } finally {
-      agent.dispose();
+      await agent.stop();
       await rm(dir, { recursive: true, force: true });
     }
   },

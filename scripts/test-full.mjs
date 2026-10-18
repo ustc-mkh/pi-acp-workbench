@@ -88,14 +88,7 @@ async function runTests() {
     [
       node('typecheck', 'node_modules/typescript/bin/tsc', '--noEmit'),
       cargo('build-debug', 'build', '--workspace'),
-      cargo(
-        'build-contract',
-        'build',
-        '--features',
-        'pi-acp-telegram-daemon/contract-test',
-        '--target-dir',
-        'rust/target/contract',
-      ),
+      cargo('build-contract', 'build', '-p', 'pi-acp-workbenchd'),
     ],
     jobs,
   );
@@ -105,7 +98,7 @@ async function runTests() {
     process.exitCode = 1;
   } else {
     const suites = [
-      node('protocol-types', 'scripts/generate-service-types.mjs', '--check'),
+      node('protocol-types', 'node_modules/typescript/bin/tsc', '--noEmit'),
       node(
         'typescript',
         'node_modules/vitest/vitest.mjs',
@@ -117,17 +110,17 @@ async function runTests() {
         String(Math.min(jobs, 4, availableParallelism())),
       ),
       cargo('rust-unit', 'test'),
-      node('service-contract', 'scripts/service-contract.mjs'),
-      node('telegram-contract', 'scripts/telegram-contract.mjs'),
-      node('rust-integration', 'scripts/rust-integration.mjs'),
-      node('rust-memory', 'scripts/memory-smoke.mjs'),
+      node('workbench-contract', 'scripts/workbench-contract.mjs'),
+      node('workbench-telegram-contract', 'scripts/workbench-telegram-contract.mjs'),
+      node('workbench-process-loss', 'scripts/workbench-process-loss.mjs'),
+      node('workbench-browser', 'scripts/workbench-browser-smoke.mjs'),
       node(
         'runner-unit',
         '--test',
         'scripts/test-pool.test.mjs',
         'scripts/test-reports.test.mjs',
         'scripts/ci-failure-diagnostics.test.mjs',
-        'scripts/telegram-setup.test.mjs',
+        'scripts/typescript-graph.test.mjs',
       ),
     ];
     const results = await testPool(suites, jobs);

@@ -1,136 +1,82 @@
 # Pi ACP Workbench
 
-在 VS Code 和 Telegram 中使用 Pi 的编码工作台，也可接入 Codex / Claude Code。桌面与手机共享会话，Agent 由服务器上的独立会话服务运行，关闭 VS Code 后已提交的任务仍可继续。
-
-## 核心功能
-
-- **桌面编码助手**：侧栏流式对话，附加代码选区、文件和粘贴图片，查看思考过程、工具调用与实时终端输出，处理工具授权或停止任务。
-- **跨端继续任务**：Telegram 每个话题对应一个会话，支持远程发指令、流式回复、完成通知、授权与停止；桌面输入、Agent 回复及支持的图片可同步到手机。
-- **修改审阅与撤回**：按轮汇总工作区文件及增删行数，查看单文件或多文件总 Diff；对满足完整快照与无冲突条件的文本修改，可确认后撤回。支持 Pi / Codex / Claude。[范围与限制](docs/turn-diff.md)。
-- **会话与历史**：保存、恢复和跨端继续会话，运行中切换到其他会话或 Agent，支持 Pi 原生会话分支和 Markdown 导出。
-- **模型管理与用量统计**：选择模型、思考强度和适配器支持的 Fast 模式；管理模型可见性、价格与 Pi context 长度；按模型、时间、会话查看 token 用量和费用估算。
-- **丰富内容展示**：流式 Markdown、代码高亮、LaTeX 数学公式、Mermaid 图表、图片与上下文占用。
+VS Code 和 Telegram 共用的 ACP 编码工作台。当前源码使用一个 **`pi-acp-workbenchd` 控制进程**；Pi、Codex、Claude ACP worker 仍是独立子进程。
 
 ```text
-VS Code ─┐                                  ┌─ Pi
-         ├─ Unix socket ─ 独立会话服务 ─ ACP ├─ Codex
-Telegram ┘                                  └─ Claude Code
+VS Code → external IPC v2 ─┐                       ┌─ Pi ACP worker
+                          ├─ pi-acp-workbenchd ────┼─ Codex ACP worker
+Telegram → Bot API adapter┘   SessionActor/store   └─ Claude ACP worker
 ```
 
-## 安装与开始使用
+> 当前为未部署的重构工作树。旧双 daemon、内部 socket client 和旧格式 reader 已删除；不会回退旧协议，也不会迁移或清空既有数据。请使用独立空 storage root。单进程本地发布门禁已通过，但 live provider/Bot、长期故障 soak 和部分 UI 功能仍待验收；历史已发布的 VSIX/服务包不代表当前源码。证据与剩余工作见 [验收 ledger](docs/rewrite-verification.md)。
 
-### 1. 准备环境
+## 当前功能与边界
 
-会话服务目前支持 **Linux x86_64**，需要 **Node.js 22+、Pi 和用户级 systemd**；从源码构建服务还需要 **Rust/Cargo**。VS Code 要求 **1.96+**。使用 Remote SSH / WSL 时，服务与扩展安装在扩展宿主所在的机器，并使用同一账户。
+- VS Code 直接使用 typed IPC v2：创建/选择会话、cold history inspection、文字 prompt、思考/文本/tool metadata、模型/mode、权限与多字段表单、取消、明确的 archived image 读取、原生 fork 和精确 fork operation 取消。
+- SessionActor 独占会话状态；历史提交后才发布，持久化 native identity 供显式恢复。关闭 VS Code 只断开 observer，不撤销已接收任务；daemon 崩溃不自动重放工具调用。
+- Telegram 在同一宿主进程内授权、分类、持久入箱及投递。支持文字 prompt/answer、权限按钮、取消、状态和归档图片输出；Plan/Todo 只在显式 `/status` 展示。
+- Outbox 使用 durable admission FIFO、同 topic 串行和最多八个独立 topic 并发投递；失败重试不重新运行 Agent。Multipart 部分成功或发送后崩溃可能重复之前的 parts（at-least-once）。
+- Pi native fork 要求独立 native identity 和可证明安全的 entry cut；不以摘要/文本重播代替，不猜 timestamp。Codex/Claude 私有 native fork 支持未经验证；不支持或不明确的 cut 显式拒绝。
 
-安装 Pi，并完成模型供应商登录或 API key 配置：
+尚未恢复的 UI 包括完整 history paging、跨 reload workflow receipts、文件 diff/撤回、统计/价格、Mermaid、高级 preferences、导出菜单、图片 prompt 输入和 tool binary archives。工具路径、URI 和 terminal references 只是显示 metadata，不授权读文件、联网或执行命令。图片校验目前是 MIME/signature/hash/size，不等于完整解码或 sanitization。
 
-```bash
-npm install -g @earendil-works/pi-coding-agent
-pi
-```
+## 从源码本地运行
 
-插件与会话服务复用该账户的 Pi 凭据。
+环境：Linux x86_64、Node.js 22+、Rust/Cargo；VS Code 1.96+。Remote SSH/WSL 中，扩展、Unix socket 和 daemon 位于同一扩展宿主机器、同一账户。
 
-### 2. 部署会话服务
-
-以下从源码构建；也可使用 [Release](https://github.com/ustc-mkh/pi-acp-workbench/releases/latest) 的 Linux 服务包，按[服务发布指南](docs/service-release.md#校验安装与回滚)校验和安装。
-
-```bash
-git clone https://github.com/ustc-mkh/pi-acp-workbench.git
-cd pi-acp-workbench
+```sh
 npm ci
+npm run build
 npm run build:services
-
-mkdir -p ~/.config/pi-acp-workbench ~/.config/systemd/user
-chmod 700 ~/.config/pi-acp-workbench
-cp examples/sessions.json ~/.config/pi-acp-workbench/sessions.json
-cp examples/pi-sessions.service ~/.config/systemd/user/pi-sessions.service
+npm run package:services
 ```
 
-编辑 `pi-sessions.service`，将占位路径替换为仓库的实际绝对路径，指向 `service-dist/pi-acp-session-daemon`。
+`service-dist/` 只包含一个控制 binary 和 manifest。发布归档在 `service-artifacts/`，包含 SHA256SUMS、许可证、文档和单个 systemd 示例。这里只本地打包，不自动安装、部署或更新真实服务。校验、ABI、手动配置和备份边界见 [当前单宿主发布指南](docs/workbench-release.md)。
 
-- 默认自动查找 `pi`，无需填写 Pi 安装路径。
-- 确保 **Node 在服务的 PATH 中**；systemd 不读取 `.bashrc` 或 nvm / Volta 的交互式初始化配置。
-- 代理及模型环境变量放在 `sessions.json` 的 `env` 中，不写入仓库。
+复制并编辑 [`examples/workbench.json`](examples/workbench.json)：
 
-```bash
-chmod 600 ~/.config/pi-acp-workbench/sessions.json
-systemctl --user daemon-reload
-systemctl --user enable --now pi-sessions
+- `storage.root` 替换为显式绝对路径，例如 `/home/YOU/.pi/pi-acp-workbench`，首次使用空目录。
+- `workers.pi/codex/claude` 分别设置 ACP executable 的 `command`、`args`、`env`；`null` 表示禁用，没有其他 provider fallback。先独立完成 provider CLI 登录，不将凭据写入仓库。
+- 默认示例使用 PATH 中的 `pi-acp`。需要本仓库 Pi 增强功能时，配置 Node 的绝对路径，并将 `args` 设为构建后的 `dist/pi-adapter.mjs` 绝对路径；核对实际构建输出，不能依赖交互 shell PATH。
+- Telegram 为可选配置，token 只从 `bot_token_env` 指定的环境变量读取，不写入 JSON；workspace/chat/user 授权必须显式设置。详见 [Telegram 配置](docs/workbench-telegram.md)。
+
+```sh
+./service-dist/pi-acp-workbenchd --config /absolute/path/workbench.json
 ```
 
-需要退出 SSH 后仍运行时，为账户启用 linger：`loginctl enable-linger "$USER"`，是否需要管理员权限取决于服务器策略。
+socket 为 `<storage.root>/workbench.sock`。不兼容/损坏/未版本化非空目录一律拒绝，不做隐式清理。离线维护在同一 binary 中提供，持有与 host 相同的独占 flock，见 [存储 export/reset/typed GC](docs/workbench-storage.md)。
 
-默认最多 16 个 Agent 工作进程，包含执行中与空闲驻留进程；按需启动，不会预先启动 16 个。空闲进程按活跃度分层回收，容量满时可提前回收空闲进程。历史保存在服务账户的数据目录。完整配置与排障见[会话服务](docs/session-service.md)。
+### 可选 systemd（仅手动部署）
 
-### 3. 安装插件并开始对话
+编辑 [`examples/pi-acp-workbenchd.service`](examples/pi-acp-workbenchd.service) 的绝对 binary/config 路径后，按自己的运维策略安装到用户 unit 目录。保持 workspace/storage 私有、使用最小权限账户，单独向服务注入 token 环境变量。仓库脚本不会执行 `systemctl`，也没有旧式 Telegram setup 向导。
 
-从 [Release](https://github.com/ustc-mkh/pi-acp-workbench/releases/latest) 下载 VSIX，在 VS Code 执行 **Extensions: Install from VSIX…**。远程开发时安装到远端，然后重新加载窗口。
+### VS Code
 
-打开并信任项目文件夹，点击活动栏 **π** → **新建会话**：
-
-- **Enter** 发送，**Shift+Enter** 换行。
-- 编辑器右键 **Pi: Add Selection to Chat** 可附加选区，也可粘贴图片。
-- 顶部选择 Agent、模型、思考强度和可用的 Fast 模式。
-- 任务结束后在「本轮修改」中审阅 Diff；运行中可切换会话，原任务继续执行。
-
-插件默认连接 `~/.pi/pi-acp-workbench/service/sessions.sock`，自定义路径使用 VS Code 设置 `piAcp.serviceSocket`。
-
-更多操作见[桌面使用指南](docs/usage.md)。
-
-## 接入 Telegram
-
-1. 准备 Bot token，建立私人群组并启用 **Topics / 话题**；将 Bot 加入群组，设为管理员并允许管理话题。
-2. 在运行会话服务的服务器上，以同一账户执行：
-
-   ```bash
-   npm run telegram:setup
-   ```
-
-   使用服务发布包时，在解压目录执行 `node scripts/setup-telegram.mjs`。向导需要 curl，隐藏输入 token，通过群内配对码获取群组与用户 ID，并配置用户级自启动，无需 sudo。
-
-3. 在群组 General 中发送 `/menu`，选择目录和 Agent 创建会话；进入对应话题后直接发文字。
-
-| 命令                         | 用途                                                   |
-| ---------------------------- | ------------------------------------------------------ |
-| `/menu`                      | General 管理会话与全局开关；会话话题管理当前模型和任务 |
-| `/new /绝对路径`             | 在服务器指定目录创建会话                               |
-| `/sessions`、`/open 编号`    | 列出或打开已有会话                                     |
-| `/history`、`/history all`   | 同步本话题更多或完整历史                               |
-| `/sync`                      | 为已有会话建立话题并同步历史摘要                       |
-| `/status`                    | 查看任务进度及待授权操作                               |
-| `/stop`、`/interrupt 新指令` | 停止任务，或停止后发送新指令                           |
-| `/notifications`、`/silent`  | 自动推送与静音开关                                     |
-
-路径指服务器上的已有目录。默认允许服务账户可访问的任意目录，可配置目录限制；此限制不是工具执行沙箱。服务使用长轮询，无需开放入站端口。
-
-Telegram 目前仅支持文字输入，输出与历史同步支持文字及部分图片。详细配置、代理与恢复说明见[Telegram 指南](docs/telegram.md)。
-
-## 可选：Codex / Claude Code
-
-在服务所在机器安装对应 ACP 适配器，并完成其认证：
-
-```bash
-npm install -g @agentclientprotocol/codex-acp
-npm install -g @agentclientprotocol/claude-agent-acp
+```sh
+npm run package
 ```
 
-确保服务 PATH 可找到适配器，然后在插件顶部切换 Agent，或在 Telegram 新建会话时选择。自定义命令、参数及环境变量放在 `sessions.json` 的 `harnesses.codex` / `harnesses.claude` 中，见[配置说明](docs/session-service.md#codex--claude-配置)。功能以适配器声明的 ACP 能力为准，Pi 原生分支等专属能力不适用于其他 Agent。
+将本次构建的 VSIX 手动安装到扩展宿主，打开并信任项目。设置 **`piAcp.workbenchSocket`**（空值默认 `~/.pi/pi-acp-workbench/workbench.sock`），修改路径后 reload。扩展不包含 native daemon，也不会启动/安装 daemon。编辑器选择只能通过显式 **Pi: Add Selection to Chat** 附加；不是任意工具路径读取功能。
 
-## 使用边界
+完整行为、授权、CSP 和限制见 [VS Code 接入](docs/workbench-vscode.md)；外部 IPC 方法、错误与 operation replay 见 [IPC v2](docs/workbench-ipc.md)。
 
-- **独立服务是必需组件**：VSIX 不包含原生 daemon，插件不自动安装或启动服务。插件、会话服务与 Telegram relay 需配套更新，当前要求 v4 服务协议。
-- **不是沙箱**：Agent 可在服务账户权限范围内执行命令和修改文件；仅在可信项目与私人群组中使用，生产部署建议最小权限账户或容器隔离。
-- **任务继续不等于故障续跑**：关闭 VS Code 不影响已提交任务；停止服务、服务器重启或掉电会中断任务，服务不会自动重放工具操作。
-- **撤回有范围限制**：取消任务不撤销已发生的修改；手动撤回只覆盖已完整采集且无冲突的文件，不是多文件原子事务，也不回退模型上下文。
-- **费用是估算值**：统计依赖 Agent 返回的用量与已配置价格，不等于供应商账单。Fast 优先级服务和自动会话命名可能产生额外费用。
+## 验证与开发
 
-## 文档与开发
+```sh
+npm run test:rewrite             # check/build/fmt/clippy/Rust/contracts/browser/full/package/artifact
+npm run test:workbench:storage   # builds host, isolated offline maintenance tests
+npm run test:workbench:process-loss # real host SIGKILL; explicit fixture-only stale socket cleanup
+npm run test:workbench:soak -- --duration-seconds 600 # sustained local synthetic workload; separate report
+```
 
-- [文档索引](docs/README.md)：按使用、部署、开发主题导航。
-- [桌面使用指南](docs/usage.md)：会话、模型、用量统计与后台任务扩展。
-- [参与开发](CONTRIBUTING.md) · [架构](docs/architecture.md) · [测试与发布](docs/testing.md)。
-- [更新记录](CHANGELOG.md)：版本变更与发布历史。
+真实 Pi 1.3.0 SDK/native-file 的独立离线验收（需要本地 SDK 和 Cargo cache，不执行真实模型请求）：
 
-本项目采用 [MIT 许可证](LICENSE)。
+```sh
+PI_OFFLINE_PI_CLI=/absolute/path/to/pi/dist/cli.js npm run test:native-fork:offline
+```
+
+默认 fixtures 使用 synthetic ACP peers 与本地 mock Bot，不等于 live Pi/Codex/Claude 或真实 Telegram 验收。程序可使用服务账户权限执行命令、修改文件；不是安全沙箱。取消也不撤销已发生的文件或远端副作用。
+
+- [文档索引](docs/README.md) · [贡献指南](CONTRIBUTING.md)
+- [完整重构计划](docs/full-rewrite-plan.md) · [验收 ledger](docs/rewrite-verification.md)
+- [更新历史](CHANGELOG.md) · [MIT 许可证](LICENSE)

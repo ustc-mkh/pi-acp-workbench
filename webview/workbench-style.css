@@ -1,0 +1,122 @@
+:root {
+  color-scheme: light dark;
+  font-family: var(--vscode-font-family, system-ui);
+  font-size: var(--vscode-font-size, 13px);
+  color: var(--vscode-foreground, #ddd);
+  background: var(--vscode-sideBar-background, #202124);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 12px;
+}
+main {
+  max-width: 1100px;
+  margin: auto;
+}
+header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+h1 {
+  font-size: 1.2rem;
+  margin: 6px 0;
+  flex: 1;
+}
+h2 {
+  font-size: 1rem;
+}
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, #555);
+  border-radius: 4px;
+  background: var(--vscode-input-background, #303134);
+  padding: 6px 8px;
+  max-width: 100%;
+}
+button {
+  cursor: pointer;
+  margin: 4px;
+}
+button:hover:not(:disabled) {
+  outline: 1px solid var(--vscode-focusBorder, #8ab4f8);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+select {
+  margin: 6px 4px;
+}
+#transcript {
+  max-height: 62vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+article {
+  border-left: 2px solid var(--vscode-panel-border, #555);
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+article.user {
+  border-color: var(--vscode-focusBorder, #8ab4f8);
+}
+small,
+figcaption {
+  opacity: 0.7;
+}
+pre {
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+code {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+}
+figure {
+  margin: 12px 0;
+}
+form {
+  margin: 12px 0;
+}
+form label {
+  display: block;
+  margin: 8px 0;
+}
+form label textarea,
+#prompt {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  margin-top: 6px;
+}
+#operations {
+  max-height: 20vh;
+  overflow: auto;
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+[role='alert'] {
+  color: var(--vscode-errorForeground, #f88);
+  white-space: pre-wrap;
+}
+details {
+  padding: 6px 0;
+}
+a {
+  color: var(--vscode-textLink-foreground, #8ab4f8);
+}

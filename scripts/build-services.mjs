@@ -27,7 +27,7 @@ if (!outputRelative || outputRelative.startsWith('..') || outputRelative.startsW
 // Only replace our own generated directory, never a source/data directory.
 try {
   const prior = JSON.parse(await readFile(join(target, 'manifest.json'), 'utf8'));
-  if (prior.platform !== 'linux' || !prior.files?.['pi-acp-session-daemon'])
+  if (prior.platform !== 'linux' || !prior.files?.['pi-acp-workbenchd'])
     throw new Error('out-dir does not contain a service artifact manifest');
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
@@ -90,19 +90,13 @@ try {
 } catch {
   /* Source archives can be built without .git. */
 }
-const files = [
-  'pi-acp-session-daemon',
-  'pi-acp-telegram-daemon',
-  'pi-adapter.mjs',
-  'pi-native-fork.mjs',
-  'pi-fast-mode.mjs',
-];
+const files = ['pi-acp-workbenchd'];
 await mkdir(staging, { mode: 0o755, recursive: true });
 try {
   const hashes = {},
     abi = {};
   for (const file of files) {
-    const native = file.endsWith('-daemon');
+    const native = file === 'pi-acp-workbenchd';
     await copyFile(join(native ? nativeDir : 'dist', file), join(staging, file));
     await chmod(join(staging, file), native ? 0o755 : 0o644);
     hashes[file] = createHash('sha256')

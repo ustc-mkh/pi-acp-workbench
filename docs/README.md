@@ -1,42 +1,17 @@
-# 文档索引
+# 当前源码文档
 
-## 使用指南
+| 文档                                                | 内容                                                              |
+| --------------------------------------------------- | ----------------------------------------------------------------- |
+| [单宿主发布](workbench-release.md)                  | GNU/musl 构建范围、产物校验、配置/systemd、备份与替换边界         |
+| [项目 README](../README.md)                         | 单宿主架构、从源码运行、功能与限制                                |
+| [VS Code](workbench-vscode.md)                      | direct IPC v2 client/view、workspace trust、CSP、界面范围         |
+| [IPC v2](workbench-ipc.md)                          | domain commands/events、operation replay、容量及错误语义          |
+| [Telegram](workbench-telegram.md)                   | merged config、授权、命令、admission/inbox/outbox、图片投递       |
+| [显式离线存储维护](workbench-storage.md)            | 同一 binary/lease 下 export、marker-only reset、typed Telegram GC |
+| [重构计划](full-rewrite-plan.md)                    | 原始基线、阶段 0–8 与最终十项条件；基线结构不是现有实现           |
+| [验收 ledger](rewrite-verification.md)              | 当前证据、历史中间门禁、明确剩余工作                              |
+| [重构 fixtures](../test/fixtures/rewrite/README.md) | synthetic provider fixtures、实际离线 SDK/native-file 的范围      |
+| [贡献指南](../CONTRIBUTING.md)                      | 当前模块、测试与安全边界                                          |
+| [CHANGELOG](../CHANGELOG.md)                        | 历史版本变更，不是当前功能承诺                                    |
 
-| 文档                         | 内容                                             |
-| ---------------------------- | ------------------------------------------------ |
-| [项目 README](../README.md)  | 核心功能、环境要求、安装与入门                   |
-| [桌面使用](usage.md)         | 对话、历史、模型管理、用量统计与 Pi 后台任务扩展 |
-| [Telegram](telegram.md)      | 一键配置、话题会话、命令、推送与静音             |
-| [每轮修改汇总](turn-diff.md) | 总 Diff、采集范围、手动撤回与限制                |
-
-## 部署与运维
-
-| 文档                                    | 内容                                    |
-| --------------------------------------- | --------------------------------------- |
-| [会话服务](session-service.md)          | 安装、worker 配置、生命周期、容量与恢复 |
-| [服务发布](service-release.md)          | GNU / musl 构建、包校验、升级与回滚     |
-| [持久化与恢复](persistence-recovery.md) | 提交顺序、故障行为、数据清理与撤回保证  |
-
-## 开发参考
-
-| 文档                                   | 内容                                          |
-| -------------------------------------- | --------------------------------------------- |
-| [贡献指南](../CONTRIBUTING.md)         | 开发环境、修改入口、适配器维护与提交要求      |
-| [架构](architecture.md)                | 模块职责、数据流、会话状态与客户端边界        |
-| [测试与发布](testing.md)               | 测试分层、可复现命令、CI 与发布检查           |
-| [Wire 协议](service-protocol.md)       | v4 方法、帧、订阅、限制与错误语义             |
-| [磁盘格式](data-formats.md)            | 历史、收据、偏好、Telegram 状态与原生分支哈希 |
-| [Fixtures](../test/fixtures/README.md) | 冻结样例、生成入口与兼容性验证                |
-
-## 版本与历史记录
-
-- [CHANGELOG](../CHANGELOG.md)：未发布变更和已发布版本历史。
-- [历史服务验收记录](rust-acceptance.md)：特定日期与版本的执行范围和证据，不代表当前版本已验收，也不是当前待办清单。
-
-## 文档维护约定
-
-- README 介绍仓库现有重点功能与入门路径，不累积逐次修复、UI 微调或迁移过程。
-- 详细操作、配置与限制放在对应专题，历史变更放入 CHANGELOG；历史设计与迁移过程可通过 Git 历史查看。
-- 行为、配置、持久化或协议变化时同步更新对应文档。命令以根目录 `package.json` 和 `scripts/` 为准，字段与边界以当前实现为准。
-- 长期指南描述覆盖场景与可复现命令；测试数量、执行日期、代码基线和结果只放在验收记录中。历史包或本地检查不能代替当前产物与远端 CI 的实际结果。
-- 修改后检查 Markdown 格式、本地链接和标题锚点，清除失效路径与不存在的 npm 命令。`.test-results/run-*` 默认仅保留最近 5 次，长期证据应另存或作为 CI / Release 附件保留。
+旧双 daemon 的 usage、wire、setup 和 release 指南已删除，不应通过历史命令启动当前源码。以 `package.json`、Rust typed boundary 和当前示例配置为准；不把旧已发布 VSIX/归档视为当前架构的验收。

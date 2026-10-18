@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
 const [service, ...args] = process.argv.slice(2);
-const names = { sessions: 'pi-acp-session-daemon', telegram: 'pi-acp-telegram-daemon' };
-if (!Object.hasOwn(names, service)) throw new Error('Expected sessions or telegram');
+if (service !== 'workbenchd') throw new Error('Expected workbenchd');
+const name = 'pi-acp-workbenchd';
 if (process.platform !== 'linux' || process.arch !== 'x64')
   throw new Error('Rust 服务仅支持 Linux x86_64。');
-const binary = resolve('service-dist', names[service]);
+const binary = resolve('service-dist', name);
 try {
   await access(binary);
 } catch {

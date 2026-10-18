@@ -1,29 +1,39 @@
-# Fixtures：跨实现验证样例
+# Fixtures：当前架构与历史拒绝样例
 
-本目录是 [docs/service-protocol.md](../../docs/service-protocol.md) 与
-[docs/data-formats.md](../../docs/data-formats.md) 的可执行形态，原生分支样例由 `test/native-fixtures.test.ts` 对生产 TS 校验器运行冻结输出断言。Rust 不再保留另一套未调用的树校验/哈希算法，仅绑定已验证的切点；格式样例继续服务于磁盘契约测试。
+当前完整重构 fixtures、synthetic / 真实离线 SDK 的证据边界与执行入口见
+[rewrite/README.md](rewrite/README.md)。当前接口与磁盘约束见
+[Workbench IPC](../../docs/workbench-ipc.md) 和
+[Workbench storage](../../docs/workbench-storage.md)。
 
-## `native-branch/`（由 `scripts/export-fixtures.mjs` 生成，勿手改）
+## `native-branch/`：Pi adapter 的冻结原生文件算法样例
 
-每个文件是一个独立用例：
+七份 `kind: "points"` 样例保存原生历史节点及冻结的 `forkPoints` / `prefixHash`，
+或必须拒绝的错误。`test/native-fixtures.test.ts` 校验 `src/native-branch.ts` 的
+原生路径、工具配对、compaction、label 重连与逐节点 SHA-256 行为。
 
-- `kind: "points"`：输入 `entries`（原生历史节点，已按 root→leaf 排好），期望
-  `expected.forkPoints`（`entryId`/`hash`/`role`/`key`/`timestamp`/`safe`）与
-  `expected.prefixHash`（全链 `nativePrefixHash`）；`expected.error` 表示必须拒绝。
-- `kind: "bind"`：额外含 `uiEntries`（界面条目）与可选 `previous`，期望
-  `expected.bound`（`bindNativeForks` 输出映射）。
+这些是 provider/native-file 边界算法，不是 UI/domain reducer：`entryId` 是原生节点，
+`timestamp` 只是原生 metadata。旧的 UI display-row / timestamp 绑定算法及其三份
+`kind: "bind"` 样例、旧 generator / `npm run fixtures` 已删除；不再把时间戳当 native
+identity，也不将 image-bearing display row 当安全 cut。
+当前切点绑定与保守拒绝在 Rust domain/fork 集成测试中验证，真实 Pi SDK/native-file
+行为另由 `npm run test:native-fork:offline` 验证。
 
-算法语义见 `src/native-branch.ts` 与 data-formats.md §8：canonicalEntries 剔除 label、
-剥离 parentId、重映射 compaction 边界；前缀 hash 为逐节点 `JSON.stringify` 拼接后的
-SHA-256。key 排序/字符串化必须与 JS `JSON.stringify` 一致（键按源码序、无空白）。
+只有有意修改原生算法时才审查并更新冻结期望；不能因为一次实现回归就批量重生成
+期望来使测试通过。执行：
 
-## `formats/`（手工维护的规范样例）
+```sh
+npx vitest run test/native-branch.test.ts test/native-fixtures.test.ts
+```
 
-每份文件对应 data-formats.md 的一个磁盘格式；实现必须能读取这些样例，读写必须满足规范中的必需 / 可选字段与类型约束；未知字段是否容忍由相应格式定义决定。样例中的哈希为占位值，
-不表示真实内容摘要。
+## `formats/`：历史格式的拒绝样例，不是当前可读格式
 
-## 更新与验证
+六份历史 JSON 样例仅作为 **negative fixtures** 保留。当前 daemon 和同 binary
+维护工具不能读取、转换或隐式清理它们。Rust
+`frozen_legacy_format_samples_are_refused_byte_for_byte_without_migration` 将每份样例
+放入隔离的 unversioned storage root，验证 host 与 maintenance lease gate 均拒绝、
+没有创建新 marker，且原始 bytes 不变。
 
-只有有意修改原生分支算法时才运行 `npm run fixtures`，并审查每个 JSON diff。执行 `npx vitest run test/native-branch.test.ts test/native-fixtures.test.ts` 验证树安全语义与冻结输出；服务端切点绑定由 Rust native 单测验证。
-
-`formats/` 样例由人工维护，`npm run fixtures` 不生成这些文件。磁盘格式变化须同步规范、读写实现与黑盒契约，不将新增字段的存在误当作所有历史样例都必须包含它。完整测试入口见 [测试指南](../../docs/testing.md)。
+当前 format2 的有效/无效格式、checksum、identity、revision、journal、outbox、inbox
+与 archive 由相应 Rust persistence tests 和 actual-host contract 验证；这些历史样例
+不是 format2 的规范，也不代表存在旧 reader。真实旧数据需由 operator 先备份并显式
+处理，不能依靠启动时 migration、reset 或文件名扫描删除。
