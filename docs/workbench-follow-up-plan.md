@@ -197,6 +197,16 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 显式 GNU 产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19项通过；`node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：15项通过。日志 `.test-results/t04/production-{ipc,telegram}-stage1.log`。未发布、未 push；未将 GNU 结果算作 musl 验收。
 - 下一步严格继续 T04 第2步 PayloadStore，再按顺序推进 Outbox/history 原子事务、Telegram/inbox/effect、SessionStore 与删除清单。当前 history/payload/outbox/Telegram 仍有旧业务文件协议，state/entries/delivery 尚未在生产同事务，因此 **T04 不勾选、不完成面板任务，不进入 T05**。
 
+**阶段2a执行记录（Payload 图像 SQL 基础设施；实现提交 `bf6b7c2`；尚未切换 facade）：**
+
+- 补齐 T03 图像 BLOB 所需的完整不可变描述：`contents.image_ref_json` 仅允许 kind=Image 时存在，使用 typed ImageRef JSON、1024字符 schema 上限；文本不允许携带 image 描述。所有新/重复图像写入同时校验原始 bytes、kind、hash、长度和描述身份；SessionCommit 内的图像仍与 entry/state/delivery 共用原事务，独立 archive 请求也使用单事务。
+- 新增唯一数据库线程上的 typed `ArchiveImage`/`Image` 请求及 `Database::{archive_image,image_by_id,image}`，不开放任意 SQL/closure，不添加连接、线程、payload 文件或 backend 选择。读取先在 SQL 限制图像 BLOB 为≤4MiB且长度一致，再检查完整 ref、SHA256、MIME signature；按 id 读取不重新生成 image id，也不经过 base64 JSON。`ImageAsset` Debug 仍不显示 pixels。
+- 内部未发布的早期 format3 数据库若缺少 image descriptor 列，明确拒绝启动；测试验证不会隐式 ALTER/迁移或更改源 DB bytes。所有测试仍使用隔离 root，未修改真实数据。后续验收使用全新 format3 root，不将阶段1临时 root 当作可迁移生产格式。
+- 新增5项 SQLite 回归并加强既有图像事务测试：原始 BLOB/ref 精确往返与真实重开、相同 id 改内容拒绝、完整 expected ref 校验、bytes/hash/MIME/id/length/缺描述的7类损坏拒绝、Text/Image 身份不能互换、丢弃 archive observer 后 shutdown 仍提交、pre-release schema 拒绝且不迁移；rollback 后 image 查询必须 NotFound，commit 后可精确读取。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sqlite_image`：5项通过（4项新增+1项加强）；`cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sqlite_pre_release_schema`：1项通过；`npm run clippy`：通过。日志 `.test-results/t04/{image-sql-stage2,image-schema-stage2,clippy-stage2}.log`。
+- `cargo test --manifest-path rust/Cargo.toml --workspace`：232项通过（daemon230+core2），既有 offline SDK 仍1项默认 ignored；`npm run format:check`、`npm run audit:workbench`：通过。日志 `.test-results/t04/{rust-stage2,format-stage2,audit-stage2}.log`。此阶段未重新执行完整 rewrite、TS、GNU/musl artifact 或 offline SDK，不把阶段1的结果冒充新提交后的完整验收。
+- **PayloadStore 尚未接入新 API，仍保留旧文件实现等待本步骤后续替换。** 下一步将 notice/interaction/entry 查询与图像统一接入同一 Database，调整 HistoryStore/test 构造依赖和只读 SQL 契约断言，再继续 Outbox。T04 仍未完成，不进入 T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
