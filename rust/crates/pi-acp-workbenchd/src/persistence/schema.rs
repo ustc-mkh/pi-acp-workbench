@@ -101,6 +101,11 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
             return Err(StoreError::Invalid("required database table is missing"));
         }
     }
+    // No migration or format guessing for pre-release v3 roots lacking the
+    // immutable image descriptor. Such roots must be recreated explicitly.
+    connection
+        .prepare("SELECT image_ref_json FROM contents LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported contents schema"))?;
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(StoreError::Invalid("SQLite quick_check failed"));

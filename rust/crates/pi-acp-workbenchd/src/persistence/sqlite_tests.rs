@@ -593,8 +593,16 @@ async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
     .await
     .unwrap();
     assert!(result.await.unwrap().is_err());
+    assert!(matches!(
+        db.image_by_id(image.image().id().clone()).await,
+        Err(StoreError::NotFound)
+    ));
     assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 0);
     let batch = db.commit(change.clone()).await.unwrap();
+    assert_eq!(
+        db.image(image.image().clone()).await.unwrap().bytes(),
+        image.bytes()
+    );
     assert!(matches!(batch.entries[0].text, TextBody::Archived { .. }));
     assert_eq!(batch.entries[0].image.as_ref(), Some(image.image()));
     assert!(crate::domain::query::json_bytes(&batch, 4096).is_ok());
@@ -630,6 +638,203 @@ async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
     for file in fs::read_dir(root.data()).unwrap() {
         assert!(allowed.contains(&file.unwrap().file_name().to_str().unwrap()));
     }
+}
+fn image_fixture() -> crate::domain::image::ImageAsset {
+    crate::domain::image::ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap()
+}
+#[tokio::test]
+async fn sqlite_image_archive_preserves_raw_blob_descriptor_and_id_across_restart() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use sha2::{Digest, Sha256};
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    let asset = image_fixture();
+    assert!(matches!(
+        db.image_by_id(asset.image().id().clone()).await,
+        Err(StoreError::NotFound)
+    ));
+    db.archive_image(asset.clone()).await.unwrap();
+    db.archive_image(asset.clone()).await.unwrap();
+    assert_eq!(
+        db.image(asset.image().clone()).await.unwrap().bytes(),
+        asset.bytes()
+    );
+    assert!(!format!("{asset:?}").contains("iVBOR"));
+    assert!(!format!("{asset:?}").contains("data"));
+    let mut changed = serde_json::to_value(&asset).unwrap();
+    let mut bytes = asset.bytes().to_vec();
+    *bytes.last_mut().unwrap() ^= 1;
+    changed["data"] = STANDARD.encode(&bytes).into();
+    changed["image"]["sha256"] = format!("{:x}", Sha256::digest(&bytes)).into();
+    let changed: crate::domain::image::ImageAsset = serde_json::from_value(changed).unwrap();
+    assert!(matches!(
+        db.archive_image(changed.clone()).await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(db.image(changed.image().clone()).await.is_err());
+    for (field, value) in [
+        ("sha256", serde_json::json!("0".repeat(64))),
+        ("bytes", serde_json::json!(asset.bytes().len() - 1)),
+        ("mime", serde_json::json!("image/jpeg")),
+        ("id", serde_json::json!("unknown-image")),
+    ] {
+        let mut expected = serde_json::to_value(asset.image()).unwrap();
+        expected[field] = value;
+        assert!(
+            db.image(serde_json::from_value(expected).unwrap())
+                .await
+                .is_err(),
+            "{field}"
+        );
+    }
+    db.shutdown().await.unwrap();
+    let sql = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+    let (raw, metadata): (Vec<u8>, String) = sql
+        .query_row(
+            "SELECT data,image_ref_json FROM contents WHERE id=?1 AND kind='Image'",
+            [asset.image().id().as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(raw, asset.bytes());
+    assert_eq!(metadata, serde_json::to_string(asset.image()).unwrap());
+    assert_eq!(count(&sql, "contents"), 1);
+    drop(sql);
+    let db = Database::open(root.data(), &lease).await.unwrap();
+    let restored = db.image_by_id(asset.image().id().clone()).await.unwrap();
+    assert_eq!(restored.image(), asset.image());
+    assert_eq!(restored.bytes(), asset.bytes());
+    db.shutdown().await.unwrap();
+    for file in fs::read_dir(root.data()).unwrap() {
+        let name = file.unwrap().file_name();
+        assert!(
+            [
+                ".workbench.lock",
+                "storage-format.json",
+                "workbench.sqlite3",
+                "workbench.sqlite3-wal",
+                "workbench.sqlite3-shm",
+                "workbench.sqlite3-journal"
+            ]
+            .contains(&name.to_str().unwrap()),
+            "{name:?}"
+        );
+    }
+}
+#[tokio::test]
+async fn sqlite_image_reads_reject_corrupt_bytes_metadata_mime_and_missing_descriptor() {
+    for fault in 0..7 {
+        let root = Root::new();
+        let (lease, db) = open(&root.data()).await;
+        let asset = image_fixture();
+        db.archive_image(asset.clone()).await.unwrap();
+        db.shutdown().await.unwrap();
+        let sql = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+        let mut metadata = serde_json::to_value(asset.image()).unwrap();
+        match fault {
+            0 => {
+                let mut bytes = asset.bytes().to_vec();
+                *bytes.last_mut().unwrap() ^= 1;
+                sql.execute("UPDATE contents SET data=?1", [bytes]).unwrap();
+            }
+            1 => metadata["sha256"] = "0".repeat(64).into(),
+            2 => metadata["id"] = "different-image".into(),
+            3 => metadata["mime"] = "image/jpeg".into(),
+            4 => metadata["bytes"] = (asset.bytes().len() - 1).into(),
+            5 => {
+                metadata["sha256"] = "0".repeat(64).into();
+                sql.execute("UPDATE contents SET sha256=?1", ["0".repeat(64)])
+                    .unwrap();
+            }
+            _ => {
+                sql.execute_batch(
+                    "PRAGMA ignore_check_constraints=ON; UPDATE contents SET image_ref_json=NULL;",
+                )
+                .unwrap();
+            }
+        }
+        if (1..6).contains(&fault) {
+            sql.execute(
+                "UPDATE contents SET image_ref_json=?1",
+                [serde_json::to_string(&metadata).unwrap()],
+            )
+            .unwrap();
+        }
+        drop(sql);
+        let reopened = Database::open(root.data(), &lease).await;
+        if fault == 6 {
+            assert!(
+                reopened.is_err(),
+                "missing image descriptor must fail schema integrity at startup"
+            );
+        } else {
+            let db = reopened.unwrap();
+            assert!(
+                db.image_by_id(asset.image().id().clone()).await.is_err(),
+                "fault {fault}"
+            );
+            db.shutdown().await.unwrap();
+        }
+    }
+}
+#[tokio::test]
+async fn sqlite_image_and_text_identities_cannot_be_rebound_or_read_as_the_other_kind() {
+    let root = Root::new();
+    let (_lease, db) = open(&root.data()).await;
+    db.create(initial()).await.unwrap();
+    let change = update(initial(), "not-image", "immutable text");
+    let content = change.append[0].text.content.clone();
+    db.commit(change).await.unwrap();
+    let image_id = crate::domain::ImageId::new(content.id.as_str()).unwrap();
+    assert!(db.image_by_id(image_id.clone()).await.is_err());
+    let mut image = serde_json::to_value(image_fixture()).unwrap();
+    image["image"]["id"] = image_id.as_str().into();
+    let image = serde_json::from_value(image).unwrap();
+    assert!(matches!(
+        db.archive_image(image).await,
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(db.content(content).await.unwrap(), "immutable text");
+    db.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_image_observer_drop_does_not_cancel_archive_and_shutdown_joins_it() {
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    let image = image_fixture();
+    let (reply, observer) = oneshot::channel();
+    drop(observer);
+    db.enqueue(StoreRequest::ArchiveImage {
+        asset: image.clone(),
+        reply,
+    })
+    .await
+    .unwrap();
+    db.shutdown().await.unwrap();
+    let db = Database::open(root.data(), &lease).await.unwrap();
+    let restored = db.image(image.image().clone()).await.unwrap();
+    assert_eq!(restored.bytes(), image.bytes());
+    db.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_pre_release_schema_without_image_descriptors_is_rejected_not_migrated() {
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    db.shutdown().await.unwrap();
+    let path = root.data().join("workbench.sqlite3");
+    let sql = Connection::open(&path).unwrap();
+    sql.execute_batch("DROP TABLE contents; CREATE TABLE contents(id TEXT PRIMARY KEY,kind TEXT NOT NULL,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL,data BLOB NOT NULL) STRICT;").unwrap();
+    drop(sql);
+    let original = fs::read(&path).unwrap();
+    assert!(matches!(
+        Database::open(root.data(), &lease).await,
+        Err(StoreError::Invalid("unsupported contents schema"))
+    ));
+    assert_eq!(
+        fs::read(path).unwrap(),
+        original,
+        "no implicit ALTER/migration"
+    );
 }
 #[tokio::test]
 async fn sqlite_real_second_process_cannot_take_live_database_lease() {

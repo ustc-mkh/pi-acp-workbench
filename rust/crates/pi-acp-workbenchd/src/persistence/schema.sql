@@ -20,7 +20,9 @@ CREATE TABLE contents (
     kind TEXT NOT NULL CHECK (kind IN ('Text', 'ToolText', 'ToolDiff', 'ToolResource', 'Image')),
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
     bytes INTEGER NOT NULL CHECK (bytes BETWEEN 0 AND 67108864 AND (kind != 'Image' OR bytes BETWEEN 1 AND 4194304)),
-    data BLOB NOT NULL CHECK (length(data) = bytes)
+    data BLOB NOT NULL CHECK (length(data) = bytes),
+    image_ref_json TEXT CHECK (image_ref_json IS NULL OR (json_valid(image_ref_json) AND length(image_ref_json) <= 1024)),
+    CHECK ((kind = 'Image' AND image_ref_json IS NOT NULL) OR (kind != 'Image' AND image_ref_json IS NULL))
 ) STRICT;
 CREATE TABLE entries (
     entry_id TEXT PRIMARY KEY CHECK (length(entry_id) BETWEEN 1 AND 200),

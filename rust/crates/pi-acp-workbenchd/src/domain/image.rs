@@ -156,6 +156,15 @@ impl ImageAsset {
             data,
         })
     }
+    /// Restore immutable database bytes without regenerating the opaque ID or
+    /// allocating a base64 JSON envelope. The complete descriptor is verified.
+    pub(crate) fn from_archive(image: ImageRef, data: Vec<u8>) -> Result<Self, DomainError> {
+        validate(image.mime, &data)?;
+        if data.len() as u64 != image.bytes || digest(&data) != image.sha256 {
+            return Err(invalid());
+        }
+        Ok(Self { image, data })
+    }
     pub fn image(&self) -> &ImageRef {
         &self.image
     }
@@ -170,14 +179,7 @@ impl TryFrom<ImageAssetWire> for ImageAsset {
             return Err(invalid());
         }
         let data = STANDARD.decode(&value.data).map_err(|_| invalid())?;
-        validate(value.image.mime, &data)?;
-        if data.len() as u64 != value.image.bytes || digest(&data) != value.image.sha256 {
-            return Err(invalid());
-        }
-        Ok(Self {
-            image: value.image,
-            data,
-        })
+        Self::from_archive(value.image, data)
     }
 }
 impl From<ImageAsset> for ImageAssetWire {

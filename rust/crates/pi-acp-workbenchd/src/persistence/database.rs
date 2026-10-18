@@ -107,6 +107,14 @@ pub(super) enum StoreRequest {
         reply: Reply<String>,
     },
     Journal(Box<super::journal::Request>),
+    ArchiveImage {
+        asset: crate::domain::image::ImageAsset,
+        reply: Reply<()>,
+    },
+    Image {
+        id: crate::domain::ImageId,
+        reply: Reply<crate::domain::image::ImageAsset>,
+    },
     #[cfg(test)]
     Test(super::sqlite_tests::TestRequest),
 }
@@ -183,6 +191,18 @@ impl Database {
                         }
                         StoreRequest::Content { content, reply } => {
                             let _ = reply.send(super::content::read_text(&connection, &content));
+                        }
+                        StoreRequest::ArchiveImage { asset, reply } => {
+                            let result = (|| -> Result<(), StoreError> {
+                                let tx = connection.transaction()?;
+                                super::content::put_image(&tx, &asset)?;
+                                tx.commit()?;
+                                Ok(())
+                            })();
+                            let _ = reply.send(result);
+                        }
+                        StoreRequest::Image { id, reply } => {
+                            let _ = reply.send(super::content::image(&connection, &id));
                         }
                         StoreRequest::Journal(request) => {
                             super::journal::execute(&mut connection, *request);
@@ -294,6 +314,33 @@ impl Database {
         ))
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn archive_image(
+        &self,
+        asset: crate::domain::image::ImageAsset,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ArchiveImage { asset, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn image_by_id(
+        &self,
+        id: crate::domain::ImageId,
+    ) -> Result<crate::domain::image::ImageAsset, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Image { id, reply }).await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn image(
+        &self,
+        expected: crate::domain::image::ImageRef,
+    ) -> Result<crate::domain::image::ImageAsset, StoreError> {
+        let asset = self.image_by_id(expected.id().clone()).await?;
+        if asset.image() != &expected {
+            return Err(StoreError::Invalid("image reference identity mismatch"));
+        }
+        Ok(asset)
     }
     pub async fn shutdown(&self) -> Result<(), StoreError> {
         let _shutdown = self.inner.shutdown.lock().await;

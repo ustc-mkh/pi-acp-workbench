@@ -35,19 +35,31 @@ pub(super) fn put_text(db: &Connection, value: &NewContent) -> Result<(), StoreE
         kind_name(value.content.kind),
         value.content.sha256.as_str(),
         value.text.as_bytes(),
+        None,
     )
 }
-fn put(db: &Connection, id: &str, kind: &str, sha256: &str, data: &[u8]) -> Result<(), StoreError> {
-    type Stored = (String, String, SafeInteger, Vec<u8>);
+fn put(
+    db: &Connection,
+    id: &str,
+    kind: &str,
+    sha256: &str,
+    data: &[u8],
+    image: Option<&ImageRef>,
+) -> Result<(), StoreError> {
+    type Stored = (String, String, SafeInteger, Vec<u8>, Option<String>);
     let existing: Option<Stored> = db
         .query_row(
-            "SELECT kind, sha256, bytes, data FROM contents WHERE id = ?1",
+            "SELECT kind, sha256, bytes, data, image_ref_json FROM contents WHERE id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    if let Some((old_kind, hash, bytes, old_data)) = existing {
+    if let Some((old_kind, hash, bytes, old_data, old_image)) = existing {
+        let old_image: Option<ImageRef> = old_image
+            .map(|encoded| serde_json::from_str(&encoded))
+            .transpose()?;
         if old_kind != kind
+            || old_image.as_ref() != image
             || hash != sha256
             || bytes.get() != data.len() as u64
             || old_data != data
@@ -57,12 +69,19 @@ fn put(db: &Connection, id: &str, kind: &str, sha256: &str, data: &[u8]) -> Resu
         return Ok(());
     }
     db.execute(
-        "INSERT INTO contents(id,kind,sha256,bytes,data) VALUES (?1,?2,?3,?4,?5)",
-        params![id, kind, sha256, data.len() as i64, data],
+        "INSERT INTO contents(id,kind,sha256,bytes,data,image_ref_json) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![
+            id,
+            kind,
+            sha256,
+            data.len() as i64,
+            data,
+            image.map(encode).transpose()?
+        ],
     )?;
     Ok(())
 }
-fn put_image(db: &Connection, asset: &ImageAsset) -> Result<(), StoreError> {
+pub(super) fn put_image(db: &Connection, asset: &ImageAsset) -> Result<(), StoreError> {
     let image = asset.image();
     // ImageAsset constructors/deserializers already verify MIME signature/hash.
     put(
@@ -71,7 +90,40 @@ fn put_image(db: &Connection, asset: &ImageAsset) -> Result<(), StoreError> {
         "Image",
         image.sha256(),
         asset.bytes(),
+        Some(image),
     )
+}
+pub(super) fn image(
+    db: &Connection,
+    id: &crate::domain::ImageId,
+) -> Result<ImageAsset, StoreError> {
+    type Stored = (String, String, SafeInteger, Option<Vec<u8>>, Option<String>);
+    // Bound BLOB materialization in SQL, including for externally corrupted
+    // rows. Descriptors cannot authorize arbitrary paths or external fetches.
+    let found: Option<Stored> = db.query_row(
+        "SELECT kind,sha256,bytes,
+         CASE WHEN kind='Image' AND bytes BETWEEN 1 AND 4194304 AND length(data)=bytes THEN data END,
+         image_ref_json FROM contents WHERE id=?1",
+        [id.as_str()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    ).optional()?;
+    let (kind, sha256, bytes, data, metadata) = found.ok_or(StoreError::NotFound)?;
+    let image: ImageRef =
+        serde_json::from_str(&metadata.ok_or(StoreError::Invalid("image descriptor missing"))?)?;
+    if kind != "Image"
+        || image.id() != id
+        || image.sha256() != sha256
+        || image.byte_len() != bytes.get()
+    {
+        return Err(StoreError::Invalid("image content identity mismatch"));
+    }
+    ImageAsset::from_archive(
+        image,
+        data.ok_or(StoreError::Invalid(
+            "image BLOB length exceeds bound or mismatches",
+        ))?,
+    )
+    .map_err(|_| StoreError::Invalid("invalid archived image bytes/MIME/hash"))
 }
 pub(super) fn read_text(db: &Connection, content: &ContentRef) -> Result<String, StoreError> {
     content.validate()?;
