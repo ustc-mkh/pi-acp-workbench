@@ -230,6 +230,15 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 最新 GNU 产物显式运行 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：分别19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-delivery-sql-stage3.log`。未运行 musl、offline SDK、最终 scale/soak，未发布、未 push。
 - **生产 OutboxStore 仍为原文件 facade，尚未使用本次 SQL API；第3步不算完成。** 下一步统一生产 DeliveryIntent 与 facade/调用依赖，保留当前绑定后的 topic FIFO 与失败 ack join/lease 安全测试，不增加旧/新 payload JSON 双reader。随后按顺序完成 history 单事务、Telegram inbox/effect、SessionStore 及删除清单。T04 不完成、不进入 T05。
 
+**阶段3b执行记录（SQL ack/fail 取消与回滚安全证据；提交 `0958970`；facade 尚未切换）：**
+
+- 新增仅 cfg(test) 的唯一 executor RAII pause guard，直接暂停既有数据库线程，而不是增加 facade Mutex 或第二条执行通道；guard Drop 在断言 unwind 时也释放线程，避免物理 join 卡住测试清理。此入口不进入生产 binary。
+- 新增两项 SQL 回归：明确先 enqueue 接受 ack 再丢弃 reply observer，启动独立持有的 shutdown 后用 timeout 取消其等待观察，证明线程暂停期间 shutdown 未完成、host lease 不能重取；释放 executor 后 drain/join，真实重开并重放同 intent 后仍无 Pending，证明 ack 未因 observer 消失而丢失。该测试不声称已替代 Telegram supervisor 集成测试，原集成测试仍保留待 facade 切换时迁移。
+- SQL BEFORE UPDATE ABORT 分别注入 ack/fail，验证整个 DB bytes 不变，原 Pending/attempt=0/retry=0/failure=None 精确保留；移除 trigger 后真实重开，ack/fail 均可成功重试。没有将 SQL 失败当作成功、吞错或仅检查不存在的文件。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sql_delivery`：9项通过；`cargo test --manifest-path rust/Cargo.toml --workspace`：244项通过（daemon242+core2；既有 offline SDK1项仍默认 ignored）。`npm run clippy`、`npm run format:check`、`npm run audit:workbench` 均通过。日志 `.test-results/t04/{delivery-ack-stage3-final,rust-delivery-ack-stage3,clippy-delivery-ack-stage3,format-delivery-ack-stage3,audit-delivery-ack-stage3}.log`。首次编译发现新增测试传 PathBuf 而 API 要求 &Path，已修复；原失败日志 `.test-results/t04/delivery-ack-stage3.log` 保留。
+- 本次仅改测试及 cfg(test) 支撑，未重跑完整 rewrite/TS/生产 artifact/musl/offline SDK，不能将阶段3a结果算作本次测试提交后的执行证据。未发布、未 push。
+- **第3步仍未完成**：生产 OutboxStore 仍为文件实现；下一步必须切换 facade/统一 DeliveryIntent 调用，并迁移 binary outbox 文件断言与 Telegram ack pause fixture。后续 history 同事务、Telegram 和 SessionStore 工作仍按原顺序，T04 不完成、不进入 T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
