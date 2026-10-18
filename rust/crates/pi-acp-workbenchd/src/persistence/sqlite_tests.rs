@@ -23,6 +23,10 @@ use tokio::sync::oneshot;
 
 type TestReply<T> = oneshot::Sender<Result<T, StoreError>>;
 pub(super) enum TestRequest {
+    RejectJournalAdmission {
+        operation: crate::domain::OperationId,
+        reply: TestReply<()>,
+    },
     Pause {
         entered: oneshot::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
@@ -43,6 +47,22 @@ pub(super) enum TestRequest {
 }
 pub(super) fn execute(db: &mut Connection, request: TestRequest) {
     match request {
+        TestRequest::RejectJournalAdmission { operation, reply } => {
+            let result = (|| -> Result<(), StoreError> {
+                db.execute_batch(
+                    "CREATE TEMP TABLE IF NOT EXISTS test_rejected_operations(operation TEXT PRIMARY KEY);
+                     CREATE TEMP TRIGGER IF NOT EXISTS test_reject_journal_admission BEFORE INSERT ON main.operations
+                     WHEN EXISTS(SELECT 1 FROM test_rejected_operations WHERE operation=NEW.operation)
+                     BEGIN SELECT RAISE(ABORT,'test journal admission failure'); END;",
+                )?;
+                db.execute(
+                    "INSERT INTO test_rejected_operations(operation) VALUES (?1)",
+                    [operation.as_str()],
+                )?;
+                Ok(())
+            })();
+            let _ = reply.send(result);
+        }
         TestRequest::Pause { entered, resume } => {
             let _ = entered.send(());
             resume.recv().unwrap();

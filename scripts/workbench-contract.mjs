@@ -1,7 +1,7 @@
 // New-daemon contract: real Unix IPC + independent stdio peer, no model/Bot credentials.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, readFile, readdir, mkdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, stat } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+import { operationRecords } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -146,16 +147,7 @@ class Wire extends EventEmitter {
   }
 }
 async function journal() {
-  const files = [];
-  async function walk(prefix = '') {
-    for (const entry of await readdir(join(data, 'journal', prefix), { withFileTypes: true })) {
-      const name = join(prefix, entry.name);
-      if (entry.isDirectory()) await walk(name);
-      else files.push([name, await readFile(join(data, 'journal', name), 'utf8')]);
-    }
-  }
-  await walk();
-  return files.sort(([a], [b]) => a.localeCompare(b));
+  return operationRecords(data);
 }
 try {
   await writeFile(configFile, JSON.stringify(config));

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+import { operationRecords } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -78,7 +79,9 @@ async function exited(pid) {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
     return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z ');
   } catch (error) {
-    if (error.code === 'ENOENT') return true;
+    // Linux may remove the task after opening /proc/<pid>/stat but before
+    // read completes. ESRCH, like ENOENT, proves this PID is no longer live.
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return true;
     throw error;
   }
 }
@@ -141,11 +144,10 @@ try {
     assert(native);
     const historyPath = join(data, 'history', `${session}.json`);
     const history = await readFile(historyPath);
-    const receipts = [
-      join(data, 'journal', `${operation}.json`),
-      join(data, 'journal/results', `${operation}.json`),
-    ];
-    const receiptBytes = await Promise.all(receipts.map((file) => readFile(file)));
+    const receiptRows = operationRecords(data, operation);
+    assert.equal(receiptRows.length, 1);
+    assert.equal(receiptRows[0].status, 'Completed');
+    assert.deepEqual(JSON.parse(receiptRows[0].result.toString('utf8')), { Ok: receipt });
     const inode = await lstat(socket);
     const worker = (await traces(trace)).find((entry) => entry.method === 'boot').pid;
     const traceBeforeKill = await readFile(trace);
@@ -188,8 +190,11 @@ try {
       traceBeforeKill,
       'load/replay must not repeat prompt or boot a worker',
     );
-    for (let i = 0; i < receipts.length; i++)
-      assert.deepEqual(await readFile(receipts[i]), receiptBytes[i]);
+    assert.deepEqual(
+      operationRecords(data, operation),
+      receiptRows,
+      'immutable raw SQL receipt survives SIGKILL/load/replay',
+    );
     assert.deepEqual(await client.call({ method: 'image', image }), imageAsset);
     await client.call({ method: 'subscribe', session });
     finished = client.waitFor((event) => event.TurnFinished?.session === session);

@@ -6,24 +6,6 @@ use crate::{
     telegram::runtime::AdapterError,
 };
 
-async fn journal_files(root: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut files = vec![];
-    let mut directory = match tokio::fs::read_dir(root.join("journal")).await {
-        Ok(directory) => directory,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return files,
-        Err(error) => panic!("{error}"),
-    };
-    while let Some(entry) = directory.next_entry().await.unwrap() {
-        if entry.file_type().await.unwrap().is_file() {
-            files.push((
-                entry.file_name().to_string_lossy().into_owned(),
-                tokio::fs::read(entry.path()).await.unwrap(),
-            ));
-        }
-    }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    files
-}
 fn scoped_config(root: &Path) -> TelegramConfig {
     let mut config = config();
     config.workspace = crate::domain::WorkspacePath::new(root.to_str().unwrap()).unwrap();
@@ -114,7 +96,7 @@ async fn pending_image_after_external_source_removal_and_restart_uses_frozen_sco
     )
     .await
     .unwrap();
-    let before_journal = journal_files(&root).await;
+    let before_journal = second.journal_snapshot().await.unwrap();
     second
         .delivery_store()
         .fail(&pending[0].event.id, DeliveryFailure::RateLimited, 0)
@@ -140,7 +122,7 @@ async fn pending_image_after_external_source_removal_and_restart_uses_frozen_sco
         .is_empty());
     assert!(context.inspect(&session).await.unwrap().is_none());
     assert_eq!(
-        journal_files(&root).await,
+        second.journal_snapshot().await.unwrap(),
         before_journal,
         "missing snapshot reads are not load/mutation operations"
     );
@@ -198,7 +180,7 @@ async fn archived_scope_does_not_authorize_outside_workspace_unbound_or_disallow
             .await
             .unwrap();
     }
-    let journal_before = journal_files(&root).await;
+    let journal_before = app.journal_snapshot().await.unwrap();
     deliver_once(&context).await.unwrap();
     assert!(app
         .delivery_store()
@@ -207,7 +189,7 @@ async fn archived_scope_does_not_authorize_outside_workspace_unbound_or_disallow
         .unwrap()
         .is_empty());
     assert_eq!(api.0.lock().await.media_attempts, 0);
-    assert_eq!(journal_files(&root).await, journal_before);
+    assert_eq!(app.journal_snapshot().await.unwrap(), journal_before);
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

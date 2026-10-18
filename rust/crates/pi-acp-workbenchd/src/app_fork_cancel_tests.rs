@@ -237,12 +237,13 @@ async fn cancel_admission_persistence_failure_cannot_touch_the_remote_fork() {
         .unwrap();
     marker(&root.join("fork-gate.started")).await;
     let cancel_id = OperationId::generate();
-    tokio::fs::write(
-        root.join("journal").join(format!("{cancel_id}.json")),
-        b"fixture corruption",
-    )
-    .await
-    .unwrap();
+    // A real SQLite failure at durable admission must precede any remote
+    // cancellation; a fake corrupt journal JSON no longer exercises storage.
+    app.core
+        .database
+        .reject_journal_admission(cancel_id.clone())
+        .await
+        .unwrap();
     assert!(matches!(
         app.command_durable(
             cancel_id,

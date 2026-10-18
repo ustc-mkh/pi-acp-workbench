@@ -28,7 +28,7 @@ function run(...args: string[]) {
 async function marker(root: string) {
   await writeFile(
     join(root, 'storage-format.json'),
-    '{"format_version":2,"storage_kind":"pi-acp-workbench"}\n',
+    '{"format_version":3,"storage_kind":"pi-acp-workbench"}\n',
   );
 }
 it('requires explicit confirmation, refuses active-looking hosts, and exports exact bytes with manifest', async () => {

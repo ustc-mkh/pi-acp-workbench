@@ -106,6 +106,7 @@ pub(super) enum StoreRequest {
         content: ContentRef,
         reply: Reply<String>,
     },
+    Journal(Box<super::journal::Request>),
     #[cfg(test)]
     Test(super::sqlite_tests::TestRequest),
 }
@@ -123,6 +124,11 @@ impl Database {
     /// The retained lease prevents a host/maintenance race even if the caller
     /// drops its lease before all Database handles have drained.
     pub async fn open(root: impl AsRef<Path>, lease: &StorageLease) -> Result<Self, StoreError> {
+        Self::open_sync(root, lease)
+    }
+    /// Synchronous host construction waits only for the dedicated thread's
+    /// startup result. All SQLite work, including open/validation, stays there.
+    pub fn open_sync(root: impl AsRef<Path>, lease: &StorageLease) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
         if !lease.owns(&root) {
             return Err(StoreError::Invalid(
@@ -131,7 +137,7 @@ impl Database {
         }
         let held_lease = lease.claim_database()?;
         let (sender, mut requests) = mpsc::channel(STORE_QUEUE_CAPACITY);
-        let (started, ready) = oneshot::channel();
+        let (started, ready) = std::sync::mpsc::sync_channel(1);
         let (finished, done) = oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("workbench-sqlite".into())
@@ -178,6 +184,9 @@ impl Database {
                         StoreRequest::Content { content, reply } => {
                             let _ = reply.send(super::content::read_text(&connection, &content));
                         }
+                        StoreRequest::Journal(request) => {
+                            super::journal::execute(&mut connection, *request);
+                        }
                         #[cfg(test)]
                         StoreRequest::Test(request) => {
                             super::sqlite_tests::execute(&mut connection, request)
@@ -190,7 +199,7 @@ impl Database {
                 drop(held_lease);
                 let _ = finished.send(result);
             })?;
-        match ready.await.unwrap_or(Err(StoreError::Closed)) {
+        match ready.recv().unwrap_or(Err(StoreError::Closed)) {
             Ok(()) => Ok(Self {
                 inner: Arc::new(Inner {
                     sender: Mutex::new(Some(sender)),
@@ -272,6 +281,18 @@ impl Database {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Content { content, reply })
             .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    #[cfg(test)]
+    pub(crate) async fn reject_journal_admission(
+        &self,
+        operation: crate::domain::OperationId,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Test(
+            super::sqlite_tests::TestRequest::RejectJournalAdmission { operation, reply },
+        ))
+        .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn shutdown(&self) -> Result<(), StoreError> {

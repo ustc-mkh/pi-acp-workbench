@@ -84,7 +84,7 @@ async fn image_queries_return_bounded_verified_binary_responses_without_journal_
     bytes[12..16].copy_from_slice(b"IHDR");
     let asset = ImageAsset::new(ImageMime::Png, bytes).unwrap();
     app.delivery_payloads().put_image(&asset).await.unwrap();
-    let journal = tokio::fs::try_exists(root.join("journal")).await.unwrap();
+    let journal = app.journal_snapshot().await.unwrap();
     let socket = root.join("workbench.sock");
     let transport = ExternalTransport::bind(&socket, app.clone()).await.unwrap();
     let mut client = Client::open(&socket).await;
@@ -135,10 +135,7 @@ async fn image_queries_return_bounded_verified_binary_responses_without_journal_
         matches!(client.next().await, IpcMessage::Reply { id: 4, events } if matches!(&events[0], DomainEvent::SessionsListed(sessions) if sessions.is_empty()))
     );
     assert!(!tokio::fs::try_exists(trace).await.unwrap());
-    assert_eq!(
-        tokio::fs::try_exists(root.join("journal")).await.unwrap(),
-        journal
-    );
+    assert_eq!(app.journal_snapshot().await.unwrap(), journal);
     assert!(serde_json::from_str::<IpcRequest>(
         r#"{"version":2,"id":5,"command":{"method":"image","path":"/etc/passwd"}}"#
     )

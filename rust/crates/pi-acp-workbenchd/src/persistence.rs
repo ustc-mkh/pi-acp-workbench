@@ -1,4 +1,4 @@
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 mod content;
 pub mod database;
 pub mod format;

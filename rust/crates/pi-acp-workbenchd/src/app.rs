@@ -9,6 +9,7 @@ use crate::{
         ids::SessionId,
     },
     persistence::{
+        database::Database,
         format::StorageLease,
         journal::{Admission, JournalStore},
         HistoryStore,
@@ -88,6 +89,7 @@ struct CommandCore {
     adapters_stop: CancellationToken,
     closed: Arc<AtomicBool>,
     storage_lease: Arc<Mutex<Option<StorageLease>>>,
+    database: Database,
     journal: JournalStore,
     history: HistoryStore,
     pending_interactions: usize,
@@ -102,7 +104,9 @@ impl WorkbenchApp {
         make_runtime: impl FnOnce(HistoryStore, usize) -> Runtime,
     ) -> Result<Self, DomainError> {
         config.validate()?;
-        let lease = StorageLease::acquire(&config.storage.root)
+        let lease = StorageLease::lock(&config.storage.root)
+            .map_err(|error| DomainError::Persistence(error.to_string()))?;
+        let database = Database::open_sync(&config.storage.root, &lease)
             .map_err(|error| DomainError::Persistence(error.to_string()))?;
         let (events, _) = broadcast::channel(256);
         let mut supervisor =
@@ -124,7 +128,8 @@ impl WorkbenchApp {
             adapters_stop: CancellationToken::new(),
             closed: Arc::new(AtomicBool::new(false)),
             storage_lease: Arc::new(Mutex::new(Some(lease))),
-            journal: JournalStore::new(config.storage.root.join("journal")),
+            journal: JournalStore::new(database.clone()),
+            database,
             history,
             pending_interactions: config.limits.pending_interactions,
             fork_controls: Arc::new(fork_control::ForkControls::default()),
@@ -170,6 +175,12 @@ impl WorkbenchApp {
     }
     pub async fn command(&self, command: DomainCommand) -> Result<Vec<DomainEvent>, DomainError> {
         self.enqueue_command(None, command)?.wait().await
+    }
+    #[cfg(test)]
+    pub(crate) async fn journal_snapshot(
+        &self,
+    ) -> Result<Vec<crate::persistence::journal::ArchivedOperation>, DomainError> {
+        self.core.journal.snapshot().await
     }
     pub async fn operation_result(
         &self,
@@ -232,10 +243,16 @@ impl WorkbenchApp {
     }
     pub async fn shutdown_checked(&self) -> Result<(), DomainError> {
         let result = self.ingress.shutdown(&self.core).await;
+        let database = self
+            .core
+            .database
+            .shutdown()
+            .await
+            .map_err(|error| DomainError::Persistence(error.to_string()));
         // Main stops the transport adapters before this call. Keep the lease
         // across an unexpected ingress exit until the host finishes that cleanup.
         self.core.storage_lease.lock().await.take();
-        result
+        result.and(database)
     }
 }
 pub(crate) struct CommandTicket {

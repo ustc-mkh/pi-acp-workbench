@@ -1,9 +1,10 @@
 // Real new host + TypeScript v2 client; synthetic ACP peer, isolated files, no account/model/Bot.
 import { afterEach, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { operationRecords } from '../scripts/lib/workbench-sqlite-fixture.mjs';
 import { WorkbenchClient } from '../src/workbench-client';
 import { WorkbenchSession } from '../src/workbench-session';
 import {
@@ -95,14 +96,6 @@ async function host(forkGate = false) {
     clients.push(value);
     return value;
   };
-  const contents = async (dir: string): Promise<[string, string][]> => {
-    const files: [string, string][] = [];
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) files.push(...(await contents(join(dir, entry.name))));
-      else files.push([join(dir, entry.name), await readFile(join(dir, entry.name), 'utf8')]);
-    }
-    return files.sort(([a], [b]) => a.localeCompare(b));
-  };
   await start();
   return {
     root,
@@ -110,7 +103,7 @@ async function host(forkGate = false) {
     client,
     stop,
     start,
-    journal: () => contents(join(data, 'journal')),
+    journal: () => operationRecords(data),
     trace: () => readFile(trace, 'utf8'),
   };
 }

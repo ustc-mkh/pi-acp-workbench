@@ -123,6 +123,7 @@ async function runTests() {
         'scripts/typescript-graph.test.mjs',
         'scripts/workbench-binary.test.mjs',
         'scripts/prepare-release.test.mjs',
+        'scripts/workbench-sqlite-fixture.test.mjs',
       ),
     ];
     const results = await testPool(suites, jobs);

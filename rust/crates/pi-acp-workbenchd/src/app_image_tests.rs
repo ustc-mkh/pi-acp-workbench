@@ -85,7 +85,7 @@ async fn image_query_is_read_only_validates_full_reference_and_corruption_and_ne
     let app = WorkbenchApp::new(config_at(&root, Default::default())).unwrap();
     let asset = ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap();
     app.delivery_payloads().put_image(&asset).await.unwrap();
-    let journal = tokio::fs::try_exists(root.join("journal")).await.unwrap();
+    let journal = app.journal_snapshot().await.unwrap();
     assert_eq!(
         app.image(asset.image()).await.unwrap().bytes(),
         asset.bytes()
@@ -108,10 +108,7 @@ async fn image_query_is_read_only_validates_full_reference_and_corruption_and_ne
         Err(DomainError::Persistence(_))
     ));
     assert!(app.core.adapters.lock().await.is_empty());
-    assert_eq!(
-        tokio::fs::try_exists(root.join("journal")).await.unwrap(),
-        journal
-    );
+    assert_eq!(app.journal_snapshot().await.unwrap(), journal);
     app.close_admission();
     assert!(matches!(
         app.image(asset.image()).await,
