@@ -5,7 +5,7 @@ use crate::domain::{
         CommitBatch, ContentRef, HistoryCursor, HistoryPage, ListCursor, ListPage, QueryError,
         SafeInteger, SessionSummary, SessionView,
     },
-    transition::{DeliveryIntent, NewEntry, ToolUpdate},
+    transition::{DeliveryIntent, NewContent, NewEntry, ToolUpdate},
     SessionId,
 };
 use serde::Serialize;
@@ -72,6 +72,8 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StoreError> {
 pub struct SessionCommit {
     pub expected_revision: SafeInteger,
     pub next: SessionView,
+    /// Immutable notice/interaction archives committed with their delivery refs.
+    pub contents: Vec<NewContent>,
     pub append: Vec<NewEntry>,
     pub tool_updates: Vec<ToolUpdate>,
     pub deliveries: Vec<DeliveryIntent>,

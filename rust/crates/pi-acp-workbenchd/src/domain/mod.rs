@@ -13,6 +13,7 @@ pub mod session;
 pub mod tool;
 pub mod transcript;
 pub mod transition;
+mod transition_storage;
 pub mod usage;
 pub mod workspace;
 pub use workspace::WorkspacePath;

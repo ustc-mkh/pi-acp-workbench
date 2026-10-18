@@ -241,6 +241,7 @@ fn update(mut view: SessionView, id: &str, text: &str) -> SessionCommit {
         expected_revision,
         deliveries: vec![delivery(&view, &format!("delivery-{id}"))],
         next: view,
+        contents: vec![],
         append: vec![entry(id, text)],
         tool_updates: vec![],
         view_changed: true,
@@ -318,6 +319,126 @@ async fn sqlite_atomic_commit_conflicts_hash_and_restart() {
         .unwrap();
     assert_eq!(integrity, "ok");
 }
+#[tokio::test]
+async fn sqlite_session_commit_archives_notices_and_interactions_with_intents_or_rolls_back_every_row(
+) {
+    use crate::{
+        domain::{interaction::Interaction, transition::DeliveryPayload, NoticeId},
+        persistence::payload::{interaction_content, notice_content, NoticeContent},
+    };
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    let view = initial();
+    db.create(view.clone()).await.unwrap();
+    let notice = NoticeContent {
+        id: NoticeId::generate(),
+        text: "cancelled 🌏 exact\nnotice".into(),
+    };
+    let archived = notice_content(&notice).unwrap();
+    let mut change = update(initial(), "atomic-output", "committed output");
+    change.contents.push(archived.clone());
+    change.deliveries[0].payload = DeliveryPayload::Notice {
+        content: archived.content.clone(),
+    };
+    // Use the same typed archived interaction encoding as the standalone facade.
+    let interaction = Interaction {
+        id: crate::domain::InteractionId::generate(),
+        kind: crate::domain::interaction::InteractionKind::Permission,
+        title: "exact title".into(),
+        detail: "permission 🌏".into(),
+        fields: vec![],
+        options: vec![crate::domain::interaction::InteractionOption {
+            id: "allow".into(),
+            label: "Allow".into(),
+        }],
+        expires_at: Some(1234),
+    };
+    let interaction_archive = interaction_content(&interaction).unwrap();
+    change.contents.push(interaction_archive.clone());
+    let mut interaction_intent = change.deliveries[0].clone();
+    interaction_intent.id = crate::domain::DeliveryId::generate();
+    interaction_intent.payload = DeliveryPayload::Interaction {
+        interaction: interaction.id.clone(),
+    };
+    change.deliveries.push(interaction_intent);
+    // A late immutable identity conflict rolls back even archives already inserted.
+    let mut invalid = change.clone();
+    invalid.contents.push(NewContent {
+        content: archived.content.clone(),
+        text: "wrong bytes".into(),
+    });
+    assert!(db.commit(invalid).await.is_err());
+    assert_eq!(
+        db.view(initial().id.clone()).await.unwrap().revision.get(),
+        0
+    );
+    assert!(matches!(
+        db.content(archived.content.clone()).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        db.content(interaction_archive.content.clone()).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(db
+        .delivery_target_heads(SafeInteger::new(0).unwrap(), 10)
+        .await
+        .unwrap()
+        .is_empty());
+    // Scope and source revision are checked INSIDE the transaction after writes.
+    for wrong_revision in [false, true] {
+        let mut invalid = change.clone();
+        if wrong_revision {
+            invalid.deliveries[0].revision = SafeInteger::new(0).unwrap();
+        } else {
+            invalid.deliveries[0].target = crate::domain::transition::DeliveryTarget::Session {
+                session: initial().id,
+                cwd: crate::domain::WorkspacePath::new("/").unwrap(),
+            };
+        }
+        assert!(matches!(
+            db.commit(invalid).await,
+            Err(StoreError::Invalid(
+                "session delivery scope/revision mismatch"
+            ))
+        ));
+        assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 0);
+        assert!(matches!(
+            db.content(archived.content.clone()).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+    db.commit(change).await.unwrap();
+    db.shutdown().await.unwrap();
+    let db = Database::open(root.data(), &lease).await.unwrap();
+    assert_eq!(db.content(archived.content).await.unwrap(), notice.text);
+    assert_eq!(
+        db.content(interaction_archive.content).await.unwrap(),
+        super::database::encode(&interaction).unwrap()
+    );
+    assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 1);
+    assert_eq!(
+        db.history(initial().id, None, None)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.delivery_target_heads(SafeInteger::new(0).unwrap(), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    db.shutdown().await.unwrap();
+    let sql = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+    assert_eq!(count(&sql, "contents"), 3);
+    assert_eq!(count(&sql, "deliveries"), 2);
+    assert_eq!(count(&sql, "session_entries"), 1);
+}
+
 #[tokio::test]
 async fn sqlite_rollback_discards_session_entries_contents_and_delivery_together() {
     let root = Root::new();

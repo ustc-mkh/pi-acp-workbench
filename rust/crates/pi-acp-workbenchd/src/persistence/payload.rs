@@ -96,12 +96,9 @@ impl PayloadStore {
         Ok(asset)
     }
     pub fn notice_ref(notice: &NoticeContent) -> Result<ContentRef, DomainError> {
-        text(
-            content_id("notice", notice.id.as_str()).map_err(failure)?,
-            notice.text.clone(),
-        )
-        .map(|value| value.content)
-        .map_err(failure)
+        notice_content(notice)
+            .map(|value| value.content)
+            .map_err(failure)
     }
     pub async fn content(&self, reference: &ContentRef) -> Result<String, DomainError> {
         self.database
@@ -163,6 +160,21 @@ pub(super) fn content_id(scope: &str, id: &str) -> Result<ContentId, StoreError>
     ))
     .map_err(|_| StoreError::Invalid("invalid archive content id"))
 }
+pub(super) fn notice_content(notice: &NoticeContent) -> Result<NewContent, StoreError> {
+    text(
+        content_id("notice", notice.id.as_str())?,
+        notice.text.clone(),
+    )
+}
+pub(super) fn interaction_content(interaction: &Interaction) -> Result<NewContent, StoreError> {
+    interaction
+        .validate_definition()
+        .map_err(|_| StoreError::Invalid("invalid archived interaction"))?;
+    text(
+        content_id("interaction", interaction.id.as_str())?,
+        encode(interaction)?,
+    )
+}
 pub(super) fn entry_content(entry: &TranscriptEntry) -> Result<NewContent, StoreError> {
     text(content_id("entry", entry.id.as_str())?, entry.text.clone())
 }
@@ -202,17 +214,10 @@ fn read(db: &Connection, id: ContentId) -> Result<String, StoreError> {
 }
 fn put(db: &Connection, payload: Payload) -> Result<(), StoreError> {
     match payload {
-        Payload::Notice(notice) => content::put_text(
-            db,
-            &text(content_id("notice", notice.id.as_str())?, notice.text)?,
-        ),
-        Payload::Interaction(interaction) => content::put_text(
-            db,
-            &text(
-                content_id("interaction", interaction.id.as_str())?,
-                encode(&interaction)?,
-            )?,
-        ),
+        Payload::Notice(notice) => content::put_text(db, &notice_content(&notice)?),
+        Payload::Interaction(interaction) => {
+            content::put_text(db, &interaction_content(&interaction)?)
+        }
         Payload::Entry(entry) => {
             let image = entry
                 .image

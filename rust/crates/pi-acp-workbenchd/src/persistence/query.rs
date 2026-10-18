@@ -104,6 +104,9 @@ pub(super) fn apply_commit(
     if changed != 1 {
         return Err(StoreError::Conflict);
     }
+    for item in &commit.contents {
+        content::put_text(tx, item)?;
+    }
     let mut entries = Vec::with_capacity(commit.append.len());
     for (index, entry) in commit.append.iter().enumerate() {
         content::put_entry(tx, entry)?;
@@ -131,6 +134,17 @@ pub(super) fn apply_commit(
         tx.execute("INSERT INTO tools(session,turn,tool_id,header_json) VALUES (?1,?2,?3,?4) ON CONFLICT(session,turn,tool_id) DO UPDATE SET header_json=excluded.header_json", params![commit.next.id.as_str(), update.header.turn.as_str(), update.header.id.as_str(), encode(&update.header)?])?;
     }
     for delivery in &commit.deliveries {
+        if delivery.revision != commit.next.revision
+            || delivery.target
+                != (crate::domain::transition::DeliveryTarget::Session {
+                    session: commit.next.id.clone(),
+                    cwd: commit.next.cwd.clone(),
+                })
+        {
+            return Err(StoreError::Invalid(
+                "session delivery scope/revision mismatch",
+            ));
+        }
         put_delivery(tx, delivery)?;
     }
     let batch = CommitBatch {
