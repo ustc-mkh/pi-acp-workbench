@@ -258,6 +258,15 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 最新显式GNU产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-outbox-stage3.log`。未执行musl/offline SDK/最终scale或soak；未push、未发布。
 - **第3步facade已完成，但history仍是文件快照/ledger及project_outbox恢复路径，生产state/entries/delivery尚未同事务。** 下一步严格推进第4步，随后Telegram inbox/effect及SessionStore删除清单；T04不勾选、不完成面板任务、不进入T05。
 
+**阶段4a执行记录（history 单事务接入基础；实现提交 `b1da21f`；生产 history 尚未切换）：**
+
+- 扩展现有 SessionCommit 的 typed contents 写集，在同一事务更新state、写入notice/interaction不可变内容、entry及delivery，不新增表/backend/executor。事务内进一步校验session delivery的source session/cwd/revision必须等于本次next state；错误在事务内整体回滚。独立payload facade与事务路径复用同一notice/interaction编码，interaction写入前校验定义。
+- 新增纯typed `SessionView::from_state` 和 `ToolUpdate::from_call` 投影：hot JSON不包含transcript；tool text/diff/resource正文转换为kind+SHA256身份的不可变refs，完整保留display metadata、terminal/unsupported variant；metadata超预算明确拒绝。此处只是T04存储接入准备，actor仍持完整历史，**不算T05已实现或100k spy验收**。
+- 新增3项测试：大历史正文不进入hot view且完整hot字段逐字节一致/unsafe revision拒绝；长Unicode工具正文及所有variant/metadata/ref-kind隔离/超预算拒绝；notice+interaction+entry+delivery同事务，后段内容或scope/revision错误时state/archives/intent全部回滚，成功后真实close/join/reopen精确保留正文及所有row。
+- `npm run test:rewrite`全通过：check/audit/build/format/clippy、Rust workspace250项（daemon248+core2；offline SDK1项默认ignored）、TS187、runner41、IPC19、Telegram15、SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-history-atomic-foundation.log`、`.test-results/run-JvkPma/`；定向测试 `.test-results/t04/history-atomic-{archives-final,projection}.log`，首次漏import失败日志保留。
+- 最新显式GNU `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-history-atomic-foundation.log`。未执行musl/offline SDK/scale/soak，未push或发布。
+- **当前生产 HistoryStore 仍使用文件快照和delivery_events/project_outbox；第4步尚未完成。** 下一步接入SQL session commit/load/remove并迁移旧文件故障fixture，删除ledger和恢复扫描，然后继续Telegram inbox/effect及SessionStore删除清单。T04不完成，不进入T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
