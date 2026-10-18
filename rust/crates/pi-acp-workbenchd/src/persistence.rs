@@ -1,4 +1,6 @@
 pub const FORMAT_VERSION: u32 = 2;
+mod content;
+pub mod database;
 pub mod format;
 mod history;
 pub mod inbox;
@@ -8,6 +10,10 @@ pub mod journal;
 pub mod maintenance;
 pub mod outbox;
 pub mod payload;
+mod query;
+mod schema;
+#[cfg(test)]
+mod sqlite_tests;
 pub mod telegram_effect;
 pub use history::{HistorySnapshot, HistoryStore};
 

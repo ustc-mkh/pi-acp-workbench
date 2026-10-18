@@ -8,7 +8,11 @@ use std::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, OpenOptionsExt},
     },
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,16 +22,28 @@ struct FormatMarker {
     storage_kind: String,
 }
 
+#[derive(Clone)]
 pub struct StorageLease {
-    _file: File,
+    file: Arc<LeaseFile>,
+    root: PathBuf,
 }
-impl Drop for StorageLease {
+struct LeaseFile {
+    file: File,
+    database_open: AtomicBool,
+}
+pub(crate) struct DatabaseLease(StorageLease);
+impl Drop for DatabaseLease {
+    fn drop(&mut self) {
+        self.0.file.database_open.store(false, Ordering::Release);
+    }
+}
+impl Drop for LeaseFile {
     fn drop(&mut self) {
         // Explicit unlock also releases the lease if a concurrently spawned child
         // briefly inherited the open description between fork and exec.
         // SAFETY: the file descriptor remains valid throughout this destructor.
         unsafe {
-            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -40,21 +56,18 @@ impl StorageLease {
     pub fn acquire_existing(root: &Path) -> io::Result<Self> {
         Self::open(root, false)
     }
-    fn open(root: &Path, initialize: bool) -> io::Result<Self> {
+    /// Acquire only the existing stable host lock. Database initialization owns
+    /// the format3 completion marker, so a failed open never marks success.
+    pub fn lock(root: &Path) -> io::Result<Self> {
         if !root.is_absolute() {
             return Err(io::Error::other("storage root must be absolute"));
         }
-        if initialize {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(root)?;
-        }
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root)?;
         if !fs::symlink_metadata(root)?.is_dir() {
             return Err(io::Error::other("storage root must be a real directory"));
-        }
-        if !initialize {
-            validate_marker(root)?;
         }
         let lock = OpenOptions::new()
             .read(true)
@@ -67,15 +80,42 @@ impl StorageLease {
         if !lock.metadata()?.is_file() {
             return Err(io::Error::other("storage lease must be a regular file"));
         }
-        // SAFETY: flock borrows a valid open file descriptor. The owned file keeps
-        // the exclusive lease alive and the kernel releases it after process loss.
+        // SAFETY: the descriptor remains owned by LeaseFile until final drop.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "storage already owned by another workbench host",
             ));
         }
-        let lease = Self { _file: lock };
+        Ok(Self {
+            file: Arc::new(LeaseFile {
+                file: lock,
+                database_open: AtomicBool::new(false),
+            }),
+            root: fs::canonicalize(root)?,
+        })
+    }
+    pub(crate) fn claim_database(&self) -> io::Result<DatabaseLease> {
+        self.file
+            .database_open
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| io::Error::other("database executor already open under this lease"))?;
+        Ok(DatabaseLease(self.clone()))
+    }
+    pub(crate) fn owns(&self, root: &Path) -> bool {
+        fs::canonicalize(root).is_ok_and(|path| path == self.root)
+            && self.file.file.metadata().is_ok_and(|held| {
+                fs::symlink_metadata(root.join(".workbench.lock")).is_ok_and(|current| {
+                    use std::os::unix::fs::MetadataExt;
+                    held.dev() == current.dev() && held.ino() == current.ino()
+                })
+            })
+    }
+    fn open(root: &Path, initialize: bool) -> io::Result<Self> {
+        if !initialize {
+            validate_marker(root)?;
+        }
+        let lease = Self::lock(root)?;
         let marker = root.join("storage-format.json");
         match validate_marker(root) {
             Ok(()) => {}
@@ -130,6 +170,99 @@ pub(crate) fn validate_marker(root: &Path) -> io::Result<()> {
         return Err(io::Error::other("unsupported storage format"));
     }
     Ok(())
+}
+
+/// Only used by the staged v3 Database until T04 replaces the old host facade.
+/// Returns true for a new/interrupted initialization and false for a valid root.
+pub(crate) fn prepare_database(root: &Path) -> io::Result<bool> {
+    let marker = root.join("storage-format.json");
+    if marker.try_exists()? {
+        read_database_marker(&marker)?;
+        if !root.join("workbench.sqlite3").try_exists()? {
+            return Err(io::Error::other("format3 database is missing"));
+        }
+        return Ok(false);
+    }
+    let pending = root.join("storage-format.pending");
+    let interrupted = pending.try_exists()?;
+    if interrupted {
+        read_database_marker(&pending)?;
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let allowed = name == ".workbench.lock"
+            || interrupted
+                && matches!(
+                    name.to_str(),
+                    Some(
+                        "storage-format.pending"
+                            | "workbench.sqlite3"
+                            | "workbench.sqlite3-wal"
+                            | "workbench.sqlite3-shm"
+                            | "workbench.sqlite3-journal"
+                    )
+                );
+        if !allowed {
+            return Err(io::Error::other(
+                "unversioned storage directory is not empty; refusing database initialization",
+            ));
+        }
+        if !entry.file_type()?.is_file() {
+            return Err(io::Error::other(
+                "database initialization contains non-regular files",
+            ));
+        }
+    }
+    if !interrupted {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(pending)?;
+        file.write_all(
+            &serde_json::to_vec(&FormatMarker {
+                format_version: crate::domain::query::STORAGE_VERSION,
+                storage_kind: "pi-acp-workbench".into(),
+            })
+            .map_err(io::Error::other)?,
+        )?;
+        file.sync_all()?;
+        File::open(root)?.sync_all()?;
+    }
+    Ok(true)
+}
+fn read_database_marker(path: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::other("database marker must be a regular file"));
+    }
+    let mut bytes = vec![];
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?
+        .take(1025)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 {
+        return Err(io::Error::other("database marker exceeds size limit"));
+    }
+    let marker: FormatMarker = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if marker.format_version != crate::domain::query::STORAGE_VERSION
+        || marker.storage_kind != "pi-acp-workbench"
+    {
+        return Err(io::Error::other(
+            "unsupported storage format; format2 must be exported offline, not opened",
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn complete_database(root: &Path) -> io::Result<()> {
+    fs::rename(
+        root.join("storage-format.pending"),
+        root.join("storage-format.json"),
+    )?;
+    File::open(root)?.sync_all()
 }
 
 #[cfg(test)]
