@@ -239,6 +239,14 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 本次仅改测试及 cfg(test) 支撑，未重跑完整 rewrite/TS/生产 artifact/musl/offline SDK，不能将阶段3a结果算作本次测试提交后的执行证据。未发布、未 push。
 - **第3步仍未完成**：生产 OutboxStore 仍为文件实现；下一步必须切换 facade/统一 DeliveryIntent 调用，并迁移 binary outbox 文件断言与 Telegram ack pause fixture。后续 history 同事务、Telegram 和 SessionStore 工作仍按原顺序，T04 不完成、不进入 T05。
 
+**阶段3c执行记录（统一 intent 的 revision 身份；实现提交 `76deffa`；生产 facade 尚未切换）：**
+
+- 对接前检查确认旧 DeliveryEvent 的 revision 属于不可变回放身份，不能在 SQL 投影中丢失。为唯一的 typed DeliveryIntent 增加 SafeInteger revision 与 deliveries.revision 列，复用同一 put_delivery 事务；重复 id 的 target/payload 即便相同，revision 改变也必须 Conflict。order_seq 仍是跨 source admission 排序，不用 revision 代替它。读取/ack/fail/replay 均读校验后的 revision，无旧 event JSON 双reader或兼容 backend。
+- 更新 SQL fixture 验证实际重开后 revision 精确保留、ack 后不同 revision 重放仍拒绝；新增缺 revision 的内部旧 v3 schema 明确拒绝且源 DB bytes 不变。与前述内部 schema 更新相同，不自动迁移，未发布中间版本。
+- `npm run test:rewrite` 全部通过：check/audit/build/format/clippy、Rust workspace245项（daemon243+core2；既有 offline SDK1项默认 ignored）、TS187、runner40、IPC19、Telegram15、真实SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。SQL delivery共10项纳入 workspace。日志 `.test-results/t04/rewrite-delivery-revision-stage3.log`、`.test-results/run-PTGMtZ/`。
+- 最新GNU产物显式 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-delivery-revision-stage3.log`。未执行 musl/offline SDK/最终scale/soak；未发布、未 push。
+- **生产 OutboxStore 文件 facade 未切换，T04 第3步仍未完成。** 下一步将已有事件构造改为单一 intent 布局后接入 facade，并保留当前binding topic屏障及ack pause集成断言；不以旧/新JSON双reader或独立 outbox 表过渡。随后按原顺序推进 history 单事务、Telegram inbox/effect 和 SessionStore；T04 不完成、不进入 T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
