@@ -247,6 +247,17 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - 最新GNU产物显式 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-delivery-revision-stage3.log`。未执行 musl/offline SDK/最终scale/soak；未发布、未 push。
 - **生产 OutboxStore 文件 facade 未切换，T04 第3步仍未完成。** 下一步将已有事件构造改为单一 intent 布局后接入 facade，并保留当前binding topic屏障及ack pause集成断言；不以旧/新JSON双reader或独立 outbox 表过渡。随后按原顺序推进 history 单事务、Telegram inbox/effect 和 SessionStore；T04 不完成、不进入 T05。
 
+**阶段3d执行记录（生产 OutboxStore facade 切换；实现提交 `3e17d94`；T04 尚未完成）：**
+
+- OutboxStore 改为共享 Database handle 加有界读取窗口，删除独立 outbox root/path/文件扫描/Mutex；enqueue、pending、fail、ack 均使用原唯一 executor/256项队列。1024是读取/调度窗口，不是持久化 admission 上限；ack tombstone/order高水位、immutable revision/target/payload 冲突及 attempt/retry 语义保留。没有兼容 reader、独立 outbox 表或第二连接。
+- 生产 DeliveryEvent 仅为唯一 domain DeliveryIntent 的类型别名。turn完成使用 typed immutable Entries refs，Notice 使用 ContentRef；Telegram target 冻结 bot/chat/thread/cwd，读取前校验 bot 和 workspace。旧 SessionCompleted/NoticeId 布局不增加 reader。Turn 范围 variant 仍未连接 renderer，当前生产只生成 Entries；按 T09 完成分页 render，此中间版本禁止发布。
+- 新增 typed topic-head 查询：在当前 binding 快照下合并 Session 与直接 Telegram target，先保留每topic最早Pending（含deferred屏障），再应用有界窗口。没有用 persisted-target heads 冒充动态topic heads；现有CAPACITY8、active lane及binding变化后的预留/join算法保留。SQL回归覆盖1100条同topic积压、Session/direct汇合、deferred不越序、独立topic进展、binding快照变化和重复binding拒绝。
+- 原 Telegram supervisor/ack取消集成测试的 pause fixture 现在暂停原数据库 executor；保留 observer取消、supervisor abort、drain/join前lease不可释放及最终ack断言。Outbox测试改为真实SQLite重开、坏typed布局/身份/状态、SQL ABORT、seq耗尽和无目录验证。新增冻结bot/workspace在缺归档读取前校验测试；未删除原安全断言。
+- binary契约不再扫描outbox目录：独立只读SQL helper检查Pending/RateLimited、Notice完整content ref及取消HTTP后保留的Entries图像引用；停止后明确断言无outbox/payloads目录。新增helper自测校验exact text/ref、scope/revision/order/retry、绑定参数及源DB bytes不变。尚存旧维护fixture的文件保留断言待T10整体切换，不将它算作SQL维护验收。
+- 最新 `npm run test:rewrite` 全通过：check/audit/build/format/clippy、Rust workspace247项（daemon245+core2；offline SDK1项仍默认ignored）、TS187、runner41、IPC19、Telegram15、真实SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-outbox-integration-stage3-final.log`、`.test-results/run-OHef4l/`。此前format/type-complexity/新增测试漏import的失败日志保留，已修复而未放宽门禁。
+- 最新显式GNU产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-outbox-stage3.log`。未执行musl/offline SDK/最终scale或soak；未push、未发布。
+- **第3步facade已完成，但history仍是文件快照/ledger及project_outbox恢复路径，生产state/entries/delivery尚未同事务。** 下一步严格推进第4步，随后Telegram inbox/effect及SessionStore删除清单；T04不勾选、不完成面板任务、不进入T05。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
