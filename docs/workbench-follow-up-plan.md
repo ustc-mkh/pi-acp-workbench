@@ -184,6 +184,19 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 
 ## T04 [ ] 迁移所有持久化业务，删除多文件协议
 
+**阶段1执行记录（operation journal；实现提交 `48c0724`；本项仍未完成）：**
+
+- 已通过正式任务工具同步 T01–T03 完成状态并开始 T04；此前工具参数互斥故障已不再阻塞，没有手工改写 goal 账本。
+- 生产 `WorkbenchApp` 在同一 host lease 下启动唯一 `Database`；`JournalStore` 仅持有该 handle，移除 journal/results 文件、目录和 facade Mutex。begin/lookup/finish/expire 通过 typed 请求进入原256项队列；SQLite 准入/终态/expire 事务保留 fingerprint 冲突、Started 不重跑和显式 tombstone 语义。回执存原始 typed result BLOB 及 SHA256，读取验证 checksum/outcome，不依赖当前 session 重构。正常关机在已接受工作结束后 drain/close/join DB，再释放 lease。
+- host 改由数据库成功初始化后完成 format3 marker，拒绝旧 format2；同步 host 构造只等待专用数据库线程的启动结果，没有在调用线程打开第二个 SQLite 连接。其他 facade 尚未迁移，**这是禁止发布的 T04 内部中间版本，不是 SQLite 迁移完成的证明**。
+- journal 原4项安全测试迁移并扩为7项：真实关闭/重开后的 Started、成功/失败回执与 tombstone、16个独立 facade 并发准入、坏 hash/身份/outcome/缺 BLOB 拒绝、terminal UPDATE 后真实 SQL ABORT 整体回滚、丢弃 finish observer 后 shutdown 仍提交、只读 lookup 不创建 operation。fork cancel 的旧文件故障改为仅测试可达的数据库线程 SQL trigger，保留“准入失败绝不能触碰远端 fork”断言。
+- Rust/TS/IPC/删除源后投递测试不再以“不存在 journal 目录”作空洞安全证据，改为比较完整 operation rows（含原 BLOB/checksum）。新增只读 `scripts/lib/workbench-sqlite-fixture.mjs` 及2项测试，仅供隔离契约 fixture 独立 SQL 断言，不被生产引用；Node 22.23.1 验证。真实 SIGKILL 的 receipt 原始 SQL row 在 restart/load/replay 后保持不变。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd persistence::journal::tests`：7项通过。`npm run test:runner`：39项通过；`npm run clippy`：通过。日志 `.test-results/t04/{journal,runner-stage1,clippy-stage1}.log`。
+- 首次 workspace 回归暴露1处旧 journal 文件故障 fixture；首次完整 rewrite 又暴露 TS 旧目录断言及 `/proc/PID/stat` read 的真实 ESRCH 退出竞态。已迁移 SQL 断言，并仅把 ESRCH/ENOENT 视为 PID 已退出，其他错误仍抛出；没有删测试、提高超时或隐藏失败。失败日志保留于 `.test-results/t04/{rust-stage1,rewrite-stage1}.log` 和 `.test-results/run-h6j6O6/`。
+- 最终 `npm run test:rewrite`：通过，包含 check/audit/build/format/clippy、Rust workspace227项通过（daemon225+core2，既有 offline SDK 仍1项默认 ignored）、TS187、runner39、IPC19、Telegram15、真实SIGKILL3、Chromium9、GNU生产构建与artifact smoke。日志 `.test-results/t04/rewrite-stage1-final.log`、`.test-results/run-CaMezy/`。
+- 显式 GNU 产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19项通过；`node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：15项通过。日志 `.test-results/t04/production-{ipc,telegram}-stage1.log`。未发布、未 push；未将 GNU 结果算作 musl 验收。
+- 下一步严格继续 T04 第2步 PayloadStore，再按顺序推进 Outbox/history 原子事务、Telegram/inbox/effect、SessionStore 与删除清单。当前 history/payload/outbox/Telegram 仍有旧业务文件协议，state/entries/delivery 尚未在生产同事务，因此 **T04 不勾选、不完成面板任务，不进入 T05**。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
