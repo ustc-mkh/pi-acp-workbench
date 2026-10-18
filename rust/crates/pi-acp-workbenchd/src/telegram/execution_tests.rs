@@ -176,7 +176,7 @@ async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_sh
         .unwrap()
         .unwrap();
     assert!(
-        StorageLease::acquire(&root).is_err(),
+        StorageLease::lock(&root).is_err(),
         "transport drain must not release the host lease"
     );
     let state = context.store.snapshot().await.unwrap();

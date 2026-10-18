@@ -28,6 +28,8 @@ const absent = [
   'scripts/browser-smoke.mjs',
   'scripts/preview-components.mjs',
   'scripts/export-fixtures.mjs',
+  'rust/crates/pi-acp-workbenchd/src/persistence/history.rs',
+  'rust/crates/pi-acp-workbenchd/src/persistence/io.rs',
   ...[
     'client-settings',
     'context',
@@ -110,6 +112,12 @@ async function business(directory) {
     if (entry.isDirectory()) await business(path);
     else if (entry.name.endsWith('.rs') && !/(?:^|_)tests\.rs$/.test(entry.name)) {
       const source = await text(path);
+      assert(
+        !/\b(?:HistoryStore|HistorySnapshot|delivery_events|project_outbox|commit_state|save_image)\b/.test(
+          source,
+        ),
+        `retired file-storage/commit path in ${path}`,
+      );
       if (jsonBoundaries.has(path)) continue;
       assert(
         !/\bValue\b|serde_json::(?:json!|from_value|to_value)/.test(source),
@@ -119,6 +127,19 @@ async function business(directory) {
   }
 }
 await business(sourceRoot);
+for (const [file, name] of [
+  ['session', 'SessionStore'],
+  ['journal', 'JournalStore'],
+  ['payload', 'PayloadStore'],
+  ['outbox', 'OutboxStore'],
+  ['inbox', 'TelegramStore'],
+  ['telegram_effect', 'TelegramEffects'],
+]) {
+  const source = await text(`${sourceRoot}/persistence/${file}.rs`);
+  const fields = source.match(new RegExp(`struct ${name} \\{([^}]+)\\}`))?.[1];
+  assert(fields?.includes('database: Database'), `${name} must share Database`);
+  assert(!/\b(?:root|path|gate)\s*:|Mutex/.test(fields), `file-storage facade in ${name}`);
+}
 
 // Inspect the actual esbuild import graphs, without replacing build outputs.
 const allowed = {

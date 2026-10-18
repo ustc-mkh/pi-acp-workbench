@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { createConnection } from 'node:net';
+import { assertStorageLayout } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { dir: { type: 'string' }, report: { type: 'string' } } });
 assert(values.dir, '--dir is required');
@@ -211,6 +212,7 @@ try {
   client.close();
   await stop(service);
   const destination = join(root, 'export');
+  assertStorageLayout(data);
   const exported = execute('pi-acp-workbenchd', [
     'storage',
     'export',
@@ -224,6 +226,7 @@ try {
   const exportedManifest = JSON.parse(
     await readFile(join(destination, 'EXPORT-MANIFEST.json'), 'utf8'),
   );
+  assert.equal(exportedManifest.format_version, 3);
   assert(exportedManifest.files.length > 0);
   assert(!exportedManifest.files.some((file) => file.path === '.workbench.lock'));
   for (const file of exportedManifest.files) {

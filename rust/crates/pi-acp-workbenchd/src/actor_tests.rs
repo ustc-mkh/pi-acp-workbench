@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         domain::{DomainCommand, DomainEvent, Harness},
-        persistence::HistoryStore,
+        persistence::SessionStore,
         Runtime,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +34,7 @@ mod tests {
     async fn cancelled_worker_epoch_cannot_publish_a_late_crash_before_or_after_replacement() {
         use crate::domain::{command::AgentEvent, Prompt, SessionStatus};
         let root = temp("cancel-epoch");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 8);
         let id = create(&runtime).await;
         runtime
             .registry
@@ -116,13 +116,16 @@ mod tests {
     #[tokio::test]
     async fn failed_commit_does_not_publish_or_replace_owned_state() {
         let root = temp("failed-commit");
-        let store = HistoryStore::fixture(&root);
+        let store = SessionStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
-        // Replace the storage directory temporarily to force the commit to fail.
-        let backup = root.with_extension("backup");
-        tokio::fs::rename(&root, &backup).await.unwrap();
-        tokio::fs::write(&root, b"not a directory").await.unwrap();
+        // SQLite storage failure must be injected at the executor boundary; renaming the DB root
+        // after open correctly does not disconnect its file descriptor.
+        store
+            .database()
+            .set_session_commit_failure(id.clone(), true)
+            .await
+            .unwrap();
         let result = runtime
             .registry
             .command(DomainCommand::Prompt {
@@ -141,8 +144,11 @@ mod tests {
             .unwrap();
         assert!(matches!(&events[0], DomainEvent::SessionLoaded(snapshot)
             if snapshot.revision == 0 && matches!(snapshot.status, crate::domain::SessionStatus::Idle)));
-        tokio::fs::remove_file(&root).await.unwrap();
-        tokio::fs::rename(&backup, &root).await.unwrap();
+        store
+            .database()
+            .set_session_commit_failure(id.clone(), false)
+            .await
+            .unwrap();
         assert!(store
             .load(id.as_str())
             .await
@@ -167,7 +173,7 @@ mod tests {
     async fn durable_cancelling_state_fences_notifications_and_worker_reattachment_until_terminal_commit(
     ) {
         let root = temp("cancelling-fence");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 8);
         let id = create(&runtime).await;
         let started = runtime
             .registry
@@ -237,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn load_does_not_replace_live_owner_and_restart_interrupts_turn() {
         let root = temp("load-owner");
-        let store = HistoryStore::fixture(&root);
+        let store = SessionStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -255,14 +261,12 @@ mod tests {
             .unwrap();
         assert!(matches!(&events[0], DomainEvent::SessionLoaded(snapshot)
             if matches!(snapshot.status, crate::domain::SessionStatus::Running)));
-        let snapshot_path = root.join(format!("{id}.json"));
-        let crash_fixture = tokio::fs::read(&snapshot_path).await.unwrap();
+        let crash_fixture = store.load(id.as_str()).await.unwrap().unwrap();
         runtime.registry.shutdown().await;
-        // Model abrupt process loss using the last committed in-flight snapshot,
-        // independently of the normal shutdown cancellation path.
-        tokio::fs::write(&snapshot_path, crash_fixture)
-            .await
-            .unwrap();
+        // Preserve the committed running hot fields without rolling back SQL history.
+        let mut crash_fixture = crash_fixture;
+        crash_fixture.revision = store.load(id.as_str()).await.unwrap().unwrap().revision + 1;
+        store.save(&crash_fixture).await.unwrap();
         let restarted = Runtime::start(store.clone(), 8);
         let events = restarted
             .registry
@@ -285,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn removal_is_durable_and_shutdown_rejects_late_commands() {
         let root = temp("remove");
-        let store = HistoryStore::fixture(&root);
+        let store = SessionStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -319,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn list_and_inspect_expose_committed_domain_projection_without_workers() {
         let root = temp("list-state");
-        let store = HistoryStore::fixture(&root);
+        let store = SessionStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -339,7 +343,7 @@ mod tests {
             if snapshot.transcript.entries.len() == 1 && snapshot.transcript.entries[0].text == "你好"
                 && snapshot.revision == 1 && snapshot.active_turn.is_some()));
         runtime.registry.shutdown().await;
-        let cold = Runtime::start(store, 8);
+        let cold = Runtime::start(store.clone(), 8);
         let events = cold
             .registry
             .command(DomainCommand::ListSessions)
@@ -347,8 +351,7 @@ mod tests {
             .unwrap();
         assert!(matches!(&events[0], DomainEvent::SessionsListed(sessions)
             if sessions.len() == 1 && sessions[0].id == id && sessions[0].transcript.entries.len() == 1));
-        let snapshot_path = root.join(format!("{id}.json"));
-        let before = tokio::fs::read(&snapshot_path).await.unwrap();
+        let before = serde_json::to_vec(&store.load(id.as_str()).await.unwrap()).unwrap();
         let inspected = cold
             .registry
             .command(DomainCommand::Inspect(id.clone()))
@@ -357,7 +360,10 @@ mod tests {
         assert!(
             matches!(&inspected[0], DomainEvent::SessionLoaded(snapshot) if snapshot.id == id && snapshot.transcript.entries.len() == 1)
         );
-        assert_eq!(tokio::fs::read(snapshot_path).await.unwrap(), before);
+        assert_eq!(
+            serde_json::to_vec(&store.load(id.as_str()).await.unwrap()).unwrap(),
+            before
+        );
         // Neither listing nor cold inspection starts a mutable session owner.
         assert!(matches!(
             cold.registry
@@ -375,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn independent_sessions_accept_one_hundred_commands() {
         let root = temp("concurrent-sessions");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 128);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 128);
         let mut ids = vec![];
         for _ in 0..16 {
             ids.push(create(&runtime).await);
@@ -417,7 +423,7 @@ mod tests {
     async fn replacement_worker_fences_late_events_and_obsolete_attachments() {
         use crate::domain::command::AgentEvent;
         let root = temp("epoch-fence");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 8);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 8);
         let id = create(&runtime).await;
         let started = runtime
             .registry
@@ -491,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn checked_shutdown_commits_cancellation_and_reports_failed_final_write() {
         let root = temp("shutdown-commit");
-        let store = HistoryStore::fixture(&root);
+        let store = SessionStore::fixture(&root);
         let runtime = Runtime::start(store.clone(), 8);
         let id = create(&runtime).await;
         runtime
@@ -518,26 +524,28 @@ mod tests {
         runtime
             .registry
             .command(DomainCommand::Prompt {
-                session: id,
+                session: id.clone(),
                 prompt: crate::domain::Prompt::new("second").unwrap(),
             })
             .await
             .unwrap();
-        let backup = root.with_extension("backup");
-        tokio::fs::rename(&root, &backup).await.unwrap();
-        tokio::fs::write(&root, b"not a directory").await.unwrap();
+        store
+            .database()
+            .set_session_commit_failure(id, true)
+            .await
+            .unwrap();
         assert!(matches!(
             runtime.registry.shutdown_checked().await,
             Err(crate::domain::error::DomainError::Persistence(_))
         ));
-        tokio::fs::remove_file(&root).await.unwrap();
-        tokio::fs::remove_dir_all(backup).await.unwrap();
+        store.payloads.shutdown().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
     async fn registry_owns_session_and_routes_commands() {
         let root = temp("route");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 4);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 4);
         let events = runtime
             .registry
             .command(DomainCommand::CreateSession {
@@ -568,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn agent_events_update_owned_state() {
         let root = temp("agent");
-        let runtime = Runtime::start(HistoryStore::fixture(&root), 4);
+        let runtime = Runtime::start(SessionStore::fixture(&root), 4);
         let events = runtime
             .registry
             .command(DomainCommand::CreateSession {

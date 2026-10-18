@@ -75,6 +75,13 @@ fn incoming(id: u64, content: IncomingContent) -> IncomingUpdate {
         content,
     }
 }
+async fn fixture(root: &std::path::Path, capacity: usize) -> TelegramStore {
+    let lease = crate::persistence::format::StorageLease::lock(root).unwrap();
+    let database = crate::persistence::database::Database::open_sync(root, &lease).unwrap();
+    let store = TelegramStore::new(database, capacity);
+    store.claim_bot(UserId::new(1).unwrap()).await.unwrap();
+    store
+}
 fn root() -> PathBuf {
     std::env::temp_dir().join(format!("workbench-inbox-{}", uuid::Uuid::new_v4()))
 }
@@ -90,7 +97,7 @@ async fn canonical_workspace_scope_rejects_symlink_escapes_and_existing_outside_
         .unwrap();
     let mut policy = policy();
     policy.cwd = WorkspacePath::new(allowed.to_str().unwrap()).unwrap();
-    let store = TelegramStore::new(root.join("state.json"), 8);
+    let store = fixture(&root.join("data"), 8).await;
     let mut snapshot = snapshot();
     snapshot.cwd = WorkspacePath::new(outside.to_str().unwrap()).unwrap();
     store.bind(topic(1), snapshot.id.clone()).await.unwrap();
@@ -228,7 +235,7 @@ fn telegram_identifiers_validate_serde_and_canonical_topic_map_keys() {
 #[tokio::test]
 async fn admission_freezes_answer_binding_across_restart_and_never_reinterprets_as_prompt() {
     let root = root();
-    let store = TelegramStore::new(root.join("state.json"), 8);
+    let store = fixture(&root, 8).await;
     let mut snapshot = snapshot();
     let requested = interaction();
     let original = requested.id.clone();
@@ -253,7 +260,8 @@ async fn admission_freezes_answer_binding_across_restart_and_never_reinterprets_
     snapshot
         .pending_interactions
         .insert(replacement.id.clone(), replacement);
-    let restarted = TelegramStore::new(root.join("state.json"), 8);
+    store.database().shutdown().await.unwrap();
+    let restarted = fixture(&root, 8).await;
     let pending = restarted.pending(8).await.unwrap();
     assert!(
         matches!(&pending[0].command.action, TelegramAction::Answer { answer, .. } if answer.interaction == original)
@@ -275,17 +283,15 @@ async fn admission_freezes_answer_binding_across_restart_and_never_reinterprets_
         .complete(UpdateId::new(1).unwrap(), InboxOutcome::Applied)
         .await
         .unwrap();
-    assert!(TelegramStore::new(root.join("state.json"), 8)
-        .pending(8)
-        .await
-        .unwrap()
-        .is_empty());
+    restarted.database().shutdown().await.unwrap();
+    let reopened = fixture(&root, 8).await;
+    assert!(reopened.pending(8).await.unwrap().is_empty());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
 async fn authorization_drops_unauthorized_users_chats_and_bots_without_storing_text() {
     let root = root();
-    let store = TelegramStore::new(root.join("state.json"), 8);
+    let store = fixture(&root, 8).await;
     let mut user = incoming(1, IncomingContent::Text("private untrusted text".into()));
     user.sender = UserId::new(6).unwrap();
     let mut chat = incoming(2, IncomingContent::Text("private untrusted text".into()));
@@ -303,17 +309,29 @@ async fn authorization_drops_unauthorized_users_chats_and_bots_without_storing_t
     let state = store.snapshot().await.unwrap();
     assert_eq!(state.offset, 4);
     assert!(state.inbox.is_empty());
-    assert!(
-        !String::from_utf8(tokio::fs::read(root.join("state.json")).await.unwrap())
-            .unwrap()
-            .contains("private untrusted text")
-    );
+    assert!(!serde_json::to_string(&state)
+        .unwrap()
+        .contains("private untrusted text"));
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let records: i64 = sql
+        .query_row("SELECT count(*) FROM telegram_inbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(records, 0);
+    sql.close().unwrap();
+    for name in ["workbench.sqlite3", "workbench.sqlite3-wal"] {
+        if let Ok(bytes) = tokio::fs::read(root.join(name)).await {
+            assert!(!bytes
+                .windows(b"private untrusted text".len())
+                .any(|part| part == b"private untrusted text"));
+        }
+    }
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
 async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
     let root = root();
-    let store = TelegramStore::new(root.join("state.json"), 16);
+    let store = fixture(&root, 16).await;
     let mut snapshot = snapshot();
     let interaction = interaction();
     snapshot
@@ -374,7 +392,8 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
     )
     .await
     .unwrap();
-    let restarted = TelegramStore::new(root.join("state.json"), 16);
+    store.database().shutdown().await.unwrap();
+    let restarted = fixture(&root, 16).await;
     assert_eq!(
         restarted.snapshot().await.unwrap().callbacks[&key].used_by,
         Some(UpdateId::new(3).unwrap())
@@ -417,7 +436,8 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
         Some(UpdateId::new(3).unwrap())
     );
     assert_eq!(restarted.compact(100).await.unwrap(), (0, 1));
-    let compacted = TelegramStore::new(root.join("state.json"), 16);
+    restarted.database().shutdown().await.unwrap();
+    let compacted = fixture(&root, 16).await;
     assert_eq!(compacted.snapshot().await.unwrap().offset, 5);
     assert_eq!(compacted.pending(16).await.unwrap().len(), 3);
     assert_eq!(
@@ -438,7 +458,7 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
 #[tokio::test]
 async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback() {
     let root = root();
-    let store = TelegramStore::new(root.join("state.json"), 1);
+    let store = fixture(&root, 1).await;
     let snapshot = snapshot();
     store.bind(topic(1), snapshot.id.clone()).await.unwrap();
     admit_update(
@@ -464,9 +484,11 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
         .complete(UpdateId::new(1).unwrap(), InboxOutcome::Applied)
         .await
         .unwrap();
-    let backup = root.with_extension("backup");
-    tokio::fs::rename(&root, &backup).await.unwrap();
-    tokio::fs::write(&root, b"not a directory").await.unwrap();
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_inbox BEFORE INSERT ON telegram_inbox BEGIN SELECT RAISE(ABORT,'test inbox failure'); END").unwrap();
+    sql.close().unwrap();
+    let store = fixture(&root, 1).await;
     assert!(admit_update(
         &store,
         incoming(2, IncomingContent::Text("second".into())),
@@ -476,22 +498,24 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
     )
     .await
     .is_err());
-    tokio::fs::remove_file(&root).await.unwrap();
-    tokio::fs::rename(&backup, &root).await.unwrap();
     assert_eq!(store.snapshot().await.unwrap().offset, 2);
     assert!(store.pending(8).await.unwrap().is_empty());
-    let committed = tokio::fs::read(root.join("state.json")).await.unwrap();
-    tokio::fs::rename(&root, &backup).await.unwrap();
-    tokio::fs::write(&root, b"blocked GC storage")
-        .await
-        .unwrap();
+    let committed = serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap();
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute_batch("DROP TRIGGER reject_inbox; CREATE TRIGGER reject_compact BEFORE DELETE ON telegram_inbox BEGIN SELECT RAISE(ABORT,'test compact failure'); END").unwrap();
+    sql.close().unwrap();
+    let store = fixture(&root, 1).await;
     assert!(store.compact(100).await.is_err());
-    tokio::fs::remove_file(&root).await.unwrap();
-    tokio::fs::rename(&backup, &root).await.unwrap();
     assert_eq!(
-        tokio::fs::read(root.join("state.json")).await.unwrap(),
+        serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap(),
         committed
     );
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute_batch("DROP TRIGGER reject_compact").unwrap();
+    sql.close().unwrap();
+    let store = fixture(&root, 1).await;
     assert_eq!(store.compact(100).await.unwrap(), (1, 0));
     assert_eq!(store.snapshot().await.unwrap().offset, 2);
     assert_eq!(store.compact(100).await.unwrap(), (0, 0));
@@ -500,12 +524,17 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
 #[tokio::test]
 async fn bot_identity_and_corrupt_state_fail_closed() {
     let root = root();
-    let store = TelegramStore::new(root.join("state.json"), 8);
+    let store = fixture(&root, 8).await;
     store.claim_bot(UserId::new(1).unwrap()).await.unwrap();
     assert!(store.claim_bot(UserId::new(2).unwrap()).await.is_err());
-    tokio::fs::write(root.join("state.json"), b"{truncated")
-        .await
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute("UPDATE telegram_meta SET owner_json='{}'", [])
         .unwrap();
+    sql.close().unwrap();
+    let lease = crate::persistence::format::StorageLease::lock(&root).unwrap();
+    let database = crate::persistence::database::Database::open_sync(&root, &lease).unwrap();
+    let store = TelegramStore::new(database, 8);
     assert!(store.pending(8).await.is_err());
     assert!(admit_update(
         &store,

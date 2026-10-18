@@ -13,7 +13,14 @@ use crate::{
 };
 fn root() -> PathBuf {
     let root = std::env::temp_dir().join(format!("workbench-maintenance-{}", uuid::Uuid::new_v4()));
-    drop(StorageLease::acquire(&root).unwrap());
+    let lease = StorageLease::lock(&root).unwrap();
+    // Explicit marker-only fixture for reset, never a production initializer.
+    fs::write(
+        root.join("storage-format.json"),
+        br#"{"format_version":3,"storage_kind":"pi-acp-workbench"}"#,
+    )
+    .unwrap();
+    drop(lease);
     root
 }
 fn args(command: &str, root: &Path) -> Vec<String> {
@@ -26,8 +33,14 @@ fn args(command: &str, root: &Path) -> Vec<String> {
 }
 #[tokio::test]
 async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() {
-    let root = root();
-    let store = TelegramStore::new(root.join("telegram/state.json"), 16);
+    let root = std::env::temp_dir().join(format!(
+        "workbench-maintenance-sql-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let lease = StorageLease::lock(&root).unwrap();
+    let database = Database::open(root.clone(), &lease).await.unwrap();
+    let store = TelegramStore::new(database.clone(), 16);
+    store.claim_bot(UserId::new(1).unwrap()).await.unwrap();
     let topic = TopicKey {
         chat: ChatId::new(-100).unwrap(),
         thread: None,
@@ -51,7 +64,11 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
                     topic: topic.clone(),
                     session: session.clone(),
                     answer: answer.clone(),
-                    expires_at: if i == 3 { u64::MAX } else { 0 },
+                    expires_at: if i == 3 {
+                        crate::domain::query::MAX_SAFE_INTEGER
+                    } else {
+                        0
+                    },
                     used_by: None,
                 },
             )
@@ -82,12 +99,18 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
             store.complete(id, InboxOutcome::Applied).await.unwrap();
         }
     }
-    let lease = StorageLease::acquire_existing(&root).unwrap();
-    let before = fs::read(root.join("telegram/state.json")).unwrap();
+    let before = serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap();
     assert!(run(&args("gc", &root)).await.is_err());
-    assert_eq!(fs::read(root.join("telegram/state.json")).unwrap(), before);
+    assert_eq!(
+        serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap(),
+        before
+    );
+    database.shutdown().await.unwrap();
     drop(lease);
     run(&args("gc", &root)).await.unwrap();
+    let lease = StorageLease::acquire_existing(&root).unwrap();
+    let database = Database::open(root.clone(), &lease).await.unwrap();
+    let store = TelegramStore::new(database.clone(), 16);
     let state = store.snapshot().await.unwrap();
     assert_eq!(state.offset, 5);
     assert_eq!(state.inbox.len(), 1);
@@ -98,8 +121,10 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
         state.callbacks[&keys[3]].used_by,
         Some(UpdateId::new(4).unwrap())
     );
-    run(&args("gc", &root)).await.unwrap();
+    assert_eq!(store.compact(100).await.unwrap(), (0, 0));
     assert_eq!(store.snapshot().await.unwrap().offset, 5);
+    database.shutdown().await.unwrap();
+    drop(lease);
     fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
@@ -110,12 +135,12 @@ async fn reset_retains_lock_inode_so_waiting_hosts_cannot_obtain_a_second_lease(
     run(&args("reset", &root)).await.unwrap();
     assert!(!root.join("storage-format.json").exists());
     assert!(StorageLease::acquire_existing(&root).is_err());
-    let host = StorageLease::acquire(&root).unwrap();
+    let host = StorageLease::lock(&root).unwrap();
     assert_eq!(
         fs::metadata(root.join(".workbench.lock")).unwrap().ino(),
         inode
     );
-    assert!(StorageLease::acquire_existing(&root).is_err());
+    assert!(StorageLease::lock(&root).is_err());
     drop(host);
     fs::remove_dir_all(root).unwrap();
 }

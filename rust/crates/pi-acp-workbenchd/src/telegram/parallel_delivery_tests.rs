@@ -295,7 +295,7 @@ async fn supervisor_abort_and_cancelled_wait_observer_retain_ack_job_error_and_s
             .is_err(),
         "accepted ack must still be waiting, not aborted/detached"
     );
-    assert!(StorageLease::acquire(&root).is_err());
+    assert!(StorageLease::lock(&root).is_err());
     drop(gate);
     assert!(
         matches!(adapter.wait().await, Err(AdapterError::Task)),
@@ -309,6 +309,6 @@ async fn supervisor_abort_and_cancelled_wait_observer_retain_ack_job_error_and_s
         .is_empty());
     assert_eq!(api.active.load(Ordering::SeqCst), 0);
     app.shutdown_checked().await.unwrap();
-    drop(StorageLease::acquire(&root).unwrap());
+    drop(StorageLease::lock(&root).unwrap());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

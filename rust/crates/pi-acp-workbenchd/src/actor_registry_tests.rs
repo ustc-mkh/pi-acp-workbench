@@ -1,5 +1,5 @@
 use super::*;
-use crate::{domain::Prompt, persistence::HistoryStore};
+use crate::{domain::Prompt, persistence::SessionStore};
 use std::{
     path::PathBuf,
     sync::{
@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::Semaphore;
 #[derive(Clone)]
 struct Store {
-    history: HistoryStore,
+    history: SessionStore,
     mode: Arc<AtomicU8>,
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,
@@ -23,7 +23,7 @@ impl Store {
             std::env::temp_dir().join(format!("workbench-registry-{}", uuid::Uuid::new_v4()));
         (
             Self {
-                history: HistoryStore::fixture(&root),
+                history: SessionStore::fixture(&root),
                 mode: Arc::new(AtomicU8::new(0)),
                 entered: Arc::new(Semaphore::new(0)),
                 release: Arc::new(Semaphore::new(0)),
@@ -69,16 +69,23 @@ impl SessionPersistence for Store {
         self.gate(4).await;
         self.history.save(state).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
-        if state.active_turn.is_some() {
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
+        if change.next.active_turn.is_some() {
             self.gate(5).await;
-        } else if events
-            .iter()
-            .any(|event| matches!(event, DomainEvent::TurnCancelled { .. }))
+        } else if matches!(change.next.status, SessionStatus::Idle)
+            && change.deliveries.iter().any(|delivery| {
+                matches!(
+                    delivery.payload,
+                    crate::domain::transition::DeliveryPayload::Notice { .. }
+                )
+            })
         {
             self.gate(7).await;
         }
-        self.history.commit(state, events).await
+        self.history.commit(change).await
     }
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.gate(6).await;

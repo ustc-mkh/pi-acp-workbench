@@ -43,20 +43,21 @@ impl<A: BotApi> Context<A> {
     pub async fn new(
         app: WorkbenchApp,
         api: A,
-        root: &Path,
+        _root: &Path,
         config: TelegramConfig,
     ) -> Result<Self, AdapterError> {
         let bot = api.get_me().await?;
         if !bot.is_bot {
             return Err(ApiError::Protocol.into());
         }
-        let store = TelegramStore::new(root.join("state.json"), config.inbox_capacity);
+        let store = TelegramStore::new(app.database(), config.inbox_capacity);
+        let effects = TelegramEffects::new(app.database());
         store.claim_bot(bot.id).await?;
         Ok(Self {
             app,
             api,
             store,
-            effects: TelegramEffects::new(root.join("effects")),
+            effects,
             config,
             username: bot.username,
             delivery: Default::default(),

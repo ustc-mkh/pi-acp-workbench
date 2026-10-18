@@ -12,7 +12,7 @@ use crate::{
         database::Database,
         format::StorageLease,
         journal::{Admission, JournalStore},
-        HistoryStore,
+        SessionStore,
     },
     task_scope::{OwnedTask, TaskScope},
     worker::WorkerSupervisor,
@@ -91,7 +91,7 @@ struct CommandCore {
     storage_lease: Arc<Mutex<Option<StorageLease>>>,
     database: Database,
     journal: JournalStore,
-    history: HistoryStore,
+    history: SessionStore,
     pending_interactions: usize,
     fork_controls: Arc<fork_control::ForkControls>,
 }
@@ -101,7 +101,7 @@ impl WorkbenchApp {
     }
     fn start(
         config: Config,
-        make_runtime: impl FnOnce(HistoryStore, usize) -> Runtime,
+        make_runtime: impl FnOnce(SessionStore, usize) -> Runtime,
     ) -> Result<Self, DomainError> {
         config.validate()?;
         let lease = StorageLease::lock(&config.storage.root)
@@ -114,11 +114,7 @@ impl WorkbenchApp {
         if let Some(telegram) = &config.telegram {
             supervisor = supervisor.without_env(telegram.bot_token_env.clone());
         }
-        let history = HistoryStore::with_delivery(
-            config.storage.root.join("history"),
-            crate::persistence::outbox::OutboxStore::new(database.clone(), 1024),
-            crate::persistence::payload::PayloadStore::new(database.clone()),
-        );
+        let history = SessionStore::new(database.clone());
         let core = Arc::new(CommandCore {
             runtime: make_runtime(history.clone(), config.sessions.mailbox),
             events,
@@ -182,6 +178,9 @@ impl WorkbenchApp {
             reply,
         })?;
         wait.await.map_err(|_| ingress::interrupted())?
+    }
+    pub(crate) fn database(&self) -> Database {
+        self.core.database.clone()
     }
     pub fn delivery_store(&self) -> crate::persistence::outbox::OutboxStore {
         self.core.history.outbox.clone()

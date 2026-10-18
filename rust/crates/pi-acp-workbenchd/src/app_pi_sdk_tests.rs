@@ -109,7 +109,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
     // no old snapshot is mixed with another revision's delivery ledger.
     let lease = StorageLease::lock(&fixture.root).unwrap();
     let database = Database::open(&fixture.root, &lease).await.unwrap();
-    HistoryStore::new(fixture.root.join("history"), database.clone())
+    SessionStore::new(database.clone())
         .save(&state)
         .await
         .unwrap();

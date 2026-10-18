@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::Semaphore;
 #[derive(Clone)]
 struct Store {
-    history: HistoryStore,
+    history: SessionStore,
     panic_list: Arc<AtomicBool>,
     gate_save: Arc<AtomicBool>,
     entered: Arc<Semaphore>,
@@ -16,7 +16,7 @@ struct Store {
     premature_terminal: Arc<AtomicBool>,
 }
 impl Store {
-    fn new(history: HistoryStore) -> Self {
+    fn new(history: SessionStore) -> Self {
         Self {
             history,
             panic_list: Arc::new(AtomicBool::new(false)),
@@ -46,17 +46,24 @@ impl SessionPersistence for Store {
         }
         self.history.save(state).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
         let pid = self.pid.load(Ordering::Acquire);
         if pid != 0
-            && events
-                .iter()
-                .any(|event| matches!(event, DomainEvent::TurnCancelled { .. }))
+            && matches!(change.next.status, SessionStatus::Idle)
+            && change.deliveries.iter().any(|delivery| {
+                matches!(
+                    delivery.payload,
+                    crate::domain::transition::DeliveryPayload::Notice { .. }
+                )
+            })
             && unsafe { libc::kill(pid, 0) } == 0
         {
             self.premature_terminal.store(true, Ordering::Release);
         }
-        self.history.commit(state, events).await
+        self.history.commit(change).await
     }
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.history.remove(id).await
@@ -118,9 +125,9 @@ async fn registry_storage_panic_propagates_to_host_joins_worker_before_terminal_
     assert!(app.core.adapters.lock().await.is_empty());
     let saved = store.history.load(id.as_str()).await.unwrap().unwrap();
     assert!(saved.active_turn.is_none() && saved.pending_interactions.is_empty());
-    assert!(StorageLease::acquire(&root).is_err());
+    assert!(StorageLease::lock(&root).is_err());
     assert!(app.shutdown_checked().await.is_err());
-    assert!(StorageLease::acquire(&root).is_ok());
+    assert!(StorageLease::lock(&root).is_ok());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
@@ -164,7 +171,7 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
             .is_err()
     );
     drop(shutdown);
-    assert!(StorageLease::acquire(&root).is_err());
+    assert!(StorageLease::lock(&root).is_err());
     store.gate_save.store(false, Ordering::Release);
     store.release.add_permits(1);
     let receipt = tokio::time::timeout(Duration::from_secs(3), caller)
@@ -178,14 +185,14 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
             .unwrap()
             .is_err()
     );
-    assert_eq!(store.history.list().await.unwrap().len(), 1);
     let app = app_at(&root);
+    assert_eq!(app.core.history.list().await.unwrap().len(), 1);
     let replay = app.command_durable(operation, command).await.unwrap();
     assert_eq!(
         serde_json::to_string(&replay).unwrap(),
         serde_json::to_string(&receipt).unwrap()
     );
-    assert_eq!(store.history.list().await.unwrap().len(), 1);
+    assert_eq!(app.core.history.list().await.unwrap().len(), 1);
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

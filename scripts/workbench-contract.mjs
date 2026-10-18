@@ -9,7 +9,11 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
-import { operationRecords, imageArchive } from './lib/workbench-sqlite-fixture.mjs';
+import {
+  operationRecords,
+  imageArchive,
+  assertStorageLayout,
+} from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -76,8 +80,7 @@ async function stop(child) {
   const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
   try {
     assert.equal(await child.done, 0, child.output);
-    await assert.rejects(stat(join(data, 'outbox')), { code: 'ENOENT' });
-    await assert.rejects(stat(join(data, 'payloads')), { code: 'ENOENT' });
+    assertStorageLayout(data);
   } finally {
     clearTimeout(timer);
   }

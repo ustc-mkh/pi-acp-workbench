@@ -603,6 +603,13 @@ async fn restart_between_side_effect_and_inbox_completion_replays_topic_and_sess
     let record = context.store.pending(8).await.unwrap().remove(0);
     dispatch(&context, &record).await.unwrap(); // crash window before notice/inbox completion
     first.shutdown().await;
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute(
+        "UPDATE telegram_effects SET effect_id='hidden-topic-1' WHERE effect_id='topic-1'",
+        [],
+    )
+    .unwrap();
+    sql.close().unwrap();
     let second = app(&root);
     let restarted = Context::new(
         second.clone(),
@@ -612,12 +619,25 @@ async fn restart_between_side_effect_and_inbox_completion_replays_topic_and_sess
     )
     .await
     .unwrap();
-    let receipt = root.join("telegram/effects/topic-1.json");
-    let backup = receipt.with_extension("backup");
-    tokio::fs::rename(&receipt, &backup).await.unwrap();
     assert!(execute_record(&restarted, &record).await.is_err());
-    assert_eq!(api.0.lock().await.topics, 1); // missing effect receipt is not permission to recreate
-    tokio::fs::rename(backup, receipt).await.unwrap();
+    assert_eq!(api.0.lock().await.topics, 1); // missing receipt cannot authorize another effect
+    second.shutdown().await;
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute(
+        "UPDATE telegram_effects SET effect_id='topic-1' WHERE effect_id='hidden-topic-1'",
+        [],
+    )
+    .unwrap();
+    sql.close().unwrap();
+    let second = app(&root);
+    let restarted = Context::new(
+        second.clone(),
+        api.clone(),
+        &root.join("telegram"),
+        config(),
+    )
+    .await
+    .unwrap();
     execute(&restarted).await;
     deliver_once(&restarted).await.unwrap();
     assert_eq!(api.0.lock().await.topics, 1);

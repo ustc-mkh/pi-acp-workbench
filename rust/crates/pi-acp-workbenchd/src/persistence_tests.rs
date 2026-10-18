@@ -2,9 +2,9 @@
 mod tests {
     use crate::{
         domain::{session::SessionConfig, Harness, SessionId, SessionState, SessionStatus},
-        persistence::{checksum, HistorySnapshot, HistoryStore, FORMAT_VERSION},
+        persistence::SessionStore,
     };
-
+    use rusqlite::Connection;
     fn state() -> SessionState {
         SessionState {
             id: SessionId::generate(),
@@ -26,92 +26,52 @@ mod tests {
             revision: 7,
         }
     }
-
     #[tokio::test]
-    async fn history_rejects_wrong_version_identity_revision_and_checksum() {
-        let state = state();
-        let root = std::env::temp_dir().join(format!("workbench-history-{}", state.id));
-        let store = HistoryStore::fixture(&root);
-        store.save(&state).await.unwrap();
-        let path = root.join(format!("{}.json", state.id));
-        let original: HistorySnapshot =
-            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        assert_eq!(
-            store
-                .load(state.id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .revision,
-            7
-        );
-        for fault in 0..4 {
-            let mut snapshot = original.clone();
-            match fault {
-                0 => snapshot.format_version = FORMAT_VERSION - 1,
-                1 => {
-                    snapshot.session.id = SessionId::generate();
-                    snapshot.checksum = checksum(&snapshot.session).unwrap();
-                }
-                2 => snapshot.revision += 1,
-                _ => snapshot.session.cwd = crate::domain::WorkspacePath::new("/tampered").unwrap(),
-            }
-            tokio::fs::write(&path, serde_json::to_vec(&snapshot).unwrap())
-                .await
-                .unwrap();
+    async fn sql_hot_state_identity_revision_and_typed_json_corruption_fail_closed() {
+        for mutation in [
+            "UPDATE sessions SET revision=revision+1",
+            "UPDATE sessions SET cwd='/'",
+            "UPDATE sessions SET hot_state_json='{}'",
+        ] {
+            let state = state();
+            let root = std::env::temp_dir()
+                .join(format!("workbench-corrupt-state-{}", uuid::Uuid::new_v4()));
+            let store = SessionStore::fixture(&root);
+            store.save(&state).await.unwrap();
+            store.payloads.shutdown().await;
+            let database = Connection::open(root.join("workbench.sqlite3")).unwrap();
+            database.execute(mutation, []).unwrap();
+            database.close().unwrap();
+            let reopened = SessionStore::fixture(&root);
             assert!(
-                store.load(state.id.as_str()).await.is_err(),
-                "fault {fault}"
+                reopened.load(state.id.as_str()).await.is_err(),
+                "{mutation}"
             );
+            assert!(reopened.load("../escape").await.is_err());
+            assert!(reopened.remove("../escape").await.is_err());
+            reopened.payloads.shutdown().await;
+            tokio::fs::remove_dir_all(root).await.unwrap();
         }
-        tokio::fs::write(&path, b"{truncated").await.unwrap();
-        assert!(store.load(state.id.as_str()).await.is_err());
-        assert!(store.load("../escape").await.is_err());
-        assert!(store.remove("../escape").await.is_err());
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
-
     #[tokio::test]
-    async fn leftover_temporary_file_is_not_a_commit() {
-        let mut state = state();
-        let root = std::env::temp_dir().join(format!("workbench-history-temp-{}", state.id));
-        let store = HistoryStore::fixture(&root);
+    async fn stored_session_ignores_untrusted_json_files_and_writes_no_business_file_protocol() {
+        let state = state();
+        let root = std::env::temp_dir().join(format!("workbench-no-json-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::fixture(&root);
         store.save(&state).await.unwrap();
-        state.revision += 1;
-        let snapshot = HistorySnapshot {
-            format_version: FORMAT_VERSION,
-            revision: state.revision,
-            checksum: checksum(&state).unwrap(),
-            session: state.clone(),
-            delivery_events: Default::default(),
-        };
-        tokio::fs::write(
-            root.join(format!("{}.crashed.tmp", state.id)),
-            serde_json::to_vec(&snapshot).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            store
-                .load(state.id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .revision,
-            7
-        );
-        store.save(&state).await.unwrap();
-        assert_eq!(
-            store
-                .load(state.id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .revision,
-            8
-        );
-        store.remove(state.id.as_str()).await.unwrap();
-        assert!(store.load(state.id.as_str()).await.unwrap().is_none());
+        let mut names = tokio::fs::read_dir(&root).await.unwrap();
+        let mut found = Vec::new();
+        while let Some(entry) = names.next_entry().await.unwrap() {
+            found.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert!(!found.iter().any(|name| name == "history"
+            || name == "journal"
+            || name == "outbox"
+            || name == "payloads"));
+        assert!(!found
+            .iter()
+            .any(|name| name.ends_with(".json") && name != "storage-format.json"));
+        store.payloads.shutdown().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

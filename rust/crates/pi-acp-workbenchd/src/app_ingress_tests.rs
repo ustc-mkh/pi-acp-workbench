@@ -208,13 +208,13 @@ async fn cancelled_shutdown_caller_does_not_detach_root_or_release_storage_early
     wait_for(|| app.core.closed.load(Ordering::Acquire)).await;
     shutdown.abort();
     let _ = shutdown.await;
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_err());
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_err());
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(3), app.shutdown_checked())
         .await
         .unwrap()
         .unwrap();
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
     assert!(app.command(DomainCommand::ListSessions).await.is_err());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -252,7 +252,7 @@ async fn root_abort_preserves_accepted_execution_and_shutdown_retries_join_it_be
     wait_for(|| app.core.closed.load(Ordering::Acquire)).await;
     shutdown.abort();
     let _ = shutdown.await;
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_err());
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_err());
     release.send(()).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_secs(3), app.shutdown_checked())
@@ -261,7 +261,7 @@ async fn root_abort_preserves_accepted_execution_and_shutdown_retries_join_it_be
             .is_err()
     );
     done.await.unwrap();
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -314,16 +314,11 @@ async fn root_abort_during_adapter_drain_joins_protocol_owners_outside_map_and_s
         .unwrap()
         .is_err());
     assert!(caller.await.unwrap().is_err());
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
-    let state = app
-        .core
-        .history
-        .clone()
-        .load(id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
+    let reopened = SessionStore::fixture(&root);
+    let state = reopened.load(id.as_str()).await.unwrap().unwrap();
     assert!(state.active_turn.is_none());
+    reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -349,17 +344,12 @@ async fn owned_task_panic_is_fatal_and_cleanup_retains_lease_until_host_shutdown
     );
     assert!(app.core.adapters.lock().await.is_empty());
     assert!(app.command(DomainCommand::ListSessions).await.is_err());
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_err());
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_err());
     assert!(app.shutdown_checked().await.is_err());
-    assert!(crate::persistence::format::StorageLease::acquire(&root).is_ok());
-    let state = app
-        .core
-        .history
-        .clone()
-        .load(id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
+    let reopened = SessionStore::fixture(&root);
+    let state = reopened.load(id.as_str()).await.unwrap().unwrap();
     assert!(state.active_turn.is_none() && state.pending_interactions.is_empty());
+    reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

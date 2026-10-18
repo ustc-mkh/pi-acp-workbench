@@ -47,10 +47,15 @@ pub(super) fn create(
         ));
     }
     let tx = db.transaction()?;
-    let created = next_counter(&tx, "created_seq")?;
-    tx.execute("INSERT INTO sessions(id,created_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,0,0,?3,?4,?5,?6)", params![view.id.as_str(), created, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
+    let created = insert_view(&tx, view)?;
     tx.commit()?;
     Ok(summary(view, created))
+}
+pub(super) fn insert_view(db: &Connection, view: &SessionView) -> Result<SafeInteger, StoreError> {
+    view.validate()?;
+    let created = next_counter(db, "created_seq")?;
+    db.execute("INSERT INTO sessions(id,created_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![view.id.as_str(), created, view.revision, view.last_entry_seq, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
+    Ok(created)
 }
 pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, StoreError> {
     let mut statement = db.prepare("SELECT hot_state_json,revision,last_entry_seq,harness,cwd,status_json FROM sessions WHERE id = ?1")?;
@@ -89,7 +94,10 @@ pub(super) fn apply_commit(
     {
         return Err(StoreError::Conflict);
     }
-    if old.cwd != commit.next.cwd || old.harness != commit.next.harness {
+    if old.cwd != commit.next.cwd
+        || old.harness != commit.next.harness
+        || encode(&old.origin)? != encode(&commit.next.origin)?
+    {
         return Err(StoreError::Invalid("session immutable scope changed"));
     }
     let last = old
@@ -104,26 +112,23 @@ pub(super) fn apply_commit(
     if changed != 1 {
         return Err(StoreError::Conflict);
     }
+    apply_records(tx, commit, old.last_entry_seq)
+}
+pub(super) fn apply_records(
+    tx: &Transaction<'_>,
+    commit: &SessionCommit,
+    previous_entry_seq: SafeInteger,
+) -> Result<CommitBatch, StoreError> {
     for item in &commit.contents {
         content::put_text(tx, item)?;
     }
-    let mut entries = Vec::with_capacity(commit.append.len());
-    for (index, entry) in commit.append.iter().enumerate() {
+    let batch = commit.batch(previous_entry_seq)?;
+    for (entry, header) in commit.append.iter().zip(&batch.entries) {
         content::put_entry(tx, entry)?;
-        let seq = SafeInteger::new(old.last_entry_seq.get() + index as u64 + 1)?;
         tx.execute(
             "INSERT INTO session_entries(session,seq,entry_id) VALUES (?1,?2,?3)",
-            params![commit.next.id.as_str(), seq, entry.id.as_str()],
+            params![commit.next.id.as_str(), header.seq, entry.id.as_str()],
         )?;
-        entries.push(EntryHeader {
-            seq,
-            id: entry.id.clone(),
-            turn: entry.turn.clone(),
-            role: entry.role.clone(),
-            message: entry.message.clone(),
-            text: TextBody::from_text(&entry.text.text, entry.text.content.clone())?,
-            image: entry.image.as_ref().map(|asset| asset.image().clone()),
-        });
     }
     for update in &commit.tool_updates {
         update.header.validate()?;
@@ -147,19 +152,6 @@ pub(super) fn apply_commit(
         }
         put_delivery(tx, delivery)?;
     }
-    let batch = CommitBatch {
-        session: commit.next.id.clone(),
-        revision: commit.next.revision,
-        view: commit.view_changed.then(|| commit.next.clone()),
-        entries,
-        tools: commit
-            .tool_updates
-            .iter()
-            .map(|update| update.header.clone())
-            .collect(),
-        removed: false,
-    };
-    batch.validate()?;
     Ok(batch)
 }
 fn validate_tool_refs(db: &Connection, header: &ToolHeader) -> Result<(), StoreError> {

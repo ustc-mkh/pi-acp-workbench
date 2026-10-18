@@ -257,7 +257,9 @@ pub async fn render(
                                 interaction: interaction.id.clone(),
                                 response,
                             },
-                            expires_at: interaction.expires_at.unwrap_or(u64::MAX),
+                            expires_at: interaction
+                                .expires_at
+                                .unwrap_or(crate::domain::query::MAX_SAFE_INTEGER),
                             used_by: None,
                         },
                     )

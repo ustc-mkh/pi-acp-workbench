@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
 struct CancelFault {
-    history: HistoryStore,
+    history: SessionStore,
     fail: Arc<AtomicBool>,
     final_commit: bool,
 }
@@ -24,18 +24,24 @@ impl SessionPersistence for CancelFault {
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.history.remove(id).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
+        let state = &change.next;
         let target = if self.final_commit {
-            events
-                .iter()
-                .any(|event| matches!(event, DomainEvent::TurnCancelled { .. }))
+            matches!(state.status, SessionStatus::Idle)
+                && change
+                    .deliveries
+                    .iter()
+                    .any(|delivery| matches!(delivery.payload, DeliveryPayload::Notice { .. }))
         } else {
             matches!(state.status, SessionStatus::Cancelling)
         };
         if target && self.fail.swap(false, Ordering::AcqRel) {
             return Err("fixture cancellation commit failure".into());
         }
-        self.history.commit(state, events).await
+        self.history.commit(change).await
     }
 }
 async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
@@ -91,12 +97,25 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
                 .await
                 .unwrap();
         }
-        let path = root.join("history").join(format!("{id}.json"));
-        let crash_prefix = tokio::fs::read(&path).await.unwrap();
+        let mut crash_prefix = app.core.history.load(id.as_str()).await.unwrap().unwrap();
         app.shutdown().await;
-        // Restore an exact checksummed synthetic crash prefix, not a stale
-        // state merged with the normal shutdown's newer delivery ledger.
-        tokio::fs::write(path, crash_prefix).await.unwrap();
+        let app = app_at_with_env(&root, env.clone());
+        crash_prefix.revision = app
+            .core
+            .history
+            .load(id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision
+            + 1;
+        crash_prefix.status = if cancelling {
+            SessionStatus::Cancelling
+        } else {
+            SessionStatus::Running
+        };
+        app.core.history.save(&crash_prefix).await.unwrap();
+        app.shutdown().await;
         let app = app_at_with_env(&root, env.clone());
         let recovered = app
             .command(DomainCommand::LoadSession(id.clone()))

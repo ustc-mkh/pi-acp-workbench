@@ -380,7 +380,7 @@ async fn shutdown_during_uncertain_native_fork_joins_peer_and_replays_failure_wi
 
 #[derive(Clone)]
 struct FaultStore {
-    history: HistoryStore,
+    history: SessionStore,
     fail: Arc<AtomicBool>,
     after_write: bool,
 }
@@ -394,8 +394,11 @@ impl SessionPersistence for FaultStore {
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.history.remove(id).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
-        self.history.commit(state, events).await
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
+        self.history.commit(change).await
     }
     async fn save(&self, state: &SessionState) -> Result<(), String> {
         if state.transcript.origin.is_some() && self.fail.swap(false, Ordering::AcqRel) {

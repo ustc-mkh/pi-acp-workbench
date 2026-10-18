@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 type Fault = Arc<StdMutex<Option<SessionId>>>;
 #[derive(Clone)]
 struct Store {
-    history: HistoryStore,
+    history: SessionStore,
     reject_cancel: Fault,
 }
 impl SessionPersistence for Store {
@@ -32,7 +32,11 @@ impl SessionPersistence for Store {
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.history.remove(id).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
+        let state = &change.next;
         let reject = {
             let mut target = self.reject_cancel.lock().unwrap();
             if matches!(state.status, SessionStatus::Cancelling)
@@ -47,7 +51,7 @@ impl SessionPersistence for Store {
         if reject {
             return Err("mixed-load injected cancellation prepare failure".into());
         }
-        self.history.commit(state, events).await
+        self.history.commit(change).await
     }
 }
 fn host(root: &std::path::Path, trace: &std::path::Path, reject_cancel: &Fault) -> WorkbenchApp {
@@ -263,35 +267,56 @@ async fn mixed_three_restart_cycles_sixteen_workers_hundred_queries_thirty_two_i
         }
         prompts(&app, &ids, "permissions:2").await;
         states(&app, &ids, |state| state.pending_interactions.len() == 2).await;
-        // Save exact committed bytes, stop every real child, then restore this
-        // synthetic crash prefix offline. Never mix an older state with the
-        // shutdown delivery ledger or mutate a real user's directory.
+        // Preserve committed running hot fields to model crash recovery after
+        // joining real children. SQL archives and delivery tombstones stay intact;
+        // the synthetic state is written with a fresh revision in this test root.
         let mut prefix = BTreeMap::new();
         for id in &ids {
             prefix.insert(
                 id.clone(),
-                tokio::fs::read(root.join("history").join(format!("{id}.json")))
-                    .await
-                    .unwrap(),
+                app.core.history.load(id.as_str()).await.unwrap().unwrap(),
             );
         }
         app.shutdown_checked().await.unwrap();
         assert_eq!(live_workers(&trace_path).await, 0);
-        for (id, bytes) in &prefix {
-            tokio::fs::write(root.join("history").join(format!("{id}.json")), bytes)
+        let repair = host(&root, &trace_path, &reject);
+        for state in prefix.values() {
+            let mut crash = state.clone();
+            crash.revision = repair
+                .core
+                .history
+                .load(crash.id.as_str())
                 .await
-                .unwrap();
+                .unwrap()
+                .unwrap()
+                .revision
+                + 1;
+            repair.core.history.save(&crash).await.unwrap();
         }
         let boots = trace(&trace_path)
             .await
             .iter()
             .filter(|entry| entry.method == "boot")
             .count();
+        repair.shutdown_checked().await.unwrap();
         if round == 1 {
-            let damaged = root.join("history").join(format!("{}.json", ids[0]));
-            tokio::fs::write(&damaged, b"{damaged history fixture")
-                .await
+            // Corrupt only one hot row offline. A bad session must fail closed
+            // without preventing the remaining sessions from recovering.
+            let database = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+            let original: String = database
+                .query_row(
+                    "SELECT hot_state_json FROM sessions WHERE id=?1",
+                    [ids[0].as_str()],
+                    |row| row.get(0),
+                )
                 .unwrap();
+            database
+                .execute(
+                    "UPDATE sessions SET hot_state_json='{}' WHERE id=?1",
+                    [ids[0].as_str()],
+                )
+                .unwrap();
+            database.close().unwrap();
             let failed = host(&root, &trace_path, &reject);
             assert!(failed
                 .command(DomainCommand::LoadSession(ids[0].clone()))
@@ -307,14 +332,23 @@ async fn mixed_three_restart_cycles_sixteen_workers_hundred_queries_thirty_two_i
                     .await
                     .unwrap();
             }
-            assert_eq!(
-                tokio::fs::read(&damaged).await.unwrap(),
-                b"{damaged history fixture"
-            );
             failed.shutdown_checked().await.unwrap();
-            tokio::fs::write(damaged, prefix.get(&ids[0]).unwrap())
-                .await
+            let database = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+            let damaged: String = database
+                .query_row(
+                    "SELECT hot_state_json FROM sessions WHERE id=?1",
+                    [ids[0].as_str()],
+                    |row| row.get(0),
+                )
                 .unwrap();
+            assert_eq!(damaged, "{}");
+            database
+                .execute(
+                    "UPDATE sessions SET hot_state_json=?2 WHERE id=?1",
+                    rusqlite::params![ids[0].as_str(), original],
+                )
+                .unwrap();
+            database.close().unwrap();
         }
         app = host(&root, &trace_path, &reject);
         for id in &ids {

@@ -1,6 +1,6 @@
 //! Explicit offline operations, under the very same storage lease as the host.
 //! No provider/config/network startup and no archive reachability guessing.
-use super::{format::StorageLease, inbox::TelegramStore};
+use super::{database::Database, format::StorageLease, inbox::TelegramStore};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -48,7 +48,7 @@ pub async fn run(args: &[String]) -> io::Result<()> {
     }
     // A persistent lock file is normal, NOT evidence that it must be unlinked.
     // Never unlink it: doing so would create two independent flock identities.
-    let _lease = StorageLease::acquire_existing(&root)?;
+    let lease = StorageLease::acquire_existing(&root)?;
     if fs::symlink_metadata(root.join("workbench.sock")).is_ok() {
         return Err(io::Error::other(
             "socket exists; stop/inspect the host before maintenance",
@@ -77,19 +77,23 @@ pub async fn run(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         "gc" => {
-            // Only typed atomic Telegram compaction is currently supported.
-            // Payloads, history ledgers, journal and outbox tombstones stay.
-            let path = root.join("telegram/state.json");
-            let (inbox, callbacks) = if path.exists() {
-                TelegramStore::new(path, 1024)
+            // Only completed inbox / unreferenced expired callbacks are compacted.
+            let (inbox, callbacks) = if root.join("workbench.sqlite3").exists() {
+                let database = Database::open(root.clone(), &lease)
+                    .await
+                    .map_err(io::Error::other)?;
+                let result = TelegramStore::new(database.clone(), 1024)
                     .compact(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .map_err(io::Error::other)?
                             .as_secs(),
                     )
-                    .await
-                    .map_err(io::Error::other)?
+                    .await;
+                let closed = database.shutdown().await;
+                let counts = result.map_err(io::Error::other)?;
+                closed.map_err(io::Error::other)?;
+                counts
             } else {
                 (0, 0)
             };
@@ -158,7 +162,7 @@ fn export(root: &Path, destination: &Path, mut files: Vec<PathBuf>) -> io::Resul
     files.sort();
     let mut manifest = Manifest {
         source: root,
-        format_version: 2,
+        format_version: super::FORMAT_VERSION,
         files: Vec::new(),
     };
     for path in files {

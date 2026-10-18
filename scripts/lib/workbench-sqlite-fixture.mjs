@@ -4,6 +4,26 @@ import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { readdirSync } from 'node:fs';
+
+/** Stopped daemon roots may contain only the lease, marker and SQLite files. */
+export function assertStorageLayout(root) {
+  const required = ['.workbench.lock', 'storage-format.json', 'workbench.sqlite3'];
+  const allowed = new Set([
+    ...required,
+    'workbench.sqlite3-wal',
+    'workbench.sqlite3-shm',
+    'workbench.sqlite3-journal',
+  ]);
+  const entries = readdirSync(root, { withFileTypes: true });
+  for (const entry of entries)
+    assert(entry.isFile() && allowed.has(entry.name), `unexpected storage entry: ${entry.name}`);
+  for (const name of required)
+    assert(
+      entries.some((entry) => entry.name === name),
+      `missing storage entry: ${name}`,
+    );
+}
 
 export function operationRecords(root, operation) {
   const database = new DatabaseSync(join(root, 'workbench.sqlite3'), { readOnly: true });
@@ -72,6 +92,17 @@ export function contentText(root, reference) {
     assert.equal(row.sha256, reference.sha256);
     assert.equal(row.bytes, reference.bytes);
     return new TextDecoder('utf-8', { fatal: true }).decode(row.data);
+  });
+}
+export function sessionRecord(root, id) {
+  return inspect(root, (database) => {
+    const row = database
+      .prepare(
+        'SELECT id,created_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json FROM sessions WHERE id=?',
+      )
+      .get(id);
+    assert.ok(row, `missing SQL session ${id}`);
+    return { ...row };
   });
 }
 export function deliveryRecords(root) {

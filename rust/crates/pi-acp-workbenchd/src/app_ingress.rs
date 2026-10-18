@@ -318,7 +318,7 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                 if core.closed.load(Ordering::Acquire) {
                     return Err(stopping());
                 }
-                core.history.project_outbox().await?;
+                // Session state, immutable archives and delivery intent commit atomically.
                 match bindings {
                     Some((bindings, bot_id)) => {
                         core.history

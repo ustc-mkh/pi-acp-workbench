@@ -21,5 +21,6 @@ Existing frozen baseline storage examples are in `../formats/`:
 - `outbox-event.json`: delivery example.
 - `telegram-bridge-state.json`: Telegram state example.
 - `preferences-pi.json`: provider settings example.
+- `workbench-v2/storage-format.json`: frozen format2 marker, refused by normal startup and maintenance without changing its bytes.
 
 These samples contain no real user data. They document incompatible legacy formats and must be rejected by the new normal startup paths, not imported implicitly. Old service contract scripts and production readers have been removed; these frozen files remain only as incompatible-format rejection fixtures. Domain reducer, actor mailbox, and persistence tests in the new crate are the new state-transition safety net. All fixtures should remain usable without credentials or a real Bot/model.

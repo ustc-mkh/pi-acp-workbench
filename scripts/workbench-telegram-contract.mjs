@@ -3,6 +3,7 @@ import {
   imageArchive,
   contentText,
   deliveryRecords,
+  assertStorageLayout,
 } from './lib/workbench-sqlite-fixture.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -245,8 +246,7 @@ async function stop(child) {
   client = undefined;
   child.kill('SIGTERM');
   assert.equal(await child.done, 0);
-  await assert.rejects(stat(join(data, 'outbox')), { code: 'ENOENT' });
-  await assert.rejects(stat(join(data, 'payloads')), { code: 'ENOENT' });
+  assertStorageLayout(data);
   assert(!child.output.includes(token), 'bot token must never appear in daemon output');
 }
 async function rateLimitedPending() {

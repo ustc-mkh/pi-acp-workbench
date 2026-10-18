@@ -341,7 +341,7 @@ impl RegistryState {
         workers_stopped: Option<&CancellationToken>,
     ) -> Outcome {
         let mut outcome = Ok(());
-        // Do not abort a filesystem future halfway through its commit. Jobs
+        // Never abort an accepted database transaction. Jobs
         // removed an actor from the map may still own its stop/join receipt.
         while let Some(result) = self.io.join_next().await {
             match result {
@@ -390,6 +390,7 @@ async fn load(
         .await
         .map_err(DomainError::Persistence)?
         .ok_or_else(|| DomainError::NotFound(id.clone()))?;
+    let previous = state.clone();
     let recovery = if state.active_turn.is_some() {
         let command = if matches!(state.status, SessionStatus::Cancelling) {
             DomainCommand::Cancel {
@@ -409,10 +410,14 @@ async fn load(
     } else {
         vec![]
     };
-    store
-        .commit(&state, &recovery)
-        .await
-        .map_err(DomainError::Persistence)?;
+    if !recovery.is_empty() {
+        let change = SessionCommit::between(&previous, &state, &recovery, None)
+            .map_err(|error| DomainError::Persistence(error.to_string()))?;
+        store
+            .commit(change)
+            .await
+            .map_err(DomainError::Persistence)?;
+    }
     let mut events = vec![DomainEvent::SessionLoaded(state.snapshot())];
     events.extend(recovery);
     Ok((state, events))

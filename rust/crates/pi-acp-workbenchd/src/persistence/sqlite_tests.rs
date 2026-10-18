@@ -55,6 +55,11 @@ pub(super) enum TestRequest {
         id: crate::domain::ImageId,
         reply: TestReply<()>,
     },
+    SessionCommitFailure {
+        session: SessionId,
+        fail: bool,
+        reply: TestReply<()>,
+    },
     Hold {
         commit: Box<SessionCommit>,
         ready: PathBuf,
@@ -79,6 +84,28 @@ pub(super) fn execute(db: &mut Connection, request: TestRequest) {
                     "INSERT INTO test_rejected_operations(operation) VALUES (?1)",
                     [operation.as_str()],
                 )?;
+                Ok(())
+            })();
+            let _ = reply.send(result);
+        }
+        TestRequest::SessionCommitFailure {
+            session,
+            fail,
+            reply,
+        } => {
+            let result = (|| -> Result<(), StoreError> {
+                db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS test_failed_session_commits(session TEXT PRIMARY KEY); CREATE TEMP TRIGGER IF NOT EXISTS test_fail_session_commit BEFORE UPDATE ON main.sessions WHEN EXISTS(SELECT 1 FROM test_failed_session_commits WHERE session=NEW.id) BEGIN SELECT RAISE(ABORT,'test session commit failure'); END;")?;
+                if fail {
+                    db.execute(
+                        "INSERT OR IGNORE INTO test_failed_session_commits(session) VALUES (?1)",
+                        [session.as_str()],
+                    )?;
+                } else {
+                    db.execute(
+                        "DELETE FROM test_failed_session_commits WHERE session=?1",
+                        [session.as_str()],
+                    )?;
+                }
                 Ok(())
             })();
             let _ = reply.send(result);
@@ -535,7 +562,8 @@ async fn sqlite_old_corrupt_and_unmarked_roots_fail_before_database_creation() {
     let path = root.data();
     let lease = StorageLease::lock(&path).unwrap();
     let marker = path.join("storage-format.json");
-    let old = br#"{"format_version":2,"storage_kind":"pi-acp-workbench"}"#;
+    let old =
+        include_bytes!("../../../../../test/fixtures/formats/workbench-v2/storage-format.json");
     fs::write(&marker, old).unwrap();
     assert!(Database::open(&path, &lease).await.is_err());
     assert_eq!(fs::read(&marker).unwrap(), old);

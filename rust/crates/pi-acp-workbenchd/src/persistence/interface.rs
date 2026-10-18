@@ -1,27 +1,21 @@
-//! Session actors depend only on this commit contract, not filesystem details.
-use crate::domain::{event::DomainEvent, SessionState};
+//! Session owners submit a single typed transaction; no split image/archive writes.
+use super::database::SessionCommit;
+use crate::domain::{query::CommitBatch, SessionState};
 use std::future::Future;
 pub trait SessionPersistence: Clone + Send + Sync + 'static {
     fn load(&self, id: &str) -> impl Future<Output = Result<Option<SessionState>, String>> + Send;
     fn list(&self) -> impl Future<Output = Result<Vec<SessionState>, String>> + Send;
+    /// Creation/native adoption uses full state until the actor/fork cutover.
     fn save(&self, state: &SessionState) -> impl Future<Output = Result<(), String>> + Send;
-    /// State and delivery intent must be durable together before returning Ok.
+    /// CAS hot state, append entries/images, tools, immutable archives and delivery
+    /// intent together. A reply is observable only after the transaction commits.
     fn commit(
         &self,
-        state: &SessionState,
-        events: &[DomainEvent],
-    ) -> impl Future<Output = Result<(), String>> + Send;
-    /// Archive before committing any reference. Default fails closed for stores
-    /// that have not explicitly implemented binary payload persistence.
-    fn save_image(
-        &self,
-        _asset: &crate::domain::image::ImageAsset,
-    ) -> impl Future<Output = Result<(), String>> + Send {
-        async { Err("image persistence is unavailable".into()) }
-    }
+        change: SessionCommit,
+    ) -> impl Future<Output = Result<CommitBatch, String>> + Send;
     fn remove(&self, id: &str) -> impl Future<Output = Result<(), String>> + Send;
 }
-impl SessionPersistence for super::HistoryStore {
+impl SessionPersistence for super::SessionStore {
     async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
         self.load(id).await
     }
@@ -31,14 +25,8 @@ impl SessionPersistence for super::HistoryStore {
     async fn save(&self, state: &SessionState) -> Result<(), String> {
         self.save(state).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
-        self.commit(state, events).await
-    }
-    async fn save_image(&self, asset: &crate::domain::image::ImageAsset) -> Result<(), String> {
-        self.payloads
-            .put_image(asset)
-            .await
-            .map_err(|error| error.to_string())
+    async fn commit(&self, change: SessionCommit) -> Result<CommitBatch, String> {
+        self.commit(change).await
     }
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.remove(id).await

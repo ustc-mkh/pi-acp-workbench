@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
 struct FailPreferenceCommit {
-    history: HistoryStore,
+    history: SessionStore,
     fail: Arc<AtomicBool>,
 }
 impl SessionPersistence for FailPreferenceCommit {
@@ -20,8 +20,12 @@ impl SessionPersistence for FailPreferenceCommit {
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.history.remove(id).await
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
-        if state
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
+        if change
+            .next
             .config
             .model
             .as_ref()
@@ -30,7 +34,7 @@ impl SessionPersistence for FailPreferenceCommit {
         {
             return Err("fixture preference commit failure".into());
         }
-        self.history.commit(state, events).await
+        self.history.commit(change).await
     }
 }
 async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
@@ -142,9 +146,15 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
             trace.to_string_lossy().into_owned(),
         ),
     ]);
-    let fail = Arc::new(AtomicBool::new(true));
+    let fail = Arc::new(AtomicBool::new(false));
     let app = WorkbenchApp::start(config_at(&root, env.clone()), |history, mailbox| {
-        Runtime::start(FailPreferenceCommit { history, fail }, mailbox)
+        Runtime::start(
+            FailPreferenceCommit {
+                history,
+                fail: fail.clone(),
+            },
+            mailbox,
+        )
     })
     .unwrap();
     let id = create(&app).await;
@@ -157,6 +167,7 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
         session: id.clone(),
         model: crate::domain::ModelId::new("other").unwrap(),
     };
+    fail.store(true, Ordering::Release);
     assert!(matches!(
         app.command_durable(operation.clone(), command.clone())
             .await,
@@ -185,16 +196,9 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
         .is_err());
     assert_eq!(inspect(&app, &id).await.revision, revision);
     app.shutdown().await;
-    let persisted = app
-        .core
-        .history
-        .clone()
-        .load(id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
+    let app = app_at_with_env(&root, env.clone());
+    let persisted = app.core.history.load(id.as_str()).await.unwrap().unwrap();
     assert!(persisted.configuration_intent.is_some());
-    let app = app_at_with_env(&root, env);
     app.command(DomainCommand::LoadSession(id.clone()))
         .await
         .unwrap();

@@ -123,7 +123,13 @@ async fn restart_loads_same_provider_session_without_replaying_history() {
     let mut events = restarted.subscribe();
     prompt(&restarted, &id, "after restart").await;
     wait_finished(&mut events).await;
-    let after = store.load(id.as_str()).await.unwrap().unwrap();
+    let after = restarted
+        .core
+        .history
+        .load(id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(after.provider_session, before.provider_session);
     assert_eq!(
         after.transcript.entries.len(),
@@ -202,12 +208,7 @@ async fn committed_delivery_recovers_without_agent_reexecution_and_survives_sess
     prompt(&app, &session, "durable output").await;
     wait_finished(&mut events).await;
     // No delivery poll has run: simulate stopping between history commit and projection.
-    assert!(app
-        .delivery_store()
-        .pending(0, 16)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(app.delivery_store().pending(0, 16).await.unwrap().len(), 1);
     app.shutdown().await;
     let restarted = app_at(&root);
     let deliveries = restarted.pending_deliveries(0, 16).await.unwrap();

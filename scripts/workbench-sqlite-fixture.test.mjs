@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, symlink, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,8 @@ import {
   archivedEntry,
   contentText,
   deliveryRecords,
+  sessionRecord,
+  assertStorageLayout,
 } from './lib/workbench-sqlite-fixture.mjs';
 import { createHash } from 'node:crypto';
 
@@ -22,6 +24,33 @@ async function fixture(run) {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test('stopped storage layout requires SQLite/marker/lease and rejects business directories, files and symlinks', async () => {
+  await fixture(async (root) => {
+    const files = ['.workbench.lock', 'storage-format.json', 'workbench.sqlite3'];
+    assert.throws(() => assertStorageLayout(root), /missing/);
+    for (const file of files) await writeFile(join(root, file), 'fixture');
+    assertStorageLayout(root);
+    for (const name of ['history', 'journal', 'payloads', 'outbox', 'telegram']) {
+      await mkdir(join(root, name));
+      assert.throws(() => assertStorageLayout(root), /unexpected/);
+      await rm(join(root, name), { recursive: true });
+    }
+    await writeFile(join(root, 'session.json'), '{}');
+    assert.throws(() => assertStorageLayout(root), /unexpected/);
+    await rm(join(root, 'session.json'));
+    await symlink('/missing', join(root, 'workbench.sqlite3-wal'));
+    assert.throws(() => assertStorageLayout(root), /unexpected/);
+    await rm(join(root, 'workbench.sqlite3-wal'));
+    for (const file of [
+      'workbench.sqlite3-wal',
+      'workbench.sqlite3-shm',
+      'workbench.sqlite3-journal',
+    ])
+      await writeFile(join(root, file), 'auxiliary');
+    assertStorageLayout(root);
+  });
+});
 
 test('operation fixture reads exact immutable rows and binds the operation filter without modifying DB', async () => {
   await fixture(async (root) => {
@@ -104,7 +133,7 @@ test('delivery SQL fixture preserves immutable scope/revision/retry/order and te
     const file = join(root, 'workbench.sqlite3');
     const db = new DatabaseSync(file);
     db.exec(
-      'PRAGMA user_version=3; CREATE TABLE deliveries(delivery_id TEXT,order_seq INTEGER,revision INTEGER,target_key TEXT,target_json TEXT,payload_json TEXT,status TEXT,attempt INTEGER,next_retry INTEGER,last_failure TEXT); CREATE TABLE contents(id TEXT,kind TEXT,sha256 TEXT,bytes INTEGER,data BLOB,image_ref_json TEXT)',
+      'PRAGMA user_version=3; CREATE TABLE sessions(id TEXT,created_seq INTEGER,revision INTEGER,last_entry_seq INTEGER,harness TEXT,cwd TEXT,status_json TEXT,hot_state_json TEXT); CREATE TABLE deliveries(delivery_id TEXT,order_seq INTEGER,revision INTEGER,target_key TEXT,target_json TEXT,payload_json TEXT,status TEXT,attempt INTEGER,next_retry INTEGER,last_failure TEXT); CREATE TABLE contents(id TEXT,kind TEXT,sha256 TEXT,bytes INTEGER,data BLOB,image_ref_json TEXT)',
     );
     const bytes = Buffer.from('exact 🌏 notice');
     const reference = {
@@ -122,6 +151,16 @@ test('delivery SQL fixture preserves immutable scope/revision/retry/order and te
     );
     const target = { Telegram: { bot_id: 99, chat: -100, thread: 101, cwd: '/tmp' } };
     const payload = { Notice: { content: reference } };
+    db.prepare('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)').run(
+      'session-1',
+      1,
+      2,
+      3,
+      'Pi',
+      '/tmp',
+      '"Idle"',
+      '{"id":"session-1"}',
+    );
     db.prepare('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?,?,?,?)').run(
       'notice',
       7,
@@ -136,6 +175,16 @@ test('delivery SQL fixture preserves immutable scope/revision/retry/order and te
     );
     db.close();
     const before = await readFile(file);
+    assert.deepEqual(sessionRecord(root, 'session-1'), {
+      id: 'session-1',
+      created_seq: 1,
+      revision: 2,
+      last_entry_seq: 3,
+      harness: 'Pi',
+      cwd: '/tmp',
+      status_json: '"Idle"',
+      hot_state_json: '{"id":"session-1"}',
+    });
     assert.deepEqual(deliveryRecords(root), [
       {
         event: { id: 'notice', revision: 999, target, payload },
@@ -151,6 +200,7 @@ test('delivery SQL fixture preserves immutable scope/revision/retry/order and te
     assert.throws(() => contentText(root, { ...reference, sha256: '0'.repeat(64) }));
     assert.throws(() => contentText(root, { ...reference, id: "text' OR 1=1 --" }));
     assert.deepEqual(await readFile(file), before);
+    assert.throws(() => sessionRecord(root, "session' OR 1=1 --"));
   });
 });
 

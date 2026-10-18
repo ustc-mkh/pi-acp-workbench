@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
-import { operationRecords } from './lib/workbench-sqlite-fixture.mjs';
+import { operationRecords, sessionRecord } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -142,8 +142,7 @@ try {
     assert.equal(Object.keys(snapshot.pending_interactions).length, 1);
     const native = snapshot.provider_session;
     assert(native);
-    const historyPath = join(data, 'history', `${session}.json`);
-    const history = await readFile(historyPath);
+    const sessionBeforeKill = sessionRecord(data, session);
     const receiptRows = operationRecords(data, operation);
     assert.equal(receiptRows.length, 1);
     assert.equal(receiptRows[0].status, 'Completed');
@@ -158,13 +157,17 @@ try {
     // This peer has no external network or timers while awaiting permission;
     // host pipe EOF lets it exit. This is not a guarantee for arbitrary agents.
     await until(() => exited(worker), 'synthetic peer exits on host pipe EOF');
-    assert.deepEqual(await readFile(historyPath), history, 'no synthetic history restoration');
+    assert.deepEqual(
+      sessionRecord(data, session),
+      sessionBeforeKill,
+      'SIGKILL preserves committed SQLite session bytes',
+    );
     const refused = launch(config, home);
     const refusedResult = await refused.done;
     assert.notEqual(refusedResult.code, 0, 'stale socket must fail closed');
     const stale = await lstat(socket);
     assert(stale.isSocket() && stale.ino === inode.ino && stale.dev === inode.dev);
-    assert.deepEqual(await readFile(historyPath), history);
+    assert.deepEqual(sessionRecord(data, session), sessionBeforeKill);
     // Explicit, test-owned operator cleanup, after real host death and inode
     // validation. No production startup/maintenance path silently unlinks it.
     await unlink(socket);

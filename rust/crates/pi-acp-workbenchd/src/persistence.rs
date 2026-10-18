@@ -1,33 +1,35 @@
 pub const FORMAT_VERSION: u32 = 3;
+mod commit;
 mod content;
 pub mod database;
 pub mod delivery;
 #[cfg(test)]
 mod delivery_sql_tests;
 pub mod format;
-mod history;
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod history_tests;
 pub mod inbox;
 pub mod interface;
-mod io;
 pub mod journal;
 pub mod maintenance;
 pub mod outbox;
 pub mod payload;
 mod query;
 mod schema;
+mod session;
+mod session_state;
 #[cfg(test)]
-mod sqlite_tests;
+mod session_state_tests;
 pub mod telegram_effect;
-pub use history::{HistorySnapshot, HistoryStore};
-
+mod telegram_sql;
 #[cfg(test)]
-fn checksum(state: &crate::domain::SessionState) -> Result<String, serde_json::Error> {
-    history::checksum(state, &Default::default())
-}
+mod telegram_sql_tests;
+pub use session::SessionStore;
+
 #[cfg(test)]
 mod delivery_tests;
 #[cfg(test)]
-#[path = "persistence_tests.rs"]
-mod history_tests;
-#[cfg(test)]
 mod image_tests;
+#[cfg(test)]
+mod sqlite_tests;

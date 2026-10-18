@@ -1,6 +1,6 @@
 use crate::{
     domain::{command::DomainCommand, error::DomainError, event::DomainEvent, ids::*, session::*},
-    persistence::interface::SessionPersistence,
+    persistence::{database::SessionCommit, interface::SessionPersistence},
 };
 use std::collections::BTreeMap;
 use tokio::sync::{mpsc, oneshot};
@@ -205,16 +205,21 @@ async fn session_loop(
             SessionCommand::Shutdown(reply) => {
                 let result = if state.active_turn.is_some() {
                     let id = state.id.clone();
+                    let mut candidate = state.clone();
                     match crate::domain::reducer::apply(
-                        &mut state,
+                        &mut candidate,
                         DomainCommand::Cancel { session: id },
                     ) {
                         Ok(events) => {
-                            state.revision += 1;
-                            store
-                                .commit(&state, &events)
-                                .await
-                                .map_err(DomainError::Persistence)
+                            candidate.revision += 1;
+                            match SessionCommit::between(&state, &candidate, &events, None) {
+                                Ok(change) => store
+                                    .commit(change)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(DomainError::Persistence),
+                                Err(error) => Err(DomainError::Persistence(error.to_string())),
+                            }
                         }
                         Err(error) => Err(error),
                     }
@@ -240,8 +245,8 @@ async fn session_loop(
             let _ = reply.send(Ok(vec![DomainEvent::SessionLoaded(state.snapshot())]));
             continue;
         }
-        // Archive image bytes before committing/publishing any metadata reference.
-        // The actor owns this I/O across caller/adapter disconnect and shutdown.
+        // Image bytes travel in the same transaction as their entry/state refs.
+        // The actor owns this accepted write across observer disconnect/shutdown.
         let image = match &command {
             DomainCommand::Agent {
                 event: crate::domain::command::AgentEvent::Image { asset, .. },
@@ -258,15 +263,12 @@ async fn session_loop(
         let result = match crate::domain::reducer::apply_at(&mut candidate, command, now) {
             Ok(events) if !events.is_empty() => {
                 candidate.revision += 1;
-                let commit = async {
-                    if let Some(asset) = image {
-                        store.save_image(&asset).await?;
-                    }
-                    store.commit(&candidate, &events).await
-                }
-                .await;
+                let commit = match SessionCommit::between(&state, &candidate, &events, image) {
+                    Ok(change) => store.commit(change).await,
+                    Err(error) => Err(error.to_string()),
+                };
                 match commit {
-                    Ok(()) => {
+                    Ok(_) => {
                         if matches!(candidate.status, SessionStatus::Cancelling)
                             || events.iter().any(|event| {
                                 matches!(

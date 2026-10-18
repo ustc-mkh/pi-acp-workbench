@@ -1,5 +1,6 @@
 import type { Buffer } from 'node:buffer';
 
+export function assertStorageLayout(root: string): void;
 export interface OperationRecord {
   operation: string;
   fingerprint: string;
@@ -24,6 +25,7 @@ export function contentText(
   root: string,
   reference: { id: string; kind: string; sha256: string; bytes: number },
 ): string;
+export function sessionRecord(root: string, id: string): Record<string, unknown>;
 export function deliveryRecords(root: string): Array<{
   event: {
     id: string;

@@ -245,7 +245,7 @@ fn put(db: &Connection, payload: Payload) -> Result<(), StoreError> {
         }
     }
 }
-fn entry(db: &Connection, id: &EntryId) -> Result<TranscriptEntry, StoreError> {
+pub(super) fn entry(db: &Connection, id: &EntryId) -> Result<TranscriptEntry, StoreError> {
     let mut statement = db.prepare("SELECT 1,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes<=16384 THEN c.data ELSE NULL END FROM entries e JOIN contents c ON c.id=e.content_id WHERE e.entry_id=?1")?;
     let mut rows = statement.query([id.as_str()])?;
     let header = content::header(rows.next()?.ok_or(StoreError::NotFound)?)?;

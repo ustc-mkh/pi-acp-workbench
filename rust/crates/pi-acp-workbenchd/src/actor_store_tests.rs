@@ -14,7 +14,7 @@ use std::{
     },
 };
 use tokio::sync::Mutex;
-type Records = BTreeMap<SessionId, (SessionState, Vec<DomainEvent>)>;
+type Records = BTreeMap<SessionId, (SessionState, Vec<crate::domain::query::CommitBatch>)>;
 #[derive(Clone, Default)]
 struct MemoryStore {
     records: Arc<Mutex<Records>>,
@@ -42,29 +42,81 @@ impl SessionPersistence for MemoryStore {
             .collect())
     }
     async fn save(&self, state: &SessionState) -> Result<(), String> {
-        self.commit(state, &[]).await
+        self.records
+            .lock()
+            .await
+            .insert(state.id.clone(), (state.clone(), vec![]));
+        Ok(())
     }
-    async fn commit(&self, state: &SessionState, events: &[DomainEvent]) -> Result<(), String> {
+    async fn commit(
+        &self,
+        change: crate::persistence::database::SessionCommit,
+    ) -> Result<crate::domain::query::CommitBatch, String> {
         match self.next_failure.swap(0, Ordering::SeqCst) {
             1 => return Err("injected commit failure".into()),
             2 => panic!("injected session store panic"),
             _ => {}
         }
-        let mut records = self.records.lock().await;
-        let mut ledger = records
-            .get(&state.id)
-            .map(|(_, events)| events.clone())
-            .unwrap_or_default();
-        ledger.extend_from_slice(events);
-        records.insert(state.id.clone(), (state.clone(), ledger));
-        Ok(())
-    }
-    async fn save_image(&self, asset: &crate::domain::image::ImageAsset) -> Result<(), String> {
         if self.next_image_failure.swap(0, Ordering::SeqCst) == 1 {
             return Err("injected image archive failure".into());
         }
-        self.images.lock().await.push(asset.clone());
-        Ok(())
+        if !change.tool_updates.is_empty() {
+            return Err("MemoryStore tool fixture is unavailable".into());
+        }
+        let mut records = self.records.lock().await;
+        let (old, ledger) = records.get(&change.next.id).ok_or("missing session")?;
+        if old.revision != change.expected_revision.get()
+            || change.next.revision.get() != old.revision + 1
+        {
+            return Err("revision conflict".into());
+        }
+        let batch = change
+            .batch(
+                crate::domain::query::SafeInteger::new(old.transcript.entries.len() as u64)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut transcript = old.transcript.clone();
+        let mut assets = self.images.lock().await;
+        let mut new_assets = Vec::new();
+        for entry in change.append {
+            entry.text.validate().map_err(|e| e.to_string())?;
+            transcript
+                .entries
+                .push(crate::domain::transcript::TranscriptEntry {
+                    id: entry.id,
+                    turn: entry.turn,
+                    role: entry.role,
+                    text: entry.text.text,
+                    message: entry.message,
+                    image: entry.image.as_ref().map(|asset| asset.image().clone()),
+                });
+            if let Some(asset) = entry.image {
+                new_assets.push(asset);
+            }
+        }
+        let view = change.next;
+        let state = SessionState {
+            id: view.id,
+            provider_session: view.provider_session,
+            harness: view.harness,
+            cwd: view.cwd,
+            status: view.status,
+            transcript,
+            plan: view.plan,
+            active_turn: view.active_turn,
+            pending_interactions: view.pending_interactions,
+            usage: view.usage,
+            config: view.config,
+            configuration_intent: view.configuration_intent,
+            catalogue: view.catalogue,
+            revision: view.revision.get(),
+        };
+        let mut ledger = ledger.clone();
+        ledger.push(batch.clone());
+        assets.extend(new_assets);
+        records.insert(state.id.clone(), (state, ledger));
+        Ok(batch)
     }
     async fn remove(&self, id: &str) -> Result<(), String> {
         self.records
@@ -162,7 +214,7 @@ async fn image_archive_failure_never_commits_or_publishes_a_dangling_reference()
     assert!(!store.records.lock().await[&id]
         .1
         .iter()
-        .any(|event| matches!(event, DomainEvent::AgentImage { .. })));
+        .any(|batch| batch.entries.iter().any(|entry| entry.image.is_some())));
     assert!(store.images.lock().await.is_empty());
     let asset = ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap();
     store.next_failure.store(1, Ordering::SeqCst);
@@ -180,8 +232,8 @@ async fn image_archive_failure_never_commits_or_publishes_a_dangling_reference()
         .is_err());
     assert_eq!(
         store.images.lock().await.len(),
-        1,
-        "archive precedes failed history commit: safe orphan, no dangling reference"
+        0,
+        "failed transaction must roll back the image and state together"
     );
     assert_eq!(
         serde_json::to_vec(&store.records.lock().await[&id].0).unwrap(),

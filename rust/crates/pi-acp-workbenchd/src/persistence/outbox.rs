@@ -44,10 +44,6 @@ impl OutboxStore {
     pub(crate) async fn pause_mutations(&self) -> super::sqlite_tests::ExecutorPause {
         self.database.pause_executor().await.unwrap()
     }
-    #[cfg(test)]
-    pub(crate) fn with_window(&self, window: usize) -> Self {
-        Self::new(self.database.clone(), window)
-    }
     pub fn capacity(&self) -> usize {
         self.window
     }

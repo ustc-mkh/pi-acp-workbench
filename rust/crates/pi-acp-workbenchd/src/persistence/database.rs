@@ -6,7 +6,7 @@ use crate::domain::{
         SafeInteger, SessionSummary, SessionView,
     },
     transition::{DeliveryIntent, NewContent, NewEntry, ToolUpdate},
-    SessionId,
+    SessionId, SessionState,
 };
 use serde::Serialize;
 use std::{
@@ -110,6 +110,9 @@ pub(super) enum StoreRequest {
     },
     Delivery(Box<super::delivery::Request>),
     Payload(Box<super::payload::Request>),
+    SessionState(Box<super::session_state::Request>),
+    TelegramInbox(Box<super::inbox::Request>),
+    TelegramEffect(Box<super::telegram_effect::Request>),
     Journal(Box<super::journal::Request>),
     ArchiveImage {
         asset: crate::domain::image::ImageAsset,
@@ -214,6 +217,15 @@ impl Database {
                         StoreRequest::Payload(request) => {
                             super::payload::execute(&mut connection, *request);
                         }
+                        StoreRequest::SessionState(request) => {
+                            super::session_state::run(&mut connection, *request);
+                        }
+                        StoreRequest::TelegramInbox(request) => {
+                            super::telegram_sql::execute(&mut connection, *request);
+                        }
+                        StoreRequest::TelegramEffect(request) => {
+                            super::telegram_effect::execute(&mut connection, *request);
+                        }
                         StoreRequest::Journal(request) => {
                             super::journal::execute(&mut connection, *request);
                         }
@@ -253,6 +265,41 @@ impl Database {
             .clone()
             .ok_or(StoreError::Closed)?;
         sender.send(request).await.map_err(|_| StoreError::Closed)
+    }
+    pub async fn load_state(&self, id: SessionId) -> Result<Option<SessionState>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::SessionState(Box::new(
+            super::session_state::Request::Load { id, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn list_states(&self) -> Result<Vec<SessionState>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::SessionState(Box::new(
+            super::session_state::Request::List { reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn save_state(&self, state: SessionState) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::SessionState(Box::new(
+            super::session_state::Request::Save {
+                state: Box::new(state),
+                reply,
+            },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn remove_state(&self, id: SessionId) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::SessionState(Box::new(
+            super::session_state::Request::Remove { id, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn create(&self, view: SessionView) -> Result<SessionSummary, StoreError> {
         let (reply, result) = oneshot::channel();
@@ -340,6 +387,23 @@ impl Database {
         .await?;
         ready.await.map_err(|_| StoreError::Closed)?;
         Ok(super::sqlite_tests::ExecutorPause::new(resume))
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_session_commit_failure(
+        &self,
+        session: SessionId,
+        fail: bool,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Test(
+            super::sqlite_tests::TestRequest::SessionCommitFailure {
+                session,
+                fail,
+                reply,
+            },
+        ))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
     }
     #[cfg(test)]
     pub(crate) async fn corrupt_image(&self, id: crate::domain::ImageId) -> Result<(), StoreError> {
