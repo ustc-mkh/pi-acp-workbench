@@ -5,6 +5,11 @@ import { mkdtemp, readFile, writeFile, readdir, rm, stat } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
+import { parseArgs } from 'node:util';
+import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+
+const { values } = parseArgs({ options: { binary: { type: 'string' } } });
+const binary = resolveWorkbenchBinary(values.binary);
 
 const root = await mkdtemp(join(tmpdir(), 'workbench-tg-contract-'));
 const data = join(root, 'data');
@@ -203,7 +208,7 @@ const config = {
   limits: { pending_interactions: 32 },
 };
 function launch() {
-  const child = spawn(resolve('rust/target/debug/pi-acp-workbenchd'), ['--config', configFile], {
+  const child = spawn(binary, ['--config', configFile], {
     env: { ...process.env, REWRITE_TEST_BOT_TOKEN: token },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

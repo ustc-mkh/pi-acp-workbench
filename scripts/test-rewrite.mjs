@@ -5,7 +5,7 @@ const checks = [
   ['npm', ['run', 'check']],
   ['npm', ['run', 'audit:workbench']],
   ['npm', ['run', 'build']],
-  ['cargo', ['fmt', '--manifest-path', 'rust/Cargo.toml', '--all', '--', '--check']],
+  ['npm', ['run', 'format:check']],
   ['npm', ['run', 'clippy']],
   ['cargo', ['test', '--manifest-path', 'rust/Cargo.toml', '--workspace']],
   ['npm', ['run', 'test:contract:workbench']],

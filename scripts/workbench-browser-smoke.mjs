@@ -8,6 +8,11 @@ import { resolve, join, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
+import { parseArgs } from 'node:util';
+import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+
+const { values } = parseArgs({ options: { binary: { type: 'string' } } });
+const binary = resolveWorkbenchBinary(values.binary);
 
 const bundle = await build({
   entryPoints: ['src/workbench-controller.ts', 'src/workbench-client.ts'],
@@ -83,7 +88,7 @@ try {
       limits: { pending_interactions: 32 },
     }),
   );
-  daemon = spawn(resolve('rust/target/debug/pi-acp-workbenchd'), ['--config', config], {
+  daemon = spawn(binary, ['--config', config], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { PATH: process.env.PATH, HOME: join(root, 'home'), LANG: 'C.UTF-8' },
   });

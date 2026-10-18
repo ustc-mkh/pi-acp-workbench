@@ -86,8 +86,11 @@ jobs:
           name: workbench-js
           path: /tmp
       - run: tar -xzf /tmp/workbench-js.tgz
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (2026-10-08)
+        with:
+          toolchain: stable
       - run: npx playwright install --with-deps chromium
-      - run: node scripts/browser-smoke.mjs
+      - run: npm run test:browser
   production:
     needs: javascript
     runs-on: ubuntu-24.04
@@ -120,9 +123,8 @@ jobs:
           CC: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       - run: npm run test:service:artifact -- --dir service-dist --report test-results/production-x86_64-unknown-linux-musl.json
-      - run: node scripts/service-contract.mjs
-        env:
-          PI_CONTRACT_DAEMON: service-dist/pi-acp-session-daemon
+      - run: node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"
+      - run: node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"
       - run: npm run package:services
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

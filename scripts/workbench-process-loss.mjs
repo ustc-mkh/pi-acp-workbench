@@ -7,9 +7,13 @@ import { mkdtemp, mkdir, writeFile, readFile, lstat, unlink, rm } from 'node:fs/
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
+import { parseArgs } from 'node:util';
+import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+
+const { values } = parseArgs({ options: { binary: { type: 'string' } } });
+const binary = resolveWorkbenchBinary(values.binary);
 
 const root = await mkdtemp(join(tmpdir(), 'workbench-process-loss-'));
-const binary = resolve('rust/target/debug/pi-acp-workbenchd');
 const peer = resolve('test/contract-agent.mjs');
 const children = new Set();
 const workerTraces = [];

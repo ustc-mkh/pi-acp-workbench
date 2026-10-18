@@ -7,9 +7,13 @@ import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parseArgs } from 'node:util';
+import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+
+const { values } = parseArgs({ options: { binary: { type: 'string' } } });
+const binary = resolveWorkbenchBinary(values.binary);
 
 const root = await mkdtemp(join(tmpdir(), 'workbench-contract-'));
-const binary = resolve('rust/target/debug/pi-acp-workbenchd');
 const data = join(root, 'data');
 const configFile = join(root, 'workbench.json');
 const children = new Set();

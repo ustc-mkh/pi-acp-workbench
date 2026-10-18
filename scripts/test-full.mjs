@@ -121,6 +121,8 @@ async function runTests() {
         'scripts/test-reports.test.mjs',
         'scripts/ci-failure-diagnostics.test.mjs',
         'scripts/typescript-graph.test.mjs',
+        'scripts/workbench-binary.test.mjs',
+        'scripts/prepare-release.test.mjs',
       ),
     ];
     const results = await testPool(suites, jobs);

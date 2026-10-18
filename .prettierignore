@@ -3,6 +3,7 @@ dist/
 service-dist/
 service-dist.*.tmp/
 rust/target/
+.pi/
 playwright-report/
 test-results/
 *.vsix
