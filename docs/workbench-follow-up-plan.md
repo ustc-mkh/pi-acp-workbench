@@ -207,6 +207,18 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - `cargo test --manifest-path rust/Cargo.toml --workspace`：232项通过（daemon230+core2），既有 offline SDK 仍1项默认 ignored；`npm run format:check`、`npm run audit:workbench`：通过。日志 `.test-results/t04/{rust-stage2,format-stage2,audit-stage2}.log`。此阶段未重新执行完整 rewrite、TS、GNU/musl artifact 或 offline SDK，不把阶段1的结果冒充新提交后的完整验收。
 - **PayloadStore 尚未接入新 API，仍保留旧文件实现等待本步骤后续替换。** 下一步将 notice/interaction/entry 查询与图像统一接入同一 Database，调整 HistoryStore/test 构造依赖和只读 SQL 契约断言，再继续 Outbox。T04 仍未完成，不进入 T05。
 
+**阶段2b执行记录（PayloadStore facade 切换完成；实现提交 `165bbdb`；T04 尚未完成）：**
+
+- `PayloadStore` 只保存共享 `Database` handle，删除 root/path/Mutex 和 image/entry/notice/interaction 的 JSON 文件协议。生产 app 将 journal 与 payload 注入同一个 Database，所有请求仍经过同一256项队列和唯一 SQLite 线程/连接；没有 per-store executor、兼容 backend 或任意 SQL/closure 入口。
+- notice 原始 UTF-8 与 interaction 强类型 JSON 写入 immutable contents，entry 的 metadata/ref 与文本写入 entries/contents 同一事务；图像调用阶段2a的 raw BLOB/ref API，保留完整 expected ref、SHA256、MIME signature、长度及身份重绑定拒绝。归档文本 key 按 typed scope 和 ID 的 SHA256 命名，使合法200字节 ID 无需放宽 ContentId 限制，也不成为路径。单条 entry 读取复用已验证的 indexed header/typed metadata，再读取对应正文。
+- HistoryStore 构造改为显式注入 Database；app 测试直接复用其 history facade，而不是在已有 host 旁创建 executor。旧文件 history 的独立测试暂用明确 cfg(test) 的隔离 fixture 启动一个 Database，随T04第9步旧 HistoryStore 一并删除；没有生产可选 backend。projection/archive 的既有重开测试现在显式 shutdown/join 后真实重开数据库，仍断言归档在删除源后保留、ack 重开后不复活。
+- 原图像文件损坏 fixture 改为仅测试可用的 typed SQL 请求，在原 executor 上破坏 BLOB；保持坏 ref/损坏拒绝、query 不创建 provider、不改变完整 operation rows 的断言。扩展独立只读 SQL fixture，检查图像 exact bytes/hash/ref、notice 正文与 entry 归档，迁移 binary IPC/Telegram 的文件断言；SQL helper 自测验证 read-only、绑定参数和坏 hash 拒绝。没有删除或弱化原安全断言。
+- Payload 定向测试现4项（原1项图像不可变/损坏回归加强并新增3项）：真实 DB 重开后图像/长 UTF-8 entry/notice/interaction 往返、完整ref匹配、immutable冲突、200字节ID、没有 payload 文件、缺图像引用拒绝、SQL trigger 在 entry 插入时 ABORT 后先写入的 text 亦回滚。独立 Node SQL fixture 共3项，纳入 runner 门禁。
+- 首次 workspace 暴露 app 图像损坏测试仍写旧文件；首次 rewrite 暴露两处重启/删除源后的 imagePath 遗留；另一次 format 门禁准确拒绝新增测试未格式化。均已修正并保留失败日志 `.test-results/t04/{rust-payload-stage2,rewrite-payload-stage2,rewrite-payload-stage2-final}.log`，没有改门禁或吞错。
+- 最新完整 `npm run test:rewrite` 通过：check/audit/build/format/clippy、Rust workspace235项（daemon233+core2；既有 offline SDK 仍1项默认 ignored）、TS187、runner40、IPC19、Telegram15、真实SIGKILL3、Chromium9、GNU生产构建/打包与artifact smoke。日志 `.test-results/t04/rewrite-payload-stage2-final3.log`、`.test-results/run-1y97Eg/`；此前成功的 `.test-results/t04/rewrite-payload-stage2-final2.log` / `.test-results/run-ItY3eh/` 保留，但最新结果以 final3 为准。
+- 对最新显式 GNU 产物运行 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19项通过；`node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：15项通过。日志 `.test-results/t04/production-{ipc,telegram}-payload-stage2-final.log`。未运行 musl、offline SDK 或最终规模/soak，未把默认 ignored 算作已执行；未发布、未 push。
+- 下一步严格执行第3步 OutboxStore，再推进 history state/entries/delivery 单事务、Telegram inbox/effect 和 SessionStore。生产 history/outbox/Telegram 仍有文件协议，**此提交仅完成第2步；T04 不勾选、不完成面板任务，不进入 T05，禁止发布此中间版本**。
+
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
 执行顺序固定：
