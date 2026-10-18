@@ -182,7 +182,7 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 
 **命令：** `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sqlite`、`npm run clippy`。
 
-## T04 [ ] 迁移所有持久化业务，删除多文件协议
+## T04 [x] 迁移所有持久化业务，删除多文件协议
 
 **阶段1执行记录（operation journal；实现提交 `48c0724`；本项仍未完成）：**
 
@@ -266,6 +266,44 @@ node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-
 - `npm run test:rewrite`全通过：check/audit/build/format/clippy、Rust workspace250项（daemon248+core2；offline SDK1项默认ignored）、TS187、runner41、IPC19、Telegram15、SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-history-atomic-foundation.log`、`.test-results/run-JvkPma/`；定向测试 `.test-results/t04/history-atomic-{archives-final,projection}.log`，首次漏import失败日志保留。
 - 最新显式GNU `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-history-atomic-foundation.log`。未执行musl/offline SDK/scale/soak，未push或发布。
 - **当前生产 HistoryStore 仍使用文件快照和delivery_events/project_outbox；第4步尚未完成。** 下一步接入SQL session commit/load/remove并迁移旧文件故障fixture，删除ledger和恢复扫描，然后继续Telegram inbox/effect及SessionStore删除清单。T04不完成，不进入T05。
+
+**阶段4b执行记录（生产 history 单事务切换；当前工作区未提交；T04 尚未完成）：**
+
+- 接续已有未提交实现，`HistoryStore` 仅持共享 Database，load/list/commit/remove 通过唯一 executor 的 typed 请求操作 sessions/entries/contents/tools/deliveries。删除 filesystem HistorySnapshot、checksum 外壳、delivery_events ledger、project_outbox 及 ingress 恢复扫描。会话状态、追加 entry、工具正文、notice/interaction archive 和 delivery intent 由同一事务提交；删除源只删除会话归属/工具投影，归档及投递不 cascade 删除。
+- 当前仍使用既有完整 SessionState actor contract；SQL 只存 hot view 与规范化 archive，暂在 DB 线程重建旧 contract 所需 transcript。没有第二 backend/连接/执行线程或旧 JSON reader。**本阶段仍会读取旧历史，不是 T05 的增量 actor 实现，也未完成 SessionStore 命名/contract 最终切换。** 图像仍使用已有先归档再引用流程，T05 再改 actor 的统一写集。
+- 修正待接入实现将 revision 强行归一为 old+1 的问题：既有 reducer 一次命令可能推进多个 revision，存储必须精确保留调用方 revision，不能导致内存/SQL 版本分离。保留 stale/same-revision conflict、immutable prefix、workspace/harness 与 tool identity 校验；T05 再收敛为每 transition 一次 revision/CAS。
+- 迁移旧 rename/JSON 故障 fixture 为唯一 executor 上 cfg(test) SQL trigger 或关闭 DB 后的离线 SQL 损坏。保留 mixed-load 中“损坏会话 load/inspect 拒绝、其他会话仍能恢复、损坏原值不被改写”的断言。恢复遗漏的 image_tests 模块注册，4项既有 Payload 安全回归继续执行；没有通过移除测试或放宽门禁通过。
+- 增加4项 facade 回归：多 revision 精确往返、immutable prefix 与 ack replay；delivery INSERT 末段 SQL ABORT 后 state/entry/content/order 整体回滚并可真实重开重试；window=1 仍保存所有 intent，删除源/重开后按序投递；长工具 text/diff/resource 的正文与 terminal status 重开精确往返。迁移既有 stale/same-revision/scope、源删除 archive、ack 重开测试及 SIGKILL 的独立 SQL row 断言。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd sql_state`：当时4项通过（后补工具往返用例随完整 workspace 通过），日志 `.test-results/t04/state-atomic-review-final.log`。首次新增测试使用了不存在的构造器/错误 enum pattern，后续 clippy 发现两处 slice clone，均修复；失败日志 `.test-results/t04/{state-atomic-review,rewrite-history-integration-review}.log` 保留。
+- 最新 `npm run test:rewrite` 全通过：check/audit/build/format/clippy、Rust workspace251项（daemon249+core2；既有 offline SDK1项仍默认 ignored）、TS187、runner41、IPC19、Telegram15、真实 SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-history-integration-review-final2.log`、`.test-results/run-QnCftA/`。前次运行在 GNU release 构建期间触及本次工具200秒执行上限，未记为通过；完整重跑采用600秒工具上限，未更改测试超时或生产帧预算。
+- 最新显式 GNU 产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：19/15项通过，日志 `.test-results/t04/production-{ipc,telegram}-history-integration-review.log`。未执行 musl/offline SDK/最终 scale 或 soak，未 commit/push/发布；未修改真实数据。
+- **第4步 history 原子提交及第5步窗口语义已接入；T04 仍不勾选。** 下一步按第6/7步迁移 Telegram offset/callback/inbox admission 的单事务及 topic effect，然后完成 SessionStore/interface 收尾和 io.rs 删除。Telegram 仍有文件协议，维护仍待后续任务切换，禁止发布此中间版本，不进入 T05。
+
+**阶段6/7执行记录（Telegram inbox/effect 切换到共享 SQLite；当前工作区未提交；T04/T05 尚未完成）：**
+
+- `TelegramStore` 改为共享 Database typed facade，移除 path/root/全局文件 Mutex；新增 `telegram_sql.rs`，在唯一 executor/连接上读校验规范化 meta/bindings/inbox/callback rows，事务内再验证 expected_binding，原子更新 offset、callback used_by 和 inbox admission。所有写入绑定参数，校验 JS safe integer、typed JSON、SQL 列身份/状态及 callback receipt；没有新连接池、可选 backend 或任意 SQL 业务入口。
+- `TelegramEffects` 使用同一 executor 的 Lookup/Begin/Finish typed 请求。在 HTTP 前提交 Started；16个并发准入只有一个获准调用远端，其他看到 Started；响应不确定记 Uncertain，不自动再次 createForumTopic。无 reply observer 时已准入 DB 请求仍执行；若 HTTP caller 消失则保留 Started，重启不重新执行。completed/missing/conflicting effect 及源删除后的 operation replay 保证保持。
+- production Context 从 app 注入同一 Database，不再创建 Telegram state/effect 文件。删除最后的 `persistence/io.rs` 及模块引用。现有离线 gc 改在持原 flock 时打开同一 Database，完成 typed compact 后 shutdown/drain/join，再释放 lease；仅删除 completed inbox / 不被 pending 保护的 expired callbacks。更新维护 fixture 为 SQL，export manifest 使用当前 format3 标记；完整 WAL export 恢复验收仍属于 T10，未冒充本阶段完成。
+- 原34项 Telegram 回归保留并通过。旧 state JSON/rename fixture 改为关闭 DB 后离线 SQL 损坏/trigger；保留坏 owner 拒绝、缺 effect 不得重建远端、删除源后投递、callback 重放、FIFO/429、supervisor join 安全断言。新增 admission 末段 SQL ABORT 精确回滚 offset/callback/inbox、expected_binding TOCTOU 拒绝、丢弃已接受 admission observer 后仍提交及真实重开；新增 effect 16路并发唯一 Started、重开后 Started/Uncertain 不重新准入、不同请求冲突测试。
+- binary IPC/Telegram 停止后新增无 telegram 目录断言。授权丢弃测试验证无 inbox SQL row 且 DB/存在的 WAL 原始 bytes 不包含未授权原文，而非仅检查不存在的 JSON 文件。无过期时间的 callback 使用 JS MAX_SAFE_INTEGER，保持合法不自动过期语义；不放宽 schema 数字上限。
+- 首次 workspace 执行暴露2项旧 fixture/默认 u64::MAX：旧 effect rename 路径已不存在，callback expiry 超过新固定 safe integer；均修正后 `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd telegram::` 34项通过，`npm run clippy` 通过。日志 `.test-results/t04/{rust-telegram-sql,tests-telegram-sql2,clippy-telegram-sql}.log` 保留。
+- 最新完整 `npm run test:rewrite` 通过：check/audit/build/format/clippy、Rust workspace253项（daemon251+core2；既有 offline SDK1项仍默认 ignored）、TS187、runner41、IPC19、Telegram15、真实 SIGKILL3、Chromium9、GNU构建/打包/artifact smoke。日志 `.test-results/t04/rewrite-telegram-sql-final.log`、`.test-results/run-giuBxc/`。随后只加强授权丢弃的 SQL/raw bytes 测试，定向测试通过，日志 `.test-results/t04/telegram-private-bytes.log`；未将此前完整 rewrite 声称为此后已重跑。
+- 最新显式 GNU `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` 分别19/15项通过，日志 `.test-results/t04/production-{ipc-telegram-sql,telegram-sql}.log`。未执行 musl/offline SDK/最终 scale/soak；未 commit/push/发布，未修改真实 root。
+- 用户已明确选择先完成 T04 再完成 T05；**本阶段只完成 T04 第6/7步和 io.rs 删除，不代表用户要求的 T05 已完成。** 当前仍需第9步 SessionStore/interface commit contract 收尾及第10步 format fixture 清单核验；actor 仍持完整历史，未完成 T05 的 transition/增量 commit/100k store spy 验收。不得勾选 T04/T05 或发布当前内部版本。
+
+**最终收尾及验收记录（实现提交 `af66421`；T04 完成）：**
+
+- 将此前未提交的阶段4b、阶段6/7实现一并保存于本提交。正式以 `SessionStore` 替换 `HistoryStore`，无旧名字 alias；删除 `persistence/history.rs`、`persistence/io.rs`、filesystem HistorySnapshot/checksum 外壳、delivery_events/project_outbox/恢复扫描。所有生产 facade 来自 app 同一个 Database，只有一个 SQLite executor/Connection 和原256项队列；没有 facade 文件路径、文件 Mutex、旧格式 reader、双写或新增 backend。
+- `SessionPersistence::commit` 统一接受已有 typed `SessionCommit` 并返回 `CommitBatch`。正常 actor 更新、shutdown cancellation 和冷恢复均走 revision CAS；entries、原始图像 BLOB、工具正文/metadata、notice/interaction archives、delivery intents 同事务。删除 `save_image` 和 split archive/commit 路径。失败不替换内存或返回成功事件；shutdown候选状态也不在持久化前修改原状态。一个测试用 MemoryStore 改为同样 typed commit，失败图像与状态一起回滚，其他故障 wrapper 仅代理新契约。
+- T04 仍保留既有 full-state reducer/actor 和 native adoption 的 load/list/save contract。临时 `commit.rs::SessionCommit::between` 从旧 reducer 的前后状态形成 SQL 写集，继续验证不可变历史 prefix、origin 和 tool identity；不读旧 DB history 来提交普通更新。**该桥接仍会 clone/比较 actor 历史，不是 T05 的纯 transition 或100k零读取/零序列化验收。** 完整历史冷查询和 v2 wire 继续按 T05–T08 移除；尚未按 committed batch 发布，不能提前声明这些后续任务完成。
+- 删除 `StorageLease::acquire` 提前写完成 marker 的旧生产初始化路径，只有 Database executor 可成功建库后完成 marker；维护只获取已有 marker 和同一个 flock。合并重复 marker 校验，不支持格式猜测/自动迁移。新增 frozen `test/fixtures/formats/workbench-v2/storage-format.json`，实际 normal DB startup 与 gc/reset/export均拒绝且源bytes不变；旧6项业务format拒绝样本继续执行。
+- format/维护 fixture 改用生产 schema.sql 构造独立 SQL root，验证 gc 保留 contents/entries、operation 原始BLOB/checksum、Acked delivery完整rows，坏数据库明确失败且bytes不变；不再用旧业务 JSON路径证明新持久化成功。marker-only reset / live lease / symlink / canonical destination / exact bytes export断言保持。T10的有效未checkpoint WAL导出恢复和生命周期专项验收未在本项冒充完成。
+- 新增 stopped-root 全白名单 helper及自测；实际 IPC/Telegram契约和GNU artifact均验证root只含lease、format marker、DB与合法WAL/SHM/journal辅助文件，拒绝任意额外JSON/业务目录/symlink。补充具体静态tripwire：旧history/io路径、旧ledger/project_outbox/split image方法不可达，六个facade必须持Database而非root/path/gate/Mutex；未增加通用lint框架。
+- 新增/加强 CAS stale owner 与 accepted commit reply observer丢弃仍drain/join/重开回归；末段delivery SQL ABORT同时回滚state、entry、text、image BLOB、sequence和intent；原始图像/工具正文可在成功重试后精确读取。保留ack tombstone、window=1不丢intent、callback重放、429/restart、topic FIFO、cancel/remove终态前worker join等断言，不删除测试/改ignored/放宽门禁。
+- `cargo test --manifest-path rust/Cargo.toml --workspace` 在契约接入后通过，日志 `.test-results/t04/rust-session-contract.log`；首次clippy发现移除旧lease acquire后13处测试调用仍未迁移，已改为实际flock lock且安全断言保留，失败日志 `.test-results/t04/clippy-closeout.log` 保留。随后 `npm run clippy`通过；独立 `npx vitest run test/workbench-storage.test.ts` 7项通过，日志 `.test-results/t04/{clippy-closeout2,storage-closeout}.log`。
+- 最终 `npm run test:rewrite` **全部通过**：check/audit/build/format/clippy、Rust workspace254项（daemon252+core2；既有 offline SDK1项仍默认ignored）、TS188、runner42、IPC19、Telegram15、真实SIGKILL3、Chromium9、GNU生产构建/打包/artifact smoke。完整日志 `.test-results/t04/rewrite-closeout.log`、并行suite日志 `.test-results/run-gVqr2W/`。
+- 最新显式 GNU 产物 `node scripts/workbench-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"` / `node scripts/workbench-telegram-contract.mjs --binary "$PWD/service-dist/pi-acp-workbenchd"`：**19/15项通过**，日志 `.test-results/t04/production-{ipc,telegram}-closeout.log`。`git diff --check`通过。未执行musl、offline SDK、最终scale/soak；未push/发布、未触及真实root；内部版本继续禁止发布。
+- **T04十项实施及本项安全验收已完成，无本项剩余阻塞。下一项为T05。** T05仍未完成，actor不再持历史、纯transition/热状态硬预算、每revision单batch发布和100k store spy等均不得以本次结果替代。维护WAL、musl和发布最终门禁继续按T10/T11执行。
 
 **读取/修改：** `app.rs`、`persistence/{history,journal,outbox,payload,inbox,telegram_effect,interface}.rs`、`telegram/{runtime,admission,polling,execution,delivery,render}.rs`。
 
