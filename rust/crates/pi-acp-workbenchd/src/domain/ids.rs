@@ -68,6 +68,7 @@ id!(TurnId);
 id!(InteractionId);
 id!(EntryId);
 id!(ImageId);
+id!(ContentId);
 id!(NoticeId);
 id!(DeliveryId);
 id!(OperationId);

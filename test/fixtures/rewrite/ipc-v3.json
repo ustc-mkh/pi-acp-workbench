@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "summary": {
+    "id": "session-1", "harness": "Pi", "cwd": "/workspace",
+    "status": "Idle", "revision": 7, "created_seq": 1
+  },
+  "view": {
+    "id": "session-1", "provider_session": "native/session-1", "harness": "Pi", "cwd": "/workspace", "status": "Idle",
+    "config": {"model": null, "mode": null}, "configuration_intent": null,
+    "catalogue": {"models": [], "modes": [], "commands": []},
+    "plan": {"items": []},
+    "usage": {"input_tokens": 0, "output_tokens": 0, "cost_micros": 0, "context_used": null, "context_size": null},
+    "active_turn": null, "pending_interactions": {}, "origin": null,
+    "revision": 7, "last_entry_seq": 2
+  },
+  "entries": [
+    {"seq": 1, "id": "entry-1", "turn": "turn-1", "role": "User", "message": null, "text": {"Inline": {"text": "你好🌏\n\"quoted\"\\"}}, "image": null},
+    {"seq": 2, "id": "entry-2", "turn": "turn-1", "role": "Agent", "message": "stream/1", "text": {"Archived": {"content": {"id": "content-2", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 67108864, "kind": "Text"}}}, "image": null}
+  ],
+  "tools": [
+    {"id": "tool/1", "turn": "turn-1", "status": "Completed", "kind": "Edit", "title": "编辑", "name": "apply_patch", "locations": [{"path": "src/example.ts", "line": 0}],
+      "content": [{"Diff": {"path": "src/example.ts", "old_text": null, "new_text": {"id": "diff-1", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bytes": 1048576, "kind": "ToolDiff"}}}]}
+  ],
+  "receipts": [
+    {"Created": {"summary": {"id": "session-1", "harness": "Pi", "cwd": "/workspace", "status": "Idle", "revision": 7, "created_seq": 1}}},
+    {"Accepted": {"session": "session-1", "revision": 7}},
+    {"Forked": {"summary": {"id": "session-2", "harness": "Pi", "cwd": "/workspace", "status": "Idle", "revision": 0, "created_seq": 2}}},
+    {"Removed": {"session": "session-1"}},
+    {"ForkCancelRequested": {"source": "session-1", "operation": "operation-1"}}
+  ]
+}

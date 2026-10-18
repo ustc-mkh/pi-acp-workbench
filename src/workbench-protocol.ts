@@ -292,3 +292,245 @@ export function commandPool(command: ClientCommand): 0 | 1 | 2 {
 export function durableCommand(command: ClientCommand) {
   return !['list', 'inspect', 'image', 'subscribe', 'unsubscribe'].includes(command.method);
 }
+
+/** Fixed v3 contracts; production client switches in T08, server in T07. */
+export const PROTOCOL_VERSION_V3 = 3;
+export const STORAGE_VERSION_V3 = 3;
+export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+export const MAX_QUERY_BYTES = 1024 * 1024;
+export const MAX_VIEW_BYTES = 512 * 1024;
+export const INLINE_TEXT_BYTES = 16 * 1024;
+export const MAX_CONTENT_BYTES = 64 * 1024 * 1024;
+export const CONTENT_SLICE_BYTES = 64 * 1024;
+export const DEFAULT_LIST_LIMIT = 50;
+export const MAX_LIST_LIMIT = 100;
+export const DEFAULT_HISTORY_LIMIT = 100;
+export const MAX_HISTORY_LIMIT = 200;
+export const MAX_PENDING_INTERACTIONS = 32;
+export const jsonBytes = (value: unknown) => byteLength(JSON.stringify(value));
+export function checkJsonBudget<T>(value: T, budget: number): T {
+  if (jsonBytes(value) > budget) invalid();
+  return value;
+}
+export function queryLimit(value: number | undefined, fallback: number, maximum: number) {
+  const n = uint.parse(value ?? fallback);
+  return n > 0 && n <= maximum ? n : invalid();
+}
+export const contentKind = oneOf('Text', 'ToolText', 'ToolDiff', 'ToolResource');
+export const contentRef = object({
+  id: id('content'),
+  sha256: digest,
+  bytes: checked(uint, (n) => n <= MAX_CONTENT_BYTES),
+  kind: contentKind,
+});
+export type ContentRef = Infer<typeof contentRef>;
+export const textBody = variants({
+  Inline: object({ text: checked(string, (s) => byteLength(s) <= INLINE_TEXT_BYTES) }),
+  Archived: object({ content: checked(contentRef, (r) => r.kind === 'Text') }),
+});
+export type TextBody = Infer<typeof textBody>;
+export const sessionSummary = object({
+  id: sessionId,
+  harness,
+  cwd: workspacePath,
+  status,
+  revision: uint,
+  created_seq: uint,
+});
+export type SessionSummary = Infer<typeof sessionSummary>;
+export const sessionView = checked(
+  object({
+    id: sessionId,
+    provider_session: nullable(providerSessionId),
+    harness,
+    cwd: workspacePath,
+    status,
+    config,
+    configuration_intent: nullable(object({ requested: config, restore: config })),
+    catalogue,
+    plan,
+    usage: object({
+      input_tokens: uint,
+      output_tokens: uint,
+      cost_micros: uint,
+      context_used: nullable(uint),
+      context_size: nullable(uint),
+    }),
+    active_turn: nullable(turnId),
+    pending_interactions: checked(
+      record(interaction, interactionId),
+      (items) =>
+        Object.keys(items).length <= MAX_PENDING_INTERACTIONS &&
+        Object.entries(items).every(([key, item]) => key === item.id),
+    ),
+    origin: nullable(object({ session: sessionId, entry: entryId, target: forkTarget })),
+    revision: uint,
+    last_entry_seq: uint,
+  }),
+  (v) => jsonBytes(v) <= MAX_VIEW_BYTES,
+);
+export type SessionView = Infer<typeof sessionView>;
+export const entryHeader = object({
+  seq: uint,
+  id: entryId,
+  turn: turnId,
+  role: oneOf('User', 'Agent', 'Thought', 'Tool'),
+  message: nullable(messageId),
+  text: textBody,
+  image: nullable(imageRef),
+});
+export type EntryHeader = Infer<typeof entryHeader>;
+const contentOfKind = (kind: ContentRef['kind']) => checked(contentRef, (r) => r.kind === kind);
+export const toolBody = variants({
+  Text: object({ content: contentOfKind('ToolText') }),
+  Diff: object({
+    path: string,
+    old_text: nullable(contentOfKind('ToolDiff')),
+    new_text: contentOfKind('ToolDiff'),
+  }),
+  ResourceText: object({
+    uri: string,
+    content: contentOfKind('ToolResource'),
+    mime_type: nullable(string),
+  }),
+  ResourceLink: object({ uri: string, name: string, mime_type: nullable(string) }),
+  TerminalReference: object({ id: terminalId }),
+  Unsupported: object({ kind: oneOf('Image', 'Audio', 'ResourceBlob', 'Unknown') }),
+});
+export const toolHeader = checked(
+  object({
+    id: toolId,
+    turn: turnId,
+    status: toolStatus,
+    kind: nullable(toolKind),
+    title: string,
+    name: nullable(string),
+    locations: array(
+      object({ path: string, line: nullable(checked(uint, (n) => n <= 0xffffffff)) }),
+    ),
+    content: array(toolBody),
+  }),
+  (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export type ToolHeader = Infer<typeof toolHeader>;
+export const commandReceipt = checked(
+  variants({
+    Created: object({ summary: sessionSummary }),
+    Loaded: object({ view: sessionView }),
+    Accepted: object({ session: sessionId, revision: uint }),
+    Forked: object({ summary: sessionSummary }),
+    Removed: object({ session: sessionId }),
+    ForkCancelRequested: object({ source: sessionId, operation: operationId }),
+  }),
+  (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export type CommandReceipt = Infer<typeof commandReceipt>;
+export const commitBatch = checked(
+  object({
+    session: sessionId,
+    revision: uint,
+    view: nullable(sessionView),
+    entries: array(entryHeader),
+    tools: array(toolHeader),
+    removed: boolean,
+  }),
+  (v) =>
+    jsonBytes(v) <= MAX_QUERY_BYTES &&
+    (!v.view || (v.view.id === v.session && v.view.revision === v.revision)) &&
+    (!v.removed || (!v.view && v.entries.length === 0 && v.tools.length === 0)),
+);
+export type CommitBatch = Infer<typeof commitBatch>;
+export const queryError = oneOf('InvalidInput', 'UnsupportedVersion', 'TooLarge');
+export const listCursor = object({ version: literal(3), max_created_seq: uint, before_seq: uint });
+export const historyCursor = object({
+  version: literal(3),
+  session: sessionId,
+  max_entry_seq: uint,
+  before_seq: uint,
+});
+export const toolCursor = object({
+  version: literal(3),
+  session: sessionId,
+  turn: turnId,
+  after_tool: toolId,
+});
+export const listPage = checked(
+  object({ sessions: array(sessionSummary), next_cursor: nullable(listCursor) }),
+  (v) => v.sessions.length <= MAX_LIST_LIMIT && jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export const historyPage = checked(
+  object({ entries: array(entryHeader), next_cursor: nullable(historyCursor) }),
+  (v) => v.entries.length <= MAX_HISTORY_LIMIT && jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export const toolPage = checked(
+  object({ tools: array(toolHeader), next_cursor: nullable(toolCursor) }),
+  (v) => v.tools.length <= MAX_HISTORY_LIMIT && jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export const contentSlice = checked(
+  object({
+    text: checked(string, (s) => byteLength(s) <= CONTENT_SLICE_BYTES),
+    next_offset: nullable(uint),
+    sha256: digest,
+    total_bytes: checked(uint, (n) => n <= MAX_CONTENT_BYTES),
+  }),
+  (v) => v.next_offset === null || v.next_offset <= v.total_bytes,
+);
+export const attached = checked(
+  object({ view: sessionView, recent_page: historyPage }),
+  (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+const listLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_LIST_LIMIT)));
+const historyLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_HISTORY_LIMIT)));
+export const queryCommand = checked(
+  tagged('method', {
+    list: object({
+      method: literal('list'),
+      cursor: optional(nullable(listCursor)),
+      limit: listLimit,
+    }),
+    inspect: object({ method: literal('inspect'), session: sessionId }),
+    history: object({
+      method: literal('history'),
+      session: sessionId,
+      cursor: optional(nullable(historyCursor)),
+      limit: historyLimit,
+    }),
+    tools: object({
+      method: literal('tools'),
+      session: sessionId,
+      turn: turnId,
+      cursor: optional(nullable(toolCursor)),
+      limit: historyLimit,
+    }),
+    content: object({
+      method: literal('content'),
+      ref: contentRef,
+      offset: uint,
+      length: optional(nullable(checked(uint, (n) => n > 0 && n <= CONTENT_SLICE_BYTES))),
+    }),
+    attach: object({ method: literal('attach'), session: sessionId }),
+    image: object({ method: literal('image'), image: imageRef }),
+  }),
+  (v) => {
+    switch (v.method) {
+      case 'list':
+        return (
+          !v.cursor || (v.cursor.before_seq > 0 && v.cursor.before_seq <= v.cursor.max_created_seq)
+        );
+      case 'history':
+        return (
+          !v.cursor ||
+          (v.cursor.session === v.session &&
+            v.cursor.before_seq > 0 &&
+            v.cursor.before_seq <= v.cursor.max_entry_seq)
+        );
+      case 'tools':
+        return !v.cursor || (v.cursor.session === v.session && v.cursor.turn === v.turn);
+      case 'content':
+        return v.offset <= v.ref.bytes;
+      default:
+        return true;
+    }
+  },
+);
+export const queryRequest = object({ version: literal(3), id: uint, command: queryCommand });

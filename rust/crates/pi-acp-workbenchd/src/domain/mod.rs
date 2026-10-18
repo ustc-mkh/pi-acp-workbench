@@ -7,10 +7,12 @@ pub mod ids;
 pub mod image;
 pub mod interaction;
 pub mod plan;
+pub mod query;
 pub mod reducer;
 pub mod session;
 pub mod tool;
 pub mod transcript;
+pub mod transition;
 pub mod usage;
 pub mod workspace;
 pub use workspace::WorkspacePath;
@@ -25,6 +27,8 @@ mod image_tests;
 mod interaction_tests;
 #[cfg(test)]
 mod metadata_tests;
+#[cfg(test)]
+mod query_tests;
 #[cfg(test)]
 mod tests;
 
