@@ -8,7 +8,9 @@ use crate::domain::{
     fork::ContentHash,
     ids::{ContentId, EntryId, InteractionId, NoticeId},
     interaction::Interaction,
-    query::{ContentKind, ContentRef, SafeInteger, TextBody},
+    query::{
+        ContentKind, ContentRef, ContentSlice, EntryHeader, SafeInteger, TextBody, MAX_QUERY_BYTES,
+    },
     transcript::TranscriptEntry,
     transition::{NewContent, NewEntry},
 };
@@ -33,7 +35,22 @@ pub(super) enum Payload {
     Interaction(Interaction),
     Entry(TranscriptEntry),
 }
+#[derive(Debug, Serialize)]
+pub struct DeliveryPage {
+    pub entries: Vec<EntryHeader>,
+    pub next_seq: Option<SafeInteger>,
+}
+
 pub(super) enum Request {
+    DeliveryPage {
+        id: crate::domain::DeliveryId,
+        after: SafeInteger,
+        reply: Reply<DeliveryPage>,
+    },
+    Header {
+        id: EntryId,
+        reply: Reply<EntryHeader>,
+    },
     Put {
         payload: Box<Payload>,
         reply: Reply<()>,
@@ -100,6 +117,39 @@ impl PayloadStore {
             .map(|value| value.content)
             .map_err(failure)
     }
+    pub async fn content_slice(
+        &self,
+        reference: &ContentRef,
+        offset: SafeInteger,
+    ) -> Result<ContentSlice, DomainError> {
+        self.database
+            .content_slice(reference.clone(), offset, None)
+            .await
+            .map_err(failure)
+    }
+    pub async fn delivery_page(
+        &self,
+        id: &crate::domain::DeliveryId,
+        after: SafeInteger,
+    ) -> Result<DeliveryPage, DomainError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::DeliveryPage {
+            id: id.clone(),
+            after,
+            reply,
+        })
+        .await?;
+        result.await.map_err(failure)?.map_err(failure)
+    }
+    pub async fn entry_header(&self, id: &EntryId) -> Result<EntryHeader, DomainError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::Header {
+            id: id.clone(),
+            reply,
+        })
+        .await?;
+        result.await.map_err(failure)?.map_err(failure)
+    }
     pub async fn content(&self, reference: &ContentRef) -> Result<String, DomainError> {
         self.database
             .content(reference.clone())
@@ -153,6 +203,57 @@ fn failure(error: impl std::fmt::Display) -> DomainError {
 // Hashing the typed identity keeps all valid 200-byte IDs representable after
 // namespacing. Scope is part of the key, so notice/interaction/entry IDs cannot
 // alias one another. These are database keys, never filesystem paths.
+fn delivery_page(
+    db: &Connection,
+    id: &crate::domain::DeliveryId,
+    after: SafeInteger,
+) -> Result<DeliveryPage, StoreError> {
+    let (record, _) = super::delivery::record(db, id)?.ok_or(StoreError::NotFound)?;
+    let crate::domain::transition::DeliveryPayload::Turn {
+        turn,
+        first_seq,
+        last_seq,
+        ..
+    } = record.intent.payload
+    else {
+        return Err(StoreError::Invalid("delivery has no frozen turn manifest"));
+    };
+    let mut page = DeliveryPage {
+        entries: Vec::new(),
+        next_seq: None,
+    };
+    let mut statement = db.prepare("SELECT de.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes<=16384 THEN c.data ELSE NULL END FROM delivery_entries de JOIN entries e ON e.entry_id=de.entry_id JOIN contents c ON c.id=e.content_id WHERE de.delivery_id=?1 AND de.seq>?2 ORDER BY de.seq LIMIT 101")?;
+    let mut rows = statement.query(rusqlite::params![id.as_str(), after])?;
+    while let Some(row) = rows.next()? {
+        let header = content::header(row)?;
+        if header.turn != turn
+            || header.role != crate::domain::transcript::EntryRole::Agent
+            || header.seq < first_seq
+            || header.seq > last_seq
+        {
+            return Err(StoreError::Invalid(
+                "frozen delivery entry identity mismatch",
+            ));
+        }
+        if page.entries.len() == 100 {
+            return Ok(page);
+        }
+        let previous = page.next_seq;
+        page.next_seq = Some(header.seq);
+        page.entries.push(header);
+        if crate::domain::query::json_bytes(&page, MAX_QUERY_BYTES).is_err() {
+            page.entries.pop();
+            page.next_seq = previous;
+            if page.entries.is_empty() {
+                return Err(crate::domain::query::QueryError::TooLarge.into());
+            }
+            return Ok(page);
+        }
+    }
+    page.next_seq = None;
+    Ok(page)
+}
+
 pub(super) fn content_id(scope: &str, id: &str) -> Result<ContentId, StoreError> {
     ContentId::new(format!(
         "archive-{scope}-{:x}",
@@ -287,6 +388,17 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                     return Err(StoreError::Invalid("interaction payload identity mismatch"));
                 }
                 Ok(interaction)
+            })();
+            let _ = reply.send(result);
+        }
+        Request::DeliveryPage { id, after, reply } => {
+            let _ = reply.send(delivery_page(db, &id, after));
+        }
+        Request::Header { id, reply } => {
+            let result = (|| {
+                let mut statement = db.prepare("SELECT 0,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes<=16384 THEN c.data ELSE NULL END FROM entries e JOIN contents c ON c.id=e.content_id WHERE e.entry_id=?1")?;
+                let mut rows = statement.query([id.as_str()])?;
+                content::header(rows.next()?.ok_or(StoreError::NotFound)?)
             })();
             let _ = reply.send(result);
         }

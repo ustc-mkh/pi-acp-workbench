@@ -119,7 +119,7 @@ try {
     if (message.type() === 'error') errors.push(message.text());
   });
   page.on('request', (request) => {
-    if (!request.url().startsWith(origin + '/') && !request.url().startsWith('data:'))
+    if (!request.url().startsWith(origin + '/') && !request.url().startsWith('blob:'))
       unexpected.push(request.url());
   });
   const client = new WorkbenchClient(join(data, 'workbench.sock'));
@@ -136,7 +136,7 @@ try {
   await page.exposeFunction('workbenchReceive', (message) => controller.receive(message));
   await page.goto(origin + '/style.css');
   await page.setContent(
-    `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-smoke' ${origin}; style-src ${origin} 'unsafe-inline'; font-src ${origin}; img-src data:; connect-src 'none';"><link rel="stylesheet" href="${origin}/style.css"><link rel="stylesheet" href="${origin}/katex.min.css"></head><body><main id="workbench"></main></body></html>`,
+    `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-smoke' ${origin}; style-src ${origin} 'unsafe-inline'; font-src ${origin}; img-src blob:; connect-src 'none';"><link rel="stylesheet" href="${origin}/style.css"><link rel="stylesheet" href="${origin}/katex.min.css"></head><body><main id="workbench"></main></body></html>`,
   );
   await page.evaluate(() => {
     window.acquireVsCodeApi = () => ({
@@ -158,8 +158,8 @@ try {
   await wait(() => controller.snapshot.view?.status === 'ready', 'created session');
   const source = controller.snapshot.selected;
   assert(source);
-  assert.equal(controller.snapshot.view.snapshot.harness, 'Pi');
-  check('production browser/controller creates a session through the actual single host IPC v2');
+  assert.equal(controller.snapshot.view.view.harness, 'Pi');
+  check('production browser/controller creates a session through the actual single host IPC v3');
   const prompt = async (text) => {
     await page.waitForFunction(
       (selected) =>
@@ -170,15 +170,15 @@ try {
       controller.snapshot.selected,
     );
     const previous =
-      controller.snapshot.view?.snapshot?.transcript.entries.filter(
-        (row) => row.role === 'User' && row.text === text,
+      controller.snapshot.view?.entries.filter(
+        (row) => row.role === 'User' && row.text.Inline?.text === text,
       ).length || 0;
     await page.locator('#prompt').fill(text);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await wait(
       () =>
-        (controller.snapshot.view?.snapshot?.transcript.entries.filter(
-          (row) => row.role === 'User' && row.text === text,
+        (controller.snapshot.view?.entries.filter(
+          (row) => row.role === 'User' && row.text.Inline?.text === text,
         ).length || 0) > previous,
       `prompt ${text}`,
     );
@@ -187,13 +187,13 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'stream completion',
   );
   await page.locator('article').filter({ hasText: '世界' }).waitFor();
   assert.equal(await page.locator('article').count(), 4);
   assert.equal(await page.locator('article.thought').count(), 1);
-  const sourceRows = structuredClone(controller.snapshot.view.snapshot.transcript.entries);
+  const sourceRows = structuredClone(controller.snapshot.view.entries);
   assert.equal(new Set(sourceRows.slice(1).map((row) => row.message)).size, 1);
   check(
     'live text/thought deltas preserve distinct committed entry IDs and opaque groups in browser state',
@@ -204,7 +204,7 @@ try {
     'native branch selection',
   );
   const branch = controller.snapshot.selected;
-  assert.equal(controller.snapshot.view.snapshot.transcript.origin.session, source);
+  assert.equal(controller.snapshot.view.view.origin.session, source);
   assert(
     controller.snapshot.operations.some(
       (operation) => operation.method === 'fork' && operation.status === 'completed',
@@ -220,7 +220,7 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'typed form resolution',
   );
   await page.locator('#interactions form').waitFor({ state: 'detached' });
@@ -229,14 +229,15 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'tool completion',
   );
-  assert(
-    Object.values(controller.snapshot.view.snapshot.transcript.tools).some(
-      (turn) => Object.keys(turn).length,
-    ),
-  );
+  await page
+    .getByRole('button', { name: /^Tools for / })
+    .last()
+    .click();
+  await wait(() => controller.snapshot.view.tools.length > 0, 'bounded tools query');
+  assert(controller.snapshot.view.tools.length > 0);
   check(
     'typed tool metadata reaches the browser as escaped display content without file/terminal authority',
   );
@@ -244,15 +245,13 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'image completion',
   );
   await page.getByRole('button', { name: 'Load archived image', exact: true }).click();
   await page.locator('figure img').waitFor();
   await page.waitForFunction(() => document.querySelector('figure img')?.naturalWidth > 0);
-  assert(
-    (await page.locator('figure img').getAttribute('src')).startsWith('data:image/png;base64,'),
-  );
+  assert((await page.locator('figure img').getAttribute('src')).startsWith('blob:'));
   check(
     'explicit archive-only image read displays a real decoded raster with no remote/path fallback',
   );
@@ -260,14 +259,14 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      typeof controller.snapshot.view.snapshot.status === 'object',
+      typeof controller.snapshot.view.view.status === 'object',
     'worker crash',
   );
   await prompt('recovered browser turn');
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'explicit post-crash recovery',
   );
   assert.equal(controller.snapshot.selected, branch);
@@ -280,13 +279,13 @@ try {
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
-      controller.snapshot.view.snapshot.status === 'Idle',
+      controller.snapshot.view.view.status === 'Idle',
     'cancel with pending form',
   );
   await page.locator('#interactions form').waitFor({ state: 'detached' });
   check('reserved control cancels a live waiting turn and clears its exact pending interaction');
-  const sourceEvents = await client.call({ method: 'inspect', session: source });
-  assert.deepEqual(sourceEvents[0].SessionLoaded.transcript.entries, sourceRows);
+  const sourcePage = await client.call({ method: 'history', session: source });
+  assert.deepEqual(sourcePage.entries, sourceRows);
   assert.equal(controller.snapshot.selected, branch);
   assert.equal(controller.snapshot.error, undefined);
   assert.deepEqual(unexpected, []);
@@ -295,7 +294,7 @@ try {
   const extension = await readFile('dist/extension.cjs', 'utf8');
   for (const forbidden of [])
     assert(!extension.includes(forbidden), `legacy production import: ${forbidden}`);
-  await page.screenshot({ path: join(artifacts, 'workbench-v2.png'), fullPage: true });
+  await page.screenshot({ path: join(artifacts, 'workbench-v3.png'), fullPage: true });
   check(
     'source unchanged, no browser external fetch/errors, production extension excludes legacy wire/facade',
   );

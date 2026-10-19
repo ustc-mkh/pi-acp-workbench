@@ -10,7 +10,7 @@ use crate::{
             InteractionResponse,
         },
         plan::PlanStatus,
-        SessionSnapshot,
+        query::SessionView,
     },
     persistence::{
         inbox::TelegramStore,
@@ -50,7 +50,7 @@ pub fn messages(topic: &TopicKey, text: &str) -> Vec<SendMessage> {
         .collect()
 }
 /// Plan is deliberately rendered only by this explicit /status projection.
-pub fn status(snapshot: &SessionSnapshot) -> String {
+pub fn status(snapshot: &SessionView) -> String {
     let mut text = format!(
         "Session {}\n{:?} · {:?}\n{}\nModel: {}\nMode: {}\n",
         snapshot.id,
@@ -167,54 +167,15 @@ fn text_parts(topic: &TopicKey, text: &str) -> Vec<DeliveryPart> {
         .map(DeliveryPart::Message)
         .collect()
 }
-fn flush_text(topic: &TopicKey, text: &mut String, parts: &mut Vec<DeliveryPart>) {
-    if !text.is_empty() {
-        parts.extend(text_parts(topic, &std::mem::take(text)));
-    }
-}
 pub async fn render(
     event: &DeliveryEvent,
     topic: &TopicKey,
-    snapshot: Option<&SessionSnapshot>,
+    snapshot: Option<&SessionView>,
     payloads: &PayloadStore,
     store: &TelegramStore,
     now: u64,
 ) -> Result<Vec<DeliveryPart>, DomainError> {
     match &event.payload {
-        DeliveryPayload::Entries { turn, entries } => {
-            let mut text = String::new();
-            let mut parts = Vec::new();
-            let mut previous_message = None;
-            for id in entries {
-                let entry = payloads.entry(id).await?;
-                if &entry.turn != turn {
-                    return Err(DomainError::Persistence(
-                        "delivery turn/entry mismatch".into(),
-                    ));
-                }
-                if let Some(image) = entry.image {
-                    flush_text(topic, &mut text, &mut parts);
-                    parts.push(DeliveryPart::Image {
-                        topic: topic.clone(),
-                        image,
-                    });
-                }
-                if !text.is_empty()
-                    && previous_message.is_some()
-                    && entry.message.is_some()
-                    && previous_message != entry.message
-                {
-                    text.push_str("\n\n");
-                }
-                previous_message = entry.message;
-                text.push_str(&entry.text);
-            }
-            flush_text(topic, &mut text, &mut parts);
-            if parts.is_empty() {
-                parts.extend(text_parts(topic, "Turn completed."));
-            }
-            Ok(parts)
-        }
         DeliveryPayload::Entry { entry } => {
             let entry = payloads.entry(entry).await?;
             let mut parts = Vec::new();
@@ -231,7 +192,7 @@ pub async fn render(
             Ok(text_parts(topic, &payloads.content(content).await?))
         }
         DeliveryPayload::Turn { .. } => Err(DomainError::Persistence(
-            "range delivery renderer not yet connected".into(),
+            "turn manifest must use the bounded TurnStream".into(),
         )),
         DeliveryPayload::Interaction { interaction } => {
             let Some(snapshot) =
@@ -257,9 +218,14 @@ pub async fn render(
                                 interaction: interaction.id.clone(),
                                 response,
                             },
+                            // Buttons are intentionally short-lived even when the
+                            // interaction itself has no provider deadline. Saturating
+                            // arithmetic keeps the wire value inside JS-safe bounds.
                             expires_at: interaction
                                 .expires_at
-                                .unwrap_or(crate::domain::query::MAX_SAFE_INTEGER),
+                                .unwrap_or(crate::domain::query::MAX_SAFE_INTEGER)
+                                .min(now.saturating_add(24 * 60 * 60))
+                                .min(crate::domain::query::MAX_SAFE_INTEGER),
                             used_by: None,
                         },
                     )

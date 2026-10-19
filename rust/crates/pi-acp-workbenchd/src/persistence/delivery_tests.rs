@@ -1,77 +1,92 @@
 use super::*;
 use crate::domain::{
-    event::DomainEvent,
-    ids::{EntryId, TurnId},
-    session::SessionConfig,
-    transcript::{EntryRole, TranscriptEntry},
-    Harness, SessionId, SessionState, SessionStatus, WorkspacePath,
+    command::AgentEvent, query::SessionView, transition::Transition, DomainCommand, EntryId,
+    SessionStatus, WorkspacePath,
 };
 fn root() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("workbench-sql-session-{}", uuid::Uuid::new_v4()))
 }
-fn state() -> SessionState {
-    SessionState {
-        id: SessionId::generate(),
-        provider_session: None,
-        harness: Harness::Pi,
-        cwd: WorkspacePath::new("/tmp").unwrap(),
-        status: SessionStatus::Idle,
-        transcript: Default::default(),
-        plan: Default::default(),
-        active_turn: None,
-        pending_interactions: Default::default(),
-        usage: Default::default(),
-        configuration_intent: None,
-        config: SessionConfig {
-            model: None,
-            mode: None,
-        },
-        catalogue: Default::default(),
-        revision: 0,
-    }
+fn state() -> SessionView {
+    let mut view = turn_manifest_tests::initial();
+    view.cwd = WorkspacePath::new("/tmp").unwrap();
+    view
 }
-async fn finish(store: &SessionStore, state: &mut SessionState, text: &str) -> EntryId {
-    store.save(state).await.unwrap();
-    let previous = state.clone();
-    let turn = TurnId::generate();
-    let id = EntryId::generate();
-    state.transcript.entries.push(TranscriptEntry {
-        id: id.clone(),
-        turn: turn.clone(),
-        role: EntryRole::Agent,
-        text: text.into(),
-        message: None,
-        image: None,
-    });
-    state.revision += 1;
-    let change = database::SessionCommit::between(
-        &previous,
-        state,
-        &[DomainEvent::TurnFinished {
-            session: state.id.clone(),
-            turn,
-        }],
-        None,
+async fn finish(store: &SessionStore, view: &mut SessionView, text: &str) -> EntryId {
+    turn_manifest_tests::apply(
+        store.database(),
+        view,
+        DomainCommand::Prompt {
+            session: view.id.clone(),
+            prompt: crate::domain::Prompt::new("input").unwrap(),
+        },
     )
-    .unwrap();
-    store.commit(change).await.unwrap();
-    id
+    .await;
+    let turn = view.active_turn.clone().unwrap();
+    turn_manifest_tests::apply(
+        store.database(),
+        view,
+        DomainCommand::Agent {
+            session: view.id.clone(),
+            event: AgentEvent::Text {
+                turn: turn.clone(),
+                message: None,
+                text: text.into(),
+            },
+        },
+    )
+    .await;
+    turn_manifest_tests::apply(
+        store.database(),
+        view,
+        DomainCommand::Agent {
+            session: view.id.clone(),
+            event: AgentEvent::Finished { turn },
+        },
+    )
+    .await;
+    store
+        .database()
+        .history(view.id.clone(), None, Some(1))
+        .await
+        .unwrap()
+        .entries[0]
+        .id
+        .clone()
+}
+fn changed(view: &SessionView) -> Transition {
+    let mut next = view.clone();
+    next.revision = next.revision.next().unwrap();
+    Transition {
+        expected_revision: view.revision,
+        next,
+        contents: vec![],
+        append: vec![],
+        tool_updates: vec![],
+        deliveries: vec![],
+    }
 }
 #[tokio::test]
 async fn sql_session_commit_and_delivery_are_durable_without_projection_scan() {
     let root = root();
     let store = SessionStore::fixture(&root);
-    let mut state = state();
-    let entry = finish(&store, &mut state, "你好 immutable output").await;
+    let mut view = state();
+    store.database().create(view.clone()).await.unwrap();
+    let entry = finish(&store, &mut view, "你好 immutable output").await;
     store.payloads.shutdown().await;
     let store = SessionStore::fixture(&root);
     let pending = store.outbox.pending(0, 16).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert!(
-        matches!(&pending[0].event.payload, outbox::DeliveryPayload::Entries { entries, .. } if entries == &vec![entry.clone()])
+        matches!(&pending[0].event.payload, outbox::DeliveryPayload::Turn { session, first_seq, last_seq, .. } if session == &view.id && first_seq.get() == 1 && last_seq.get() == 2)
     );
-    store.remove(state.id.as_str()).await.unwrap();
-    assert!(store.load(state.id.as_str()).await.unwrap().is_none());
+    let frozen = store
+        .payloads
+        .delivery_page(&pending[0].event.id, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(frozen.entries[0].id, entry);
+    store.database().remove(view.id.clone()).await.unwrap();
+    assert!(store.database().view(view.id.clone()).await.is_err());
     assert_eq!(
         store.payloads.entry(&entry).await.unwrap().text,
         "你好 immutable output"
@@ -85,28 +100,27 @@ async fn sql_session_commit_and_delivery_are_durable_without_projection_scan() {
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
-async fn sql_state_rejects_stale_and_scope_conflicts_without_mutation() {
+async fn sql_incremental_rejects_stale_same_revision_and_scope_conflicts_without_mutation() {
     let root = root();
     let store = SessionStore::fixture(&root);
-    let mut state = state();
-    store.save(&state).await.unwrap();
-    let stale = state.clone();
-    finish(&store, &mut state, "committed").await;
-    assert!(store.save(&stale).await.is_err());
-    let mut conflicting = state.clone();
-    conflicting.status = SessionStatus::Failed("same revision, different state".into());
-    assert!(store.save(&conflicting).await.is_err());
-    store.save(&state).await.unwrap();
+    let mut view = state();
+    store.database().create(view.clone()).await.unwrap();
+    let stale = changed(&view);
+    finish(&store, &mut view, "committed").await;
+    assert!(store.commit(stale).await.is_err());
+    let mut conflicting = changed(&view);
+    conflicting.next.revision = view.revision;
+    conflicting.next.status = SessionStatus::Failed("same revision, different state".into());
+    assert!(store.commit(conflicting).await.is_err());
     assert_eq!(
-        serde_json::to_vec(&store.load(state.id.as_str()).await.unwrap().unwrap()).unwrap(),
-        serde_json::to_vec(&state).unwrap()
+        serde_json::to_vec(&store.database().view(view.id.clone()).await.unwrap()).unwrap(),
+        serde_json::to_vec(&view).unwrap()
     );
-    let mut moved = state.clone();
-    moved.cwd = WorkspacePath::new("/").unwrap();
-    moved.revision += 1;
-    assert!(store.save(&moved).await.is_err());
+    let mut moved = changed(&view);
+    moved.next.cwd = WorkspacePath::new("/").unwrap();
+    assert!(store.commit(moved).await.is_err());
     assert_eq!(
-        store.load(state.id.as_str()).await.unwrap().unwrap().cwd,
+        store.database().view(view.id).await.unwrap().cwd,
         WorkspacePath::new("/tmp").unwrap()
     );
     store.payloads.shutdown().await;

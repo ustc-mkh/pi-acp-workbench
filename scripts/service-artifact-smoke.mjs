@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { createConnection } from 'node:net';
+import { WorkbenchWire, inlineText } from '../test/helpers/workbench-wire.mjs';
 import { assertStorageLayout } from './lib/workbench-sqlite-fixture.mjs';
 
 const { values } = parseArgs({ options: { dir: { type: 'string' }, report: { type: 'string' } } });
@@ -69,73 +69,6 @@ async function until(predicate, label, child) {
   }
   throw new Error(`${label}: stdout=${child?.output || ''}; stderr=${child?.errors || ''}`);
 }
-class ArtifactWire {
-  static async open(path) {
-    const socket = createConnection(path);
-    await new Promise((resolve, reject) => {
-      socket.once('connect', resolve);
-      socket.once('error', reject);
-    });
-    return new ArtifactWire(socket);
-  }
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 0;
-    this.pending = new Map();
-    let buffer = '';
-    socket.setEncoding('utf8');
-    socket.on('error', () => {});
-    socket.on('data', (data) => {
-      buffer += data;
-      let end;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, end);
-        buffer = buffer.slice(end + 1);
-        try {
-          const item = JSON.parse(line);
-          if (item.type === 'event') continue;
-          const pending = this.pending.get(item.id);
-          if (!pending) continue;
-          this.pending.delete(item.id);
-          clearTimeout(pending.timer);
-          if (item.type === 'error')
-            pending.reject(Object.assign(new Error(item.message), { code: item.code }));
-          else pending.resolve(item.events);
-        } catch (error) {
-          socket.destroy(error);
-        }
-      }
-    });
-    socket.once('close', () => {
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('artifact IPC closed'));
-      }
-      this.pending.clear();
-    });
-  }
-  call(command, options = {}) {
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`artifact timeout: ${command.method}`));
-      }, 10000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket.write(
-        JSON.stringify({
-          version: 2,
-          id,
-          command,
-          ...(options.operation ? { operation: options.operation } : {}),
-        }) + '\n',
-      );
-    });
-  }
-  close() {
-    this.socket.destroy();
-  }
-}
 let client;
 try {
   const help = execute('pi-acp-workbenchd', ['--help']);
@@ -170,23 +103,24 @@ try {
       'workbenchd ready',
       child,
     );
-    client = await ArtifactWire.open(join(data, 'workbench.sock'));
+    client = await WorkbenchWire.open(join(data, 'workbench.sock'));
     return child;
   };
   let service = await launch();
   const created = await client.call({ method: 'create', harness: 'Pi', cwd: workspace });
-  const session = created.find((event) => event.SessionCreated)?.SessionCreated;
-  assert(session);
-  const sessionId = session.id;
+  const sessionId = created.Created.summary.id;
+  assert(sessionId);
   const prompt = { method: 'prompt', session: sessionId, prompt: 'artifact-acceptance' };
-  const reply = await client.call(prompt, { operation: 'artifact-request' });
+  const reply = await client.call(prompt, 'artifact-request');
   let inspected, entries;
   await until(
     async () => {
       inspected = await client.call({ method: 'inspect', session: sessionId });
-      entries =
-        inspected.find((event) => event.SessionLoaded)?.SessionLoaded.transcript.entries || [];
-      return entries.some((entry) => entry.text === 'echo: artifact-acceptance');
+      entries = (await client.call({ method: 'history', session: sessionId })).entries;
+      return (
+        inspected.active_turn === null &&
+        entries.some((entry) => inlineText(entry) === 'echo: artifact-acceptance')
+      );
     },
     'artifact prompt completion',
     service,
@@ -195,11 +129,9 @@ try {
   await stop(service);
   service = await launch();
   const restarted = await client.call({ method: 'inspect', session: sessionId });
-  assert.deepEqual(
-    restarted.find((event) => event.SessionLoaded)?.SessionLoaded.transcript.entries,
-    entries,
-  );
-  assert.deepEqual(await client.call(prompt, { operation: 'artifact-request' }), reply);
+  assert.equal(restarted.id, sessionId);
+  assert.deepEqual((await client.call({ method: 'history', session: sessionId })).entries, entries);
+  assert.deepEqual(await client.call(prompt, 'artifact-request'), reply);
   check(`${manifest.target}: worker, durable history, restart and no replay`);
   const activeMaintenance = execute('pi-acp-workbenchd', [
     'storage',

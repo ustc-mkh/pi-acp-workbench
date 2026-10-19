@@ -1,8 +1,8 @@
 use super::tests::state;
 use super::{
     command::{AgentEvent, DomainCommand},
-    reducer::apply,
     session::{ConfigurationIntent, SessionConfig},
+    tests::apply,
     ModelId,
 };
 

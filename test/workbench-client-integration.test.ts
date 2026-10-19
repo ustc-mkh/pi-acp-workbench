@@ -1,4 +1,4 @@
-// Real new host + TypeScript v2 client; synthetic ACP peer, isolated files, no account/model/Bot.
+// Real v3 host + TypeScript client; synthetic ACP peer, isolated files, no account/model/Bot.
 import { afterEach, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -7,12 +7,7 @@ import { tmpdir } from 'node:os';
 import { operationRecords } from '../scripts/lib/workbench-sqlite-fixture.mjs';
 import { WorkbenchClient } from '../src/workbench-client';
 import { WorkbenchSession } from '../src/workbench-session';
-import {
-  imageRef,
-  type DomainEvent,
-  type SessionId,
-  type SessionSnapshot,
-} from '../src/workbench-protocol';
+import { imageRef, type SessionId } from '../src/workbench-protocol';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -107,61 +102,60 @@ async function host(forkGate = false) {
     trace: () => readFile(trace, 'utf8'),
   };
 }
-function snapshot(events: DomainEvent[]): SessionSnapshot {
-  for (const event of events) {
-    if ('SessionCreated' in event) return event.SessionCreated;
-    if ('SessionLoaded' in event) return event.SessionLoaded;
-  }
-  throw new Error('Snapshot absent');
+async function create(client: WorkbenchClient, cwd: string) {
+  const receipt = await client.call({ method: 'create', harness: 'Pi', cwd });
+  if (!('Created' in receipt)) throw new Error('Created summary absent');
+  return receipt.Created.summary;
 }
 async function turn(client: WorkbenchClient, session: SessionId, prompt: string) {
-  await client.call({ method: 'subscribe', session });
+  await client.call({ method: 'attach', session });
   let unobserve = () => {};
-  const completed = new Promise<void>((resolve) => {
+  const completed = new Promise<void>((resolve, reject) => {
     unobserve = client.observe({
-      event(event) {
-        if ('TurnFinished' in event && event.TurnFinished.session === session) resolve();
+      batch(batch) {
+        if (batch.session !== session || !batch.view) return;
+        if (typeof batch.view.status === 'object') reject(new Error(batch.view.status.Failed));
+        if (batch.view.status === 'Idle' && !batch.view.active_turn) resolve();
       },
     });
   });
   try {
     await client.call({ method: 'prompt', session, prompt });
     await completed;
-    return snapshot(await client.call({ method: 'inspect', session }));
+    return {
+      view: await client.call({ method: 'inspect', session }),
+      page: await client.call({ method: 'history', session }),
+    };
   } finally {
     unobserve();
   }
 }
 
-it('real new host streams typed text/tool/form DTOs into the authoritative TypeScript session view', async () => {
+it('real v3 host streams bounded text/tool/form DTOs into the authoritative TypeScript session view', async () => {
   const runtime = await host(),
-    client = runtime.client();
-  const created = snapshot(
-    await client.call({ method: 'create', harness: 'Pi', cwd: runtime.root }),
-  );
-  const view = new WorkbenchSession(client, created.id);
-  cleanups.push(() => view.stop());
-  await view.start();
+    client = runtime.client(),
+    created = await create(client, runtime.root);
+  const session = new WorkbenchSession(client, created.id);
+  cleanups.push(() => session.stop());
+  await session.start();
   const streamed = await turn(client, created.id, 'streamed-message');
-  expect(streamed.transcript.entries.map((e) => e.text)).toEqual([
-    'streamed-message',
-    'reasoning',
-    'hello ',
-    '世界',
-  ]);
-  await expect.poll(() => view.view.snapshot?.revision).toBe(streamed.revision);
-  expect(view.view.snapshot?.transcript.entries).toEqual(streamed.transcript.entries);
-  expect(new Set(streamed.transcript.entries.slice(1).map((e) => e.message)).size).toBe(1);
-  const tools = await turn(client, created.id, 'tool-metadata');
   expect(
-    Object.values(tools.transcript.tools).flatMap((turn) => Object.values(turn)),
-  ).not.toHaveLength(0);
-  const prompt = client.call({ method: 'prompt', session: created.id, prompt: 'elicitation-text' });
-  await prompt;
+    streamed.page.entries.map((entry) =>
+      'Inline' in entry.text ? entry.text.Inline.text : 'archived',
+    ),
+  ).toEqual(['streamed-message', 'reasoning', 'hello ', '世界']);
+  await expect.poll(() => session.view.view?.revision).toBe(streamed.view.revision);
+  expect(session.view.entries).toEqual(streamed.page.entries);
+  expect(new Set(streamed.page.entries.slice(1).map((entry) => entry.message)).size).toBe(1);
+  const output = await turn(client, created.id, 'tool-metadata');
+  const turnId = output.page.entries.at(-1)!.turn;
+  const tools = await client.call({ method: 'tools', session: created.id, turn: turnId });
+  expect(tools.tools.length).toBeGreaterThan(0);
+  await client.call({ method: 'prompt', session: created.id, prompt: 'elicitation-text' });
   await expect
-    .poll(() => Object.keys(view.view.snapshot?.pending_interactions || {}).length)
+    .poll(() => Object.keys(session.view.view?.pending_interactions || {}).length)
     .toBe(1);
-  const interaction = Object.values(view.view.snapshot!.pending_interactions)[0];
+  const interaction = Object.values(session.view.view!.pending_interactions)[0];
   expect(interaction.kind).toBe('Elicitation');
   await client.call({
     method: 'answer',
@@ -171,19 +165,17 @@ it('real new host streams typed text/tool/form DTOs into the authoritative TypeS
       response: { Form: { fields: { question_0: { Text: 'typed answer' } } } },
     },
   });
-  await expect.poll(() => view.view.snapshot?.status).toBe('Idle');
-  expect(view.view.snapshot?.pending_interactions).toEqual({});
-  expect(view.view.error).toBeUndefined();
+  await expect.poll(() => session.view.view?.status).toBe('Idle');
+  expect(session.view.view?.pending_interactions).toEqual({});
+  expect(session.view.error).toBeUndefined();
 }, 20000);
 
 it('real client reads exact immutable images after source removal/restart without journal or peer effects', async () => {
   const runtime = await host();
   let client = runtime.client();
-  const created = snapshot(
-    await client.call({ method: 'create', harness: 'Pi', cwd: runtime.root }),
-  );
+  const created = await create(client, runtime.root);
   const output = await turn(client, created.id, 'image-output');
-  const ref = output.transcript.entries.find((e) => e.image)!.image!;
+  const ref = output.page.entries.find((entry) => entry.image)!.image!;
   const before = await runtime.journal(),
     trace = await runtime.trace();
   const asset = await client.call({ method: 'image', image: ref });
@@ -207,15 +199,12 @@ it('real client reads exact immutable images after source removal/restart withou
 
 it('real exact fork cancellation targets the original operation and preserves uncertain remote effects', async () => {
   const runtime = await host(true),
-    client = runtime.client();
-  const created = snapshot(
-    await client.call({ method: 'create', harness: 'Pi', cwd: runtime.root }),
-  );
+    client = runtime.client(),
+    created = await create(client, runtime.root);
   const source = await turn(client, created.id, 'streamed-message');
-  const entry = source.transcript.entries.find((e) => e.role === 'User')!.id;
+  const entry = source.page.entries.find((entry) => entry.role === 'User')!.id;
   const command = { method: 'fork' as const, session: created.id, request: { entry } };
   const fork = client.request(command);
-  // Attach the rejection observer before cancellation can settle the workflow.
   const failed = expect(fork.result).rejects.toMatchObject({
     code: 'native_fork_uncertain',
     operation: fork.operation,
@@ -248,35 +237,31 @@ it('real exact fork cancellation targets the original operation and preserves un
     code: 'native_fork_uncertain',
   });
   expect(await runtime.trace()).toBe(trace);
-  expect(
-    snapshot(await client.call({ method: 'inspect', session: created.id })).transcript,
-  ).toEqual(source.transcript);
+  expect(await client.call({ method: 'history', session: created.id })).toEqual(source.page);
 }, 20000);
 
 it('real one-worker native fork returns typed independent origin and stable replay after source deletion/restart', async () => {
   const runtime = await host();
   let client = runtime.client();
-  const created = snapshot(
-    await client.call({ method: 'create', harness: 'Pi', cwd: runtime.root }),
-  );
-  const source = await turn(client, created.id, 'streamed-message');
-  const entry = source.transcript.entries.find((e) => e.role === 'User')!.id;
+  const created = await create(client, runtime.root),
+    source = await turn(client, created.id, 'streamed-message');
+  const entry = source.page.entries.find((entry) => entry.role === 'User')!.id;
   const command = { method: 'fork' as const, session: created.id, request: { entry } };
   const fork = client.request(command);
   expect(fork.operation).toBeDefined();
-  const branch = snapshot(await fork.result);
+  const receipt = await fork.result;
+  if (!('Forked' in receipt)) throw new Error('Forked summary absent');
+  const branch = await client.call({ method: 'inspect', session: receipt.Forked.summary.id });
   expect(branch.id).not.toBe(created.id);
-  expect(branch.provider_session).not.toBe(source.provider_session);
-  expect(branch.transcript.origin?.session).toBe(created.id);
-  expect(branch.transcript.origin?.entry).toBe(entry);
-  expect(
-    snapshot(await client.call({ method: 'inspect', session: created.id })).transcript,
-  ).toEqual(source.transcript);
+  expect(branch.provider_session).not.toBe(source.view.provider_session);
+  expect(branch.origin?.session).toBe(created.id);
+  expect(branch.origin?.entry).toBe(entry);
+  expect(await client.call({ method: 'history', session: created.id })).toEqual(source.page);
   await client.call({ method: 'remove', session: created.id });
   await runtime.stop();
   await runtime.start();
   client = runtime.client();
   const trace = await runtime.trace();
-  expect(snapshot(await client.call(command, { operation: fork.operation }))).toEqual(branch);
+  expect(await client.call(command, { operation: fork.operation })).toEqual(receipt);
   expect(await runtime.trace()).toBe(trace);
 }, 20000);

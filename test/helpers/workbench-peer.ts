@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { WorkbenchClient } from '../../src/workbench-client';
 import {
   clientCommand,
-  sessionSnapshot,
+  sessionView,
   type ClientCommand,
   type OperationId,
 } from '../../src/workbench-protocol';
@@ -38,8 +38,8 @@ export async function workbenchPeer() {
         buffer = buffer.slice(end + 1);
         const request = { ...raw, command: clientCommand.parse(raw.command), socket };
         requests.push(request);
-        if (['subscribe', 'unsubscribe'].includes(request.command.method))
-          send(socket, { type: 'reply', id: request.id, events: [] });
+        if (request.command.method === 'detach')
+          send(socket, { type: 'detached', id: request.id, session: request.command.session });
       }
     });
   });
@@ -58,8 +58,11 @@ export async function workbenchPeer() {
       clients.push(client);
       return client;
     },
-    reply(request: PeerRequest, events: unknown[] = []) {
-      send(request.socket, { type: 'reply', id: request.id, events });
+    reply(request: PeerRequest, receipt: unknown) {
+      send(request.socket, { type: 'reply', id: request.id, receipt });
+    },
+    query(request: PeerRequest, kind: string, value: unknown) {
+      send(request.socket, { type: 'query', id: request.id, result: { kind, value } });
     },
     send,
     async close() {
@@ -71,14 +74,16 @@ export async function workbenchPeer() {
     },
   };
 }
-export function emptySnapshot(revision = 1) {
-  return sessionSnapshot.parse({
+export function emptyView(revision = 1) {
+  return sessionView.parse({
     id: 'session',
     provider_session: null,
     harness: 'Pi',
     cwd: '/workspace',
     status: 'Idle',
-    transcript: { entries: [], tools: {} },
+    last_entry_seq: 0,
+    origin: null,
+    configuration_intent: null,
     plan: { items: [] },
     active_turn: null,
     pending_interactions: {},

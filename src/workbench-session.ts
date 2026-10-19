@@ -1,41 +1,45 @@
 import { WorkbenchClient, WorkbenchError } from './workbench-client';
-import type { DomainEvent, SessionId, SessionSnapshot } from './workbench-protocol';
+import {
+  jsonBytes,
+  type CommitBatch,
+  type EntryHeader,
+  type HistoryCursor,
+  type SessionId,
+  type SessionView,
+  type ToolHeader,
+  type ToolCursor,
+} from './workbench-protocol';
 
-type Entry = SessionSnapshot['transcript']['entries'][number];
 export interface WorkbenchSessionView {
   readonly status: 'syncing' | 'ready' | 'stale' | 'removed' | 'disconnected';
-  readonly snapshot?: SessionSnapshot;
-  /** Live identity-bearing rows are display-only until confirmed by a fresh snapshot. */
-  readonly provisional: readonly Entry[];
+  readonly view?: SessionView;
+  readonly entries: readonly EntryHeader[];
+  readonly tools: readonly ToolHeader[];
+  readonly toolCursor?: ToolCursor;
+  readonly earlier?: HistoryCursor;
+  readonly historical: boolean;
   readonly error?: string;
 }
-export function eventSession(event: DomainEvent): SessionId | undefined {
-  if ('SessionsListed' in event) return undefined;
-  if ('SessionCreated' in event) return event.SessionCreated.id;
-  if ('SessionLoaded' in event) return event.SessionLoaded.id;
-  if ('SessionRemoved' in event) return event.SessionRemoved;
-  return Object.values(event)[0].session;
-}
-/**
- * Read-only view projection, never a second domain reducer. Event payloads have
- * no revision, so replaying buffered lifecycle/config events over an inspect
- * reply would regress state. They instead invalidate/coalesce authoritative
- * cold inspect reads; entry IDs support bounded, provisional live display.
- */
+/** Bounded confirmed page projection. No provisional rows, domain reducer or
+ * polling. Reattach after gaps; never replay an uncertain mutation. */
 export class WorkbenchSession {
   private active = false;
   private ended = false;
-  private removed = false;
-  private dirty = false;
+  private attaching = false;
   private generation = 0;
+  private historyRequest = 0;
+  private toolsRequest = 0;
+  private pending: CommitBatch[] = [];
+  private pendingBytes = 0;
   private startTask?: Promise<void>;
   private flight?: Promise<void>;
-  private timer?: NodeJS.Timeout;
   private unobserve?: () => void;
-  private rows = new Map<string, Entry>();
-  private committed = new Set<string>();
-  private rowBytes = 0;
-  private current: WorkbenchSessionView = { status: 'syncing', provisional: [] };
+  private current: WorkbenchSessionView = {
+    status: 'syncing',
+    entries: [],
+    tools: [],
+    historical: false,
+  };
   private listeners = new Set<(view: WorkbenchSessionView) => void>();
   constructor(
     readonly client: WorkbenchClient,
@@ -51,189 +55,226 @@ export class WorkbenchSession {
     };
   }
   private publish(change: Partial<WorkbenchSessionView>) {
-    this.current = { ...this.current, ...change, provisional: [...this.rows.values()] };
+    this.current = { ...this.current, ...change };
     for (const listener of [...this.listeners]) {
       try {
         listener(this.current);
       } catch {
-        /* a view observer cannot interrupt transport/cleanup */
+        /* observer isolation */
       }
     }
   }
   start(): Promise<void> {
     if (this.ended) return Promise.reject(new WorkbenchError('closed', 'Session view is stopped'));
-    if (this.startTask)
-      return this.active
-        ? this.startTask
-        : Promise.reject(
-            new WorkbenchError('closed', 'Explicit reattachment needs a new session view'),
-          );
+    if (this.startTask) return this.startTask;
     this.active = true;
     this.unobserve = this.client.observe({
-      event: (event) => this.event(event),
-      resync: () => {
-        if (!this.active) return;
-        this.generation++;
-        this.rows.clear();
-        this.rowBytes = 0;
-        this.publish({ status: 'stale' });
-        this.invalidate();
-      },
+      batch: (batch) => this.batch(batch),
+      resync: () => this.stale('Workbench revision gap; reattach required'),
       lost: () => {
         this.generation++;
-        this.active = false;
-        this.unobserve?.();
-        this.unobserve = undefined;
-        clearTimeout(this.timer);
-        this.timer = undefined;
-        this.rows.clear();
-        this.rowBytes = 0;
+        this.historyRequest++;
+        this.toolsRequest++;
+        this.pending = [];
+        this.pendingBytes = 0;
         this.publish({
           status: 'disconnected',
-          error: 'Workbench disconnected; explicit reattachment required',
+          error: 'Workbench disconnected; explicitly reattach to continue',
         });
       },
     });
-    return (this.startTask = (async () => {
-      try {
-        await this.client.call({ method: 'subscribe', session: this.id });
-        if (this.active) await this.refresh();
-      } catch (error) {
-        if (this.active) this.publish({ status: 'stale', error: this.message(error) });
-        throw error;
-      }
-    })());
+    return (this.startTask = this.refresh());
   }
-  private event(event: DomainEvent) {
-    if (!this.active || this.removed || eventSession(event) !== this.id) return;
-    if ('SessionRemoved' in event) {
-      this.removed = true;
-      this.generation++;
-      this.dirty = false;
-      clearTimeout(this.timer);
-      this.timer = undefined;
-      this.rows.clear();
-      this.rowBytes = 0;
-      this.publish({ status: 'removed', snapshot: undefined, error: undefined });
+  private stale(error: string) {
+    if (!this.active) return;
+    this.generation++;
+    this.historyRequest++;
+    this.toolsRequest++;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.publish({ status: 'stale', error });
+  }
+  private batch(batch: CommitBatch) {
+    if (!this.active || batch.session !== this.id || this.current.status === 'removed') return;
+    if (this.attaching) {
+      const bytes = jsonBytes(batch);
+      if (this.pending.length >= 1000 || this.pendingBytes + bytes > 4 * 1024 * 1024) {
+        this.stale('Attach buffer exceeded; explicitly reattach');
+        return;
+      }
+      this.pending.push(batch);
+      this.pendingBytes += bytes;
       return;
     }
-    let row: Entry | undefined;
-    if ('UserPromptAdded' in event) {
-      const e = event.UserPromptAdded;
-      row = { id: e.entry, turn: e.turn, role: 'User', text: e.prompt };
-    } else if ('AgentText' in event || 'AgentThought' in event) {
-      const thought = 'AgentThought' in event;
-      const e = 'AgentText' in event ? event.AgentText : event.AgentThought;
-      row = {
-        id: e.entry,
-        turn: e.turn,
-        role: thought ? 'Thought' : 'Agent',
-        text: e.text,
-        ...(e.message === null ? {} : { message: e.message }),
-      };
-    } else if ('AgentImage' in event) {
-      const e = event.AgentImage;
-      row = {
-        id: e.entry,
-        turn: e.turn,
-        role: 'Agent',
-        text: '',
-        image: e.image,
-        ...(e.message === null ? {} : { message: e.message }),
-      };
+    const view = this.current.view;
+    if (!view || this.current.status !== 'ready' || batch.revision <= view.revision) return;
+    if (batch.revision !== view.revision + 1) {
+      this.stale('Workbench revision gap; explicitly reattach');
+      return;
     }
-    if (row && !this.rows.has(row.id) && !this.committed.has(row.id)) {
-      const bytes = Buffer.byteLength(row.text);
-      if (this.rows.size < 256 && this.rowBytes + bytes <= 1024 * 1024) {
-        this.rows.set(row.id, row);
-        this.rowBytes += bytes;
-      }
+    if (batch.removed) {
+      this.publish({
+        status: 'removed',
+        view: undefined,
+        entries: [],
+        tools: [],
+        earlier: undefined,
+        toolCursor: undefined,
+        historical: false,
+      });
+      return;
     }
-    // Includes configuration/catalogue/interactions/tool changes: do not infer
-    // authoritative status or safe fork positions from their arrival order.
-    this.publish({ status: 'stale' });
-    this.invalidate();
-  }
-  private invalidate() {
-    this.dirty = true;
-    if (!this.active || this.removed || this.flight || this.timer) return;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      void this.refresh().catch(() => {});
-    }, 50);
-    this.timer.unref();
-  }
-  refresh(): Promise<void> {
-    if (!this.active || this.removed) return Promise.resolve();
-    if (this.flight) return this.flight;
-    clearTimeout(this.timer);
-    this.timer = undefined;
-    this.dirty = false;
-    const generation = this.generation;
-    const task = (async () => {
-      try {
-        const events = await this.client.call({ method: 'inspect', session: this.id });
-        if (!this.active || this.removed || generation !== this.generation) return;
-        const snapshot = events.flatMap((event) =>
-          'SessionLoaded' in event ? [event.SessionLoaded] : [],
-        );
-        if (snapshot.length !== 1 || snapshot[0].id !== this.id)
-          throw new WorkbenchError('protocol', 'Invalid inspect response');
-        const next = snapshot[0];
-        if (this.current.snapshot && next.revision < this.current.snapshot.revision) {
-          this.dirty = true;
+    if (!batch.view) {
+      this.stale('Commit has no hot view; explicitly reattach');
+      return;
+    }
+    let entries = [...this.current.entries];
+    let earlier: HistoryCursor | undefined = this.current.earlier;
+    if (!this.current.historical) {
+      const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
+      for (const entry of batch.entries) {
+        const prior = bySeq.get(entry.seq);
+        if ((prior && prior.id !== entry.id) || entry.seq > batch.view.last_entry_seq) {
+          this.stale('Entry identity mismatch');
           return;
         }
-        this.committed = new Set(next.transcript.entries.map((entry) => entry.id));
-        for (const [id, row] of this.rows) {
-          if (this.committed.has(id) || (!this.dirty && next.active_turn !== row.turn)) {
-            this.rows.delete(id);
-            this.rowBytes -= Buffer.byteLength(row.text);
-          }
-        }
-        this.publish({ snapshot: next, status: this.dirty ? 'stale' : 'ready', error: undefined });
+        bySeq.set(entry.seq, entry);
+      }
+      entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+      let bytes = entries.reduce(
+        (total, entry) => total + jsonBytes(entry),
+        2 + Math.max(0, entries.length - 1),
+      );
+      while (entries.length > 200 || bytes > 4 * 1024 * 1024) {
+        const removed = entries.shift();
+        if (removed) bytes -= jsonBytes(removed) + (entries.length ? 1 : 0);
+      }
+      const minimum = entries[0]?.seq;
+      earlier =
+        minimum && minimum > 1
+          ? {
+              version: 3,
+              session: this.id,
+              max_entry_seq: batch.view.last_entry_seq,
+              before_seq: minimum,
+            }
+          : undefined;
+    }
+    const tools = new Map(this.current.tools.map((tool) => [`${tool.turn}:${tool.id}`, tool]));
+    for (const tool of batch.tools) tools.set(`${tool.turn}:${tool.id}`, tool);
+    const boundedTools = [...tools.values()];
+    while (boundedTools.length > 200 || jsonBytes(boundedTools) > 1024 * 1024) boundedTools.shift();
+    this.publish({ view: batch.view, entries, tools: boundedTools, earlier, error: undefined });
+  }
+  refresh(): Promise<void> {
+    if (!this.active || this.ended || this.current.status === 'removed') return Promise.resolve();
+    if (this.flight) return this.flight;
+    const generation = ++this.generation;
+    this.historyRequest++;
+    this.toolsRequest++;
+    this.attaching = true;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.publish({ status: 'syncing', error: undefined });
+    const task = (async () => {
+      try {
+        const attached = await this.client.call({ method: 'attach', session: this.id });
+        if (!this.active || generation !== this.generation) return;
+        if (
+          attached.view.id !== this.id ||
+          attached.recent_page.entries.some((entry) => entry.seq > attached.view.last_entry_seq)
+        )
+          throw new WorkbenchError('protocol', 'Invalid attach scope');
+        this.publish({
+          view: attached.view,
+          entries: attached.recent_page.entries,
+          tools: [],
+          earlier: attached.recent_page.next_cursor ?? undefined,
+          historical: false,
+          status: 'ready',
+          error: undefined,
+        });
+        this.attaching = false;
+        const buffered = this.pending;
+        this.pending = [];
+        this.pendingBytes = 0;
+        for (const batch of buffered) this.batch(batch);
       } catch (error) {
-        if (!this.active || this.removed || generation !== this.generation) return;
-        if (error instanceof WorkbenchError && error.code === 'not_found') {
-          this.removed = true;
-          this.rows.clear();
-          this.rowBytes = 0;
-          this.publish({ status: 'removed', snapshot: undefined, error: undefined });
-        } else {
-          this.publish({ status: 'stale', error: this.message(error) });
-          // No tight retry loop for persistent I/O/corruption errors. A new
-          // event, explicit refresh or resync may trigger another cold query.
-        }
+        if (this.active && generation === this.generation)
+          this.publish({
+            status: 'stale',
+            error: error instanceof Error ? error.message : 'Cannot attach session',
+          });
+      } finally {
+        this.attaching = false;
       }
     })();
     this.flight = task;
     void task.finally(() => {
       if (this.flight === task) this.flight = undefined;
-      if (this.dirty) this.invalidate();
     });
     return task;
   }
-  private message(error: unknown) {
-    return error instanceof WorkbenchError ? error.message : 'Cannot refresh workbench session';
+  async earlier() {
+    const cursor = this.current.earlier;
+    if (!cursor || !this.active || this.current.status !== 'ready') return;
+    const generation = this.generation;
+    const request = ++this.historyRequest;
+    const page = await this.client.call({
+      method: 'history',
+      session: this.id,
+      cursor,
+      limit: 200,
+    });
+    if (!this.active || generation !== this.generation || request !== this.historyRequest) return;
+    this.publish({
+      entries: page.entries,
+      earlier: page.next_cursor ?? undefined,
+      historical: true,
+      error: undefined,
+    });
+  }
+  async latest() {
+    if (!this.active || this.current.status === 'removed') return;
+    await this.refresh();
+  }
+  async loadTools(turn: EntryHeader['turn'], cursor?: ToolCursor) {
+    if (!this.active || this.current.status !== 'ready') return;
+    const generation = this.generation;
+    const request = ++this.toolsRequest;
+    const requestedRevision = this.current.view?.revision;
+    const page = await this.client.call({
+      method: 'tools',
+      session: this.id,
+      turn,
+      cursor,
+      limit: 200,
+    });
+    if (!this.active || generation !== this.generation || request !== this.toolsRequest) return;
+    if (requestedRevision !== this.current.view?.revision) return;
+    this.publish({
+      tools: page.tools,
+      toolCursor: page.next_cursor ?? undefined,
+      error: undefined,
+    });
   }
   async stop() {
     if (this.ended) return;
-    const subscribed = this.active;
+    const connected = this.current.status !== 'disconnected';
     this.ended = true;
     this.active = false;
     this.generation++;
-    clearTimeout(this.timer);
-    this.timer = undefined;
+    this.historyRequest++;
+    this.toolsRequest++;
     this.unobserve?.();
-    this.unobserve = undefined;
+    this.pending = [];
+    this.pendingBytes = 0;
     this.listeners.clear();
-    // The accepted inspect remains owned by the host; only detach this view.
-    if (subscribed) {
-      try {
-        await this.client.call({ method: 'unsubscribe', session: this.id });
-      } catch {
-        /* disconnected/disposed */
-      }
+    if (!connected) return;
+    try {
+      await this.client.call({ method: 'detach', session: this.id });
+    } catch {
+      /* disconnected/disposed */
     }
   }
 }

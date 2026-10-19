@@ -3,6 +3,7 @@ import {
   imageArchive,
   contentText,
   deliveryRecords,
+  deliveryEntryIds,
   assertStorageLayout,
 } from './lib/workbench-sqlite-fixture.mjs';
 import assert from 'node:assert/strict';
@@ -11,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
+import { WorkbenchWire, turnFinished, inlineText } from '../test/helpers/workbench-wire.mjs';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
 
@@ -267,39 +268,38 @@ try {
   let daemon = await start();
   text('/new');
   await until(
-    async () =>
-      (await client.call({ method: 'list' }))[0].SessionsListed.length === 1 && sent.length > 0,
+    async () => (await client.call({ method: 'list' })).sessions.length === 1 && sent.length > 0,
     'forum session creation',
   );
-  const session = (await client.call({ method: 'list' }))[0].SessionsListed[0].id;
+  const session = (await client.call({ method: 'list' })).sessions[0].id;
   const thread = sent[0].message_thread_id;
   assert.equal(topics, 1);
   assert(thread);
-  await client.call({ method: 'subscribe', session });
+  await client.call({ method: 'attach', session });
   check('one host creates forum topic and session through its shared runtime');
-  let finished = client.waitFor((event) => event.TurnFinished);
+  let finished = client.waitFor((batch) => turnFinished(batch, session));
   text('你好', thread);
   await finished;
   await until(() => sent.some((message) => message.text === 'echo: 你好'), 'Telegram agent output');
   check('Telegram prompt produces IPC events and durable Telegram output');
-  const interaction = client.waitFor((event) => event.InteractionRequested);
+  const interaction = client.waitFor(
+    (batch) =>
+      batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
+  );
   await client.call({ method: 'prompt', session, prompt: 'permission' }, 'contract-permission');
-  const requested = (await interaction).InteractionRequested.interaction.id;
+  const requested = Object.keys((await interaction).view.pending_interactions)[0];
   await until(() => sent.some((message) => message.reply_markup), 'permission keyboard');
   const key = sent.find((message) => message.reply_markup).reply_markup.inline_keyboard[0][0]
     .callback_data;
   callback(key, thread + 1);
   callback(key, thread, 6);
   await until(() => acknowledgements >= 2, 'rejected callback acknowledgement');
-  const waiting = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+  const waiting = await client.call({ method: 'inspect', session });
   assert(waiting.pending_interactions[requested]);
-  finished = client.waitFor((event) => event.TurnFinished);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   callback(key, thread);
   await finished;
-  assert.deepEqual(
-    (await client.call({ method: 'inspect', session }))[0].SessionLoaded.pending_interactions,
-    {},
-  );
+  assert.deepEqual((await client.call({ method: 'inspect', session })).pending_interactions, {});
   check(
     'IPC permission → Telegram UI → typed response; wrong-topic/unauthorized callbacks cannot consume it',
   );
@@ -308,21 +308,20 @@ try {
     'permission completion delivery',
   );
   rateLimit = true;
-  finished = client.waitFor((event) => event.TurnFinished);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   text('retry-output', thread);
   await finished;
   await until(() => rateFailures === 1, 'rate-limited send');
   await until(rateLimitedPending, 'persisted retry metadata');
-  const nativeBeforeRestart = (await client.call({ method: 'inspect', session }))[0].SessionLoaded
-    .provider_session;
+  const nativeBeforeRestart = (await client.call({ method: 'inspect', session })).provider_session;
   await stop(daemon);
   daemon = await start();
-  await client.call({ method: 'subscribe', session });
-  const nativeResumed = client.waitFor((event) => event.TurnFinished?.session === session);
+  await client.call({ method: 'attach', session });
+  const nativeResumed = client.waitFor((batch) => turnFinished(batch, session));
   text('telegram native resume', thread);
   await nativeResumed;
   assert.equal(
-    (await client.call({ method: 'inspect', session }))[0].SessionLoaded.provider_session,
+    (await client.call({ method: 'inspect', session })).provider_session,
     nativeBeforeRestart,
   );
   check(
@@ -338,13 +337,13 @@ try {
   );
   assert.equal((await trace()).filter((record) => record.text === 'retry-output').length, 1);
   assert.equal(topics, 1);
-  assert.equal((await client.call({ method: 'list' }))[0].SessionsListed.length, 1);
+  assert.equal((await client.call({ method: 'list' })).sessions.length, 1);
   check(
     '429 retry metadata survives restart without rerunning the agent or duplicating topic/session',
   );
   mediaRateLimit = true;
   const imageOrderStart = sendOrder.length;
-  finished = client.waitFor((event) => event.TurnFinished);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   text('image-output', thread);
   await finished;
   await until(() => mediaRateFailures === 1, 'rate-limited multipart image');
@@ -366,14 +365,14 @@ try {
   );
   await stop(daemon);
   daemon = await start();
-  await client.call({ method: 'subscribe', session });
+  await client.call({ method: 'attach', session });
   await until(
     () => mediaSent.length === 1 && sent.some((message) => message.text === 'image caption'),
     'archived image retry after restart',
   );
-  const imageRow = (
-    await client.call({ method: 'inspect', session })
-  )[0].SessionLoaded.transcript.entries.find((entry) => entry.image);
+  const imageRow = (await client.call({ method: 'history', session })).entries.find(
+    (entry) => entry.image,
+  );
   const imageRecord = imageArchive(data, imageRow.image.id);
   assert.deepEqual(mediaSent[0].file.bytes, Buffer.from(imageRecord.data, 'base64'));
   assert.equal(mediaSent[0].thread, thread);
@@ -397,13 +396,15 @@ try {
     'a later same-topic control notice cannot overtake a deferred image, including across restart',
   );
   await client.call({ method: 'load', session });
-  const envText = client.waitFor((event) => event.AgentText?.text === 'bot-env-hidden');
-  finished = client.waitFor((event) => event.TurnFinished);
+  const envText = client.waitFor((batch) =>
+    batch.entries.some((entry) => inlineText(entry) === 'bot-env-hidden'),
+  );
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   await client.call({ method: 'prompt', session, prompt: 'check-bot-env' });
   await envText;
   await finished;
   check('actual ACP child cannot inherit the bot token environment variable');
-  finished = client.waitFor((event) => event.TurnFinished);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   text('plan-report', thread);
   await finished;
   await delay(250);
@@ -422,10 +423,10 @@ try {
   const otherThread = thread + 1;
   text('/new', otherThread);
   await until(
-    async () => (await client.call({ method: 'list' }))[0].SessionsListed.length === 2,
+    async () => (await client.call({ method: 'list' })).sessions.length === 2,
     'independent topic creation',
   );
-  const otherSession = (await client.call({ method: 'list' }))[0].SessionsListed.find(
+  const otherSession = (await client.call({ method: 'list' })).sessions.find(
     (entry) => entry.id !== session,
   ).id;
   await until(
@@ -436,8 +437,8 @@ try {
       ),
     'independent topic binding',
   );
-  await client.call({ method: 'subscribe', session: otherSession });
-  const independent = client.waitFor((event) => event.TurnFinished?.session === otherSession);
+  await client.call({ method: 'attach', session: otherSession });
+  const independent = client.waitFor((batch) => turnFinished(batch, otherSession));
   text('independent-while-config-blocked', otherThread);
   await independent;
   const statusStart = sent.length;
@@ -449,23 +450,23 @@ try {
         .some((message) => message.message_thread_id === thread && message.text.includes('Plan:')),
     'query bypasses blocked topic mutation',
   );
-  assert((await client.call({ method: 'inspect', session }))[0].SessionLoaded.configuration_intent);
+  assert((await client.call({ method: 'inspect', session })).configuration_intent);
   check(
     'a blocked Telegram provider leaves other topics, IPC and same-topic status queries responsive',
   );
   await writeFile(`${configGate}.release`, 'release');
   await until(async () => {
-    const state = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+    const state = await client.call({ method: 'inspect', session });
     return state.config.model === 'other' && !state.configuration_intent;
   }, 'Telegram setting completion');
   holdMedia = true;
   const mediaStart = sent.length;
-  finished = client.waitFor((event) => event.TurnFinished?.session === session);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   text('image-output', thread);
   await finished;
   await until(() => mediaHolds === 1, 'in-flight multipart HTTP hold');
   text('/help', thread);
-  const mediaIndependent = client.waitFor((event) => event.TurnFinished?.session === otherSession);
+  const mediaIndependent = client.waitFor((batch) => turnFinished(batch, otherSession));
   text('independent-while-media-blocked', otherThread);
   await mediaIndependent;
   await until(
@@ -511,11 +512,14 @@ try {
     'an in-flight image HTTP request does not block another topic, while later same-topic output remains FIFO',
   );
   const traceStart = (await trace()).length;
-  const cancelInteraction = client.waitFor((event) => event.InteractionRequested);
+  const cancelInteraction = client.waitFor(
+    (batch) =>
+      batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
+  );
   await client.call({ method: 'prompt', session, prompt: 'permission' });
   await cancelInteraction;
   const cancelled = await client.call({ method: 'cancel', session });
-  assert(cancelled.some((event) => event.TurnCancelled));
+  assert(cancelled.Accepted);
   await until(async () => {
     const records = (await trace()).slice(traceStart);
     return (
@@ -529,7 +533,7 @@ try {
   // Let the cancelled source restore its model while the global fixture gate
   // is still released; then independently block the other topic's setting.
   holdMedia = true;
-  finished = client.waitFor((event) => event.TurnFinished?.session === session);
+  finished = client.waitFor((batch) => turnFinished(batch, session));
   text('image-output', thread);
   await finished;
   await until(() => mediaHolds === 2, 'in-flight image before fatal cleanup');
@@ -541,11 +545,7 @@ try {
     'blocked record before fatal polling',
   );
   await client.call({ method: 'remove', session }, 'remove-source-with-pending-image');
-  assert(
-    !(await client.call({ method: 'list' }))[0].SessionsListed.some(
-      (entry) => entry.id === session,
-    ),
-  );
+  assert(!(await client.call({ method: 'list' })).sessions.some((entry) => entry.id === session));
   fatalPoll = true;
   await until(
     () => daemon.exitCode !== null,
@@ -554,8 +554,8 @@ try {
   await until(() => mediaClosed === 1, 'cancelled image HTTP socket closed');
   let pendingImage;
   for (const body of deliveryRecords(data)) {
-    if (body.status !== 'Pending' || !body.event.payload.Entries) continue;
-    for (const entry of body.event.payload.Entries.entries) {
+    if (body.status !== 'Pending' || !body.event.payload.Turn) continue;
+    for (const entry of deliveryEntryIds(data, body.event.id)) {
       const archived = archivedEntry(data, entry);
       if (archived.image) pendingImage = archived.image;
     }
@@ -597,11 +597,7 @@ try {
     peersBeforeDeletedRetry,
     'delivery after source deletion/restart must not spawn or rerun ACP',
   );
-  assert(
-    !(await client.call({ method: 'list' }))[0].SessionsListed.some(
-      (entry) => entry.id === session,
-    ),
-  );
+  assert(!(await client.call({ method: 'list' })).sessions.some((entry) => entry.id === session));
   check(
     'frozen workspace scope authorizes the original bound topic after external source deletion and restart, without ACP or different bytes',
   );

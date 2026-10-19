@@ -11,6 +11,7 @@ use std::{
 const SCHEMA: &str = include_str!("schema.sql");
 const TABLES: &[&str] = &[
     "store_meta",
+    "removed_sessions",
     "sessions",
     "contents",
     "entries",
@@ -18,6 +19,7 @@ const TABLES: &[&str] = &[
     "tools",
     "operations",
     "deliveries",
+    "delivery_entries",
     "telegram_meta",
     "telegram_bindings",
     "telegram_inbox",
@@ -116,6 +118,13 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     connection
         .prepare("SELECT revision FROM deliveries LIMIT 0")
         .map_err(|_| StoreError::Invalid("unsupported delivery schema"))?;
+    let inbox_index = connection
+        .prepare("PRAGMA index_info(telegram_inbox_pending)")?
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if inbox_index != ["bot_id", "status", "update_id"] {
+        return Err(StoreError::Invalid("unsupported Telegram inbox index"));
+    }
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(StoreError::Invalid("SQLite quick_check failed"));

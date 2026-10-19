@@ -1,10 +1,12 @@
-//! Typed incremental write set. The reducer starts returning it in T05.
+//! The single incremental write set accepted by the session store.
 use super::{
     fork::ContentHash,
     ids::*,
     image::ImageAsset,
-    query::{ContentRef, SafeInteger, ToolHeader},
-    session::SessionState,
+    query::{
+        CommitBatch, ContentRef, EntryHeader, QueryError, SafeInteger, SessionView, TextBody,
+        ToolHeader,
+    },
     transcript::EntryRole,
     WorkspacePath,
 };
@@ -12,12 +14,48 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct Transition {
-    pub next: SessionState,
+    pub expected_revision: SafeInteger,
+    pub next: SessionView,
+    pub contents: Vec<NewContent>,
     pub append: Vec<NewEntry>,
     pub tool_updates: Vec<ToolUpdate>,
     pub deliveries: Vec<DeliveryIntent>,
-    pub view_changed: bool,
 }
+impl Transition {
+    pub(crate) fn batch(&self, previous_seq: SafeInteger) -> Result<CommitBatch, QueryError> {
+        let mut entries = Vec::with_capacity(self.append.len());
+        for (index, entry) in self.append.iter().enumerate() {
+            let seq = previous_seq
+                .get()
+                .checked_add(index as u64 + 1)
+                .ok_or(QueryError::InvalidInput)?;
+            entries.push(EntryHeader {
+                seq: SafeInteger::new(seq)?,
+                id: entry.id.clone(),
+                turn: entry.turn.clone(),
+                role: entry.role.clone(),
+                message: entry.message.clone(),
+                text: TextBody::from_text(&entry.text.text, entry.text.content.clone())?,
+                image: entry.image.as_ref().map(|asset| asset.image().clone()),
+            });
+        }
+        let batch = CommitBatch {
+            session: self.next.id.clone(),
+            revision: self.next.revision,
+            view: Some(self.next.clone()),
+            entries,
+            tools: self
+                .tool_updates
+                .iter()
+                .map(|update| update.header.clone())
+                .collect(),
+            removed: false,
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewContent {
@@ -77,10 +115,6 @@ pub enum DeliveryTarget {
 #[serde(deny_unknown_fields)]
 pub enum DeliveryPayload {
     /// Immutable archive references; no session snapshot is required to render.
-    Entries {
-        turn: TurnId,
-        entries: Vec<EntryId>,
-    },
     Turn {
         session: SessionId,
         turn: TurnId,

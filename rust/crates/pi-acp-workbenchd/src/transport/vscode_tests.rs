@@ -45,8 +45,8 @@ impl Client {
     }
     async fn send(&mut self, id: u64, command: ClientCommand) {
         let mut bytes = serde_json::to_vec(&IpcRequest {
-            version: PROTOCOL_VERSION,
-            id,
+            version: query::ProtocolVersion,
+            id: SafeInteger::new(id).unwrap(),
             command,
             operation: None,
         })
@@ -98,14 +98,15 @@ async fn image_queries_return_bounded_verified_binary_responses_without_journal_
         .await;
     let result = client.next().await;
     assert!(!format!("{result:?}").contains("iVBOR"));
-    let IpcMessage::Image { id: 1, asset: read } = result else {
+    let IpcMessage::Image { id, asset: read } = result else {
         panic!("image response")
     };
+    assert_eq!(id.get(), 1);
     assert_eq!(read.image(), asset.image());
     assert_eq!(read.bytes(), asset.bytes());
     let request = IpcRequest {
-        version: PROTOCOL_VERSION,
-        id: 2,
+        version: query::ProtocolVersion,
+        id: SafeInteger::new(2).unwrap(),
         command: ClientCommand::Image {
             image: asset.image().clone(),
         },
@@ -115,7 +116,7 @@ async fn image_queries_return_bounded_verified_binary_responses_without_journal_
     wire.push(b'\n');
     client.write.write_all(&wire).await.unwrap();
     assert!(
-        matches!(client.next().await, IpcMessage::Error { id: 2, code, .. } if code == "invalid_input")
+        matches!(client.next().await, IpcMessage::Error { id, code, .. } if id.get() == 2 && code == "invalid_input")
     );
     let mut wrong = serde_json::to_value(asset.image()).unwrap();
     wrong["sha256"] = "0".repeat(64).into();
@@ -128,11 +129,19 @@ async fn image_queries_return_bounded_verified_binary_responses_without_journal_
         )
         .await;
     assert!(
-        matches!(client.next().await, IpcMessage::Error { id: 3, code, .. } if code == "persistence")
+        matches!(client.next().await, IpcMessage::Error { id, code, .. } if id.get() == 3 && code == "persistence")
     );
-    client.send(4, ClientCommand::List).await;
+    client
+        .send(
+            4,
+            ClientCommand::List {
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await;
     assert!(
-        matches!(client.next().await, IpcMessage::Reply { id: 4, events } if matches!(&events[0], DomainEvent::SessionsListed(sessions) if sessions.is_empty()))
+        matches!(client.next().await, IpcMessage::Query { id, result: QueryResult::List(page) } if id.get() == 4 && page.sessions.is_empty())
     );
     assert!(!tokio::fs::try_exists(trace).await.unwrap());
     assert_eq!(app.journal_snapshot().await.unwrap(), journal);
@@ -166,24 +175,25 @@ async fn external_ipc_creates_prompts_and_streams_the_shared_runtime() {
             },
         )
         .await;
-    let IpcMessage::Reply { events, .. } = client.next().await else {
-        panic!("reply")
+    let IpcMessage::Reply {
+        receipt: CommandReceipt::Created { summary },
+        ..
+    } = client.next().await
+    else {
+        panic!("create receipt")
     };
-    let DomainEvent::SessionCreated(snapshot) = &events[0] else {
-        panic!("create")
-    };
-    let id = snapshot.id.clone();
+    let id = summary.id;
     client
         .send(
             2,
-            ClientCommand::Subscribe {
+            ClientCommand::Attach {
                 session: id.clone(),
             },
         )
         .await;
     assert!(matches!(
         client.next().await,
-        IpcMessage::Reply { id: 2, .. }
+        IpcMessage::Query { id, result: QueryResult::Attached(_) } if id.get() == 2
     ));
     client
         .send(
@@ -199,20 +209,21 @@ async fn external_ipc_creates_prompts_and_streams_the_shared_runtime() {
     let mut finished = false;
     while !reply || !finished {
         match client.next().await {
-            IpcMessage::Reply { id: 3, .. } => reply = true,
-            IpcMessage::Event { event } => match *event {
-                DomainEvent::AgentText { text: value, .. } => text |= value == "echo: IPC hello",
-                DomainEvent::TurnFinished { .. } => finished = true,
-                _ => {}
-            },
+            IpcMessage::Reply { id, .. } if id.get() == 3 => reply = true,
+            IpcMessage::Batch { batch } => {
+                text |= batch.entries.iter().any(|entry| matches!(&entry.text, query::TextBody::Inline { text } if text == "echo: IPC hello"));
+                finished |= batch.view.is_some_and(|view| {
+                    view.active_turn.is_none()
+                        && matches!(view.status, crate::domain::SessionStatus::Idle)
+                });
+            }
             IpcMessage::Error { message, .. } => panic!("{message}"),
             _ => {}
         }
     }
     assert!(reply && text);
     let state = app.command(DomainCommand::Inspect(id)).await.unwrap();
-    assert!(matches!(&state[0], DomainEvent::SessionLoaded(snapshot)
-        if snapshot.transcript.entries.iter().any(|entry| entry.text == "echo: IPC hello")));
+    assert_eq!(state.view().unwrap().last_entry_seq.get(), 2);
     transport.shutdown().await.unwrap();
     assert!(!socket.exists());
     app.shutdown().await;
@@ -240,10 +251,10 @@ async fn duplicate_pending_ids_close_only_the_socket_and_accepted_work_survives_
         })
         .await
         .unwrap();
-    let DomainEvent::SessionCreated(snapshot) = &created[0] else {
+    let CommandReceipt::Created { summary } = created else {
         panic!("created")
     };
-    let id = snapshot.id.clone();
+    let id = summary.id;
     app.command(DomainCommand::Prompt {
         session: id.clone(),
         prompt: Prompt::new("prime").unwrap(),
@@ -252,11 +263,21 @@ async fn duplicate_pending_ids_close_only_the_socket_and_accepted_work_survives_
     .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = app.command(DomainCommand::Inspect(id.clone())).await.unwrap();
-            if matches!(&events[0], DomainEvent::SessionLoaded(snapshot) if snapshot.active_turn.is_none() && snapshot.provider_session.is_some()) { break; }
+            let events = app
+                .command(DomainCommand::Inspect(id.clone()))
+                .await
+                .unwrap();
+            if events
+                .view()
+                .is_some_and(|view| view.active_turn.is_none() && view.provider_session.is_some())
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let mut client = Client::open(&socket).await;
     let operation = crate::domain::OperationId::generate();
     let command = DomainCommand::SetModel {
@@ -264,8 +285,8 @@ async fn duplicate_pending_ids_close_only_the_socket_and_accepted_work_survives_
         model: ModelId::new("other").unwrap(),
     };
     let mut request = serde_json::to_vec(&IpcRequest {
-        version: 2,
-        id: 7,
+        version: query::ProtocolVersion,
+        id: SafeInteger::new(7).unwrap(),
         command: ClientCommand::SetModel {
             session: id.clone(),
             model: ModelId::new("other").unwrap(),
@@ -323,7 +344,7 @@ async fn duplicate_pending_ids_close_only_the_socket_and_accepted_work_survives_
         .send(1, ClientCommand::Inspect { session: id })
         .await;
     assert!(
-        matches!(healthy.next().await, IpcMessage::Reply { id: 1, events } if matches!(&events[0], DomainEvent::SessionLoaded(snapshot) if snapshot.config.model.as_ref().unwrap().as_str() == "other"))
+        matches!(healthy.next().await, IpcMessage::Query { id, result: QueryResult::View(view) } if id.get() == 1 && view.config.model.as_ref().unwrap().as_str() == "other")
     );
     transport.shutdown().await.unwrap();
     app.shutdown().await;
@@ -359,11 +380,18 @@ async fn invalid_connection_is_isolated_and_socket_cleanup_preserves_replacement
         0
     );
     let mut client = Client::open(&socket).await;
-    client.send(1, ClientCommand::List).await;
-    assert!(matches!(
-        client.next().await,
-        IpcMessage::Reply { id: 1, .. }
-    ));
+    client
+        .send(
+            1,
+            ClientCommand::List {
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(client.next().await, IpcMessage::Query { id, result: QueryResult::List(_) } if id.get() == 1)
+    );
     tokio::fs::remove_file(&socket).await.unwrap();
     tokio::fs::write(&socket, b"replacement owned by operator")
         .await

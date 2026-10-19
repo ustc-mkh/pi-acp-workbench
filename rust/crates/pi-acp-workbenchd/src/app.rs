@@ -5,8 +5,8 @@ use crate::{
     domain::{
         command::{AgentEvent, DomainCommand},
         error::DomainError,
-        event::DomainEvent,
         ids::SessionId,
+        query::{CommandReceipt, CommitBatch},
     },
     persistence::{
         database::Database,
@@ -78,11 +78,11 @@ pub struct WorkbenchApp {
     ingress: IngressHandle,
 }
 
-// Runtime handles and protocol/lifecycle metadata only. SessionState remains
+// Runtime handles and protocol/lifecycle metadata only. SessionView remains
 // exclusively inside SessionActor; ingress never owns a session projection.
 struct CommandCore {
     runtime: Runtime,
-    events: broadcast::Sender<DomainEvent>,
+    events: broadcast::Sender<CommitBatch>,
     supervisor: Arc<WorkerSupervisor>,
     adapters: Arc<Mutex<HashMap<SessionId, AdapterHandle>>>,
     adapter_tasks: TaskScope,
@@ -108,16 +108,16 @@ impl WorkbenchApp {
             .map_err(|error| DomainError::Persistence(error.to_string()))?;
         let database = Database::open_sync(&config.storage.root, &lease)
             .map_err(|error| DomainError::Persistence(error.to_string()))?;
-        let (events, _) = broadcast::channel(256);
         let mut supervisor =
             WorkerSupervisor::configured(config.workers, config.sessions.max_workers);
         if let Some(telegram) = &config.telegram {
             supervisor = supervisor.without_env(telegram.bot_token_env.clone());
         }
         let history = SessionStore::new(database.clone());
+        let runtime = make_runtime(history.clone(), config.sessions.mailbox);
         let core = Arc::new(CommandCore {
-            runtime: make_runtime(history.clone(), config.sessions.mailbox),
-            events,
+            events: runtime.events.clone(),
+            runtime,
             supervisor: Arc::new(supervisor),
             adapters: Arc::new(Mutex::new(HashMap::new())),
             adapter_tasks: TaskScope::default(),
@@ -137,33 +137,46 @@ impl WorkbenchApp {
             ingress,
         })
     }
+    pub async fn query(
+        &self,
+        command: crate::domain::query::QueryCommand,
+    ) -> Result<crate::domain::query::QueryResult, DomainError> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        self.ingress.submit(Request::Query { command, reply })?;
+        wait.await.map_err(|_| ingress::interrupted())?
+    }
+    pub async fn list(
+        &self,
+        cursor: Option<crate::domain::query::ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<crate::domain::query::ListPage, DomainError> {
+        match self
+            .query(crate::domain::query::QueryCommand::List { cursor, limit })
+            .await?
+        {
+            crate::domain::query::QueryResult::List(page) => Ok(page),
+            _ => Err(DomainError::Protocol("invalid list query result".into())),
+        }
+    }
+    pub(crate) async fn dispatch_snapshot(
+        &self,
+        bot: i64,
+        limit: usize,
+    ) -> Result<crate::persistence::delivery::DispatchSnapshot, DomainError> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        self.ingress
+            .submit(Request::Dispatch { bot, limit, reply })?;
+        wait.await.map_err(|_| ingress::interrupted())?
+    }
+    #[cfg(test)]
     pub async fn pending_deliveries(
         &self,
         now: u64,
         limit: usize,
     ) -> Result<Vec<crate::persistence::outbox::DeliveryRecord>, DomainError> {
         let (reply, wait) = tokio::sync::oneshot::channel();
-        self.ingress.submit(Request::Deliveries {
-            now,
-            limit,
-            bindings: None,
-            reply,
-        })?;
-        wait.await.map_err(|_| ingress::interrupted())?
-    }
-    pub(crate) async fn pending_topic_deliveries(
-        &self,
-        limit: usize,
-        bindings: Vec<(SessionId, i64, i64)>,
-        bot_id: i64,
-    ) -> Result<Vec<crate::persistence::outbox::DeliveryRecord>, DomainError> {
-        let (reply, wait) = tokio::sync::oneshot::channel();
-        self.ingress.submit(Request::Deliveries {
-            now: u64::MAX,
-            limit,
-            bindings: Some((bindings, bot_id)),
-            reply,
-        })?;
+        self.ingress
+            .submit(Request::Deliveries { now, limit, reply })?;
         wait.await.map_err(|_| ingress::interrupted())?
     }
     /// Read immutable bytes through the bounded query ingress. This never
@@ -188,10 +201,10 @@ impl WorkbenchApp {
     pub fn delivery_payloads(&self) -> crate::persistence::payload::PayloadStore {
         self.core.history.payloads.clone()
     }
-    pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<CommitBatch> {
         self.core.events.subscribe()
     }
-    pub async fn command(&self, command: DomainCommand) -> Result<Vec<DomainEvent>, DomainError> {
+    pub async fn command(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
         self.enqueue_command(None, command)?.wait().await
     }
     #[cfg(test)]
@@ -204,7 +217,7 @@ impl WorkbenchApp {
         &self,
         operation: &crate::domain::OperationId,
         command: &DomainCommand,
-    ) -> Result<Option<Result<Vec<DomainEvent>, DomainError>>, DomainError> {
+    ) -> Result<Option<Result<CommandReceipt, DomainError>>, DomainError> {
         let (reply, wait) = tokio::sync::oneshot::channel();
         self.ingress.submit(Request::Lookup {
             operation: operation.clone(),
@@ -217,7 +230,7 @@ impl WorkbenchApp {
         &self,
         operation: crate::domain::OperationId,
         command: DomainCommand,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+    ) -> Result<CommandReceipt, DomainError> {
         self.enqueue_command(Some(operation), command)?.wait().await
     }
     /// Synchronous admission preserves wire order before reply observers are
@@ -274,10 +287,10 @@ impl WorkbenchApp {
     }
 }
 pub(crate) struct CommandTicket {
-    wait: tokio::sync::oneshot::Receiver<Result<Vec<DomainEvent>, DomainError>>,
+    wait: tokio::sync::oneshot::Receiver<Result<CommandReceipt, DomainError>>,
 }
 impl CommandTicket {
-    pub(crate) async fn wait(self) -> Result<Vec<DomainEvent>, DomainError> {
+    pub(crate) async fn wait(self) -> Result<CommandReceipt, DomainError> {
         self.wait.await.map_err(|_| ingress::interrupted())?
     }
 }
@@ -286,7 +299,7 @@ impl CommandCore {
         &self,
         operation: crate::domain::OperationId,
         command: DomainCommand,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+    ) -> Result<CommandReceipt, DomainError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainError::Worker("runtime shutting down".into()));
         }
@@ -305,7 +318,7 @@ impl CommandCore {
         self.journal.finish(ticket, &result).await?;
         result
     }
-    async fn execute(&self, command: DomainCommand) -> Result<Vec<DomainEvent>, DomainError> {
+    async fn execute(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainError::Worker("runtime shutting down".into()));
         }
@@ -321,7 +334,7 @@ impl CommandCore {
                     .registry
                     .command(DomainCommand::Inspect(session.clone()))
                     .await?;
-                let Some(DomainEvent::SessionLoaded(snapshot)) = events.first() else {
+                let Some(snapshot) = events.view() else {
                     return Err(DomainError::NotFound(session.clone()));
                 };
                 if !self.supervisor.is_configured(&snapshot.harness) {
@@ -359,9 +372,7 @@ impl CommandCore {
                 .commit(DomainCommand::LoadSession(session.clone()))
                 .await
             {
-                Ok(events) => {
-                    matches!(events.first(), Some(DomainEvent::SessionLoaded(snapshot)) if snapshot.active_turn.is_some())
-                }
+                Ok(events) => events.view().is_some_and(|view| view.active_turn.is_some()),
                 Err(DomainError::NotFound(_)) => false,
                 Err(error) => return Err(error),
             };
@@ -387,7 +398,7 @@ impl CommandCore {
                 .registry
                 .command(DomainCommand::Inspect(session.clone()))
                 .await?;
-            let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
+            let Some(snapshot) = events.view() else {
                 return Err(DomainError::NotFound(session.clone()));
             };
             if snapshot.active_turn.is_some() || snapshot.configuration_intent.is_some() {
@@ -452,66 +463,52 @@ impl CommandCore {
                 return applied;
             }
         }
-        let read_only = matches!(
-            command,
-            DomainCommand::ListSessions | DomainCommand::Inspect(_)
-        );
-        let events = self.runtime.registry.command(command).await?;
-        if !read_only {
-            for event in &events {
-                let _ = self.events.send(event.clone());
+        // Side effects use the accepted command and its committed view, not a
+        // second event/reducer projection. The owner already published its batch.
+        let prompt = match &command {
+            DomainCommand::Prompt { session, prompt } => {
+                Some((session.clone(), prompt.as_str().to_owned()))
+            }
+            _ => None,
+        };
+        let answer_session = match &command {
+            DomainCommand::AnswerInteraction { session, .. } => Some(session.clone()),
+            _ => None,
+        };
+        let result = self.runtime.registry.command(command).await?;
+        if let Some((session, text)) = prompt {
+            if let Some(turn) = result.view().and_then(|view| view.active_turn.clone()) {
+                if let Err(error) = self.dispatch_prompt(session.clone(), turn, text).await {
+                    self.fail_adapter(&session, &error).await?;
+                    return Err(error);
+                }
             }
         }
-        for event in &events {
-            match event {
-                DomainEvent::UserPromptAdded {
-                    session,
-                    turn,
-                    prompt,
-                    ..
-                } => {
-                    if let Err(error) = self
-                        .dispatch_prompt(session.clone(), turn.clone(), prompt.clone())
-                        .await
-                    {
-                        self.fail_adapter(session, &error).await?;
-                        return Err(error);
-                    }
+        if let Some(session) = answer_session {
+            // Forward only the canonical validated response, and only after the
+            // owner has committed it. Raw text answers are not ACP wire values.
+            if let crate::actor::OwnerReply::Answered { answer, .. } = &result {
+                let sender = self
+                    .adapters
+                    .lock()
+                    .await
+                    .get(&session)
+                    .map(|adapter| adapter.tx.clone());
+                let sent = match sender {
+                    Some(sender) => sender
+                        .try_send(AdapterCommand::Answer(answer.clone()))
+                        .map_err(|_| DomainError::Backpressure),
+                    None => Err(DomainError::Worker(
+                        "answer has no live provider adapter".into(),
+                    )),
+                };
+                if let Err(error) = sent {
+                    self.fail_adapter(&session, &error).await?;
+                    return Err(error);
                 }
-                DomainEvent::InteractionResolved {
-                    session,
-                    resolution,
-                } => {
-                    let crate::domain::interaction::InteractionResolution::Answered(answer) =
-                        resolution
-                    else {
-                        continue;
-                    };
-                    let sender = self
-                        .adapters
-                        .lock()
-                        .await
-                        .get(session)
-                        .map(|adapter| adapter.tx.clone());
-                    let result = match sender {
-                        Some(sender) => sender
-                            .try_send(AdapterCommand::Answer(answer.clone()))
-                            .map_err(|_| DomainError::Backpressure),
-                        None => Err(DomainError::Worker(
-                            "answer has no live provider adapter".into(),
-                        )),
-                    };
-                    if let Err(error) = result {
-                        // The domain answer is already committed. Never leave it
-                        // looking Running after silently losing the remote reply.
-                        self.fail_adapter(session, &error).await?;
-                        return Err(error);
-                    }
-                }
-                _ => {}
             }
         }
-        Ok(events)
+        result.receipt()
     }
     async fn stop_session_adapter(&self, session: &SessionId) -> Result<(), DomainError> {
         let adapter = self.adapters.lock().await.remove(session);
@@ -525,12 +522,8 @@ impl CommandCore {
         }
         Ok(())
     }
-    async fn commit(&self, command: DomainCommand) -> Result<Vec<DomainEvent>, DomainError> {
-        let events = self.runtime.registry.command(command).await?;
-        for event in &events {
-            let _ = self.events.send(event.clone());
-        }
-        Ok(events)
+    async fn commit(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
+        self.runtime.registry.command(command).await?.receipt()
     }
     async fn fail_adapter(
         &self,
@@ -567,10 +560,7 @@ impl CommandCore {
                 },
             }
         };
-        let failed = self.runtime.registry.command(terminal).await;
-        for event in failed? {
-            let _ = self.events.send(event);
-        }
+        self.runtime.registry.command(terminal).await?;
         Ok(())
     }
     async fn dispatch_prompt(
@@ -616,8 +606,8 @@ impl CommandCore {
             .registry
             .command(DomainCommand::Inspect(session.clone()))
             .await?;
-        let (harness, cwd, provider_session, config, recovery) = match &snapshot[0] {
-            DomainEvent::SessionLoaded(snapshot) => (
+        let (harness, cwd, provider_session, config, recovery) = match snapshot.view() {
+            Some(snapshot) => (
                 snapshot.harness.clone(),
                 snapshot.cwd.clone(),
                 snapshot.provider_session.clone(),
@@ -670,7 +660,6 @@ impl CommandCore {
                 cwd,
                 provider_session,
                 registry: self.runtime.registry.clone(),
-                output: self.events.clone(),
                 lifecycle: stop.clone(),
                 pending_interactions: self.pending_interactions,
                 recovery,

@@ -17,6 +17,16 @@ fn fixture() -> Fixture {
     ))
     .unwrap()
 }
+#[test]
+fn hot_view_rejects_embedded_history_and_unsafe_wire_revision() {
+    let mut unknown = serde_json::to_value(fixture().view).unwrap();
+    unknown["transcript"] = serde_json::json!({ "entries": [] });
+    assert!(serde_json::from_value::<SessionView>(unknown).is_err());
+    let mut unsafe_revision = serde_json::to_value(fixture().view).unwrap();
+    unsafe_revision["revision"] = serde_json::json!(MAX_SAFE_INTEGER + 1);
+    assert!(serde_json::from_value::<SessionView>(unsafe_revision).is_err());
+}
+
 fn content(text: &str) -> ContentRef {
     ContentRef {
         id: ContentId::new("content-test").unwrap(),

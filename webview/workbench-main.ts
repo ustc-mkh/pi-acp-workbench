@@ -4,7 +4,10 @@ import {
   type ClientCommand,
   type ImageAsset,
   type ImageRef,
-  type SessionSnapshot,
+  type SessionView,
+  type ContentRef,
+  contentRef,
+  contentSlice,
 } from '../src/workbench-protocol';
 import { uiStateMessage, type UiCommand, type WorkbenchUiState } from '../src/workbench-ui';
 
@@ -14,11 +17,11 @@ const vscode = acquireVsCodeApi(),
 const markdown = createRenderer(window);
 let state: WorkbenchUiState | undefined,
   sequence = 0,
-  selected: string | undefined,
-  visible = 100;
+  selected: string | undefined;
 const images = new Map<string, { asset: ImageAsset; url: string }>();
 const imageErrors = new Map<string, string>(),
-  pendingImages = new Set<string>();
+  pendingImages = new Map<number, { image: string; session: string }>();
+let nextUiRequest = 0;
 let imageBytes = 0,
   rendering = false;
 const drafts = new Map<string, string>();
@@ -108,7 +111,7 @@ root.append(
   composer,
 );
 function current() {
-  return state?.view?.snapshot;
+  return state?.view?.view;
 }
 function mutate(command: ClientCommand) {
   const snapshot = current();
@@ -122,7 +125,7 @@ function schedule() {
     render();
   });
 }
-function renderSettings(snapshot: SessionSnapshot, busy: boolean) {
+function renderSettings(snapshot: SessionView, busy: boolean) {
   settings.replaceChildren();
   for (const key of ['model', 'mode'] as const) {
     const choices = key === 'model' ? snapshot.catalogue.models : snapshot.catalogue.modes;
@@ -147,12 +150,12 @@ function renderSettings(snapshot: SessionSnapshot, busy: boolean) {
           ? {
               method: 'set_model',
               session: snapshot.id,
-              model: value.id as NonNullable<SessionSnapshot['config']['model']>,
+              model: value.id as NonNullable<SessionView['config']['model']>,
             }
           : {
               method: 'set_mode',
               session: snapshot.id,
-              mode: value.id as NonNullable<SessionSnapshot['config']['mode']>,
+              mode: value.id as NonNullable<SessionView['config']['mode']>,
             },
       );
     });
@@ -186,24 +189,29 @@ function renderSettings(snapshot: SessionSnapshot, busy: boolean) {
     ),
   );
 }
-function imageNode(ref: ImageRef, session: SessionSnapshot['id']) {
+function imageNode(ref: ImageRef, session: SessionView['id']) {
   const box = element('figure'),
     cached = images.get(ref.id);
   if (cached) {
+    images.delete(ref.id);
+    images.set(ref.id, cached);
     const img = element('img');
     img.alt = 'Archived agent image';
     img.src = cached.url;
     box.append(img);
   } else {
     const load = button(
-      pendingImages.has(ref.id) ? 'Loading image…' : 'Load archived image',
+      [...pendingImages.values()].some((item) => item.image === ref.id)
+        ? 'Loading image…'
+        : 'Load archived image',
       () => {
         if (pendingImages.size >= 4) return;
-        pendingImages.add(ref.id);
-        send({ type: 'read_image', session, image: ref });
+        const request_id = ++nextUiRequest;
+        pendingImages.set(request_id, { image: ref.id, session });
+        send({ type: 'read_image', session, image: ref, request_id });
         schedule();
       },
-      pendingImages.has(ref.id) || pendingImages.size >= 4,
+      [...pendingImages.values()].some((item) => item.image === ref.id) || pendingImages.size >= 4,
     );
     box.append(load);
   }
@@ -215,82 +223,116 @@ function imageNode(ref: ImageRef, session: SessionSnapshot['id']) {
   );
   return box;
 }
-function renderTranscript(snapshot: SessionSnapshot, busy: boolean) {
-  const rows = [...snapshot.transcript.entries, ...(state?.view?.provisional || [])];
+const contentPages = new Map<
+  string,
+  { ref: ContentRef; offset: number; text: string; next: number | null }
+>();
+function contentNode(ref: ContentRef, session: SessionView['id']) {
+  const box = element('section');
+  const page = contentPages.get(ref.id);
+  box.append(element('small', `Archived ${ref.kind} · ${ref.bytes} bytes`));
+  box.append(
+    button(page ? 'First content page' : 'Read content', () =>
+      send({ type: 'read_content', session, ref, offset: 0 }),
+    ),
+  );
+  if (page) {
+    // Replace, never concatenate content pages. Each response is <=64KiB;
+    // at most four open pages remain, below 256KiB per item and bounded overall.
+    box.append(element('pre', page.text));
+    if (page.next !== null)
+      box.append(
+        button('Next content page', () =>
+          send({ type: 'read_content', session, ref, offset: page.next! }),
+        ),
+      );
+  }
+  return box;
+}
+function renderTranscript(snapshot: SessionView, busy: boolean) {
+  const rows = state?.view?.entries || [];
   const scroll = transcript.scrollTop,
     bottom = transcript.scrollHeight - transcript.clientHeight - scroll < 80;
   transcript.replaceChildren();
-  if (rows.length > visible)
-    transcript.append(
-      button(`Show earlier (${rows.length - visible})`, () => {
-        visible += 100;
-        schedule();
-      }),
-    );
-  const committed = new Set(snapshot.transcript.entries.map((row) => row.id));
-  for (const row of rows.slice(-visible)) {
+  transcript.append(
+    button(
+      'Earlier page',
+      () => send({ type: 'earlier', session: snapshot.id }),
+      !state?.view?.earlier,
+    ),
+  );
+  transcript.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
+  transcript.append(
+    element(
+      'small',
+      `${rows.length} confirmed entries · ${state?.view?.historical ? 'historical page' : 'latest page'}`,
+    ),
+  );
+  for (const row of rows) {
     const article = element('article');
     article.dataset.entry = row.id;
     article.className = row.role.toLowerCase();
-    article.append(
-      element('small', `${row.role}${committed.has(row.id) ? '' : ' · synchronizing'}`),
-    );
+    article.append(element('small', `${row.role} · ${row.seq}`));
     const content = element('div');
-    content.innerHTML = markdown(row.text);
-    // Markdown links and image markers are display metadata, never automatic I/O.
-    content
-      .querySelectorAll('a')
-      .forEach((link) => link.addEventListener('click', (event) => event.preventDefault()));
+    if ('Inline' in row.text) {
+      content.innerHTML = markdown(row.text.Inline.text);
+      content
+        .querySelectorAll('a')
+        .forEach((link) => link.addEventListener('click', (event) => event.preventDefault()));
+    } else content.append(contentNode(row.text.Archived.content, snapshot.id));
     if (row.role === 'Thought') {
-      const details = element('details'),
-        summary = element('summary', 'Thought');
-      details.append(summary, content);
+      const details = element('details');
+      details.append(element('summary', 'Thought'), content);
       article.append(details);
     } else article.append(content);
     if (row.image) article.append(imageNode(row.image, snapshot.id));
-    if (committed.has(row.id) && ['Agent', 'User'].includes(row.role) && !row.image)
+    if (['Agent', 'User'].includes(row.role) && !row.image)
       article.append(
         button(
           'Fork here',
-          () => {
-            mutate({ method: 'fork', session: snapshot.id, request: { entry: row.id } });
-          },
+          () => mutate({ method: 'fork', session: snapshot.id, request: { entry: row.id } }),
           busy || snapshot.status !== 'Idle',
         ),
       );
     transcript.append(article);
   }
-  const visibleTurns = new Set<string>(rows.slice(-visible).map((row) => row.turn));
-  let toolCount = 0;
-  for (const [turn, tools] of Object.entries(snapshot.transcript.tools))
-    for (const tool of Object.values(tools)) {
-      if (!visibleTurns.has(turn) || toolCount++ >= 300) continue;
-      const details = element('details'),
-        summary = element('summary', `${tool.title} · ${tool.status}`);
-      details.append(summary);
-      for (const content of tool.details.content) {
-        if ('Text' in content) details.append(element('pre', content.Text.text));
-        else if ('Diff' in content)
-          details.append(
-            element(
-              'pre',
-              `${content.Diff.path}\n---\n${content.Diff.old_text ?? ''}\n+++\n${content.Diff.new_text}`,
-            ),
-          );
-        else if ('ResourceText' in content)
-          details.append(
-            element('pre', `${content.ResourceText.uri}\n${content.ResourceText.text}`),
-          );
-        else if ('ResourceLink' in content)
-          details.append(element('p', `${content.ResourceLink.name}: ${content.ResourceLink.uri}`));
-        else if ('TerminalReference' in content)
-          details.append(
-            element('p', `Terminal reference: ${content.TerminalReference.id} (display only)`),
-          );
-        else details.append(element('p', `Unsupported binary: ${content.Unsupported.kind}`));
-      }
-      transcript.append(details);
+  const visibleTurns = new Set(rows.map((row) => row.turn));
+  for (const turn of visibleTurns)
+    transcript.append(
+      button(`Tools for ${turn}`, () => send({ type: 'read_tools', session: snapshot.id, turn })),
+    );
+  const cursor = state?.view?.toolCursor;
+  if (cursor)
+    transcript.append(
+      button('Next tool page', () =>
+        send({ type: 'read_tools', session: snapshot.id, turn: cursor.turn, cursor }),
+      ),
+    );
+  for (const tool of state?.view?.tools || []) {
+    if (!visibleTurns.has(tool.turn)) continue;
+    const details = element('details');
+    details.append(element('summary', `${tool.title} · ${tool.status}`));
+    for (const body of tool.content) {
+      if ('Text' in body) details.append(contentNode(body.Text.content, snapshot.id));
+      else if ('Diff' in body) {
+        details.append(element('p', body.Diff.path));
+        if (body.Diff.old_text) details.append(contentNode(body.Diff.old_text, snapshot.id));
+        details.append(contentNode(body.Diff.new_text, snapshot.id));
+      } else if ('ResourceText' in body) {
+        details.append(
+          element('p', body.ResourceText.uri),
+          contentNode(body.ResourceText.content, snapshot.id),
+        );
+      } else if ('ResourceLink' in body)
+        details.append(element('p', `${body.ResourceLink.name}: ${body.ResourceLink.uri}`));
+      else if ('TerminalReference' in body)
+        details.append(
+          element('p', `Terminal reference: ${body.TerminalReference.id} (display only)`),
+        );
+      else details.append(element('p', `Unsupported binary: ${body.Unsupported.kind}`));
     }
+    transcript.append(details);
+  }
   if (snapshot.plan.items.length) {
     const plan = element('details');
     plan.append(element('summary', 'Plan'));
@@ -300,7 +342,7 @@ function renderTranscript(snapshot: SessionSnapshot, busy: boolean) {
   }
   transcript.scrollTop = bottom ? transcript.scrollHeight : scroll;
 }
-function renderInteractions(snapshot: SessionSnapshot) {
+function renderInteractions(snapshot: SessionView) {
   // Preserve partially entered answers across streaming/snapshot refresh. A
   // definition change must replace that form; answered/expired IDs disappear.
   const existing = new Map(
@@ -430,8 +472,9 @@ function render() {
     if (drafts.size > 16) drafts.delete(drafts.keys().next().value!);
     selected = state.selected;
     prompt.value = drafts.get(selected || '') || '';
-    visible = 100;
+    for (const image of images.values()) URL.revokeObjectURL(image.url);
     images.clear();
+    contentPages.clear();
     imageBytes = 0;
     imageErrors.clear();
     pendingImages.clear();
@@ -439,14 +482,27 @@ function render() {
   }
   sessions.replaceChildren(element('option', 'Select session'));
   for (const session of state.sessions) {
-    const option = element(
-      'option',
-      `${session.harness} · ${session.transcript.entries.find((row) => row.role === 'User')?.text.slice(0, 50) || session.id} · ${session.cwd}`,
-    );
+    const option = element('option', `${session.harness} · ${session.id} · ${session.cwd}`);
     option.value = session.id;
     sessions.append(option);
   }
   sessions.value = state.selected || '';
+  document.querySelector('[data-session-page]')?.remove();
+  const nextSessions = state.sessionsCursor;
+  if (nextSessions) {
+    const page = element('span');
+    page.dataset.sessionPage = 'true';
+    page.append(button('Next session page', () => send({ type: 'refresh', cursor: nextSessions })));
+    page.append(button('Latest session page', () => send({ type: 'refresh' })));
+    sessions.after(page);
+  }
+  const visibleImages = new Set<string>(
+    (state.view?.entries || []).flatMap((row) => (row.image ? [row.image.id as string] : [])),
+  );
+  for (const [request_id, pending] of pendingImages)
+    if (pending.session !== state.selected || !visibleImages.has(pending.image))
+      pendingImages.delete(request_id);
+  for (const id of imageErrors.keys()) if (!visibleImages.has(id)) imageErrors.delete(id);
   const snapshot = current();
   error.textContent =
     state.error ||
@@ -516,12 +572,12 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       raw.session === state?.selected &&
       'asset' in raw
     ) {
+      if ('request_id' in raw && typeof raw.request_id === 'number')
+        pendingImages.delete(raw.request_id);
       const message = ipcMessage.parse({ type: 'image', id: 0, asset: raw.asset });
       if (message.type !== 'image') return;
       const asset = message.asset,
-        ref = [...(current()?.transcript.entries || []), ...(state?.view?.provisional || [])].find(
-          (row) => row.image?.id === asset.image.id,
-        )?.image;
+        ref = (state?.view?.entries || []).find((row) => row.image?.id === asset.image.id)?.image;
       if (
         !ref ||
         ref.bytes !== asset.image.bytes ||
@@ -532,16 +588,73 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       const bytes = atob(asset.data);
       if (bytes.length !== ref.bytes || btoa(bytes) !== asset.data) throw new Error();
       if (!images.has(ref.id)) {
-        while (imageBytes + ref.bytes > 16 * 1024 * 1024 && images.size) {
+        while (imageBytes + ref.bytes > 32 * 1024 * 1024 && images.size) {
           const first = images.keys().next().value!;
           imageBytes -= images.get(first)!.asset.image.bytes;
+          URL.revokeObjectURL(images.get(first)!.url);
           images.delete(first);
         }
-        images.set(ref.id, { asset, url: `data:${ref.mime};base64,${asset.data}` });
+        images.set(ref.id, {
+          asset,
+          url: URL.createObjectURL(
+            new Blob([Uint8Array.from(bytes, (ch) => ch.charCodeAt(0))], { type: ref.mime }),
+          ),
+        });
         imageBytes += ref.bytes;
       }
-      pendingImages.delete(ref.id);
+      if ('request_id' in raw && typeof raw.request_id === 'number')
+        pendingImages.delete(raw.request_id);
+      else
+        for (const [request_id, pending] of pendingImages)
+          if (pending.image === ref.id && pending.session === raw.session)
+            pendingImages.delete(request_id);
       imageErrors.delete(ref.id);
+      schedule();
+    } else if (
+      raw.type === 'content' &&
+      'session' in raw &&
+      raw.session === state?.selected &&
+      'ref' in raw &&
+      'slice' in raw &&
+      'offset' in raw &&
+      Number.isSafeInteger(raw.offset) &&
+      Number(raw.offset) >= 0
+    ) {
+      const ref = contentRef.parse(raw.ref),
+        slice = contentSlice.parse(raw.slice);
+      const known =
+        state?.view?.entries.some(
+          (entry) => 'Archived' in entry.text && entry.text.Archived.content.id === ref.id,
+        ) ||
+        state?.view?.tools.some((tool) =>
+          tool.content.some((body) =>
+            'Text' in body
+              ? body.Text.content.id === ref.id
+              : 'ResourceText' in body
+                ? body.ResourceText.content.id === ref.id
+                : 'Diff' in body
+                  ? body.Diff.old_text?.id === ref.id || body.Diff.new_text.id === ref.id
+                  : false,
+          ),
+        );
+      if (!known || slice.sha256 !== ref.sha256 || slice.total_bytes !== ref.bytes) return;
+      contentPages.delete(ref.id);
+      while (contentPages.size >= 4) contentPages.delete(contentPages.keys().next().value!);
+      contentPages.set(ref.id, {
+        ref,
+        offset: Number(raw.offset),
+        text: slice.text,
+        next: slice.next_offset,
+      });
+      schedule();
+    } else if (
+      raw.type === 'content_error' &&
+      'session' in raw &&
+      raw.session === state?.selected &&
+      'ref' in raw
+    ) {
+      const ref = contentRef.parse(raw.ref);
+      contentPages.delete(ref.id);
       schedule();
     } else if (
       raw.type === 'image_error' &&
@@ -550,12 +663,23 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       'image' in raw &&
       typeof raw.image === 'string'
     ) {
-      pendingImages.delete(raw.image);
+      if ('request_id' in raw && typeof raw.request_id === 'number')
+        pendingImages.delete(raw.request_id);
+      else
+        for (const [request_id, pending] of pendingImages)
+          if (pending.image === raw.image && pending.session === raw.session)
+            pendingImages.delete(request_id);
       imageErrors.set(raw.image, 'Archive unavailable');
       schedule();
     }
   } catch {
     error.textContent = 'Invalid workbench view message; refresh or reconnect';
   }
+});
+window.addEventListener('unload', () => {
+  for (const image of images.values()) URL.revokeObjectURL(image.url);
+  images.clear();
+  contentPages.clear();
+  pendingImages.clear();
 });
 send({ type: 'ready' });

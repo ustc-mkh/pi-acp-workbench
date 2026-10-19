@@ -10,8 +10,7 @@ use crate::{
             Interaction, InteractionAnswer, InteractionKind, InteractionOption, InteractionResponse,
         },
         session::SessionConfig,
-        DeliveryId, Harness, InteractionId, SessionId, SessionSnapshot, SessionState,
-        SessionStatus, WorkspacePath,
+        DeliveryId, Harness, InteractionId, SessionId, SessionStatus, WorkspacePath,
     },
     persistence::inbox::{AdmissionResult, TelegramStore},
 };
@@ -29,14 +28,15 @@ fn policy() -> AdmissionPolicy {
         cwd: WorkspacePath::new("/tmp").unwrap(),
     }
 }
-fn snapshot() -> SessionSnapshot {
-    SessionState {
+fn snapshot() -> crate::domain::query::SessionView {
+    crate::domain::query::SessionView {
         id: SessionId::generate(),
         provider_session: None,
         harness: Harness::Pi,
         cwd: WorkspacePath::new("/tmp").unwrap(),
         status: SessionStatus::Waiting,
-        transcript: Default::default(),
+        origin: None,
+        last_entry_seq: crate::domain::query::SafeInteger::new(0).unwrap(),
         plan: Default::default(),
         active_turn: None,
         pending_interactions: Default::default(),
@@ -47,9 +47,8 @@ fn snapshot() -> SessionSnapshot {
             mode: None,
         },
         catalogue: Default::default(),
-        revision: 1,
+        revision: crate::domain::query::SafeInteger::new(1).unwrap(),
     }
-    .snapshot()
 }
 fn interaction() -> Interaction {
     Interaction {

@@ -3,8 +3,7 @@ use super::*;
 use crate::{
     domain::{
         interaction::{InteractionAnswer, InteractionResponse},
-        session::SessionSnapshot,
-        OperationId, SessionState,
+        OperationId,
     },
     persistence::interface::SessionPersistence,
 };
@@ -20,21 +19,10 @@ struct Store {
     reject_cancel: Fault,
 }
 impl SessionPersistence for Store {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
-        self.history.load(id).await
-    }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
-        self.history.list().await
-    }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
-        self.history.save(state).await
-    }
-    async fn remove(&self, id: &str) -> Result<(), String> {
-        self.history.remove(id).await
-    }
+    crate::persistence::interface_test_helpers::delegate_session_queries!();
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         let state = &change.next;
         let reject = {
@@ -73,21 +61,14 @@ fn host(root: &std::path::Path, trace: &std::path::Path, reject_cancel: &Fault) 
     })
     .unwrap()
 }
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
 async fn states(
     app: &WorkbenchApp,
     ids: &[SessionId],
-    predicate: impl Fn(&SessionSnapshot) -> bool,
-) -> Vec<SessionSnapshot> {
+    predicate: impl Fn(&SessionView) -> bool,
+) -> Vec<SessionView> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let mut snapshots = Vec::new();
@@ -259,11 +240,10 @@ async fn mixed_three_restart_cycles_sixteen_workers_hundred_queries_thirty_two_i
         })
         .await;
         for state in complete {
-            assert!(state
-                .transcript
-                .entries
+            assert!(history_text(&app, &state.id)
+                .await
                 .iter()
-                .any(|entry| entry.text == format!("echo: {text}")));
+                .any(|entry| entry == &format!("echo: {text}")));
         }
         prompts(&app, &ids, "permissions:2").await;
         states(&app, &ids, |state| state.pending_interactions.len() == 2).await;
@@ -272,33 +252,39 @@ async fn mixed_three_restart_cycles_sixteen_workers_hundred_queries_thirty_two_i
         // the synthetic state is written with a fresh revision in this test root.
         let mut prefix = BTreeMap::new();
         for id in &ids {
-            prefix.insert(
-                id.clone(),
-                app.core.history.load(id.as_str()).await.unwrap().unwrap(),
-            );
+            prefix.insert(id.clone(), inspect_view(&app, id).await);
         }
         app.shutdown_checked().await.unwrap();
         assert_eq!(live_workers(&trace_path).await, 0);
-        let repair = host(&root, &trace_path, &reject);
+        let database = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
         for state in prefix.values() {
             let mut crash = state.clone();
-            crash.revision = repair
-                .core
-                .history
-                .load(crash.id.as_str())
-                .await
-                .unwrap()
-                .unwrap()
-                .revision
-                + 1;
-            repair.core.history.save(&crash).await.unwrap();
+            let revision: crate::domain::query::SafeInteger = database
+                .query_row(
+                    "SELECT revision FROM sessions WHERE id=?1",
+                    [crash.id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            crash.revision = revision.next().unwrap();
+            database
+                .execute(
+                    "UPDATE sessions SET revision=?2,status_json=?3,hot_state_json=?4 WHERE id=?1",
+                    rusqlite::params![
+                        crash.id.as_str(),
+                        crash.revision,
+                        serde_json::to_string(&crash.status).unwrap(),
+                        serde_json::to_string(&crash).unwrap()
+                    ],
+                )
+                .unwrap();
         }
+        drop(database);
         let boots = trace(&trace_path)
             .await
             .iter()
             .filter(|entry| entry.method == "boot")
             .count();
-        repair.shutdown_checked().await.unwrap();
         if round == 1 {
             // Corrupt only one hot row offline. A bad session must fail closed
             // without preventing the remaining sessions from recovering.

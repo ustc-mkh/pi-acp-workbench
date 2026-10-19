@@ -1,9 +1,13 @@
 //! Typed session transactions and indexed bounded queries; called only by the DB executor.
 use super::{
     content,
-    database::{encode, SessionCommit, StoreError},
+    database::{encode, StoreError},
 };
-use crate::domain::{query::*, transition::DeliveryIntent, Harness, SessionId};
+use crate::domain::{
+    query::*,
+    transition::{DeliveryIntent, Transition},
+    Harness, SessionId,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub(super) const HISTORY_SQL: &str = "SELECT se.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes <= 16384 THEN c.data ELSE NULL END FROM session_entries se JOIN entries e ON e.entry_id = se.entry_id JOIN contents c ON c.id = e.content_id WHERE se.session = ?1 AND se.seq <= ?2 AND se.seq < ?3 ORDER BY se.seq DESC LIMIT ?4";
@@ -26,7 +30,7 @@ fn parse_harness(value: &str) -> Result<Harness, StoreError> {
         _ => Err(StoreError::Invalid("invalid harness")),
     }
 }
-fn summary(view: &SessionView, created_seq: SafeInteger) -> SessionSummary {
+pub(super) fn summary(view: &SessionView, created_seq: SafeInteger) -> SessionSummary {
     SessionSummary {
         id: view.id.clone(),
         harness: view.harness.clone(),
@@ -53,6 +57,14 @@ pub(super) fn create(
 }
 pub(super) fn insert_view(db: &Connection, view: &SessionView) -> Result<SafeInteger, StoreError> {
     view.validate()?;
+    let removed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM removed_sessions WHERE id=?1)",
+        [view.id.as_str()],
+        |row| row.get(0),
+    )?;
+    if removed {
+        return Err(StoreError::Conflict);
+    }
     let created = next_counter(db, "created_seq")?;
     db.execute("INSERT INTO sessions(id,created_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![view.id.as_str(), created, view.revision, view.last_entry_seq, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
     Ok(created)
@@ -74,10 +86,7 @@ pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, 
     }
     Ok(view)
 }
-pub(super) fn commit(
-    db: &mut Connection,
-    commit: SessionCommit,
-) -> Result<CommitBatch, StoreError> {
+pub(super) fn commit(db: &mut Connection, commit: Transition) -> Result<CommitBatch, StoreError> {
     let tx = db.transaction()?;
     let batch = apply_commit(&tx, &commit)?;
     tx.commit()?;
@@ -85,7 +94,7 @@ pub(super) fn commit(
 }
 pub(super) fn apply_commit(
     tx: &Transaction<'_>,
-    commit: &SessionCommit,
+    commit: &Transition,
 ) -> Result<CommitBatch, StoreError> {
     commit.next.validate()?;
     let old = view(tx, &commit.next.id)?;
@@ -116,7 +125,7 @@ pub(super) fn apply_commit(
 }
 pub(super) fn apply_records(
     tx: &Transaction<'_>,
-    commit: &SessionCommit,
+    commit: &Transition,
     previous_entry_seq: SafeInteger,
 ) -> Result<CommitBatch, StoreError> {
     for item in &commit.contents {
@@ -193,8 +202,155 @@ pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(
     let key = super::delivery::target_key(&intent.target);
     let order = next_counter(db, "delivery_seq")?;
     db.execute("INSERT INTO deliveries(delivery_id,order_seq,revision,target_key,target_json,payload_json,status) VALUES (?1,?2,?3,?4,?5,?6,'Pending')", params![intent.id.as_str(), order, intent.revision, key, target, payload])?;
+    if let crate::domain::transition::DeliveryPayload::Turn {
+        session,
+        turn,
+        first_seq,
+        last_seq,
+    } = &intent.payload
+    {
+        let source = view(db, session)?;
+        if source.revision != intent.revision || last_seq > &source.last_entry_seq {
+            return Err(StoreError::Conflict);
+        }
+        // Freeze links, not bodies, before the owning transaction can commit.
+        // The turn index avoids walking historical entries; the session+entry
+        // unique index then proves that each candidate belongs to this source.
+        db.execute("INSERT INTO delivery_entries(delivery_id,seq,entry_id) SELECT ?1,se.seq,e.entry_id FROM entries e INDEXED BY entries_turn_role JOIN session_entries se ON se.session=?2 AND se.entry_id=e.entry_id WHERE e.turn=?3 AND e.role='Agent' AND se.seq BETWEEN ?4 AND ?5 ORDER BY se.seq", params![intent.id.as_str(), session.as_str(), turn.as_str(), first_seq, last_seq])?;
+    }
     Ok(())
 }
+pub(super) fn tool(
+    db: &Connection,
+    session: &SessionId,
+    turn: &crate::domain::TurnId,
+    id: &crate::domain::ToolCallId,
+) -> Result<Option<ToolHeader>, StoreError> {
+    let encoded: Option<String> = db
+        .query_row(
+            "SELECT header_json FROM tools WHERE session=?1 AND turn=?2 AND tool_id=?3",
+            params![session.as_str(), turn.as_str(), id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let header: Option<ToolHeader> = encoded
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    if let Some(header) = &header {
+        header.validate()?;
+        if &header.turn != turn || &header.id != id {
+            return Err(StoreError::Invalid("tool identity mismatch"));
+        }
+        validate_tool_refs(db, header)?;
+    }
+    Ok(header)
+}
+
+pub(super) fn remove(db: &mut Connection, session: &SessionId) -> Result<CommitBatch, StoreError> {
+    let tx = db.transaction()?;
+    let current = view(&tx, session)?;
+    if current.active_turn.is_some() {
+        return Err(StoreError::Invalid("cannot remove an active turn"));
+    }
+    let revision = current.revision.next()?;
+    tx.execute(
+        "INSERT INTO removed_sessions(id,revision) VALUES (?1,?2)",
+        params![session.as_str(), revision],
+    )?;
+    tx.execute("DELETE FROM tools WHERE session=?1", [session.as_str()])?;
+    tx.execute(
+        "DELETE FROM session_entries WHERE session=?1",
+        [session.as_str()],
+    )?;
+    tx.execute("DELETE FROM sessions WHERE id=?1", [session.as_str()])?;
+    let batch = CommitBatch {
+        session: session.clone(),
+        revision,
+        view: None,
+        entries: Vec::new(),
+        tools: Vec::new(),
+        removed: true,
+    };
+    batch.validate()?;
+    tx.commit()?;
+    Ok(batch)
+}
+
+pub(super) fn tools(
+    db: &Connection,
+    session: &SessionId,
+    turn: &crate::domain::TurnId,
+    cursor: Option<ToolCursor>,
+    requested: Option<usize>,
+) -> Result<ToolPage, StoreError> {
+    QueryCommand::Tools {
+        session: session.clone(),
+        turn: turn.clone(),
+        cursor: cursor.clone(),
+        limit: requested,
+    }
+    .validate()?;
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+        [session.as_str()],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(StoreError::NotFound);
+    }
+    let limit = limit(requested, DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT)?;
+    let after = cursor
+        .as_ref()
+        .map_or("", |cursor| cursor.after_tool.as_str());
+    let mut statement = db.prepare("SELECT tool_id,header_json FROM tools WHERE session=?1 AND turn=?2 AND tool_id>?3 ORDER BY tool_id LIMIT ?4")?;
+    let mut rows = statement.query(params![
+        session.as_str(),
+        turn.as_str(),
+        after,
+        (limit + 1) as i64
+    ])?;
+    let mut page = ToolPage {
+        tools: Vec::new(),
+        next_cursor: None,
+    };
+    let mut more = false;
+    while let Some(row) = rows.next()? {
+        if page.tools.len() == limit {
+            more = true;
+            break;
+        }
+        let id: String = row.get(0)?;
+        let header: ToolHeader = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        header.validate()?;
+        if header.id.as_str() != id || &header.turn != turn {
+            return Err(StoreError::Invalid("tool identity mismatch"));
+        }
+        validate_tool_refs(db, &header)?;
+        let previous = page.next_cursor.clone();
+        page.next_cursor = Some(ToolCursor {
+            version: ProtocolVersion,
+            session: session.clone(),
+            turn: turn.clone(),
+            after_tool: header.id.clone(),
+        });
+        page.tools.push(header);
+        if page.validate().is_err() {
+            page.tools.pop();
+            page.next_cursor = previous;
+            if page.tools.is_empty() {
+                return Err(QueryError::TooLarge.into());
+            }
+            more = true;
+            break;
+        }
+    }
+    if !more {
+        page.next_cursor = None;
+    }
+    page.validate()?;
+    Ok(page)
+}
+
 pub(super) fn list(
     db: &Connection,
     cursor: Option<ListCursor>,

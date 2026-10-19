@@ -18,6 +18,7 @@ struct Lifecycle {
 #[derive(Clone)]
 pub struct Runtime {
     pub registry: RegistryHandle,
+    pub events: broadcast::Sender<CommitBatch>,
     lifecycle: Arc<Mutex<Lifecycle>>,
     completion: watch::Receiver<Option<Outcome>>,
     recovery: Recovery,
@@ -29,7 +30,8 @@ impl Runtime {
     pub fn start(store: impl SessionPersistence, mailbox: usize) -> Self {
         let (tx, rx) = mpsc::channel(mailbox);
         let (completion, receiver) = watch::channel(None);
-        let shared = Arc::new(Mutex::new(RegistryState::default()));
+        let (events, _) = broadcast::channel(mailbox.max(1));
+        let shared = Arc::new(Mutex::new(RegistryState::new(events.clone())));
         let recovery: Recovery = {
             let store = store.clone();
             let shared = shared.clone();
@@ -48,6 +50,7 @@ impl Runtime {
         let root_abort = task.abort_handle();
         Self {
             registry: RegistryHandle { tx },
+            events,
             lifecycle: Arc::new(Mutex::new(Lifecycle {
                 task: Some(task),
                 result: None,

@@ -1,12 +1,12 @@
 use super::{
+    fork::oracle::OracleHistory,
     fork::*,
     ids::*,
-    session::SessionState,
     tool::{ToolCall, ToolStatus},
     transcript::{EntryRole, TranscriptEntry},
 };
-fn fixture() -> SessionState {
-    let mut state = super::tests::state();
+fn fixture() -> OracleHistory {
+    let mut state = OracleHistory::new(super::tests::state());
     state.provider_session = Some(ProviderSessionId::new("native-source").unwrap());
     for index in 0..2 {
         let turn = TurnId::generate();
@@ -47,7 +47,7 @@ fn fixture() -> SessionState {
     }
     state.config.model = Some(ModelId::new("source-current-model").unwrap());
     state.config.mode = Some(ModeId::new("source-current-mode").unwrap());
-    state.revision = 99;
+    state.view.revision = super::query::SafeInteger::new(99).unwrap();
     state
 }
 fn candidate(entry: &TranscriptEntry) -> ForkCandidate {
@@ -103,7 +103,7 @@ fn fork_projection_is_an_independent_prefix_without_current_settings_or_future_t
         projection.snapshot.config.model.is_none() && projection.snapshot.config.mode.is_none()
     );
     assert!(projection.snapshot.provider_session.is_none());
-    assert_eq!(projection.snapshot.revision, 0);
+    assert_eq!(projection.snapshot.revision.get(), 0);
     let origin = projection.snapshot.transcript.origin.as_ref().unwrap();
     assert_eq!(origin.session, state.id);
     assert_eq!(origin.entry, entry.id);

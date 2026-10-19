@@ -1,25 +1,64 @@
 use crate::{
-    domain::{command::DomainCommand, error::DomainError, event::DomainEvent, ids::*, session::*},
-    persistence::{database::SessionCommit, interface::SessionPersistence},
+    domain::{
+        command::{AgentEvent, DomainCommand},
+        error::DomainError,
+        ids::*,
+        query::{CommandReceipt, CommitBatch, ListPage, SessionView},
+        reducer::{transition, TransitionContext},
+        session::SessionStatus,
+    },
+    persistence::interface::SessionPersistence,
 };
 use std::collections::BTreeMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-type Reply = oneshot::Sender<Result<Vec<DomainEvent>, DomainError>>;
-
+/// Internal owner result. Only CommandReceipt crosses the mutation wire or
+/// journal boundary; batches are published synchronously by the state owner.
+#[derive(Clone, Debug)]
+pub enum OwnerReply {
+    Receipt(CommandReceipt),
+    Committed(CommitBatch),
+    Answered {
+        batch: CommitBatch,
+        answer: crate::domain::interaction::InteractionAnswer,
+    },
+    Listed(ListPage),
+    ForkPrepared(Box<crate::domain::fork::ForkPlan>),
+}
+impl OwnerReply {
+    pub fn view(&self) -> Option<&SessionView> {
+        match self {
+            Self::Receipt(CommandReceipt::Loaded { view }) => Some(view),
+            Self::Committed(batch) | Self::Answered { batch, .. } => batch.view.as_ref(),
+            _ => None,
+        }
+    }
+    pub fn receipt(self) -> Result<CommandReceipt, DomainError> {
+        match self {
+            Self::Receipt(receipt) => Ok(receipt),
+            Self::Committed(batch) | Self::Answered { batch, .. } => Ok(CommandReceipt::Accepted {
+                session: batch.session,
+                revision: batch.revision,
+            }),
+            _ => Err(DomainError::Protocol(
+                "internal query is not a mutation receipt".into(),
+            )),
+        }
+    }
+}
+type Reply = oneshot::Sender<Result<OwnerReply, DomainError>>;
 #[cfg(test)]
 #[path = "actor_mailbox_tests.rs"]
 mod mailbox_tests;
 #[cfg(test)]
 #[path = "actor_registry_tests.rs"]
 mod registry_tests;
-
 #[derive(Clone)]
 pub struct RegistryHandle {
     tx: mpsc::Sender<RegistryCommand>,
 }
 impl RegistryHandle {
-    pub async fn command(&self, command: DomainCommand) -> Result<Vec<DomainEvent>, DomainError> {
+    pub async fn command(&self, command: DomainCommand) -> Result<OwnerReply, DomainError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .try_send(RegistryCommand::Command { command, reply })
@@ -31,23 +70,23 @@ impl RegistryHandle {
         &self,
         session: SessionId,
         epoch: u64,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+    ) -> Result<OwnerReply, DomainError> {
         self.worker_message(session, epoch, None).await
     }
     pub async fn worker_event(
         &self,
         session: SessionId,
         epoch: u64,
-        event: crate::domain::command::AgentEvent,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+        event: AgentEvent,
+    ) -> Result<OwnerReply, DomainError> {
         self.worker_message(session, epoch, Some(event)).await
     }
     async fn worker_message(
         &self,
         session: SessionId,
         epoch: u64,
-        event: Option<crate::domain::command::AgentEvent>,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+        event: Option<AgentEvent>,
+    ) -> Result<OwnerReply, DomainError> {
         let (reply, wait) = oneshot::channel();
         self.tx
             .try_send(RegistryCommand::Worker {
@@ -60,8 +99,6 @@ impl RegistryHandle {
         wait.await
             .map_err(|_| DomainError::Worker("session actor closed".into()))?
     }
-    // Test-only protocol helpers. Production shutdown is owned and joined by
-    // Runtime, not exposed to protocol adapters through RegistryHandle clones.
     #[cfg(test)]
     pub async fn shutdown(&self) {
         self.shutdown_checked()
@@ -100,7 +137,7 @@ enum RegistryCommand {
     Worker {
         session: SessionId,
         epoch: u64,
-        event: Option<crate::domain::command::AgentEvent>,
+        event: Option<AgentEvent>,
         reply: Reply,
     },
     Shutdown(oneshot::Sender<Result<(), DomainError>>),
@@ -110,7 +147,6 @@ mod registry;
 #[path = "actor_runtime.rs"]
 mod runtime;
 pub use runtime::Runtime;
-
 fn forward(
     command: DomainCommand,
     id: &SessionId,
@@ -119,7 +155,6 @@ fn forward(
 ) {
     enqueue(SessionCommand::Command { command, reply }, id, sessions);
 }
-
 fn enqueue(
     message: SessionCommand,
     id: &SessionId,
@@ -138,7 +173,6 @@ fn enqueue(
         error.into_inner().reject(failure);
     }
 }
-
 enum SessionCommand {
     Command {
         command: DomainCommand,
@@ -146,7 +180,7 @@ enum SessionCommand {
     },
     Worker {
         epoch: u64,
-        event: Option<crate::domain::command::AgentEvent>,
+        event: Option<AgentEvent>,
         reply: Reply,
     },
     Shutdown(oneshot::Sender<Result<(), DomainError>>),
@@ -158,10 +192,76 @@ impl SessionCommand {
         }
     }
 }
+fn accepted(view: &SessionView) -> OwnerReply {
+    OwnerReply::Receipt(CommandReceipt::Accepted {
+        session: view.id.clone(),
+        revision: view.revision,
+    })
+}
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+async fn commit_command(
+    state: &mut SessionView,
+    command: DomainCommand,
+    store: &impl SessionPersistence,
+    events: &broadcast::Sender<CommitBatch>,
+) -> Result<OwnerReply, DomainError> {
+    // Read only the requested tool header, and only after scope/turn fencing.
+    // No old body is materialized by either this read or a status-only patch.
+    let old_tool = match &command {
+        DomainCommand::Agent {
+            session,
+            event: AgentEvent::ToolCall(update),
+        } if session == &state.id
+            && state.active_turn.as_ref() == Some(&update.turn)
+            && !matches!(state.status, SessionStatus::Cancelling) =>
+        {
+            store
+                .tool(&state.id, &update.turn, &update.id)
+                .await
+                .map_err(DomainError::Persistence)?
+        }
+        _ => None,
+    };
+    let context = TransitionContext {
+        tool: old_tool.as_ref(),
+    };
+    let now = unix_now();
+    let answer = match &command {
+        DomainCommand::AnswerInteraction { answer, .. } => Some(
+            state
+                .pending_interactions
+                .get(&answer.interaction)
+                .ok_or(DomainError::InteractionNotFound)?
+                .validate_answer(answer.clone(), now)?,
+        ),
+        _ => None,
+    };
+    let Some(change) = transition(state, command, &context, now)? else {
+        return Ok(accepted(state));
+    };
+    let next = change.next.clone();
+    let batch = store
+        .commit(change)
+        .await
+        .map_err(DomainError::Persistence)?;
+    *state = next;
+    // No await or next mailbox message can interleave between commit and send.
+    let _ = events.send(batch.clone());
+    Ok(match answer {
+        Some(answer) => OwnerReply::Answered { batch, answer },
+        None => OwnerReply::Committed(batch),
+    })
+}
 async fn session_loop(
-    mut state: SessionState,
+    mut state: SessionView,
     mut rx: mpsc::Receiver<SessionCommand>,
     store: impl SessionPersistence,
+    events: broadcast::Sender<CommitBatch>,
 ) {
     let mut worker_epoch = None;
     while let Some(message) = rx.recv().await {
@@ -172,17 +272,16 @@ async fn session_loop(
                 event: None,
                 reply,
             } => {
-                if matches!(state.status, SessionStatus::Cancelling)
+                let result = if matches!(state.status, SessionStatus::Cancelling)
                     || epoch == 0
                     || worker_epoch.is_some_and(|current| epoch < current)
                 {
-                    let _ = reply.send(Err(DomainError::Worker(
-                        "obsolete worker attachment".into(),
-                    )));
+                    Err(DomainError::Worker("obsolete worker attachment".into()))
                 } else {
                     worker_epoch = Some(epoch);
-                    let _ = reply.send(Ok(vec![]));
-                }
+                    Ok(accepted(&state))
+                };
+                let _ = reply.send(result);
                 continue;
             }
             SessionCommand::Worker {
@@ -191,7 +290,7 @@ async fn session_loop(
                 reply,
             } => {
                 if worker_epoch != Some(epoch) {
-                    let _ = reply.send(Ok(vec![]));
+                    let _ = reply.send(Ok(accepted(&state)));
                     continue;
                 }
                 (
@@ -204,25 +303,12 @@ async fn session_loop(
             }
             SessionCommand::Shutdown(reply) => {
                 let result = if state.active_turn.is_some() {
-                    let id = state.id.clone();
-                    let mut candidate = state.clone();
-                    match crate::domain::reducer::apply(
-                        &mut candidate,
-                        DomainCommand::Cancel { session: id },
-                    ) {
-                        Ok(events) => {
-                            candidate.revision += 1;
-                            match SessionCommit::between(&state, &candidate, &events, None) {
-                                Ok(change) => store
-                                    .commit(change)
-                                    .await
-                                    .map(|_| ())
-                                    .map_err(DomainError::Persistence),
-                                Err(error) => Err(DomainError::Persistence(error.to_string())),
-                            }
-                        }
-                        Err(error) => Err(error),
-                    }
+                    let command = DomainCommand::Cancel {
+                        session: state.id.clone(),
+                    };
+                    commit_command(&mut state, command, &store, &events)
+                        .await
+                        .map(|_| ())
                 } else {
                     Ok(())
                 };
@@ -234,60 +320,35 @@ async fn session_loop(
             request,
             candidates,
             ..
-        } = &command
+        } = command
         {
-            let result = crate::domain::fork::prepare(&state, request, candidates)
-                .map(|projection| vec![DomainEvent::ForkPrepared(Box::new(projection))]);
+            let result = store
+                .prepare_fork(&state, request, candidates)
+                .await
+                .map(|plan| OwnerReply::ForkPrepared(Box::new(plan)))
+                .map_err(DomainError::Persistence);
             let _ = reply.send(result);
             continue;
         }
         if matches!(command, DomainCommand::Inspect(_)) {
-            let _ = reply.send(Ok(vec![DomainEvent::SessionLoaded(state.snapshot())]));
+            let _ = reply.send(Ok(OwnerReply::Receipt(CommandReceipt::Loaded {
+                view: Box::new(state.clone()),
+            })));
             continue;
         }
-        // Image bytes travel in the same transaction as their entry/state refs.
-        // The actor owns this accepted write across observer disconnect/shutdown.
-        let image = match &command {
-            DomainCommand::Agent {
-                event: crate::domain::command::AgentEvent::Image { asset, .. },
-                ..
-            } => Some(asset.clone()),
-            _ => None,
-        };
-        // Publish and replace committed state only after the store succeeds.
-        let mut candidate = state.clone();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let result = match crate::domain::reducer::apply_at(&mut candidate, command, now) {
-            Ok(events) if !events.is_empty() => {
-                candidate.revision += 1;
-                let commit = match SessionCommit::between(&state, &candidate, &events, image) {
-                    Ok(change) => store.commit(change).await,
-                    Err(error) => Err(error.to_string()),
-                };
-                match commit {
-                    Ok(_) => {
-                        if matches!(candidate.status, SessionStatus::Cancelling)
-                            || events.iter().any(|event| {
-                                matches!(
-                                    event,
-                                    DomainEvent::TurnCancelled { .. }
-                                        | DomainEvent::SessionError { .. }
-                                )
-                            })
-                        {
-                            worker_epoch = None;
-                        }
-                        state = candidate;
-                        Ok(events)
-                    }
-                    Err(error) => Err(DomainError::Persistence(error)),
+        let invalidate_worker = matches!(
+            &command,
+            DomainCommand::Cancel { .. }
+                | DomainCommand::RequestCancel { .. }
+                | DomainCommand::Agent {
+                    event: AgentEvent::Crashed { .. },
+                    ..
                 }
-            }
-            result => result,
-        };
+        );
+        let result = commit_command(&mut state, command, &store, &events).await;
+        if result.is_ok() && invalidate_worker {
+            worker_epoch = None;
+        }
         let _ = reply.send(result);
     }
 }

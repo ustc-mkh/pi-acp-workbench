@@ -2,41 +2,54 @@
 use super::{
     fork::ContentHash,
     ids::ContentId,
-    query::{ContentKind, ContentRef, QueryError, SafeInteger, SessionView, ToolBody, ToolHeader},
-    tool::{ToolCall, ToolContent},
+    query::{ContentKind, ContentRef, QueryError, SafeInteger, ToolBody, ToolHeader},
+    tool::{ToolCall, ToolCallUpdate, ToolContent, ToolDetails, ToolStatus},
     transition::{NewContent, ToolUpdate},
-    SessionState,
 };
 
-impl SessionView {
-    /// The SQL link sequence is supplied by the caller; it is not a timestamp.
-    pub fn from_state(
-        state: &SessionState,
-        last_entry_seq: SafeInteger,
-    ) -> Result<Self, QueryError> {
-        let view = Self {
-            id: state.id.clone(),
-            provider_session: state.provider_session.clone(),
-            harness: state.harness.clone(),
-            cwd: state.cwd.clone(),
-            status: state.status.clone(),
-            config: state.config.clone(),
-            configuration_intent: state.configuration_intent.clone(),
-            catalogue: state.catalogue.clone(),
-            plan: state.plan.clone(),
-            usage: state.usage.clone(),
-            active_turn: state.active_turn.clone(),
-            pending_interactions: state.pending_interactions.clone(),
-            origin: state.transcript.origin.clone(),
-            revision: SafeInteger::new(state.revision)?,
-            last_entry_seq,
-        };
-        view.validate()?;
-        Ok(view)
-    }
-}
-
 impl ToolUpdate {
+    /// Merge a provider patch against a targeted, read-only header. Omitted
+    /// bodies retain immutable refs; the old text/BLOB is never required.
+    pub fn patch(update: ToolCallUpdate, old: Option<&ToolHeader>) -> Result<Self, QueryError> {
+        if old.is_some_and(|header| header.id != update.id || header.turn != update.turn) {
+            return Err(QueryError::InvalidInput);
+        }
+        let replaced_content = update.details.content.is_some();
+        let call = ToolCall {
+            id: update.id,
+            turn: update.turn,
+            title: update
+                .title
+                .unwrap_or_else(|| old.map_or_else(String::new, |h| h.title.clone())),
+            status: update
+                .status
+                .unwrap_or_else(|| old.map_or(ToolStatus::Pending, |h| h.status.clone())),
+            details: ToolDetails {
+                kind: update
+                    .details
+                    .kind
+                    .or_else(|| old.and_then(|h| h.kind.clone())),
+                name: update
+                    .details
+                    .name
+                    .or_else(|| old.and_then(|h| h.name.clone())),
+                locations: update
+                    .details
+                    .locations
+                    .unwrap_or_else(|| old.map_or_else(Vec::new, |h| h.locations.clone())),
+                content: update.details.content.unwrap_or_default(),
+            },
+        };
+        let mut result = Self::from_call(&call)?;
+        if !replaced_content {
+            if let Some(old) = old {
+                result.header.content = old.content.clone();
+            }
+        }
+        result.header.validate()?;
+        Ok(result)
+    }
+
     /// Partial tool updates replace headers, never overwrite immutable content.
     /// Identical bodies share refs; kind is part of the content identity.
     pub fn from_call(call: &ToolCall) -> Result<Self, QueryError> {
@@ -133,54 +146,17 @@ mod tests {
     fn sql_projection_view_preserves_hot_identity_without_serializing_transcript() {
         #[derive(serde::Deserialize)]
         struct Fixture {
-            view: SessionView,
+            view: crate::domain::query::SessionView,
         }
         let expected = serde_json::from_str::<Fixture>(include_str!(
             "../../../../../test/fixtures/rewrite/ipc-v3.json"
         ))
         .unwrap()
         .view;
-        let mut state = SessionState {
-            id: expected.id.clone(),
-            provider_session: expected.provider_session.clone(),
-            harness: expected.harness.clone(),
-            cwd: expected.cwd.clone(),
-            status: expected.status.clone(),
-            transcript: super::super::transcript::Transcript {
-                origin: expected.origin.clone(),
-                entries: vec![],
-                tools: Default::default(),
-            },
-            plan: expected.plan.clone(),
-            active_turn: expected.active_turn.clone(),
-            pending_interactions: expected.pending_interactions.clone(),
-            usage: expected.usage.clone(),
-            config: expected.config.clone(),
-            configuration_intent: expected.configuration_intent.clone(),
-            catalogue: expected.catalogue.clone(),
-            revision: expected.revision.get(),
-        };
-        state
-            .transcript
-            .entries
-            .push(super::super::transcript::TranscriptEntry {
-                id: super::super::EntryId::generate(),
-                turn: TurnId::generate(),
-                role: super::super::transcript::EntryRole::Agent,
-                text: "old entry never in hot JSON".repeat(100_000),
-                message: None,
-                image: None,
-            });
-        let projected = SessionView::from_state(&state, expected.last_entry_seq).unwrap();
-        assert_eq!(
-            serde_json::to_vec(&projected).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
-        );
-        let encoded = serde_json::to_string(&projected).unwrap();
+        expected.validate().unwrap();
+        let encoded = serde_json::to_string(&expected).unwrap();
         assert!(!encoded.contains("transcript"));
-        assert!(!encoded.contains("old entry never in hot JSON"));
-        state.revision = super::super::query::MAX_SAFE_INTEGER + 1;
-        assert!(SessionView::from_state(&state, expected.last_entry_seq).is_err());
+        assert!(SafeInteger::new(crate::domain::query::MAX_SAFE_INTEGER + 1).is_err());
     }
 
     #[test]

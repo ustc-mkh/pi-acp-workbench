@@ -8,7 +8,7 @@ impl CommandCore {
         session: &SessionId,
         request: &ForkRequest,
         cancel: &CancellationToken,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+    ) -> Result<CommandReceipt, DomainError> {
         if cancel.is_cancelled() {
             return Err(DomainError::ForkCancelled);
         }
@@ -20,7 +20,7 @@ impl CommandCore {
             .registry
             .command(DomainCommand::Inspect(session.clone()))
             .await?;
-        let Some(DomainEvent::SessionLoaded(snapshot)) = inspected.first() else {
+        let Some(snapshot) = inspected.view() else {
             return Err(DomainError::NotFound(session.clone()));
         };
         if !self.supervisor.is_configured(&snapshot.harness) {
@@ -34,13 +34,7 @@ impl CommandCore {
         if snapshot.active_turn.is_some() || snapshot.configuration_intent.is_some() {
             return Err(DomainError::Busy);
         }
-        if snapshot.provider_session.is_none()
-            || !snapshot
-                .transcript
-                .entries
-                .iter()
-                .any(|entry| entry.id == request.entry)
-        {
+        if snapshot.provider_session.is_none() {
             return Err(DomainError::Protocol(
                 "native branch has no committed source entry".into(),
             ));
@@ -75,7 +69,7 @@ impl CommandCore {
                     candidates,
                 })
                 .await?;
-            let Some(DomainEvent::ForkPrepared(projection)) = prepared.into_iter().next() else {
+            let crate::actor::OwnerReply::ForkPrepared(projection) = prepared else {
                 return Err(DomainError::Protocol(
                     "native branch projection missing".into(),
                 ));

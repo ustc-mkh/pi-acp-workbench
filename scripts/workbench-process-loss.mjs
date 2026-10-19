@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, unlink, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { WorkbenchWire } from '../test/helpers/workbench-wire.mjs';
+import { WorkbenchWire, turnFinished, inlineText } from '../test/helpers/workbench-wire.mjs';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
 import { operationRecords, sessionRecord } from './lib/workbench-sqlite-fixture.mjs';
@@ -124,21 +124,26 @@ try {
     const socket = join(data, 'workbench.sock');
     client = await WorkbenchWire.open(socket);
     const created = await client.call({ method: 'create', harness, cwd: directory });
-    const session = created.find((event) => event.SessionCreated).SessionCreated.id;
-    await client.call({ method: 'subscribe', session });
-    let finished = client.waitFor((event) => event.TurnFinished?.session === session);
+    const session = created.Created.summary.id;
+    await client.call({ method: 'attach', session });
+    let finished = client.waitFor((batch) => turnFinished(batch, session));
     await client.call({ method: 'prompt', session, prompt: 'image-output' }, `image-${name}`);
     await finished;
-    let snapshot = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
-    const image = snapshot.transcript.entries.find((entry) => entry.image)?.image;
+    let snapshot = await client.call({ method: 'inspect', session });
+    const image = (await client.call({ method: 'history', session })).entries.find(
+      (entry) => entry.image,
+    )?.image;
     assert(image, 'committed image fixture reference');
     const imageAsset = await client.call({ method: 'image', image });
     const operation = `accepted-before-kill-${name}`;
     const command = { method: 'prompt', session, prompt: 'permission' };
-    const interaction = client.waitFor((event) => event.InteractionRequested?.session === session);
+    const interaction = client.waitFor(
+      (batch) =>
+        batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
+    );
     const receipt = await client.call(command, operation);
     await interaction;
-    snapshot = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+    snapshot = await client.call({ method: 'inspect', session });
     assert.equal(Object.keys(snapshot.pending_interactions).length, 1);
     const native = snapshot.provider_session;
     assert(native);
@@ -174,7 +179,7 @@ try {
     host = launch(config, home);
     await ready(host);
     client = await WorkbenchWire.open(socket);
-    const cold = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+    const cold = await client.call({ method: 'inspect', session });
     assert.equal(cold.provider_session, native);
     assert.equal(Object.keys(cold.pending_interactions).length, 1);
     assert.deepEqual(
@@ -183,7 +188,7 @@ try {
       'cold inspect must not start a provider',
     );
     await client.call({ method: 'load', session });
-    const recovered = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+    const recovered = await client.call({ method: 'inspect', session });
     assert.equal(recovered.provider_session, native);
     assert.equal(Object.keys(recovered.pending_interactions).length, 0);
     assert.equal(recovered.active_turn, null);
@@ -199,17 +204,20 @@ try {
       'immutable raw SQL receipt survives SIGKILL/load/replay',
     );
     assert.deepEqual(await client.call({ method: 'image', image }), imageAsset);
-    await client.call({ method: 'subscribe', session });
-    finished = client.waitFor((event) => event.TurnFinished?.session === session);
+    await client.call({ method: 'attach', session });
+    finished = client.waitFor((batch) => turnFinished(batch, session));
     await client.call(
       { method: 'prompt', session, prompt: 'worker-profile' },
       `explicit-after-kill-${name}`,
     );
     await finished;
-    const after = (await client.call({ method: 'inspect', session }))[0].SessionLoaded;
+    const after = await client.call({ method: 'inspect', session });
     assert.equal(after.provider_session, native);
-    assert.equal(after.transcript.entries.length, recovered.transcript.entries.length + 2);
-    assert.equal(after.transcript.entries.at(-1).text, `${name}:${name}`);
+    assert.equal(after.last_entry_seq, recovered.last_entry_seq + 2);
+    assert.equal(
+      inlineText((await client.call({ method: 'history', session })).entries.at(-1)),
+      `${name}:${name}`,
+    );
     const records = await traces(trace);
     assert.equal(
       records.filter((entry) => entry.method === 'session/prompt' && entry.text === 'permission')

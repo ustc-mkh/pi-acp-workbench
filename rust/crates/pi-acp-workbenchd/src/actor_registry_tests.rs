@@ -1,5 +1,11 @@
 use super::*;
-use crate::{domain::Prompt, persistence::SessionStore};
+use crate::{
+    domain::{
+        query::{ListCursor, ListPage, SessionSummary},
+        Harness, Prompt,
+    },
+    persistence::SessionStore,
+};
 use std::{
     path::PathBuf,
     sync::{
@@ -51,27 +57,32 @@ impl Store {
     }
 }
 impl SessionPersistence for Store {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
+    crate::persistence::interface_test_helpers::delegate_session_aux!();
+    async fn load(&self, id: &SessionId) -> Result<Option<SessionView>, String> {
         self.loads.fetch_add(1, Ordering::AcqRel);
         self.gate(3).await;
-        self.history.load(id).await
+        SessionPersistence::load(&self.history, id).await
     }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
+    async fn list(
+        &self,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<ListPage, String> {
         assert_ne!(
             self.mode.load(Ordering::Acquire),
             2,
             "fixture registry IO panic"
         );
         self.gate(1).await;
-        self.history.list().await
+        SessionPersistence::list(&self.history, cursor, limit).await
     }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
+    async fn create(&self, state: &SessionView) -> Result<SessionSummary, String> {
         self.gate(4).await;
-        self.history.save(state).await
+        SessionPersistence::create(&self.history, state).await
     }
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         if change.next.active_turn.is_some() {
             self.gate(5).await;
@@ -87,15 +98,15 @@ impl SessionPersistence for Store {
         }
         self.history.commit(change).await
     }
-    async fn remove(&self, id: &str) -> Result<(), String> {
+    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
         self.gate(6).await;
-        self.history.remove(id).await
+        SessionPersistence::remove(&self.history, id).await
     }
 }
 fn submit(
     runtime: &Runtime,
     command: DomainCommand,
-) -> oneshot::Receiver<Result<Vec<DomainEvent>, DomainError>> {
+) -> oneshot::Receiver<Result<OwnerReply, DomainError>> {
     let (reply, wait) = oneshot::channel();
     runtime
         .registry
@@ -112,10 +123,10 @@ fn create() -> DomainCommand {
 }
 async fn id(runtime: &Runtime) -> SessionId {
     let events = runtime.registry.command(create()).await.unwrap();
-    let DomainEvent::SessionCreated(snapshot) = &events[0] else {
+    let OwnerReply::Receipt(CommandReceipt::Created { summary }) = events else {
         panic!("created")
     };
-    snapshot.id.clone()
+    summary.id
 }
 fn prompt(id: &SessionId) -> DomainCommand {
     DomainCommand::Prompt {
@@ -152,9 +163,7 @@ async fn sixteen_blocked_store_queries_are_bounded_without_blocking_live_actor_r
     .await
     .unwrap()
     .unwrap();
-    assert!(
-        matches!(&inspected[0], DomainEvent::SessionLoaded(snapshot) if snapshot.active_turn.is_some())
-    );
+    assert!(inspected.view().unwrap().active_turn.is_some());
     blocked.pop(); // dropping a reply observer must not cancel its store future
     store.release(16);
     for wait in blocked {
@@ -178,18 +187,16 @@ async fn concurrent_loads_share_one_owner_and_commands_queued_behind_load_remain
     store.release(1);
     first.await.unwrap().unwrap();
     let loaded = second.await.unwrap().unwrap();
-    assert!(
-        matches!(&loaded[0], DomainEvent::SessionLoaded(snapshot) if snapshot.active_turn.is_none())
-    );
+    assert!(loaded.view().unwrap().active_turn.is_none());
     accepted.await.unwrap().unwrap();
     let inspected = runtime
         .registry
         .command(DomainCommand::Inspect(id))
         .await
         .unwrap();
-    assert!(
-        matches!(&inspected[0], DomainEvent::SessionLoaded(snapshot) if snapshot.revision == 1 && snapshot.transcript.entries.len() == 1)
-    );
+    assert!(inspected
+        .view()
+        .is_some_and(|view| view.revision.get() == 1 && view.last_entry_seq.get() == 1));
     assert_eq!(store.loads.load(Ordering::Acquire), 1);
     runtime.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
@@ -262,9 +269,9 @@ async fn pending_load_lane_is_bounded_and_caller_disconnect_does_not_skip_accept
         .command(DomainCommand::Inspect(cold_id))
         .await
         .unwrap();
-    assert!(
-        matches!(&events[0], DomainEvent::SessionLoaded(snapshot) if snapshot.revision == 4 && snapshot.config.model.as_ref().unwrap().as_str() == "slot-3" && snapshot.config.mode.is_none())
-    );
+    assert!(events.view().is_some_and(|view| view.revision.get() == 4
+        && view.config.model.as_ref().unwrap().as_str() == "slot-3"
+        && view.config.mode.is_none()));
     runtime.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -293,16 +300,21 @@ async fn root_abort_preserves_accepted_create_io_across_cancelled_shutdown_obser
             .is_err()
     );
     let events = accepted.await.unwrap().unwrap();
-    let DomainEvent::SessionCreated(snapshot) = &events[0] else {
+    let OwnerReply::Receipt(CommandReceipt::Created { summary }) = events else {
         panic!("accepted create settled")
     };
-    assert!(store
-        .history
-        .load(snapshot.id.as_str())
-        .await
-        .unwrap()
-        .is_some());
-    assert_eq!(store.history.list().await.unwrap().len(), 1);
+    assert!(store.history.database().view(summary.id).await.is_ok());
+    assert_eq!(
+        store
+            .history
+            .database()
+            .list(None, None)
+            .await
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
     assert!(runtime.shutdown_checked().await.is_err());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -331,9 +343,9 @@ async fn root_abort_during_actor_shutdown_preserves_join_and_final_persistence()
     );
     assert!(store
         .history
-        .load(id.as_str())
+        .database()
+        .view(id.clone())
         .await
-        .unwrap()
         .unwrap()
         .active_turn
         .is_none());
@@ -363,8 +375,8 @@ async fn storage_job_panic_is_fatal_but_other_accepted_actor_commit_is_drained_n
     store.release(1);
     assert!(shutdown.await.is_err());
     accepted.await.unwrap().unwrap();
-    let state = store.history.load(id.as_str()).await.unwrap().unwrap();
-    assert_eq!(state.transcript.entries.len(), 1);
+    let state = store.history.database().view(id.clone()).await.unwrap();
+    assert_eq!(state.last_entry_seq.get(), 1);
     assert!(state.active_turn.is_none());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -388,6 +400,6 @@ async fn removal_io_owner_outside_map_is_still_joined_after_root_abort() {
     store.release(1);
     assert!(shutdown.await.is_err());
     removed.await.unwrap().unwrap();
-    assert!(store.history.load(id.as_str()).await.unwrap().is_none());
+    assert!(store.history.database().view(id.clone()).await.is_err());
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

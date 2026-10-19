@@ -5,7 +5,7 @@ use super::*;
 use crate::domain::{
     fork::ForkRequest,
     transcript::{EntryRole, Transcript, TranscriptEntry},
-    EntryId, OperationId, ProviderSessionId, SessionState, TurnId,
+    EntryId, OperationId, ProviderSessionId, TurnId,
 };
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,31 +86,56 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         }
     }
     let entry = transcript.entries[0].id.clone();
-    let state = SessionState {
-        id: source.clone(),
-        provider_session: Some(fixture.native.clone()),
-        harness: Harness::Pi,
-        cwd: WorkspacePath::new(fixture.cwd.to_string_lossy()).unwrap(),
-        status: SessionStatus::Idle,
-        transcript,
-        plan: Default::default(),
-        active_turn: None,
-        pending_interactions: Default::default(),
-        usage: Default::default(),
-        config: crate::domain::session::SessionConfig {
-            model: Some(fixture.source_model),
-            mode: Some(crate::domain::ModeId::new("low").unwrap()),
-        },
-        configuration_intent: None,
-        catalogue: Default::default(),
-        revision: 0,
+    let mut state = crate::domain::fork::oracle::OracleHistory::new(crate::domain::tests::state());
+    state.view.id = source.clone();
+    state.view.provider_session = Some(fixture.native.clone());
+    state.view.cwd = WorkspacePath::new(fixture.cwd.to_string_lossy()).unwrap();
+    state.view.config = crate::domain::session::SessionConfig {
+        model: Some(fixture.source_model),
+        mode: Some(crate::domain::ModeId::new("low").unwrap()),
     };
+    state.transcript = transcript;
     // Initial cold bootstrap fixture only: no live actor or real data is edited,
     // no old snapshot is mixed with another revision's delivery ledger.
     let lease = StorageLease::lock(&fixture.root).unwrap();
     let database = Database::open(&fixture.root, &lease).await.unwrap();
-    SessionStore::new(database.clone())
-        .save(&state)
+    database.create(state.view.clone()).await.unwrap();
+    state.view.revision = state.view.revision.next().unwrap();
+    let append = state
+        .transcript
+        .entries
+        .iter()
+        .map(|row| {
+            let sha256 = crate::domain::fork::ContentHash::of(&row.text);
+            crate::domain::transition::NewEntry {
+                id: row.id.clone(),
+                turn: row.turn.clone(),
+                role: row.role.clone(),
+                message: row.message.clone(),
+                image: None,
+                text: crate::domain::transition::NewContent {
+                    content: crate::domain::query::ContentRef {
+                        id: crate::domain::ContentId::new(format!("fixture-{}", sha256.as_str()))
+                            .unwrap(),
+                        sha256,
+                        bytes: crate::domain::query::SafeInteger::new(row.text.len() as u64)
+                            .unwrap(),
+                        kind: crate::domain::query::ContentKind::Text,
+                    },
+                    text: row.text.clone(),
+                },
+            }
+        })
+        .collect();
+    database
+        .commit(crate::domain::transition::Transition {
+            expected_revision: Default::default(),
+            next: state.hot_view(),
+            contents: vec![],
+            append,
+            tool_updates: vec![],
+            deliveries: vec![],
+        })
         .await
         .unwrap();
     database.shutdown().await.unwrap();
@@ -135,17 +160,25 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         .command_durable(operation.clone(), command.clone())
         .await
         .unwrap();
-    let [DomainEvent::SessionCreated(branch)] = receipt.as_slice() else {
+    let CommandReceipt::Forked { summary } = &receipt else {
         panic!("native branch")
     };
-    let branch = branch.clone();
+    let branch = super::fork_tests::inspect(&app, &summary.id).await;
     assert_ne!(branch.provider_session, state.provider_session);
     assert_eq!(branch.transcript.entries.len(), 1);
     assert!(branch.config.model.is_none() && branch.config.mode.is_none());
     let loaded = super::fork_tests::inspect(&app, &source).await;
     assert_eq!(
-        serde_json::to_vec(&loaded.transcript).unwrap(),
-        serde_json::to_vec(&state.transcript).unwrap()
+        serde_json::to_vec(&loaded.transcript.entries).unwrap(),
+        serde_json::to_vec(&state.transcript.entries).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&loaded.transcript.origin).unwrap(),
+        serde_json::to_vec(&state.transcript.origin).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&loaded.transcript.tools).unwrap(),
+        serde_json::to_vec(&state.transcript.tools).unwrap()
     );
     assert_eq!(
         serde_json::to_vec(&loaded.config).unwrap(),
@@ -174,9 +207,10 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         })
         .await
         .unwrap();
-    let [DomainEvent::SessionCreated(grouped_branch)] = grouped_receipt.as_slice() else {
+    let CommandReceipt::Forked { summary } = grouped_receipt else {
         panic!("grouped native branch")
     };
+    let grouped_branch = super::fork_tests::inspect(&app, &summary.id).await;
     assert_eq!(
         serde_json::to_vec(&grouped_branch.transcript.entries).unwrap(),
         serde_json::to_vec(&state.transcript.entries[..grouped_end]).unwrap()
@@ -222,9 +256,10 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         })
         .await
         .unwrap();
-    let [DomainEvent::SessionCreated(second)] = second.as_slice() else {
+    let CommandReceipt::Forked { summary } = second else {
         panic!("independent nested branch")
     };
+    let second = super::fork_tests::inspect(&app, &summary.id).await;
     assert_ne!(second.provider_session, branch.provider_session);
     let loaded_branch = super::fork_tests::inspect(&app, &branch.id).await;
     assert_eq!(
@@ -261,7 +296,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         model_prompts: u32,
     }
     let report = Report {
-        first: branch.provider_session.unwrap(),
+        first: branch.provider_session.clone().unwrap(),
         second: second.provider_session.clone().unwrap(),
         source_unchanged: true,
         historical_settings: true,

@@ -9,7 +9,7 @@ import {
   operationId,
   type ClientCommand,
   type CommandResult,
-  type DomainEvent,
+  type CommitBatch,
   type ImageAsset,
   type ImageRef,
   type OperationId,
@@ -50,7 +50,7 @@ interface Pending {
   sent: boolean;
   settled: boolean;
   pool: 0 | 1 | 2;
-  resolve(value: DomainEvent[] | ImageAsset): void;
+  resolve(value: unknown): void;
   reject(error: Error): void;
   timer?: NodeJS.Timeout;
 }
@@ -61,7 +61,7 @@ interface Connection {
   stopReader(): void;
 }
 export interface WorkbenchObserver {
-  event?(event: DomainEvent): void;
+  batch?(batch: CommitBatch): void;
   resync?(): void;
   lost?(error: WorkbenchError): void;
   observerError?(): void;
@@ -153,7 +153,7 @@ export function verifiedImage(asset: ImageAsset, expected: ImageRef): ImageAsset
   return asset;
 }
 
-/** External IPC v2 only. A fresh explicit request may reconnect; nothing is resent/re-subscribed. */
+/** External IPC v3 only. Explicit requests may reconnect; mutations are never resent. */
 export class WorkbenchClient {
   private connection?: Connection;
   private closed = false;
@@ -173,13 +173,13 @@ export class WorkbenchClient {
       this.observers.delete(observer);
     };
   }
-  private notify(kind: 'event', value: DomainEvent): void;
+  private notify(kind: 'batch', value: CommitBatch): void;
   private notify(kind: 'lost', value: WorkbenchError): void;
   private notify(kind: 'resync'): void;
-  private notify(kind: 'event' | 'lost' | 'resync', value?: DomainEvent | WorkbenchError) {
+  private notify(kind: 'batch' | 'lost' | 'resync', value?: CommitBatch | WorkbenchError) {
     for (const observer of [...this.observers]) {
       try {
-        if (kind === 'event') observer.event?.(value as DomainEvent);
+        if (kind === 'batch') observer.batch?.(value as CommitBatch);
         else if (kind === 'lost') observer.lost?.(value as WorkbenchError);
         else observer.resync?.();
       } catch {
@@ -258,8 +258,8 @@ export class WorkbenchClient {
   }
   private receive(value: unknown) {
     const message = ipcMessage.parse(value);
-    if (message.type === 'event') {
-      this.notify('event', message.event);
+    if (message.type === 'batch') {
+      this.notify('batch', message.batch);
       return;
     }
     if (message.type === 'resync_required') {
@@ -268,12 +268,31 @@ export class WorkbenchClient {
     }
     const pending = this.pending.get(message.id);
     if (!pending) return; // A late reply never correlates to another request: IDs are not reused.
-    let result: DomainEvent[] | ImageAsset | undefined;
+    let result: unknown;
     if (message.type !== 'error') {
       if (message.type === 'image' && pending.command.method === 'image') {
         result = verifiedImage(message.asset, pending.command.image);
-      } else if (message.type === 'reply' && pending.command.method !== 'image') {
-        result = message.events;
+      } else if (message.type === 'reply' && durableCommand(pending.command)) {
+        result = message.receipt;
+      } else if (
+        message.type === 'detached' &&
+        pending.command.method === 'detach' &&
+        message.session === pending.command.session
+      ) {
+        result = message.session;
+      } else if (message.type === 'query') {
+        const kinds = {
+          list: 'list',
+          inspect: 'view',
+          history: 'history',
+          tools: 'tools',
+          content: 'content',
+          attach: 'attached',
+        } as const;
+        const method = pending.command.method;
+        if (!(method in kinds) || kinds[method as keyof typeof kinds] !== message.result.kind)
+          throw new Error('Unexpected query response kind');
+        result = message.result.value;
       } else throw new Error('Unexpected workbench response kind');
     }
     this.finish(message.id);
@@ -293,10 +312,7 @@ export class WorkbenchClient {
     if (this.closed) throw new WorkbenchError('closed', 'Workbench client is closed');
     const parsed = clientCommand.parse(command),
       pool = commandPool(parsed);
-    if (
-      options.operation !== undefined &&
-      ['image', 'subscribe', 'unsubscribe'].includes(parsed.method)
-    )
+    if (options.operation !== undefined && !durableCommand(parsed))
       throw new WorkbenchError(
         'invalid_input',
         'This query/subscription cannot have a durable operation',
@@ -318,7 +334,7 @@ export class WorkbenchClient {
       throw new WorkbenchError('backpressure', 'Workbench request IDs exhausted', operation);
     const id = ++this.nextId;
     const body =
-      JSON.stringify({ version: 2, id, command: parsed, ...(operation ? { operation } : {}) }) +
+      JSON.stringify({ version: 3, id, command: parsed, ...(operation ? { operation } : {}) }) +
       '\n';
     if (Buffer.byteLength(body) - 1 > WORKBENCH_LIMITS.frameBytes)
       throw new WorkbenchError('invalid_input', 'Workbench request is too large', operation);

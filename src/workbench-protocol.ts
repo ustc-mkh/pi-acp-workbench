@@ -1,4 +1,4 @@
-/** IPC v2 public DTOs. Decoders mirror Rust domain + transport/vscode; no ACP/legacy types. */
+/** IPC v3 bounded DTOs; no ACP, full transcript snapshots or v2 decoder. */
 import {
   array,
   boolean,
@@ -44,8 +44,8 @@ export type EntryId = Infer<typeof entryId>;
 export const operationId = id('operation');
 export type OperationId = Infer<typeof operationId>;
 export const imageId = id('image');
-const turnId = id('turn'),
-  interactionId = id('interaction');
+export const turnId = id('turn');
+const interactionId = id('interaction');
 const providerSessionId = id('provider-session', true),
   providerEntryId = id('provider-entry', true);
 const messageId = id('provider-message', true),
@@ -102,10 +102,6 @@ const answer = object({
 });
 export type Interaction = Infer<typeof interaction>;
 export type InteractionAnswer = Infer<typeof answer>;
-const resolution = variants({
-  Answered: answer,
-  Cancelled: object({ interaction: interactionId }),
-});
 const toolStatus = oneOf('Pending', 'InProgress', 'Completed', 'Failed');
 const toolKind = oneOf(
   'Read',
@@ -119,29 +115,6 @@ const toolKind = oneOf(
   'SwitchMode',
   'Other',
 );
-const toolContent = variants({
-  Text: object({ text: string }),
-  Diff: object({ path: string, old_text: nullable(string), new_text: string }),
-  ResourceText: object({ uri: string, text: string, mime_type: nullable(string) }),
-  ResourceLink: object({ uri: string, name: string, mime_type: nullable(string) }),
-  TerminalReference: object({ id: terminalId }),
-  Unsupported: object({ kind: oneOf('Image', 'Audio', 'ResourceBlob', 'Unknown') }),
-});
-const tool = object({
-  id: toolId,
-  turn: turnId,
-  title: string,
-  status: toolStatus,
-  details: object({
-    kind: nullable(toolKind),
-    name: nullable(string),
-    content: array(toolContent),
-    locations: array(
-      object({ path: string, line: nullable(checked(uint, (n) => n <= 0xffffffff)) }),
-    ),
-  }),
-});
-export type ToolCall = Infer<typeof tool>;
 const plan = object({ items: array(object({ description: string, status: toolStatus })) });
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 export const imageRef = object({
@@ -158,19 +131,6 @@ const imageAsset = object({
 });
 export type ImageAsset = Infer<typeof imageAsset>;
 const forkTarget = object({ entry: providerEntryId, prefix: digest });
-export const transcriptEntry = object({
-  id: entryId,
-  turn: turnId,
-  role: oneOf('User', 'Agent', 'Thought', 'Tool'),
-  text: string,
-  message: optional(messageId),
-  image: optional(imageRef),
-});
-const transcript = object({
-  origin: optional(object({ session: sessionId, entry: entryId, target: forkTarget })),
-  entries: array(transcriptEntry),
-  tools: record(record(tool, toolId), turnId),
-});
 const catalogue = object({
   models: array(object({ id: modelId, name: string })),
   modes: array(object({ id: modeId, name: string })),
@@ -178,122 +138,7 @@ const catalogue = object({
   current_model: optional(modelId),
   current_mode: optional(modeId),
 });
-export const sessionSnapshot = object({
-  id: sessionId,
-  provider_session: nullable(providerSessionId),
-  harness,
-  cwd: workspacePath,
-  status,
-  transcript,
-  plan,
-  active_turn: nullable(turnId),
-  pending_interactions: record(interaction, interactionId),
-  usage: object({
-    input_tokens: uint,
-    output_tokens: uint,
-    cost_micros: uint,
-    context_used: nullable(uint),
-    context_size: nullable(uint),
-  }),
-  config,
-  configuration_intent: optional(object({ requested: config, restore: config })),
-  catalogue,
-  revision: uint,
-});
-export type SessionSnapshot = Infer<typeof sessionSnapshot>;
-const textDelta = object({
-  session: sessionId,
-  turn: turnId,
-  entry: entryId,
-  message: nullable(messageId),
-  text: string,
-});
-const turn = object({ session: sessionId, turn: turnId });
-/** ForkPrepared is internal-only and intentionally not accepted from the public socket. */
-export const domainEvent = variants({
-  SessionCreated: sessionSnapshot,
-  SessionLoaded: sessionSnapshot,
-  SessionsListed: array(sessionSnapshot),
-  ForkCancelled: object({ session: sessionId, operation: operationId }),
-  CatalogueChanged: object({ session: sessionId, catalogue }),
-  ProviderSessionAttached: object({ session: sessionId, provider_session: providerSessionId }),
-  UserPromptAdded: object({ session: sessionId, turn: turnId, entry: entryId, prompt: string }),
-  AgentText: textDelta,
-  AgentThought: textDelta,
-  AgentImage: object({
-    session: sessionId,
-    turn: turnId,
-    entry: entryId,
-    message: nullable(messageId),
-    image: imageRef,
-  }),
-  ToolCallChanged: object({ session: sessionId, tool }),
-  PlanChanged: object({ session: sessionId, plan }),
-  InteractionRequested: object({ session: sessionId, interaction }),
-  InteractionResolved: object({ session: sessionId, resolution }),
-  UsageChanged: object({ session: sessionId, input_tokens: uint, output_tokens: uint }),
-  ContextUsageChanged: object({ session: sessionId, used: uint, size: uint }),
-  TurnStarted: turn,
-  TurnFinished: turn,
-  TurnCancelled: turn,
-  SessionError: object({ session: sessionId, error: string }),
-  SessionRemoved: sessionId,
-});
-export type DomainEvent = Infer<typeof domainEvent>;
-const session = { session: sessionId };
-export const clientCommand = tagged('method', {
-  create: object({ method: literal('create'), harness, cwd: workspacePath }),
-  load: object({ method: literal('load'), ...session }),
-  list: object({ method: literal('list') }),
-  inspect: object({ method: literal('inspect'), ...session }),
-  image: object({ method: literal('image'), image: imageRef }),
-  prompt: object({
-    method: literal('prompt'),
-    ...session,
-    prompt: checked(string, (s) => /\S/u.test(s) && [...s].length <= 100_000),
-  }),
-  cancel: object({ method: literal('cancel'), ...session }),
-  answer: object({ method: literal('answer'), ...session, answer }),
-  fork: object({ method: literal('fork'), ...session, request: object({ entry: entryId }) }),
-  cancel_fork: object({ method: literal('cancel_fork'), ...session, operation: operationId }),
-  set_model: object({ method: literal('set_model'), ...session, model: modelId }),
-  set_mode: object({ method: literal('set_mode'), ...session, mode: modeId }),
-  remove: object({ method: literal('remove'), ...session }),
-  subscribe: object({ method: literal('subscribe'), ...session }),
-  unsubscribe: object({ method: literal('unsubscribe'), ...session }),
-});
-export type ClientCommand = Infer<typeof clientCommand>;
-export const ipcMessage = tagged('type', {
-  reply: object({ type: literal('reply'), id: uint, events: array(domainEvent) }),
-  image: object({ type: literal('image'), id: uint, asset: imageAsset }),
-  error: object({ type: literal('error'), id: uint, code: string, message: string }),
-  event: object({ type: literal('event'), event: domainEvent }),
-  resync_required: object({ type: literal('resync_required') }),
-});
-export type IpcMessage = Infer<typeof ipcMessage>;
-export type CommandResult<C extends ClientCommand> = C extends { method: 'image' }
-  ? ImageAsset
-  : DomainEvent[];
-export function commandPool(command: ClientCommand): 0 | 1 | 2 {
-  switch (command.method) {
-    case 'list':
-    case 'inspect':
-    case 'image':
-      return 2;
-    case 'cancel':
-    case 'cancel_fork':
-    case 'answer':
-    case 'remove':
-      return 1;
-    default:
-      return 0;
-  }
-}
-export function durableCommand(command: ClientCommand) {
-  return !['list', 'inspect', 'image', 'subscribe', 'unsubscribe'].includes(command.method);
-}
-
-/** Fixed v3 contracts; production client switches in T08, server in T07. */
+/** Fixed v3 contracts shared by production client and server. */
 export const PROTOCOL_VERSION_V3 = 3;
 export const STORAGE_VERSION_V3 = 3;
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
@@ -534,3 +379,87 @@ export const queryCommand = checked(
   },
 );
 export const queryRequest = object({ version: literal(3), id: uint, command: queryCommand });
+export type ListPage = Infer<typeof listPage>;
+export type HistoryPage = Infer<typeof historyPage>;
+export type ToolPage = Infer<typeof toolPage>;
+export type ContentSlice = Infer<typeof contentSlice>;
+export type Attached = Infer<typeof attached>;
+export type ListCursor = Infer<typeof listCursor>;
+export type HistoryCursor = Infer<typeof historyCursor>;
+export type ToolCursor = Infer<typeof toolCursor>;
+export type QueryCommand = Infer<typeof queryCommand>;
+const session = { session: sessionId };
+const mutationCommand = tagged('method', {
+  create: object({ method: literal('create'), harness, cwd: workspacePath }),
+  load: object({ method: literal('load'), ...session }),
+  prompt: object({
+    method: literal('prompt'),
+    ...session,
+    prompt: checked(string, (s) => /\S/u.test(s) && [...s].length <= 100_000),
+  }),
+  cancel: object({ method: literal('cancel'), ...session }),
+  answer: object({ method: literal('answer'), ...session, answer }),
+  fork: object({ method: literal('fork'), ...session, request: object({ entry: entryId }) }),
+  cancel_fork: object({ method: literal('cancel_fork'), ...session, operation: operationId }),
+  set_model: object({ method: literal('set_model'), ...session, model: modelId }),
+  set_mode: object({ method: literal('set_mode'), ...session, mode: modeId }),
+  remove: object({ method: literal('remove'), ...session }),
+});
+const detachCommand = object({ method: literal('detach'), ...session });
+const queryMethods = new Set(['list', 'inspect', 'history', 'tools', 'content', 'attach', 'image']);
+export const clientCommand = schema(
+  (value): QueryCommand | Infer<typeof mutationCommand> | Infer<typeof detachCommand> => {
+    if (!value || typeof value !== 'object' || !('method' in value)) invalid();
+    if (queryMethods.has(String(value.method))) return queryCommand.parse(value);
+    if (value.method === 'detach') return detachCommand.parse(value);
+    return mutationCommand.parse(value);
+  },
+);
+export type ClientCommand = Infer<typeof clientCommand>;
+export const queryResult = tagged('kind', {
+  list: object({ kind: literal('list'), value: listPage }),
+  view: object({ kind: literal('view'), value: sessionView }),
+  history: object({ kind: literal('history'), value: historyPage }),
+  tools: object({ kind: literal('tools'), value: toolPage }),
+  content: object({ kind: literal('content'), value: contentSlice }),
+  attached: object({ kind: literal('attached'), value: attached }),
+});
+export type QueryResult = Infer<typeof queryResult>;
+export const ipcMessage = checked(
+  tagged('type', {
+    reply: object({ type: literal('reply'), id: uint, receipt: commandReceipt }),
+    query: object({ type: literal('query'), id: uint, result: queryResult }),
+    detached: object({ type: literal('detached'), id: uint, session: sessionId }),
+    image: object({ type: literal('image'), id: uint, asset: imageAsset }),
+    error: object({ type: literal('error'), id: uint, code: string, message: string }),
+    batch: object({ type: literal('batch'), batch: commitBatch }),
+    resync_required: object({ type: literal('resync_required') }),
+  }),
+  (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
+);
+export type IpcMessage = Infer<typeof ipcMessage>;
+export type CommandResult<C extends ClientCommand> = C extends { method: 'image' }
+  ? ImageAsset
+  : C extends { method: 'list' }
+    ? ListPage
+    : C extends { method: 'inspect' }
+      ? SessionView
+      : C extends { method: 'history' }
+        ? HistoryPage
+        : C extends { method: 'tools' }
+          ? ToolPage
+          : C extends { method: 'content' }
+            ? ContentSlice
+            : C extends { method: 'attach' }
+              ? Attached
+              : C extends { method: 'detach' }
+                ? SessionId
+                : CommandReceipt;
+export function commandPool(command: ClientCommand): 0 | 1 | 2 {
+  if (queryMethods.has(command.method) || command.method === 'detach') return 2;
+  if (['cancel', 'cancel_fork', 'answer', 'remove'].includes(command.method)) return 1;
+  return 0;
+}
+export function durableCommand(command: ClientCommand) {
+  return commandPool(command) !== 2;
+}

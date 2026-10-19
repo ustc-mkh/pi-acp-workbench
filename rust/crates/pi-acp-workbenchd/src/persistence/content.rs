@@ -3,13 +3,20 @@ use super::database::{encode, StoreError};
 use crate::domain::{
     fork::ContentHash,
     image::{ImageAsset, ImageRef},
-    query::{ContentKind, ContentRef, EntryHeader, SafeInteger, TextBody, INLINE_TEXT_BYTES},
+    query::{
+        ContentKind, ContentRef, ContentSlice, EntryHeader, QueryError, SafeInteger, TextBody,
+        CONTENT_SLICE_BYTES, INLINE_TEXT_BYTES,
+    },
     transcript::EntryRole,
     transition::{NewContent, NewEntry},
     EntryId, ProviderMessageId, TurnId,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+#[path = "content_slice_tests.rs"]
+mod slice_tests;
 
 pub(super) fn kind_name(kind: ContentKind) -> &'static str {
     match kind {
@@ -149,6 +156,69 @@ pub(super) fn read_text(db: &Connection, content: &ContentRef) -> Result<String,
     }
     Ok(text)
 }
+/// Bounded byte slices validate the descriptor and UTF-8 boundaries. The
+/// returned whole-content hash is identity, NOT a proof of individual slices;
+/// full byte/hash validation remains at immutable write/archive boundaries.
+pub(super) fn slice(
+    db: &Connection,
+    content: &ContentRef,
+    offset: SafeInteger,
+    requested: Option<usize>,
+) -> Result<ContentSlice, StoreError> {
+    content.validate()?;
+    let length = requested.unwrap_or(CONTENT_SLICE_BYTES);
+    if length == 0 || length > CONTENT_SLICE_BYTES || offset > content.bytes {
+        return Err(QueryError::InvalidInput.into());
+    }
+    type Stored = (String, String, SafeInteger, SafeInteger, Vec<u8>);
+    let found: Option<Stored> = db
+        .query_row(
+            "SELECT kind,sha256,bytes,length(data),substr(data,?2,?3) FROM contents WHERE id=?1",
+            params![content.id.as_str(), offset.get() as i64 + 1, length as i64],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (kind, sha, bytes, actual_bytes, mut data) = found.ok_or(StoreError::NotFound)?;
+    if kind != kind_name(content.kind)
+        || sha != content.sha256.as_str()
+        || bytes != content.bytes
+        || actual_bytes != bytes
+    {
+        return Err(StoreError::Invalid("content reference identity mismatch"));
+    }
+    match std::str::from_utf8(&data) {
+        Ok(_) => {}
+        Err(error)
+            if error.error_len().is_none() && offset.get() + (data.len() as u64) < bytes.get() =>
+        {
+            data.truncate(error.valid_up_to());
+        }
+        Err(_) => return Err(QueryError::InvalidInput.into()),
+    }
+    if data.is_empty() && offset < bytes {
+        return Err(QueryError::TooLarge.into());
+    }
+    let next = offset.get() + data.len() as u64;
+    let text =
+        String::from_utf8(data).map_err(|_| StoreError::Invalid("content slice is not UTF-8"))?;
+    Ok(ContentSlice {
+        text,
+        next_offset: (next < bytes.get())
+            .then(|| SafeInteger::new(next))
+            .transpose()?,
+        sha256: content.sha256.clone(),
+        total_bytes: bytes,
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EntryMetadata {

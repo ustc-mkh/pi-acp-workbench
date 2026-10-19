@@ -1,39 +1,43 @@
-//! External IPC adapter. No internal Agent command is deserializable from this API.
+//! External v3 IPC. Only bounded queries, typed original receipts and committed
+//! revision batches cross the wire. No internal Agent command is decodable.
 use crate::{
     app::WorkbenchApp,
     domain::{
-        command::DomainCommand, error::DomainError, event::DomainEvent,
-        interaction::InteractionAnswer, Harness, ModeId, ModelId, Prompt, SessionId, WorkspacePath,
+        command::DomainCommand,
+        error::DomainError,
+        interaction::InteractionAnswer,
+        query::{self, CommandReceipt, CommitBatch, QueryCommand, QueryResult, SafeInteger},
+        Harness, ModeId, ModelId, Prompt, SessionId, WorkspacePath,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
+#[cfg(test)]
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     sync::{broadcast, Semaphore},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_SUBSCRIPTIONS: usize = 32;
 const MAX_IN_FLIGHT: usize = 24;
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcRequest {
-    pub version: u32,
-    pub id: u64,
+    pub version: query::ProtocolVersion,
+    pub id: SafeInteger,
     pub command: ClientCommand,
     #[serde(default)]
     pub operation: Option<crate::domain::OperationId>,
@@ -48,9 +52,28 @@ pub enum ClientCommand {
     Load {
         session: SessionId,
     },
-    List,
+    List {
+        cursor: Option<query::ListCursor>,
+        limit: Option<usize>,
+    },
     Inspect {
         session: SessionId,
+    },
+    History {
+        session: SessionId,
+        cursor: Option<query::HistoryCursor>,
+        limit: Option<usize>,
+    },
+    Tools {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        cursor: Option<query::ToolCursor>,
+        limit: Option<usize>,
+    },
+    Content {
+        r#ref: query::ContentRef,
+        offset: SafeInteger,
+        length: Option<usize>,
     },
     Image {
         image: crate::domain::image::ImageRef,
@@ -85,17 +108,24 @@ pub enum ClientCommand {
     Remove {
         session: SessionId,
     },
-    Subscribe {
+    Attach {
         session: SessionId,
     },
-    Unsubscribe {
+    Detach {
         session: SessionId,
     },
 }
 impl ClientCommand {
     fn pool(&self) -> usize {
         match self {
-            Self::List | Self::Inspect { .. } | Self::Image { .. } => 2,
+            Self::List { .. }
+            | Self::Inspect { .. }
+            | Self::History { .. }
+            | Self::Tools { .. }
+            | Self::Content { .. }
+            | Self::Image { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. } => 2,
             Self::Cancel { .. }
             | Self::CancelFork { .. }
             | Self::Answer { .. }
@@ -103,12 +133,51 @@ impl ClientCommand {
             _ => 0,
         }
     }
+    fn query(&self) -> Option<QueryCommand> {
+        Some(match self {
+            Self::List { cursor, limit } => QueryCommand::List {
+                cursor: cursor.clone(),
+                limit: *limit,
+            },
+            Self::Inspect { session } => QueryCommand::Inspect {
+                session: session.clone(),
+            },
+            Self::History {
+                session,
+                cursor,
+                limit,
+            } => QueryCommand::History {
+                session: session.clone(),
+                cursor: cursor.clone(),
+                limit: *limit,
+            },
+            Self::Tools {
+                session,
+                turn,
+                cursor,
+                limit,
+            } => QueryCommand::Tools {
+                session: session.clone(),
+                turn: turn.clone(),
+                cursor: cursor.clone(),
+                limit: *limit,
+            },
+            Self::Content {
+                r#ref,
+                offset,
+                length,
+            } => QueryCommand::Content {
+                r#ref: r#ref.clone(),
+                offset: *offset,
+                length: *length,
+            },
+            _ => return None,
+        })
+    }
     fn into_domain(self) -> Option<DomainCommand> {
         Some(match self {
             Self::Create { harness, cwd } => DomainCommand::CreateSession { harness, cwd },
             Self::Load { session } => DomainCommand::LoadSession(session),
-            Self::List => DomainCommand::ListSessions,
-            Self::Inspect { session } => DomainCommand::Inspect(session),
             Self::Prompt { session, prompt } => DomainCommand::Prompt { session, prompt },
             Self::Cancel { session } => DomainCommand::Cancel { session },
             Self::Answer { session, answer } => {
@@ -121,36 +190,47 @@ impl ClientCommand {
             Self::SetModel { session, model } => DomainCommand::SetModel { session, model },
             Self::SetMode { session, mode } => DomainCommand::SetMode { session, mode },
             Self::Remove { session } => DomainCommand::RemoveSession(session),
-            Self::Subscribe { .. } | Self::Unsubscribe { .. } | Self::Image { .. } => return None,
+            _ => return None,
         })
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IpcMessage {
     Reply {
-        id: u64,
-        events: Vec<DomainEvent>,
+        id: SafeInteger,
+        receipt: CommandReceipt,
+    },
+    Query {
+        id: SafeInteger,
+        result: QueryResult,
+    },
+    Detached {
+        id: SafeInteger,
+        session: SessionId,
     },
     Image {
-        id: u64,
+        id: SafeInteger,
         asset: crate::domain::image::ImageAsset,
     },
     Error {
-        id: u64,
+        id: SafeInteger,
         code: String,
         message: String,
     },
-    Event {
-        event: Box<DomainEvent>,
+    Batch {
+        batch: Box<CommitBatch>,
     },
     ResyncRequired,
 }
-fn error(id: u64, error: DomainError) -> IpcMessage {
+fn error(id: SafeInteger, error: DomainError) -> IpcMessage {
     let code = match error {
         DomainError::Backpressure => "backpressure",
         DomainError::Busy => "busy",
         DomainError::NotFound(_) => "not_found",
+        DomainError::Query(query::QueryError::InvalidInput) => "invalid_input",
+        DomainError::Query(query::QueryError::TooLarge) => "too_large",
+        DomainError::Query(query::QueryError::UnsupportedVersion) => "unsupported_version",
         DomainError::Persistence(_) => "persistence",
         DomainError::InvalidId(_) | DomainError::InvalidAnswer(_) => "invalid_input",
         DomainError::OperationConflict => "operation_conflict",
@@ -169,7 +249,6 @@ fn error(id: u64, error: DomainError) -> IpcMessage {
         message: error.to_string(),
     }
 }
-
 pub struct ExternalTransport {
     stop: CancellationToken,
     task: Option<JoinHandle<io::Result<()>>>,
@@ -181,7 +260,7 @@ impl ExternalTransport {
             .parent()
             .ok_or_else(|| io::Error::other("IPC socket parent missing"))?;
         tokio::fs::create_dir_all(parent).await?;
-        // Bind fails on an occupied or stale path; never unlink another host's socket.
+        // Occupied/stale paths fail. Never unlink another host's socket.
         let listener = UnixListener::bind(&path)?;
         let metadata = std::fs::symlink_metadata(&path)?;
         let guard = SocketGuard {
@@ -242,15 +321,10 @@ async fn serve(
             _ = stop.cancelled() => break Ok(()),
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    // Filesystem mode plus peer credentials restrict access to this UID.
                     if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } { continue; }
                     let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
-                    let app = app.clone();
-                    let stop = stop.clone();
-                    connections.spawn(async move {
-                        let _permit = permit;
-                        connection(stream, app, stop).await
-                    });
+                    let app = app.clone(); let stop = stop.clone();
+                    connections.spawn(async move { let _permit = permit; connection(stream, app, stop).await });
                 }
                 Err(error) => break Err(error),
             },
@@ -265,14 +339,46 @@ async fn write_message(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     message: &IpcMessage,
 ) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(message).map_err(io::Error::other)?;
-    if bytes.len() > MAX_FRAME {
-        return Err(io::Error::other("IPC response exceeds frame limit"));
-    }
+    let budget = if matches!(message, IpcMessage::Image { .. }) {
+        MAX_FRAME
+    } else {
+        query::MAX_QUERY_BYTES
+    };
+    let mut bytes = query::json_bytes(message, budget).map_err(io::Error::other)?;
     bytes.push(b'\n');
     tokio::time::timeout(Duration::from_secs(5), writer.write_all(&bytes))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "slow IPC reader"))?
+}
+async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    stop: &CancellationToken,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut frame = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut deadline = None;
+    loop {
+        let read = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, async {
+                tokio::select! { _ = stop.cancelled() => Ok(0), result = reader.read(&mut byte) => result }
+            }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "incomplete IPC frame"))??
+        } else {
+            tokio::select! { _ = stop.cancelled() => return Ok(None), result = reader.read(&mut byte) => result? }
+        };
+        if read == 0 {
+            return Ok(if frame.is_empty() { None } else { Some(frame) });
+        }
+        if deadline.is_none() {
+            deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+        }
+        if byte[0] == b'\n' {
+            return Ok(Some(frame));
+        }
+        frame.push(byte[0]);
+        if frame.len() > MAX_FRAME {
+            return Err(io::Error::other("IPC request exceeds frame limit"));
+        }
+    }
 }
 async fn connection(
     stream: UnixStream,
@@ -280,135 +386,96 @@ async fn connection(
     stop: CancellationToken,
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
-    let mut reader = BufReader::new(read);
+    let mut reader = read;
+    // Register before any snapshot read. The broadcast itself is the bounded
+    // attach buffer; lag is fatal/resync, never silently dropped.
     let mut events = app.subscribe();
-    let mut subscriptions = BTreeSet::new();
-    // Session executions are synchronously admitted; these tasks then own only
-    // reply observers. Read-only image queries submit when their observer is
-    // polled; after host admission their I/O is owned there too. Socket loss
-    // cannot abort accepted writes or create a durable image operation.
+    let mut subscriptions: BTreeMap<SessionId, SafeInteger> = BTreeMap::new();
     let mut replies = JoinSet::new();
     let mut pending_ids = BTreeSet::new();
     let pools = [16, 4, 4].map(|size| Arc::new(Semaphore::new(size)));
-    let mut frame = vec![];
     loop {
-        let remaining = MAX_FRAME + 1 - frame.len();
-        let mut bounded = (&mut reader).take(remaining as u64);
         let message = tokio::select! {
             _ = stop.cancelled() => return Ok(()),
             completed = replies.join_next(), if !replies.is_empty() => {
                 let (id, message) = completed.expect("nonempty observers").map_err(|_| io::Error::other("IPC reply observer failed"))?;
-                pending_ids.remove(&id);
-                message
+                pending_ids.remove(&id); message
             },
-            result = bounded.read_until(b'\n', &mut frame) => {
-                if result? == 0 { return Ok(()); }
-                if frame.len() > MAX_FRAME { return Err(io::Error::other("IPC request exceeds frame limit")); }
+            result = read_frame(&mut reader, &stop) => {
+                let Some(frame) = result? else { return Ok(()); };
                 let request: IpcRequest = serde_json::from_slice(&frame).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                frame.clear();
-                if request.version != PROTOCOL_VERSION { return Err(io::Error::other("unsupported IPC version")); }
                 let id = request.id;
                 if pending_ids.contains(&id) { return Err(io::Error::other("duplicate in-flight IPC request id")); }
-                match request.command {
-                    ClientCommand::Subscribe { session } => {
-                        if subscriptions.len() >= MAX_SUBSCRIPTIONS && !subscriptions.contains(&session) {
-                            error(id, DomainError::Backpressure)
-                        } else {
-                            subscriptions.insert(session);
-                            IpcMessage::Reply { id, events: vec![] }
-                        }
-                    }
-                    ClientCommand::Unsubscribe { session } => { subscriptions.remove(&session); IpcMessage::Reply { id, events: vec![] } }
-                    ClientCommand::Image { image } => {
-                        if request.operation.is_some() { error(id, DomainError::InvalidAnswer("image queries cannot carry an operation id".into())) }
+                let command = request.command;
+                let permit = pools[command.pool()].clone().try_acquire_owned();
+                let Ok(permit) = permit else { write_message(&mut write, &error(id, DomainError::Backpressure)).await?; continue; };
+                if replies.len() >= MAX_IN_FLIGHT { error(id, DomainError::Backpressure) }
+                else if command.pool() == 2 && request.operation.is_some() { error(id, DomainError::InvalidAnswer("queries cannot carry an operation id".into())) }
+                else { match command {
+                    ClientCommand::Attach { session } => {
+                        if subscriptions.len() >= MAX_SUBSCRIPTIONS && !subscriptions.contains_key(&session) { error(id, DomainError::Backpressure) }
                         else {
-                            match pools[2].clone().try_acquire_owned() {
-                                Ok(permit) if replies.len() < MAX_IN_FLIGHT => {
-                                    pending_ids.insert(id);
-                                    let app = app.clone();
-                                    replies.spawn(async move {
-                                        let _permit = permit;
-                                        let message = match app.image(&image).await {
-                                            Ok(asset) => IpcMessage::Image { id, asset },
-                                            Err(failure) => error(id, failure),
-                                        };
-                                        (id, message)
-                                    });
-                                    continue;
+                            let result = tokio::select! { _ = stop.cancelled() => return Ok(()), result = app.query(QueryCommand::Attach { session: session.clone() }) => result };
+                            match result {
+                                Ok(QueryResult::Attached(attached)) => {
+                                    subscriptions.insert(session, attached.view.revision);
+                                    IpcMessage::Query { id, result: QueryResult::Attached(attached) }
                                 }
-                                _ => error(id, DomainError::Backpressure),
+                                Ok(_) => return Err(io::Error::other("invalid attach query result")),
+                                Err(failure) => error(id, failure),
                             }
                         }
+                    }
+                    ClientCommand::Detach { session } => { subscriptions.remove(&session); IpcMessage::Detached { id, session } }
+                    ClientCommand::Image { image } => {
+                        pending_ids.insert(id); let app = app.clone();
+                        replies.spawn(async move {
+                            let _permit = permit;
+                            let message = match app.image(&image).await { Ok(asset) => IpcMessage::Image { id, asset }, Err(failure) => error(id, failure) };
+                            (id, message)
+                        }); continue;
                     }
                     command => {
-                        let permit = pools[command.pool()].clone().try_acquire_owned();
-                        match permit {
-                            Ok(permit) if replies.len() < MAX_IN_FLIGHT => {
-                            let command = command.into_domain().expect("subscription handled above");
-                            match app.enqueue_command(request.operation, command) {
-                                Err(failure) => error(id, failure),
-                                Ok(ticket) => {
-                                    pending_ids.insert(id);
-                                    replies.spawn(async move {
-                                        let _permit = permit;
-                                        let message = match ticket.wait().await {
-                                            Ok(events) => IpcMessage::Reply { id, events },
-                                            Err(failure) => error(id, failure),
-                                        };
-                                        (id, message)
-                                    });
-                                    continue;
-                                }
+                        if let Some(query) = command.query() {
+                            pending_ids.insert(id); let app = app.clone();
+                            replies.spawn(async move {
+                                let _permit = permit;
+                                let message = match app.query(query).await { Ok(result) => IpcMessage::Query { id, result }, Err(failure) => error(id, failure) };
+                                (id, message)
+                            }); continue;
+                        }
+                        let command = command.into_domain().expect("all queries handled");
+                        match app.enqueue_command(request.operation, command) {
+                            Err(failure) => error(id, failure),
+                            Ok(ticket) => {
+                                pending_ids.insert(id);
+                                replies.spawn(async move {
+                                    let _permit = permit;
+                                    let message = match ticket.wait().await { Ok(receipt) => IpcMessage::Reply { id, receipt }, Err(failure) => error(id, failure) };
+                                    (id, message)
+                                }); continue;
                             }
-                            }
-                            _ => error(id, DomainError::Backpressure),
                         }
                     }
-                }
-            }
+                }}
+            },
             event = events.recv() => match event {
-                Ok(event) if event_session(&event).is_some_and(|session| subscriptions.contains(session)) => IpcMessage::Event { event: Box::new(event) },
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    write_message(&mut write, &IpcMessage::ResyncRequired).await?;
-                    return Ok(());
+                Ok(batch) => {
+                    let Some(last) = subscriptions.get_mut(&batch.session) else { continue; };
+                    if batch.revision <= *last { continue; }
+                    if last.next().ok() != Some(batch.revision) {
+                        write_message(&mut write, &IpcMessage::ResyncRequired).await?; return Ok(());
+                    }
+                    *last = batch.revision;
+                    IpcMessage::Batch { batch: Box::new(batch) }
                 }
+                Err(broadcast::error::RecvError::Lagged(_)) => { write_message(&mut write, &IpcMessage::ResyncRequired).await?; return Ok(()); }
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
             }
         };
-        tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
-            result = write_message(&mut write, &message) => result?,
-        }
+        tokio::select! { _ = stop.cancelled() => return Ok(()), result = write_message(&mut write, &message) => result? }
     }
 }
-fn event_session(event: &DomainEvent) -> Option<&SessionId> {
-    match event {
-        DomainEvent::SessionCreated(snapshot) | DomainEvent::SessionLoaded(snapshot) => {
-            Some(&snapshot.id)
-        }
-        DomainEvent::SessionsListed(_) | DomainEvent::ForkPrepared(_) => None,
-        DomainEvent::ForkCancelled { session, .. } => Some(session),
-        DomainEvent::SessionRemoved(session) => Some(session),
-        DomainEvent::ProviderSessionAttached { session, .. }
-        | DomainEvent::CatalogueChanged { session, .. }
-        | DomainEvent::UserPromptAdded { session, .. }
-        | DomainEvent::AgentText { session, .. }
-        | DomainEvent::AgentImage { session, .. }
-        | DomainEvent::AgentThought { session, .. }
-        | DomainEvent::ToolCallChanged { session, .. }
-        | DomainEvent::PlanChanged { session, .. }
-        | DomainEvent::InteractionRequested { session, .. }
-        | DomainEvent::InteractionResolved { session, .. }
-        | DomainEvent::UsageChanged { session, .. }
-        | DomainEvent::ContextUsageChanged { session, .. }
-        | DomainEvent::TurnStarted { session, .. }
-        | DomainEvent::TurnFinished { session, .. }
-        | DomainEvent::TurnCancelled { session, .. }
-        | DomainEvent::SessionError { session, .. } => Some(session),
-    }
-}
-
 #[cfg(test)]
 #[path = "vscode_tests.rs"]
 mod tests;

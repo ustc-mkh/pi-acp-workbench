@@ -168,9 +168,7 @@ async fn blocked_media_does_not_block_other_topics_same_topic_stays_fifo_and_can
         .unwrap()
         .is_empty());
     // No sessions exist: delivery recovery has no source/ACP execution to rerun.
-    assert!(
-        matches!(&second.command(DomainCommand::ListSessions).await.unwrap()[0], DomainEvent::SessionsListed(sessions) if sessions.is_empty())
-    );
+    assert!(second.list(None, None).await.unwrap().sessions.is_empty());
     second.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

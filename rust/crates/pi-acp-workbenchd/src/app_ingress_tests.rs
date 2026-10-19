@@ -2,15 +2,8 @@ use super::super::ingress::Request;
 use super::*;
 use tokio::sync::oneshot;
 
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
 async fn wait_for(mut check: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -316,7 +309,7 @@ async fn root_abort_during_adapter_drain_joins_protocol_owners_outside_map_and_s
     assert!(caller.await.unwrap().is_err());
     assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
     let reopened = SessionStore::fixture(&root);
-    let state = reopened.load(id.as_str()).await.unwrap().unwrap();
+    let state = reopened.database().view(id.clone()).await.unwrap();
     assert!(state.active_turn.is_none());
     reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
@@ -348,7 +341,7 @@ async fn owned_task_panic_is_fatal_and_cleanup_retains_lease_until_host_shutdown
     assert!(app.shutdown_checked().await.is_err());
     assert!(crate::persistence::format::StorageLease::lock(&root).is_ok());
     let reopened = SessionStore::fixture(&root);
-    let state = reopened.load(id.as_str()).await.unwrap().unwrap();
+    let state = reopened.database().view(id).await.unwrap();
     assert!(state.active_turn.is_none() && state.pending_interactions.is_empty());
     reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();

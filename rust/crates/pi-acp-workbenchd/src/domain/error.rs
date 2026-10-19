@@ -43,6 +43,8 @@ pub enum DomainError {
     OperationInterrupted,
     #[error("operation result was expired; request cannot be executed again")]
     OperationExpired,
+    #[error("query: {0}")]
+    Query(#[from] super::query::QueryError),
     #[error("persistence: {0}")]
     Persistence(String),
 }

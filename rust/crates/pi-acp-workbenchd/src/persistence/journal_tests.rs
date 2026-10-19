@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    domain::{Harness, WorkspacePath},
+    domain::{Harness, SessionId, WorkspacePath},
     persistence::format::StorageLease,
 };
 use std::{
@@ -110,7 +110,12 @@ async fn started_is_durable_before_effect_and_is_never_reexecuted() {
 #[tokio::test]
 async fn completed_and_failed_results_survive_restart_and_gc_preserves_tombstones() {
     let mut fixture = Fixture::new().await;
-    for outcome in [Ok(vec![]), Err(DomainError::Busy)] {
+    for outcome in [
+        Ok(crate::domain::query::CommandReceipt::Removed {
+            session: SessionId::generate(),
+        }),
+        Err(DomainError::Busy),
+    ] {
         let id = OperationId::generate();
         let Admission::Execute(ticket) =
             fixture.store().begin(id.clone(), &command()).await.unwrap()
@@ -186,7 +191,16 @@ async fn corrupt_missing_or_wrong_identity_results_fail_closed() {
         else {
             panic!("admit")
         };
-        fixture.store().finish(ticket, &Ok(vec![])).await.unwrap();
+        fixture
+            .store()
+            .finish(
+                ticket,
+                &Ok(crate::domain::query::CommandReceipt::Removed {
+                    session: SessionId::generate(),
+                }),
+            )
+            .await
+            .unwrap();
         fixture.close().await;
         let db = Connection::open(fixture.path()).unwrap();
         match fault {
@@ -286,7 +300,15 @@ async fn finish_fault_rolls_back_terminal_status_bytes_and_checksum_together() {
     drop(db);
     fixture.restart().await;
     assert!(matches!(
-        fixture.store().finish(ticket, &Ok(vec![])).await,
+        fixture
+            .store()
+            .finish(
+                ticket,
+                &Ok(crate::domain::query::CommandReceipt::Removed {
+                    session: SessionId::generate()
+                })
+            )
+            .await,
         Err(DomainError::Persistence(_))
     ));
     fixture.close().await;

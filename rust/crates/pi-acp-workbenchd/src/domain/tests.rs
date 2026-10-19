@@ -3,32 +3,37 @@ use super::{
     error::DomainError,
     ids::{InteractionId, Prompt, SessionId, TurnId},
     interaction::{Interaction, InteractionKind},
-    reducer::apply,
-    session::{Harness, SessionConfig, SessionState, SessionStatus},
+    query::SessionView,
+    session::SessionStatus,
 };
 
-pub(super) fn state() -> SessionState {
-    SessionState {
-        id: SessionId::generate(),
-        provider_session: None,
-        harness: Harness::Pi,
-        cwd: super::WorkspacePath::new("/tmp").unwrap(),
-        status: SessionStatus::Idle,
-        transcript: Default::default(),
-        plan: Default::default(),
-        active_turn: None,
-        pending_interactions: Default::default(),
-        usage: Default::default(),
-        configuration_intent: None,
-        config: SessionConfig {
-            model: None,
-            mode: None,
-        },
-        catalogue: Default::default(),
-        revision: 0,
+pub(crate) fn state() -> SessionView {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        view: SessionView,
     }
+    let mut view = serde_json::from_str::<Fixture>(include_str!(
+        "../../../../../test/fixtures/rewrite/ipc-v3.json"
+    ))
+    .unwrap()
+    .view;
+    view.id = SessionId::generate();
+    view.cwd = super::WorkspacePath::new("/tmp").unwrap();
+    view.revision = Default::default();
+    view.last_entry_seq = Default::default();
+    view
 }
-fn prompt(state: &mut SessionState) -> TurnId {
+pub(super) fn apply(
+    state: &mut SessionView,
+    command: DomainCommand,
+) -> Result<Option<super::transition::Transition>, DomainError> {
+    let change = super::reducer::transition(state, command, &Default::default(), 0)?;
+    if let Some(change) = &change {
+        *state = change.next.clone();
+    }
+    Ok(change)
+}
+fn prompt(state: &mut SessionView) -> TurnId {
     apply(
         state,
         DomainCommand::Prompt {
@@ -39,7 +44,7 @@ fn prompt(state: &mut SessionState) -> TurnId {
     .unwrap();
     state.active_turn.clone().unwrap()
 }
-fn interaction(state: &mut SessionState) {
+fn interaction(state: &mut SessionView) {
     apply(
         state,
         DomainCommand::Agent {
@@ -84,7 +89,7 @@ fn catalogue_patches_preserve_omission_clear_explicit_lists_and_keep_preferences
         current_model: Some(super::ModelId::new("model").unwrap()),
         current_mode: Some(super::ModeId::new("observed").unwrap()),
     };
-    let apply_patch = |state: &mut SessionState, patch| {
+    let apply_patch = |state: &mut SessionView, patch| {
         apply(
             state,
             DomainCommand::Agent {
@@ -94,9 +99,9 @@ fn catalogue_patches_preserve_omission_clear_explicit_lists_and_keep_preferences
         )
         .unwrap()
     };
-    assert_eq!(apply_patch(&mut state, initial).len(), 1);
+    assert!(apply_patch(&mut state, initial).is_some());
     let before = state.catalogue.clone();
-    assert!(apply_patch(&mut state, CataloguePatch::default()).is_empty());
+    assert!(apply_patch(&mut state, CataloguePatch::default()).is_none());
     assert_eq!(state.catalogue, before);
     apply_patch(
         &mut state,
@@ -127,7 +132,7 @@ fn busy_prompt_does_not_replace_active_turn() {
     );
     assert!(matches!(result, Err(DomainError::Busy)));
     assert_eq!(state.active_turn, Some(turn));
-    assert_eq!(state.transcript.entries.len(), 1);
+    assert_eq!(state.last_entry_seq.get(), 1);
 }
 
 #[test]
@@ -143,7 +148,7 @@ fn cancelled_turn_cannot_finish_or_append_to_replacement() {
         },
     )
     .unwrap();
-    assert_eq!(events.len(), 2);
+    assert!(events.unwrap().deliveries.len() == 1);
     assert!(state.pending_interactions.is_empty());
     let current = prompt(&mut state);
     for event in [
@@ -162,15 +167,15 @@ fn cancelled_turn_cannot_finish_or_append_to_replacement() {
             }
         )
         .unwrap()
-        .is_empty());
+        .is_none());
     }
     assert_eq!(state.active_turn, Some(current));
-    assert_eq!(state.transcript.entries.len(), 2);
+    assert_eq!(state.last_entry_seq.get(), 2);
 }
 
 #[test]
 fn invalid_answer_does_not_consume_interaction_and_valid_answer_resumes_turn() {
-    use super::interaction::{InteractionAnswer, InteractionResolution, InteractionResponse};
+    use super::interaction::{InteractionAnswer, InteractionResponse};
     let mut state = state();
     prompt(&mut state);
     interaction(&mut state);
@@ -188,14 +193,11 @@ fn invalid_answer_does_not_consume_interaction_and_valid_answer_resumes_turn() {
     let valid = command(InteractionResponse::Text("allow".into()));
     assert!(apply(&mut state, invalid).is_err());
     assert!(state.pending_interactions.contains_key(&id));
-    let events = apply(&mut state, valid.clone()).unwrap();
+    let interaction = state.pending_interactions[&id].clone();
     assert!(
-        matches!(&events[0], super::DomainEvent::InteractionResolved {
-        resolution: InteractionResolution::Answered(InteractionAnswer {
-            response: InteractionResponse::Permission { option }, ..
-        }), ..
-    } if option == "allow")
+        matches!(interaction.validate_answer(InteractionAnswer { interaction: id.clone(), response: InteractionResponse::Text("allow".into()) }, 0).unwrap().response, InteractionResponse::Permission { option } if option == "allow")
     );
+    assert!(apply(&mut state, valid.clone()).unwrap().is_some());
     assert!(state.pending_interactions.is_empty());
     assert!(matches!(state.status, SessionStatus::Running));
     assert!(matches!(
@@ -211,6 +213,7 @@ fn tool_partial_updates_preserve_fields_and_scope_reused_ids_to_turns() {
     let turn = prompt(&mut state);
     let session = state.id.clone();
     let tool_id = super::ToolCallId::new("call:1").unwrap();
+    let mut headers = std::collections::BTreeMap::new();
     for update in [
         ToolCallUpdate {
             id: tool_id.clone(),
@@ -239,22 +242,29 @@ fn tool_partial_updates_preserve_fields_and_scope_reused_ids_to_turns() {
             details: Default::default(),
         },
     ] {
-        apply(
-            &mut state,
+        let change = super::reducer::transition(
+            &state,
             DomainCommand::Agent {
                 session: session.clone(),
                 event: AgentEvent::ToolCall(update),
             },
+            &super::reducer::TransitionContext {
+                tool: headers.get(&turn),
+            },
+            0,
         )
+        .unwrap()
         .unwrap();
+        headers.insert(turn.clone(), change.tool_updates[0].header.clone());
+        state = change.next;
     }
-    let tool = &state.transcript.tools[&turn][&tool_id];
+    let tool = &headers[&turn];
     assert_eq!(tool.title, "Read");
     assert_eq!(tool.status, ToolStatus::Completed);
-    assert_eq!(tool.details.kind, Some(super::tool::ToolKind::Edit));
-    assert_eq!(tool.details.name.as_deref(), Some("apply_patch"));
-    assert_eq!(tool.details.content.len(), 1);
-    assert_eq!(tool.details.locations[0].line, Some(0));
+    assert_eq!(tool.kind, Some(super::tool::ToolKind::Edit));
+    assert_eq!(tool.name.as_deref(), Some("apply_patch"));
+    assert_eq!(tool.content.len(), 1);
+    assert_eq!(tool.locations[0].line, Some(0));
     apply(
         &mut state,
         DomainCommand::Agent {
@@ -264,7 +274,7 @@ fn tool_partial_updates_preserve_fields_and_scope_reused_ids_to_turns() {
     )
     .unwrap();
     let next = prompt(&mut state);
-    apply(
+    let change = apply(
         &mut state,
         DomainCommand::Agent {
             session,
@@ -277,12 +287,16 @@ fn tool_partial_updates_preserve_fields_and_scope_reused_ids_to_turns() {
             }),
         },
     )
+    .unwrap()
     .unwrap();
-    assert_eq!(state.transcript.tools[&turn][&tool_id].title, "Read");
-    assert_eq!(state.transcript.tools[&next][&tool_id].title, "Write");
-    assert_eq!(
-        state.transcript.tools[&next][&tool_id].details,
-        super::tool::ToolDetails::default()
+    headers.insert(next.clone(), change.tool_updates[0].header.clone());
+    assert_eq!(headers[&turn].title, "Read");
+    assert_eq!(headers[&next].title, "Write");
+    assert!(
+        headers[&next].kind.is_none()
+            && headers[&next].name.is_none()
+            && headers[&next].content.is_empty()
+            && headers[&next].locations.is_empty()
     );
 }
 
@@ -302,7 +316,7 @@ fn crash_clears_turn_and_pending_interactions() {
         },
     )
     .unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.unwrap().deliveries.len(), 1);
     assert!(state.active_turn.is_none());
     assert!(state.pending_interactions.is_empty());
     assert!(matches!(state.status, SessionStatus::Failed(_)));

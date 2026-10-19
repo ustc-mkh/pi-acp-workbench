@@ -11,6 +11,22 @@ use crate::{
 };
 use tokio_util::sync::CancellationToken;
 
+enum Parts {
+    Frozen(Box<super::turn_stream::TurnStream>),
+    Messages(std::vec::IntoIter<render::DeliveryPart>),
+}
+impl Parts {
+    async fn next(
+        &mut self,
+        payloads: &crate::persistence::payload::PayloadStore,
+    ) -> Result<Option<render::DeliveryPart>, DomainError> {
+        match self {
+            Self::Frozen(stream) => stream.next(payloads).await,
+            Self::Messages(parts) => Ok(parts.next()),
+        }
+    }
+}
+
 enum Outgoing {
     Message(SendMessage),
     Media(SendMedia),
@@ -41,7 +57,7 @@ pub(super) async fn deliver_record(
             thread,
             cwd,
         } => {
-            if context.store.snapshot().await?.bot.map(|bot| bot.get()) != Some(*bot_id) {
+            if context.bot_id != *bot_id {
                 return Err(
                     DomainError::Persistence("delivery bot identity mismatch".into()).into(),
                 );
@@ -56,12 +72,7 @@ pub(super) async fn deliver_record(
             (Some(TopicKey::from_delivery(*chat, *thread)?), None)
         }
         DeliveryTarget::Session { session, cwd } => {
-            let state = context.store.snapshot().await?;
-            let topic = state
-                .bindings
-                .iter()
-                .find(|(_, bound)| *bound == session)
-                .map(|(topic, _)| topic.clone());
+            let topic = context.store.topic(session).await?;
             // Binding changes must not move this job into another occupied lane.
             // Leave Pending and let the next scan reserve the new destination.
             if &topic != reserved {
@@ -102,31 +113,60 @@ pub(super) async fn deliver_record(
         outbox.ack(&record.event.id).await?;
         return Ok(());
     };
-    let parts = match render::render(
-        &record.event,
-        &topic,
-        snapshot.as_ref(),
-        &context.app.delivery_payloads(),
-        &context.store,
-        now(),
-    )
-    .await
+    let payloads = context.app.delivery_payloads();
+    let mut parts = if let crate::domain::transition::DeliveryPayload::Turn { turn, .. } =
+        &record.event.payload
     {
-        Ok(parts) => parts,
-        Err(error @ DomainError::Persistence(_)) => return Err(error.into()),
-        Err(_) => {
-            outbox
-                .fail(
-                    &record.event.id,
-                    DeliveryFailure::PayloadUnavailable,
-                    now().saturating_add(60),
-                )
-                .await?;
-            return Ok(());
+        Parts::Frozen(Box::new(super::turn_stream::TurnStream::new(
+            record.event.id.clone(),
+            turn.clone(),
+            topic.clone(),
+        )))
+    } else {
+        match render::render(
+            &record.event,
+            &topic,
+            snapshot.as_ref(),
+            &context.app.delivery_payloads(),
+            &context.store,
+            now(),
+        )
+        .await
+        {
+            Ok(parts) => Parts::Messages(parts.into_iter()),
+            Err(error @ DomainError::Persistence(_)) => return Err(error.into()),
+            Err(_) => {
+                outbox
+                    .fail(
+                        &record.event.id,
+                        DeliveryFailure::PayloadUnavailable,
+                        now().saturating_add(60),
+                    )
+                    .await?;
+                return Ok(());
+            }
         }
     };
     let mut failed = None;
-    for part in parts {
+    loop {
+        if stop.is_cancelled() || context.app.is_closing() {
+            return Ok(());
+        }
+        let part = match parts.next(&payloads).await {
+            Ok(Some(part)) => part,
+            Ok(None) => break,
+            Err(error @ DomainError::Persistence(_)) => return Err(error.into()),
+            Err(_) => {
+                outbox
+                    .fail(
+                        &record.event.id,
+                        DeliveryFailure::PayloadUnavailable,
+                        now().saturating_add(60),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
         // Read/verify local immutable bytes outside HTTP cancellation. Neither
         // image URIs nor caller-supplied filesystem paths authorize reads.
         let outgoing = match part {

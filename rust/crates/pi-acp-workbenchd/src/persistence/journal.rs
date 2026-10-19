@@ -2,7 +2,7 @@
 //! are never reexecuted, even when the reply observer or host disappears.
 use super::database::{Database, StoreRequest};
 use crate::domain::{
-    command::DomainCommand, error::DomainError, event::DomainEvent, ids::OperationId,
+    command::DomainCommand, error::DomainError, ids::OperationId, query::CommandReceipt,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ impl From<RequestFingerprint> for String {
     }
 }
 
-type OperationResult = Result<Vec<DomainEvent>, DomainError>;
+type OperationResult = Result<CommandReceipt, DomainError>;
 type Reply<T> = oneshot::Sender<Result<T, DomainError>>;
 #[derive(Debug)]
 pub struct OperationTicket {

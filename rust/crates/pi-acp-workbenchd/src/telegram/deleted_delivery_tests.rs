@@ -56,12 +56,11 @@ async fn pending_image_after_external_source_removal_and_restart_uses_frozen_sco
     poll_once(&context).await.unwrap();
     execute(&context).await;
     finished(&mut events).await;
-    let image = context
-        .inspect(&session)
+    let image = first
+        .database()
+        .history(session.clone(), None, None)
         .await
         .unwrap()
-        .unwrap()
-        .transcript
         .entries
         .iter()
         .find_map(|entry| entry.image.clone())
@@ -131,9 +130,7 @@ async fn pending_image_after_external_source_removal_and_restart_uses_frozen_sco
         before_peer,
         "deleted-source delivery must not create a peer"
     );
-    assert!(
-        matches!(&second.command(DomainCommand::ListSessions).await.unwrap()[0], DomainEvent::SessionsListed(sessions) if sessions.is_empty())
-    );
+    assert!(second.list(None, None).await.unwrap().sessions.is_empty());
     second.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
     tokio::fs::remove_file(trace).await.unwrap();

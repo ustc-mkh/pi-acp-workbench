@@ -59,7 +59,7 @@ async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_sh
             })
             .await
             .unwrap();
-        let DomainEvent::SessionCreated(snapshot) = &events[0] else {
+        let crate::domain::query::CommandReceipt::Created { summary: snapshot } = events else {
             panic!("create")
         };
         ids.push(snapshot.id.clone());
@@ -93,8 +93,12 @@ async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_sh
     .unwrap();
     let interaction = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let DomainEvent::InteractionRequested { interaction, .. } =
-                events.recv().await.unwrap()
+            if let Some(interaction) = events
+                .recv()
+                .await
+                .unwrap()
+                .view
+                .and_then(|view| view.pending_interactions.into_values().next())
             {
                 break interaction.id;
             }
@@ -158,7 +162,7 @@ async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_sh
         ));
     }
     let untouched = context.inspect(&ids[9]).await.unwrap().unwrap();
-    assert!(untouched.transcript.entries.is_empty());
+    assert_eq!(untouched.last_entry_seq.get(), 0);
     until(async || {
         context
             .inspect(&ids[8])
@@ -215,15 +219,25 @@ async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_sh
             .is_none()
     })
     .await;
-    assert!(context
-        .inspect(&ids[9])
+    let history = restarted
+        .database()
+        .history(ids[9].clone(), None, None)
         .await
-        .unwrap()
-        .unwrap()
-        .transcript
-        .entries
-        .iter()
-        .any(|entry| entry.text == "echo: ordinary must wait"));
+        .unwrap();
+    let mut found = false;
+    for entry in history.entries {
+        if restarted
+            .delivery_payloads()
+            .entry(&entry.id)
+            .await
+            .unwrap()
+            .text
+            == "echo: ordinary must wait"
+        {
+            found = true;
+        }
+    }
+    assert!(found);
     stop.cancel();
     task.await.unwrap().unwrap();
     restarted.shutdown_checked().await.unwrap();

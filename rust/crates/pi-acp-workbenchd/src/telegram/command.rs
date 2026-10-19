@@ -2,7 +2,8 @@ use super::types::TopicKey;
 use crate::domain::{
     ids::{InteractionId, ModeId, ModelId},
     interaction::{Interaction, InteractionAnswer, InteractionResponse},
-    Harness, Prompt, SessionId, SessionSnapshot, WorkspacePath,
+    query::SessionView,
+    Harness, Prompt, SessionId, WorkspacePath,
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,13 +67,13 @@ pub enum RejectionReason {
     AlreadyUsed,
     WorkspaceForbidden,
 }
-fn session(snapshot: Option<&SessionSnapshot>) -> Result<SessionId, RejectionReason> {
+fn session(snapshot: Option<&SessionView>) -> Result<SessionId, RejectionReason> {
     snapshot
         .map(|snapshot| snapshot.id.clone())
         .ok_or(RejectionReason::NoSession)
 }
 fn answer(
-    snapshot: &SessionSnapshot,
+    snapshot: &SessionView,
     interaction: &Interaction,
     text: String,
     now: u64,
@@ -95,7 +96,7 @@ fn answer(
     })
 }
 pub fn parse_text(
-    snapshot: Option<&SessionSnapshot>,
+    snapshot: Option<&SessionView>,
     text: &str,
     cwd: &WorkspacePath,
     now: u64,

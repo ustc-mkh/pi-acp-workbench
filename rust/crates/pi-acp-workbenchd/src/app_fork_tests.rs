@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    domain::{fork::ForkRequest, session::SessionSnapshot, OperationId, SessionState},
+    domain::{fork::ForkRequest, OperationId},
     persistence::interface::SessionPersistence,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,15 +15,83 @@ pub(super) fn native_config(root: &std::path::Path) -> Config {
     config.sessions.max_workers = 1;
     config
 }
-pub(super) async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+/// Explicit test-only archive evidence: collected through real bounded query
+/// pages, never used by the production actor/app or mutation receipts.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct Evidence {
+    #[serde(flatten)]
+    pub view: SessionView,
+    pub transcript: ArchiveEvidence,
+}
+impl std::ops::Deref for Evidence {
+    type Target = SessionView;
+    fn deref(&self) -> &SessionView {
+        &self.view
+    }
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct ArchiveEvidence {
+    pub origin: Option<crate::domain::fork::ForkOrigin>,
+    pub entries: Vec<crate::domain::transcript::TranscriptEntry>,
+    pub tools: std::collections::BTreeMap<
+        crate::domain::TurnId,
+        std::collections::BTreeMap<crate::domain::ToolCallId, crate::domain::query::ToolHeader>,
+    >,
+}
+pub(super) async fn inspect(app: &WorkbenchApp, id: &SessionId) -> Evidence {
+    let view = inspect_view(app, id).await;
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = app
+            .database()
+            .history(id.clone(), cursor, Some(200))
+            .await
+            .unwrap();
+        for header in page.entries {
+            entries.push((
+                header.seq,
+                app.delivery_payloads().entry(&header.id).await.unwrap(),
+            ));
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    entries.sort_by_key(|(seq, _)| *seq);
+    let entries: Vec<_> = entries.into_iter().map(|(_, entry)| entry).collect();
+    let turns: std::collections::BTreeSet<_> =
+        entries.iter().map(|entry| entry.turn.clone()).collect();
+    let mut tools = std::collections::BTreeMap::new();
+    for turn in turns {
+        let mut cursor = None;
+        loop {
+            let page = app
+                .database()
+                .tools(id.clone(), turn.clone(), cursor, Some(200))
+                .await
+                .unwrap();
+            for header in page.tools {
+                tools
+                    .entry(turn.clone())
+                    .or_insert_with(std::collections::BTreeMap::new)
+                    .insert(header.id.clone(), header);
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    Evidence {
+        transcript: ArchiveEvidence {
+            origin: view.origin.clone(),
+            entries,
+            tools,
+        },
+        view,
+    }
 }
 pub(super) async fn setup(app: &WorkbenchApp) -> SessionId {
     let id = create(app).await;
@@ -112,9 +180,10 @@ async fn streamed_message_fork_keeps_immutable_deltas_and_matches_the_complete_n
         })
         .await
         .unwrap();
-    let [DomainEvent::SessionCreated(branch)] = receipt.as_slice() else {
-        panic!("branch")
+    let CommandReceipt::Forked { summary } = receipt else {
+        panic!("branch receipt")
     };
+    let branch = inspect(&app, &summary.id).await;
     assert_eq!(
         serde_json::to_vec(&branch.transcript.entries).unwrap(),
         serde_json::to_vec(&before.transcript.entries).unwrap()
@@ -180,10 +249,10 @@ async fn native_fork_is_actor_projected_durable_independent_and_replays_after_so
         .command_durable(operation.clone(), command.clone())
         .await
         .unwrap();
-    let [DomainEvent::SessionCreated(branch)] = receipt.as_slice() else {
+    let CommandReceipt::Forked { summary } = &receipt else {
         panic!("adopted fork")
     };
-    let branch = branch.clone();
+    let branch = inspect(&app, &summary.id).await;
     assert_ne!(branch.id, source);
     assert_ne!(branch.provider_session, before.provider_session);
     assert_eq!(branch.transcript.entries.len(), 1);
@@ -371,9 +440,7 @@ async fn shutdown_during_uncertain_native_fork_joins_peer_and_replays_failure_wi
             .count(),
         1
     );
-    assert!(
-        matches!(&app.command(DomainCommand::ListSessions).await.unwrap()[0], DomainEvent::SessionsListed(snapshots) if snapshots.len() == 1)
-    );
+    assert_eq!(app.list(None, None).await.unwrap().sessions.len(), 1);
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -385,29 +452,59 @@ struct FaultStore {
     after_write: bool,
 }
 impl SessionPersistence for FaultStore {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
-        self.history.load(id).await
+    async fn load(&self, id: &SessionId) -> Result<Option<SessionView>, String> {
+        SessionPersistence::load(&self.history, id).await
     }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
-        self.history.list().await
+    async fn list(
+        &self,
+        cursor: Option<crate::domain::query::ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<crate::domain::query::ListPage, String> {
+        SessionPersistence::list(&self.history, cursor, limit).await
     }
-    async fn remove(&self, id: &str) -> Result<(), String> {
-        self.history.remove(id).await
+    async fn create(
+        &self,
+        view: &SessionView,
+    ) -> Result<crate::domain::query::SessionSummary, String> {
+        SessionPersistence::create(&self.history, view).await
+    }
+    async fn tool(
+        &self,
+        session: &SessionId,
+        turn: &crate::domain::TurnId,
+        tool: &crate::domain::ToolCallId,
+    ) -> Result<Option<crate::domain::query::ToolHeader>, String> {
+        SessionPersistence::tool(&self.history, session, turn, tool).await
+    }
+    async fn prepare_fork(
+        &self,
+        view: &SessionView,
+        request: ForkRequest,
+        candidates: Vec<crate::domain::fork::ForkCandidate>,
+    ) -> Result<crate::domain::fork::ForkPlan, String> {
+        SessionPersistence::prepare_fork(&self.history, view, request, candidates).await
+    }
+    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
+        SessionPersistence::remove(&self.history, id).await
     }
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         self.history.commit(change).await
     }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
-        if state.transcript.origin.is_some() && self.fail.swap(false, Ordering::AcqRel) {
+    async fn adopt_fork(
+        &self,
+        plan: crate::domain::fork::ForkPlan,
+        native: crate::domain::ProviderSessionId,
+    ) -> Result<(SessionView, crate::domain::query::SessionSummary), String> {
+        if self.fail.swap(false, Ordering::AcqRel) {
             if self.after_write {
-                self.history.save(state).await?;
+                SessionPersistence::adopt_fork(&self.history, plan, native).await?;
             }
             return Err("injected branch adoption failure".into());
         }
-        self.history.save(state).await
+        SessionPersistence::adopt_fork(&self.history, plan, native).await
     }
 }
 #[tokio::test]
@@ -472,9 +569,9 @@ async fn adoption_failure_before_or_after_write_never_repeats_remote_fork_and_ne
             serde_json::to_vec(&before).unwrap(),
             serde_json::to_vec(&inspect(&app, &source).await).unwrap()
         );
-        let listed = app.command(DomainCommand::ListSessions).await.unwrap();
-        assert!(
-            matches!(&listed[0], DomainEvent::SessionsListed(snapshots) if snapshots.len() == if after_write { 2 } else { 1 })
+        assert_eq!(
+            app.list(None, None).await.unwrap().sessions.len(),
+            if after_write { 2 } else { 1 }
         );
         app.shutdown_checked().await.unwrap();
         tokio::fs::remove_dir_all(root).await.unwrap();

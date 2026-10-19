@@ -6,7 +6,11 @@ use super::{
 use crate::{
     app::WorkbenchApp,
     config::TelegramConfig,
-    domain::{error::DomainError, DomainCommand, DomainEvent, SessionId, SessionSnapshot},
+    domain::{
+        error::DomainError,
+        query::{CommandReceipt, SessionView},
+        DomainCommand, SessionId,
+    },
     persistence::{inbox::TelegramStore, telegram_effect::TelegramEffects},
 };
 use std::{
@@ -35,6 +39,7 @@ pub(crate) struct Context<A: BotApi> {
     pub effects: TelegramEffects,
     pub config: TelegramConfig,
     pub username: Option<String>,
+    pub bot_id: i64,
     pub delivery: std::sync::Arc<super::delivery_scheduler::DeliveryJobs>,
     pub delivered:
         std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeSet<crate::domain::DeliveryId>>>,
@@ -59,6 +64,7 @@ impl<A: BotApi> Context<A> {
             store,
             effects,
             config,
+            bot_id: bot.id.get(),
             username: bot.username,
             delivery: Default::default(),
             delivered: Default::default(),
@@ -78,10 +84,7 @@ impl<A: BotApi> Context<A> {
             && (self.config.allowed_user_ids.is_empty()
                 || self.config.allowed_user_ids.contains(&record.sender))
     }
-    pub async fn inspect(
-        &self,
-        session: &SessionId,
-    ) -> Result<Option<SessionSnapshot>, DomainError> {
+    pub async fn inspect(&self, session: &SessionId) -> Result<Option<SessionView>, DomainError> {
         let events = match self
             .app
             .command(DomainCommand::Inspect(session.clone()))
@@ -94,13 +97,10 @@ impl<A: BotApi> Context<A> {
             Err(DomainError::NotFound(_)) => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(events.into_iter().find_map(|event| {
-            if let DomainEvent::SessionLoaded(snapshot) = event {
-                Some(snapshot)
-            } else {
-                None
-            }
-        }))
+        match events {
+            CommandReceipt::Loaded { view } => Ok(Some(*view)),
+            _ => Err(DomainError::Protocol("inspect receipt has no view".into())),
+        }
     }
 }
 pub struct TelegramAdapter {

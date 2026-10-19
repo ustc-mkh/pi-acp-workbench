@@ -65,6 +65,16 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
         void this.view?.webview.postMessage(message).then(undefined, () => {});
       },
     });
+    this.resources.push(
+      ...[
+        vscode.workspace.onDidChangeWorkspaceFolders?.(() =>
+          this.controller.invalidateAuthorization(),
+        ),
+        vscode.workspace.onDidGrantWorkspaceTrust?.(() =>
+          this.controller.invalidateAuthorization(),
+        ),
+      ].filter((item): item is vscode.Disposable => Boolean(item)),
+    );
   }
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
@@ -74,13 +84,14 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
     const uri = (file: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(dist, file));
     view.webview.html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${view.webview.cspSource}; style-src ${view.webview.cspSource} 'unsafe-inline'; font-src ${view.webview.cspSource}; img-src data:; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${view.webview.cspSource}; style-src ${view.webview.cspSource} 'unsafe-inline'; font-src ${view.webview.cspSource}; img-src blob:; connect-src 'none';">
 <link rel="stylesheet" href="${uri('style.css')}"><link rel="stylesheet" href="${uri('katex.min.css')}"></head>
 <body><main id="workbench"></main><script type="module" nonce="${nonce}" src="${uri('webview.js')}"></script></body></html>`;
     this.resources.push(
       view.webview.onDidReceiveMessage((message: unknown) => void this.controller.receive(message)),
       view.onDidDispose(() => {
         if (this.view === view) this.view = undefined;
+        this.controller.invalidateAuthorization();
       }),
     );
   }

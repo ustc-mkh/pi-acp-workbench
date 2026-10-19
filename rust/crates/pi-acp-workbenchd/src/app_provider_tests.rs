@@ -34,22 +34,15 @@ fn config(root: &std::path::Path) -> Config {
         },
     }
 }
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> super::fork_tests::Evidence {
+    super::fork_tests::inspect(app, id).await
 }
 
 #[tokio::test]
 async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_cold_restart_preserves_patches(
 ) {
     use crate::domain::{
-        tool::{ToolContent, ToolKind, ToolStatus},
+        tool::{ToolKind, ToolStatus},
         ToolCallId,
     };
     let root =
@@ -65,7 +58,7 @@ async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_co
             })
             .await
             .unwrap();
-        let DomainEvent::SessionCreated(session) = &created[0] else {
+        let CommandReceipt::Created { summary: session } = created else {
             panic!("created")
         };
         prompt(&app, &session.id, "tool-metadata").await;
@@ -74,15 +67,15 @@ async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_co
         let tools = snapshot.transcript.tools.values().next().unwrap();
         let edit = &tools[&ToolCallId::new("tool:edit").unwrap()];
         assert_eq!(edit.status, ToolStatus::Completed);
-        assert_eq!(edit.details.kind, Some(ToolKind::Edit));
-        assert_eq!(edit.details.name.as_deref(), Some("apply_patch"));
-        assert_eq!(edit.details.locations[0].line, Some(0));
+        assert_eq!(edit.kind, Some(ToolKind::Edit));
+        assert_eq!(edit.name.as_deref(), Some("apply_patch"));
+        assert_eq!(edit.locations[0].line, Some(0));
         assert!(
-            matches!(&edit.details.content[0], ToolContent::Diff { old_text: Some(old), new_text, .. } if old == "before" && new_text == "after")
+            matches!(&edit.content[0], crate::domain::query::ToolBody::Diff { old_text: Some(old), new_text, .. } if app.delivery_payloads().content(old).await.unwrap() == "before" && app.delivery_payloads().content(new_text).await.unwrap() == "after")
         );
         let clear = &tools[&ToolCallId::new("tool:clear").unwrap()];
-        assert_eq!(clear.details.kind, Some(ToolKind::Read));
-        assert!(clear.details.content.is_empty() && clear.details.locations.is_empty());
+        assert_eq!(clear.kind, Some(ToolKind::Read));
+        assert!(clear.content.is_empty() && clear.locations.is_empty());
         let serialized = serde_json::to_vec(&snapshot.transcript).unwrap();
         assert!(!String::from_utf8_lossy(&serialized).contains("NOT_IN_DOMAIN"));
         saved.push((session.id.clone(), serialized));
@@ -122,7 +115,7 @@ async fn app_routes_each_harness_to_its_launch_and_disabled_harness_is_inspectab
             })
             .await
             .unwrap();
-        let DomainEvent::SessionCreated(snapshot) = &created[0] else {
+        let CommandReceipt::Created { summary: snapshot } = created else {
             panic!("create")
         };
         let id = snapshot.id.clone();
@@ -170,8 +163,7 @@ async fn app_routes_each_harness_to_its_launch_and_disabled_harness_is_inspectab
             .await,
         Err(DomainError::ProviderNotConfigured)
     ));
-    let listed = second.command(DomainCommand::ListSessions).await.unwrap();
-    assert!(matches!(&listed[0], DomainEvent::SessionsListed(sessions) if sessions.len() == 3));
+    assert_eq!(second.list(None, None).await.unwrap().sessions.len(), 3);
     second.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -219,7 +211,7 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
             })
             .await
             .unwrap();
-        let DomainEvent::SessionCreated(session) = &created[0] else {
+        let CommandReceipt::Created { summary: session } = created else {
             panic!("create {name}")
         };
         let id = session.id.clone();
@@ -320,9 +312,17 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
         .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if matches!(events.recv().await.unwrap(), DomainEvent::TurnCancelled { session, .. } if session == id) { break; }
+                if events.recv().await.unwrap().view.is_some_and(|view| {
+                    view.id == id
+                        && view.active_turn.is_none()
+                        && matches!(view.status, SessionStatus::Idle)
+                }) {
+                    break;
+                }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let cancelled = inspect(&app, &id).await;
         assert!(matches!(cancelled.status, SessionStatus::Idle));
         assert!(cancelled.pending_interactions.is_empty() && cancelled.active_turn.is_none());
@@ -332,9 +332,15 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
         prompt(&app, &id, "crash").await;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if matches!(events.recv().await.unwrap(), DomainEvent::SessionError { session, .. } if session == id) { break; }
+                if events.recv().await.unwrap().view.is_some_and(|view| {
+                    view.id == id && matches!(view.status, SessionStatus::Failed(_))
+                }) {
+                    break;
+                }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(matches!(
             inspect(&app, &id).await.status,
             SessionStatus::Failed(_)
@@ -414,11 +420,15 @@ async fn configured_interaction_limit_is_enforced_before_exposing_excess_provide
     let count = tokio::time::timeout(Duration::from_secs(5), async {
         let mut count = 0;
         loop {
-            match events.recv().await.unwrap() {
-                DomainEvent::InteractionRequested { .. } => count += 1,
-                DomainEvent::SessionError { .. } => break count,
-                DomainEvent::TurnFinished { .. } => panic!("limit must fail closed"),
-                _ => {}
+            if let Some(view) = events.recv().await.unwrap().view {
+                count = count.max(view.pending_interactions.len());
+                match view.status {
+                    SessionStatus::Failed(_) => break count,
+                    SessionStatus::Idle if view.active_turn.is_none() => {
+                        panic!("limit must fail closed")
+                    }
+                    _ => {}
+                }
             }
         }
     })

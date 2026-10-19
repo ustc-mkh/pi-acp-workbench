@@ -1,24 +1,19 @@
 use super::*;
 
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
-async fn wait_failed(events: &mut broadcast::Receiver<DomainEvent>) {
+async fn wait_failed(events: &mut broadcast::Receiver<CommitBatch>) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match events.recv().await.unwrap() {
-                DomainEvent::SessionError { .. } => break,
-                DomainEvent::TurnFinished { .. } => {
-                    panic!("foreign notification was accepted as successful turn")
+            if let Some(view) = events.recv().await.unwrap().view {
+                match view.status {
+                    SessionStatus::Failed(_) => break,
+                    SessionStatus::Idle if view.active_turn.is_none() => {
+                        panic!("foreign notification was accepted as successful turn")
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     })
@@ -56,15 +51,11 @@ async fn load_drains_three_thousand_replay_updates_and_cancels_old_interactions_
     wait_finished(&mut events).await;
     let after = inspect(&second, &id).await;
     assert_eq!(before.provider_session, after.provider_session);
-    assert_eq!(
-        after.transcript.entries.len(),
-        before.transcript.entries.len() + 2
-    );
-    assert!(!after
-        .transcript
-        .entries
+    assert_eq!(after.last_entry_seq.get(), before.last_entry_seq.get() + 2);
+    assert!(!history_text(&second, &id)
+        .await
         .iter()
-        .any(|entry| entry.text.starts_with("replayed") || entry.text.starts_with("old user")));
+        .any(|text| text.starts_with("replayed") || text.starts_with("old user")));
     assert!(after.pending_interactions.is_empty());
     assert!(after.plan.items.is_empty());
     #[derive(serde::Deserialize)]
@@ -196,11 +187,10 @@ async fn foreign_native_session_notification_cannot_append_to_turn_and_worker_ca
     wait_failed(&mut events).await;
     let failed = inspect(&app, &id).await;
     assert!(matches!(failed.status, SessionStatus::Failed(_)));
-    assert!(!failed
-        .transcript
-        .entries
+    assert!(!history_text(&app, &id)
+        .await
         .iter()
-        .any(|entry| entry.text == "must-not-enter-history"));
+        .any(|text| text == "must-not-enter-history"));
     prompt(&app, &id, "recovered").await;
     wait_finished(&mut events).await;
     assert_eq!(
@@ -237,10 +227,7 @@ async fn foreign_native_session_notification_during_load_is_rejected_before_disp
     let after = inspect(&second, &id).await;
     assert_eq!(after.provider_session, before.provider_session);
     assert_eq!(after.catalogue, before.catalogue);
-    assert_eq!(
-        after.transcript.entries.len(),
-        before.transcript.entries.len() + 1
-    );
+    assert_eq!(after.last_entry_seq.get(), before.last_entry_seq.get() + 1);
     second.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

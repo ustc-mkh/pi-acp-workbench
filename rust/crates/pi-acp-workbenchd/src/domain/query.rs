@@ -351,7 +351,19 @@ impl CommitBatch {
         for tool in &self.tools {
             tool.validate()?;
         }
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            r#type: &'static str,
+            batch: &'a CommitBatch,
+        }
+        json_bytes(
+            &Envelope {
+                r#type: "batch",
+                batch: self,
+            },
+            MAX_QUERY_BYTES,
+        )
+        .map(|_| ())
     }
 }
 
@@ -363,6 +375,30 @@ pub fn json_bytes<T: Serialize>(value: &T, budget: usize) -> Result<Vec<u8>, Que
     }
     Ok(bytes)
 }
+/// Worst-case safe request ID accounts for every byte in the production
+/// query envelope. Smaller IDs cannot cause a previously fitting page to grow.
+pub fn query_bytes<T: Serialize>(kind: &str, value: &T) -> Result<Vec<u8>, QueryError> {
+    #[derive(Serialize)]
+    struct Result<'a, T> {
+        kind: &'a str,
+        value: &'a T,
+    }
+    #[derive(Serialize)]
+    struct Envelope<'a, T> {
+        r#type: &'static str,
+        id: u64,
+        result: Result<'a, T>,
+    }
+    json_bytes(
+        &Envelope {
+            r#type: "query",
+            id: MAX_SAFE_INTEGER,
+            result: Result { kind, value },
+        },
+        MAX_QUERY_BYTES,
+    )
+}
+
 pub fn limit(value: Option<usize>, default: usize, maximum: usize) -> Result<usize, QueryError> {
     let n = value.unwrap_or(default);
     if n == 0 || n > maximum {
@@ -443,6 +479,22 @@ pub struct ContentSlice {
 pub struct Attached {
     pub view: SessionView,
     pub recent_page: HistoryPage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum QueryResult {
+    List(ListPage),
+    View(Box<SessionView>),
+    History(HistoryPage),
+    Tools(ToolPage),
+    Content(ContentSlice),
+    Attached(Box<Attached>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -542,11 +594,31 @@ impl QueryCommand {
     }
 }
 impl CommandReceipt {
+    pub fn view(&self) -> Option<&SessionView> {
+        match self {
+            Self::Loaded { view } => Some(view),
+            _ => None,
+        }
+    }
     pub fn validate(&self) -> Result<(), QueryError> {
         if let Self::Loaded { view } = self {
             view.validate()?;
         }
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            r#type: &'static str,
+            id: u64,
+            receipt: &'a CommandReceipt,
+        }
+        json_bytes(
+            &Envelope {
+                r#type: "reply",
+                id: MAX_SAFE_INTEGER,
+                receipt: self,
+            },
+            MAX_QUERY_BYTES,
+        )
+        .map(|_| ())
     }
 }
 impl HistoryPage {
@@ -557,7 +629,7 @@ impl HistoryPage {
         for entry in &self.entries {
             entry.text.validate()?;
         }
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        query_bytes("history", self).map(|_| ())
     }
 }
 impl ListPage {
@@ -565,7 +637,7 @@ impl ListPage {
         if self.sessions.len() > MAX_LIST_LIMIT {
             return Err(QueryError::TooLarge);
         }
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        query_bytes("list", self).map(|_| ())
     }
 }
 impl ToolPage {
@@ -576,14 +648,14 @@ impl ToolPage {
         for tool in &self.tools {
             tool.validate()?;
         }
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        query_bytes("tools", self).map(|_| ())
     }
 }
 impl Attached {
     pub fn validate(&self) -> Result<(), QueryError> {
         self.view.validate()?;
         self.recent_page.validate()?;
-        json_bytes(self, MAX_QUERY_BYTES).map(|_| ())
+        query_bytes("attached", self).map(|_| ())
     }
 }
 impl ContentSlice {

@@ -1,35 +1,24 @@
 use super::*;
-use crate::domain::OperationId;
-
 #[tokio::test]
-async fn inspect_and_list_return_snapshots_without_broadcasting_query_echoes() {
+async fn inspect_and_list_are_bounded_cold_queries_without_broadcasting_echoes() {
     let (app, root) = app();
     let session = create(&app).await;
     let mut events = app.subscribe();
     for _ in 0..25 {
-        let inspected = app
-            .command(DomainCommand::Inspect(session.clone()))
+        assert_eq!(inspect_view(&app, &session).await.id, session);
+        assert_eq!(app.list(None, None).await.unwrap().sessions.len(), 1);
+        let QueryResult::Attached(attached) = app
+            .query(QueryCommand::Attach {
+                session: session.clone(),
+            })
             .await
-            .unwrap();
-        assert!(
-            matches!(&inspected[0], DomainEvent::SessionLoaded(snapshot) if snapshot.id == session)
-        );
-        let listed = app.command(DomainCommand::ListSessions).await.unwrap();
-        assert!(
-            matches!(&listed[0], DomainEvent::SessionsListed(snapshots) if snapshots.len() == 1)
-        );
+            .unwrap()
+        else {
+            panic!("attach query");
+        };
+        assert_eq!(attached.view.id, session);
+        assert!(attached.recent_page.entries.is_empty());
     }
-    assert!(matches!(
-        events.try_recv(),
-        Err(broadcast::error::TryRecvError::Empty)
-    ));
-    // Explicit durable query semantics do not turn its response into a change.
-    app.command_durable(
-        OperationId::generate(),
-        DomainCommand::Inspect(session.clone()),
-    )
-    .await
-    .unwrap();
     assert!(matches!(
         events.try_recv(),
         Err(broadcast::error::TryRecvError::Empty)
@@ -37,9 +26,13 @@ async fn inspect_and_list_return_snapshots_without_broadcasting_query_echoes() {
     app.command(DomainCommand::LoadSession(session.clone()))
         .await
         .unwrap();
-    assert!(
-        matches!(events.recv().await.unwrap(), DomainEvent::SessionLoaded(snapshot) if snapshot.id == session)
-    );
+    // Unchanged hot loads must not manufacture revisions or event echoes.
+    assert!(matches!(
+        events.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(inspect_view(&app, &session).await.revision.get(), 0);
+    assert!(app.core.adapters.lock().await.is_empty());
     app.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }

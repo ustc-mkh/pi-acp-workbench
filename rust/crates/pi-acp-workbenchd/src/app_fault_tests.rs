@@ -1,15 +1,8 @@
 use super::*;
 use crate::domain::interaction::{InteractionAnswer, InteractionResponse};
 
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
 
 #[tokio::test]
@@ -71,7 +64,9 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
         assert_eq!(inspect(&app, &id).await.revision, failed.revision);
         let mut saw_failure = false;
         while let Ok(event) = events.try_recv() {
-            saw_failure |= matches!(event, DomainEvent::SessionError { .. });
+            saw_failure |= event
+                .view
+                .is_some_and(|view| matches!(view.status, SessionStatus::Failed(_)));
         }
         assert!(saw_failure);
         prompt(&app, &id, "replacement after failed answer").await;
@@ -89,8 +84,10 @@ async fn provider_rpc_error_description_cannot_escape_into_domain_or_persisted_h
     prompt(&app, &id, "rpc-error-secret").await;
     let error = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let DomainEvent::SessionError { error, .. } = events.recv().await.unwrap() {
-                break error;
+            if let Some(view) = events.recv().await.unwrap().view {
+                if let SessionStatus::Failed(error) = view.status {
+                    break error;
+                }
             }
         }
     })
@@ -98,14 +95,7 @@ async fn provider_rpc_error_description_cannot_escape_into_domain_or_persisted_h
     .unwrap();
     assert!(error.contains("session/prompt"));
     assert!(!error.contains("SENSITIVE_PROVIDER_DESCRIPTION"));
-    let persisted = app
-        .core
-        .history
-        .clone()
-        .load(id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
+    let persisted = inspect_view(&app, &id).await;
     assert!(!serde_json::to_string(&persisted)
         .unwrap()
         .contains("SENSITIVE_PROVIDER_DESCRIPTION"));

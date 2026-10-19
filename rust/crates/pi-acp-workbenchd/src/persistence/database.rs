@@ -5,8 +5,8 @@ use crate::domain::{
         CommitBatch, ContentRef, HistoryCursor, HistoryPage, ListCursor, ListPage, QueryError,
         SafeInteger, SessionSummary, SessionView,
     },
-    transition::{DeliveryIntent, NewContent, NewEntry, ToolUpdate},
-    SessionId, SessionState,
+    transition::Transition,
+    SessionId,
 };
 use serde::Serialize;
 use std::{
@@ -68,25 +68,46 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StoreError> {
     Ok(serde_json::to_string(value)?)
 }
 
-#[derive(Clone, Debug)]
-pub struct SessionCommit {
-    pub expected_revision: SafeInteger,
-    pub next: SessionView,
-    /// Immutable notice/interaction archives committed with their delivery refs.
-    pub contents: Vec<NewContent>,
-    pub append: Vec<NewEntry>,
-    pub tool_updates: Vec<ToolUpdate>,
-    pub deliveries: Vec<DeliveryIntent>,
-    pub view_changed: bool,
-}
 type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
 pub(super) enum StoreRequest {
+    Attached {
+        session: SessionId,
+        reply: Reply<crate::domain::query::Attached>,
+    },
+    Tools {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        cursor: Option<crate::domain::query::ToolCursor>,
+        limit: Option<usize>,
+        reply: Reply<crate::domain::query::ToolPage>,
+    },
+    Remove {
+        session: SessionId,
+        reply: Reply<CommitBatch>,
+    },
+    Tool {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        tool: crate::domain::ToolCallId,
+        reply: Reply<Option<crate::domain::query::ToolHeader>>,
+    },
+    PrepareFork {
+        view: Box<SessionView>,
+        request: crate::domain::fork::ForkRequest,
+        candidates: Vec<crate::domain::fork::ForkCandidate>,
+        reply: Reply<crate::domain::fork::ForkPlan>,
+    },
+    AdoptFork {
+        plan: Box<crate::domain::fork::ForkPlan>,
+        native: crate::domain::ProviderSessionId,
+        reply: Reply<(SessionView, SessionSummary)>,
+    },
     Create {
         view: Box<SessionView>,
         reply: Reply<SessionSummary>,
     },
     Commit {
-        commit: Box<SessionCommit>,
+        commit: Box<Transition>,
         reply: Reply<CommitBatch>,
     },
     View {
@@ -104,13 +125,18 @@ pub(super) enum StoreRequest {
         limit: Option<usize>,
         reply: Reply<HistoryPage>,
     },
+    ContentSlice {
+        content: ContentRef,
+        offset: SafeInteger,
+        length: Option<usize>,
+        reply: Reply<crate::domain::query::ContentSlice>,
+    },
     Content {
         content: ContentRef,
         reply: Reply<String>,
     },
     Delivery(Box<super::delivery::Request>),
     Payload(Box<super::payload::Request>),
-    SessionState(Box<super::session_state::Request>),
     TelegramInbox(Box<super::inbox::Request>),
     TelegramEffect(Box<super::telegram_effect::Request>),
     Journal(Box<super::journal::Request>),
@@ -130,6 +156,9 @@ struct Inner {
     thread: Mutex<Option<JoinHandle<()>>>,
     finished: Mutex<Option<oneshot::Receiver<Result<(), StoreError>>>>,
     shutdown: tokio::sync::Mutex<()>,
+    shutdown_started: Mutex<bool>,
+    shutdown_result: Arc<Mutex<Option<Result<(), StoreError>>>>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 #[derive(Clone)]
 pub struct Database {
@@ -171,6 +200,80 @@ impl Database {
                 // A reply is an observer, not ownership of an accepted transaction.
                 while let Some(request) = requests.blocking_recv() {
                     match request {
+                        StoreRequest::Attached { session, reply } => {
+                            let result = (|| {
+                                let tx = connection.transaction()?;
+                                let mut attached = crate::domain::query::Attached {
+                                    view: query::view(&tx, &session)?,
+                                    recent_page: query::history(&tx, &session, None, None)?,
+                                };
+                                while attached.validate().is_err() {
+                                    if attached.recent_page.entries.len() <= 1 {
+                                        return Err(
+                                            crate::domain::query::QueryError::TooLarge.into()
+                                        );
+                                    }
+                                    attached.recent_page.entries.remove(0);
+                                    attached.recent_page.next_cursor =
+                                        Some(crate::domain::query::HistoryCursor {
+                                            version: crate::domain::query::ProtocolVersion,
+                                            session: session.clone(),
+                                            max_entry_seq: attached.view.last_entry_seq,
+                                            before_seq: attached.recent_page.entries[0].seq,
+                                        });
+                                }
+                                tx.commit()?;
+                                Ok(attached)
+                            })();
+                            let _ = reply.send(result);
+                        }
+                        StoreRequest::Tools {
+                            session,
+                            turn,
+                            cursor,
+                            limit,
+                            reply,
+                        } => {
+                            let _ = reply.send(query::tools(
+                                &connection,
+                                &session,
+                                &turn,
+                                cursor,
+                                limit,
+                            ));
+                        }
+                        StoreRequest::Remove { session, reply } => {
+                            let _ = reply.send(query::remove(&mut connection, &session));
+                        }
+                        StoreRequest::Tool {
+                            session,
+                            turn,
+                            tool,
+                            reply,
+                        } => {
+                            let _ = reply.send(query::tool(&connection, &session, &turn, &tool));
+                        }
+                        StoreRequest::PrepareFork {
+                            view,
+                            request,
+                            candidates,
+                            reply,
+                        } => {
+                            let result = (|| {
+                                let tx = connection.transaction()?;
+                                let plan = super::fork::prepare(&tx, &view, &request, &candidates)?;
+                                tx.commit()?;
+                                Ok(plan)
+                            })();
+                            let _ = reply.send(result);
+                        }
+                        StoreRequest::AdoptFork {
+                            plan,
+                            native,
+                            reply,
+                        } => {
+                            let _ = reply.send(super::fork::adopt(&mut connection, *plan, native));
+                        }
                         StoreRequest::Create { view, reply } => {
                             let _ = reply.send(query::create(&mut connection, &view));
                         }
@@ -196,6 +299,19 @@ impl Database {
                             let _ =
                                 reply.send(query::history(&connection, &session, cursor, limit));
                         }
+                        StoreRequest::ContentSlice {
+                            content,
+                            offset,
+                            length,
+                            reply,
+                        } => {
+                            let _ = reply.send(super::content::slice(
+                                &connection,
+                                &content,
+                                offset,
+                                length,
+                            ));
+                        }
                         StoreRequest::Content { content, reply } => {
                             let _ = reply.send(super::content::read_text(&connection, &content));
                         }
@@ -216,9 +332,6 @@ impl Database {
                         }
                         StoreRequest::Payload(request) => {
                             super::payload::execute(&mut connection, *request);
-                        }
-                        StoreRequest::SessionState(request) => {
-                            super::session_state::run(&mut connection, *request);
                         }
                         StoreRequest::TelegramInbox(request) => {
                             super::telegram_sql::execute(&mut connection, *request);
@@ -248,6 +361,9 @@ impl Database {
                     thread: Mutex::new(Some(thread)),
                     finished: Mutex::new(Some(done)),
                     shutdown: tokio::sync::Mutex::new(()),
+                    shutdown_started: Mutex::new(false),
+                    shutdown_result: Arc::new(Mutex::new(None)),
+                    shutdown_notify: Arc::new(tokio::sync::Notify::new()),
                 }),
             }),
             Err(error) => {
@@ -266,38 +382,98 @@ impl Database {
             .ok_or(StoreError::Closed)?;
         sender.send(request).await.map_err(|_| StoreError::Closed)
     }
-    pub async fn load_state(&self, id: SessionId) -> Result<Option<SessionState>, StoreError> {
+    pub async fn content_slice(
+        &self,
+        content: ContentRef,
+        offset: SafeInteger,
+        length: Option<usize>,
+    ) -> Result<crate::domain::query::ContentSlice, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::SessionState(Box::new(
-            super::session_state::Request::Load { id, reply },
-        )))
+        self.enqueue(StoreRequest::ContentSlice {
+            content,
+            offset,
+            length,
+            reply,
+        })
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn list_states(&self) -> Result<Vec<SessionState>, StoreError> {
+    pub async fn attached(
+        &self,
+        session: SessionId,
+    ) -> Result<crate::domain::query::Attached, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::SessionState(Box::new(
-            super::session_state::Request::List { reply },
-        )))
+        self.enqueue(StoreRequest::Attached { session, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn tools(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        cursor: Option<crate::domain::query::ToolCursor>,
+        limit: Option<usize>,
+    ) -> Result<crate::domain::query::ToolPage, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Tools {
+            session,
+            turn,
+            cursor,
+            limit,
+            reply,
+        })
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn save_state(&self, state: SessionState) -> Result<(), StoreError> {
+    pub async fn remove(&self, session: SessionId) -> Result<CommitBatch, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::SessionState(Box::new(
-            super::session_state::Request::Save {
-                state: Box::new(state),
-                reply,
-            },
-        )))
+        self.enqueue(StoreRequest::Remove { session, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn tool(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        tool: crate::domain::ToolCallId,
+    ) -> Result<Option<crate::domain::query::ToolHeader>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Tool {
+            session,
+            turn,
+            tool,
+            reply,
+        })
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn remove_state(&self, id: SessionId) -> Result<(), StoreError> {
+    pub async fn prepare_fork(
+        &self,
+        view: SessionView,
+        request: crate::domain::fork::ForkRequest,
+        candidates: Vec<crate::domain::fork::ForkCandidate>,
+    ) -> Result<crate::domain::fork::ForkPlan, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::SessionState(Box::new(
-            super::session_state::Request::Remove { id, reply },
-        )))
+        self.enqueue(StoreRequest::PrepareFork {
+            view: Box::new(view),
+            request,
+            candidates,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn adopt_fork(
+        &self,
+        plan: crate::domain::fork::ForkPlan,
+        native: crate::domain::ProviderSessionId,
+    ) -> Result<(SessionView, SessionSummary), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::AdoptFork {
+            plan: Box::new(plan),
+            native,
+            reply,
+        })
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
@@ -310,7 +486,7 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn commit(&self, commit: SessionCommit) -> Result<CommitBatch, StoreError> {
+    pub async fn commit(&self, commit: Transition) -> Result<CommitBatch, StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Commit {
             commit: Box::new(commit),
@@ -455,6 +631,7 @@ impl Database {
     /// Heads for immutable persisted targets, including deferred heads when
     /// now=MAX_SAFE_INTEGER. Dynamic Telegram binding resolution stays with
     /// the adapter until its own store migration; this is not a topic resolver.
+    #[cfg(test)]
     pub async fn delivery_target_heads(
         &self,
         now: SafeInteger,
@@ -467,6 +644,7 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
+    #[cfg(test)]
     pub async fn pending_delivery_records(
         &self,
         now: SafeInteger,
@@ -479,6 +657,19 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
+    pub async fn dispatch_snapshot(
+        &self,
+        bot: i64,
+        limit: usize,
+    ) -> Result<super::delivery::DispatchSnapshot, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Delivery(Box::new(
+            super::delivery::Request::DispatchSnapshot { bot, limit, reply },
+        )))
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    #[cfg(test)]
     pub async fn delivery_topic_heads(
         &self,
         now: SafeInteger,
@@ -527,33 +718,68 @@ impl Database {
     }
     pub async fn shutdown(&self) -> Result<(), StoreError> {
         let _shutdown = self.inner.shutdown.lock().await;
-        self.inner
-            .sender
-            .lock()
-            .expect("sender lock poisoned")
-            .take();
-        let done = self
-            .inner
-            .finished
-            .lock()
-            .expect("finish lock poisoned")
-            .take();
-        let result = match done {
-            Some(done) => done.await.unwrap_or(Err(StoreError::Closed)),
-            None => Ok(()),
+        let should_start = {
+            let mut started = self
+                .inner
+                .shutdown_started
+                .lock()
+                .expect("shutdown lock poisoned");
+            if *started {
+                false
+            } else {
+                *started = true;
+                true
+            }
         };
-        if let Some(thread) = self
-            .inner
-            .thread
-            .lock()
-            .expect("thread lock poisoned")
-            .take()
-        {
-            thread
-                .join()
-                .map_err(|_| StoreError::Invalid("database thread panicked"))?;
+        if should_start {
+            self.inner
+                .sender
+                .lock()
+                .expect("sender lock poisoned")
+                .take();
+            let done = self
+                .inner
+                .finished
+                .lock()
+                .expect("finish lock poisoned")
+                .take();
+            let thread = self
+                .inner
+                .thread
+                .lock()
+                .expect("thread lock poisoned")
+                .take();
+            let result_cell = Arc::clone(&self.inner.shutdown_notify);
+            let result_store = self.inner.shutdown_result.clone();
+            tokio::spawn(async move {
+                let result = match done {
+                    Some(done) => done.await.unwrap_or(Err(StoreError::Closed)),
+                    None => Ok(()),
+                };
+                let result = if let Some(thread) = thread {
+                    match tokio::task::spawn_blocking(move || thread.join()).await {
+                        Ok(Ok(())) => result,
+                        Ok(Err(_)) | Err(_) => Err(StoreError::Invalid("database thread panicked")),
+                    }
+                } else {
+                    result
+                };
+                *result_store.lock().expect("shutdown result lock poisoned") = Some(result);
+                result_cell.notify_waiters();
+            });
         }
-        result
+        loop {
+            if let Some(result) = self
+                .inner
+                .shutdown_result
+                .lock()
+                .expect("shutdown result lock poisoned")
+                .clone()
+            {
+                return result;
+            }
+            self.inner.shutdown_notify.notified().await;
+        }
     }
 }
 impl Drop for Inner {

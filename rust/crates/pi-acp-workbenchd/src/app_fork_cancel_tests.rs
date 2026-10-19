@@ -2,7 +2,7 @@ use super::fork_tests::{inspect, native_config, setup};
 use super::*;
 use crate::domain::{fork::ForkRequest, OperationId};
 use tokio::sync::Notify;
-fn fork(source: &SessionId, snapshot: &crate::domain::session::SessionSnapshot) -> DomainCommand {
+fn fork(source: &SessionId, snapshot: &super::fork_tests::Evidence) -> DomainCommand {
     DomainCommand::Fork {
         session: source.clone(),
         request: ForkRequest {
@@ -79,7 +79,7 @@ async fn queued_fork_cancellation_bypasses_a_saturated_lane_without_touching_its
     .unwrap()
     .unwrap();
     assert!(
-        matches!(&cancelled[..], [DomainEvent::ForkCancelled { session, operation: target }] if session == &source && target == &operation)
+        matches!(&cancelled, CommandReceipt::ForkCancelRequested { source: session, operation: target } if session == &source && target == &operation)
     );
     assert!(matches!(
         ticket.wait().await,
@@ -263,8 +263,8 @@ async fn cancel_admission_persistence_failure_cannot_touch_the_remote_fork() {
         .await
         .unwrap();
     assert!(matches!(
-        ticket.wait().await.unwrap().as_slice(),
-        [DomainEvent::SessionCreated(_)]
+        ticket.wait().await.unwrap(),
+        CommandReceipt::Forked { .. }
     ));
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();

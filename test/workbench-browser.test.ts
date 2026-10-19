@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { createHash } from 'node:crypto';
-import { emptySnapshot } from './helpers/workbench-peer';
+import { emptyView } from './helpers/workbench-peer';
 import { entryId, imageRef } from '../src/workbench-protocol';
 import type { UiCommand, WorkbenchUiState } from '../src/workbench-ui';
 let dom: JSDOM | undefined;
@@ -20,11 +20,20 @@ async function browser() {
     postMessage: (message: UiCommand) => sent.push(message),
   }));
   await import('../webview/workbench-main');
-  const snapshot = emptySnapshot();
+  const snapshot = emptyView();
   const state: WorkbenchUiState = {
-    sessions: [snapshot],
+    sessions: [
+      {
+        id: snapshot.id,
+        harness: snapshot.harness,
+        cwd: snapshot.cwd,
+        status: snapshot.status,
+        revision: snapshot.revision,
+        created_seq: 1,
+      },
+    ],
     selected: snapshot.id,
-    view: { status: 'ready', snapshot, provisional: [] },
+    view: { status: 'ready', view: snapshot, entries: [], tools: [], historical: false },
     operations: [],
     trusted: true,
     workspace: '/workspace',
@@ -43,17 +52,23 @@ async function browser() {
 }
 it('renders committed rows without merging group deltas, never fetching markdown/tool URIs', async () => {
   const b = await browser(),
-    snapshot = b.state.view!.snapshot!;
+    snapshot = b.state.view!.view!;
   expect(b.sent).toEqual([{ type: 'ready' }]);
-  snapshot.transcript.entries = ['hello ', '世界'].map((text, i) => ({
-    id: entryId.parse(`e-${i}`),
-    turn: 'turn' as never,
-    role: 'Agent',
-    text,
-    message: undefined,
-  }));
-  snapshot.transcript.entries[1].text +=
-    '\n\n![evil](https://example.invalid/image.png) <script>window.pwned=true</script>';
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      'hello ',
+      '世界\n\n![evil](https://example.invalid/image.png) <script>window.pwned=true</script>',
+    ].map((text, i) => ({
+      seq: i + 1,
+      id: entryId.parse(`e-${i}`),
+      turn: 'turn' as never,
+      role: 'Agent',
+      text: { Inline: { text } },
+      message: null,
+      image: null,
+    })),
+  };
   b.update();
   await expect.poll(() => b.document.querySelectorAll('article').length).toBe(2);
   expect(b.document.querySelector('img')).toBeNull();
@@ -73,7 +88,7 @@ it('renders committed rows without merging group deltas, never fetching markdown
 });
 it('only explicit matching archive image responses become data URLs; source URIs never authorize reads', async () => {
   const b = await browser(),
-    snapshot = b.state.view!.snapshot!;
+    snapshot = b.state.view!.view!;
   const bytes = Buffer.alloc(24);
   Buffer.from('\x89PNG\r\n\x1a\n', 'latin1').copy(bytes);
   bytes.write('IHDR', 12);
@@ -83,13 +98,20 @@ it('only explicit matching archive image responses become data URLs; source URIs
     bytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   });
-  snapshot.transcript.entries.push({
-    id: entryId.parse('entry'),
-    turn: 'turn' as never,
-    role: 'Agent',
-    text: '',
-    image: ref,
-  });
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('entry'),
+        turn: 'turn' as never,
+        role: 'Agent',
+        text: { Inline: { text: '' } },
+        image: ref,
+        message: null,
+      },
+    ],
+  };
   b.update();
   await expect.poll(() => b.document.querySelector('figure')).not.toBeNull();
   expect(b.document.querySelector('img')).toBeNull();
@@ -97,19 +119,22 @@ it('only explicit matching archive image responses become data URLs; source URIs
   [...b.document.querySelectorAll('button')]
     .find((button) => button.textContent === 'Load archived image')!
     .click();
-  expect(b.sent.at(-1)).toEqual({ type: 'read_image', session: snapshot.id, image: ref });
+  expect(b.sent.at(-1)).toEqual({
+    type: 'read_image',
+    session: snapshot.id,
+    image: ref,
+    request_id: 1,
+  });
   const asset = { format_version: 1, image: ref, data: bytes.toString('base64') };
   b.post({ type: 'image', session: 'other', asset });
   await new Promise((resolve) => setTimeout(resolve, 25));
   expect(b.document.querySelector('img')).toBeNull();
   b.post({ type: 'image', session: snapshot.id, asset });
-  await expect
-    .poll(() => b.document.querySelector('img')?.src)
-    .toBe(`data:image/png;base64,${asset.data}`);
+  await expect.poll(() => b.document.querySelector('img')?.src).toMatch(/^blob:/);
 });
 it('preserves typed form drafts while refreshing snapshots and submits permission/form answers by exact ID', async () => {
   const b = await browser(),
-    snapshot = b.state.view!.snapshot!;
+    snapshot = b.state.view!.view!;
   snapshot.pending_interactions = {
     permission: {
       id: 'permission' as never,
@@ -182,7 +207,7 @@ it('preserves typed form drafts while refreshing snapshots and submits permissio
 });
 it('allows explicit recovery from Failed without enabling native forks and isolates draft text by session', async () => {
   const b = await browser();
-  b.state.view!.snapshot!.status = { Failed: 'worker exited' };
+  b.state.view!.view!.status = { Failed: 'worker exited' };
   b.update();
   await expect
     .poll(() => b.document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled)
@@ -194,12 +219,12 @@ it('allows explicit recovery from Failed without enabling native forks and isola
       .disabled,
   ).toBe(false);
   expect(b.document.querySelector('[role=alert]')!.textContent).toBe('worker exited');
-  const original = b.state.view!.snapshot!;
-  const other = { ...emptySnapshot(), id: 'other' as never };
+  const original = b.state.view!.view!;
+  const other = { ...emptyView(), id: 'other' as never };
   b.state = {
     ...b.state,
     selected: other.id,
-    view: { status: 'ready', snapshot: other, provisional: [] },
+    view: { status: 'ready', view: other, entries: [], tools: [], historical: false },
   };
   b.update(2);
   await expect.poll(() => prompt.value).toBe('');
@@ -207,7 +232,7 @@ it('allows explicit recovery from Failed without enabling native forks and isola
   b.state = {
     ...b.state,
     selected: original.id,
-    view: { status: 'ready', snapshot: original, provisional: [] },
+    view: { status: 'ready', view: original, entries: [], tools: [], historical: false },
   };
   b.update(3);
   await expect.poll(() => prompt.value).toBe('source draft');

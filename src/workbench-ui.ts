@@ -17,24 +17,53 @@ import {
   imageRef,
   operationId,
   sessionId,
-  sessionSnapshot,
-  transcriptEntry,
-  type DomainEvent,
+  sessionSummary,
+  sessionView,
+  entryHeader,
+  toolHeader,
+  toolCursor,
+  turnId,
+  historyCursor,
+  listCursor,
+  contentRef,
+  type ContentRef,
+  type ContentSlice,
   type ImageAsset,
   type OperationId,
-  type SessionSnapshot,
+  type SessionSummary,
+  type ListCursor,
 } from './workbench-protocol';
 import type { WorkbenchSessionView } from './workbench-session';
 
 // Only user-originated commands; no internal event/ACP request or caller-selected operation ID.
 export const uiCommand = tagged('type', {
   ready: object({ type: literal('ready') }),
-  refresh: object({ type: literal('refresh') }),
+  refresh: object({ type: literal('refresh'), cursor: optional(listCursor) }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
   execute: object({ type: literal('execute'), session: sessionId, command: clientCommand }),
   cancel_fork: object({ type: literal('cancel_fork'), operation: operationId }),
-  read_image: object({ type: literal('read_image'), session: sessionId, image: imageRef }),
+  read_tools: object({
+    type: literal('read_tools'),
+    session: sessionId,
+    turn: turnId,
+    cursor: optional(toolCursor),
+  }),
+  read_content: object({
+    type: literal('read_content'),
+    session: sessionId,
+    ref: contentRef,
+    offset: uint,
+    request_id: optional(uint),
+  }),
+  earlier: object({ type: literal('earlier'), session: sessionId }),
+  latest: object({ type: literal('latest'), session: sessionId }),
+  read_image: object({
+    type: literal('read_image'),
+    session: sessionId,
+    image: imageRef,
+    request_id: optional(uint),
+  }),
 });
 export type UiCommand = Infer<typeof uiCommand>;
 export interface UiOperation {
@@ -46,7 +75,8 @@ export interface UiOperation {
   error?: string;
 }
 export interface WorkbenchUiState {
-  sessions: SessionSnapshot[];
+  sessions: SessionSummary[];
+  sessionsCursor?: ListCursor;
   selected?: string;
   view?: WorkbenchSessionView;
   operations: UiOperation[];
@@ -57,16 +87,28 @@ export interface WorkbenchUiState {
 export type WorkbenchUiMessage =
   | { type: 'state'; sequence: number; state: WorkbenchUiState }
   | { type: 'prompt_accepted'; session: string; text: string }
-  | { type: 'image'; session: string; asset: ImageAsset }
-  | { type: 'image_error'; session: string; image: string; error: string };
-export function listed(events: DomainEvent[]) {
-  for (const event of events) if ('SessionsListed' in event) return event.SessionsListed;
-  throw new Error('Session list response missing');
-}
+  | { type: 'image'; session: string; request_id?: number; asset: ImageAsset }
+  | {
+      type: 'content';
+      session: string;
+      request_id?: number;
+      ref: ContentRef;
+      offset: number;
+      slice: ContentSlice;
+    }
+  | { type: 'image_error'; session: string; request_id?: number; image: string; error: string }
+  | {
+      type: 'content_error';
+      session: string;
+      request_id?: number;
+      ref: ContentRef;
+      offset: number;
+      error: string;
+    };
 // Shared output validation keeps the browser from trusting partial/old extension state.
-const row = transcriptEntry;
 export const uiState = object({
-  sessions: array(sessionSnapshot),
+  sessions: array(sessionSummary),
+  sessionsCursor: optional(listCursor),
   selected: optional(string),
   view: optional(
     object({
@@ -77,8 +119,12 @@ export const uiState = object({
         removed: null,
         disconnected: null,
       }),
-      snapshot: optional(sessionSnapshot),
-      provisional: array(row),
+      view: optional(sessionView),
+      entries: array(entryHeader),
+      tools: array(toolHeader),
+      toolCursor: optional(toolCursor),
+      earlier: optional(historyCursor),
+      historical: boolean,
       error: optional(string),
     }),
   ),

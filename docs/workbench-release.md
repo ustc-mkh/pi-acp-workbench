@@ -48,7 +48,7 @@ For a manual foreground check after configuration:
 ./pi-acp-workbenchd --config /absolute/path/workbench.json
 ```
 
-VS Code must use the matching current-source VSIX and [IPC v2](workbench-ipc.md) socket `<storage.root>/workbench.sock`. The extension does not start the daemon. See [VS Code](workbench-vscode.md) for trust/canonical-workspace checks and UI limits.
+VS Code must use the matching current-source VSIX and [IPC v3](workbench-ipc.md) socket `<storage.root>/workbench.sock`. The extension does not start the daemon. See [VS Code](workbench-vscode.md) for trust/canonical-workspace checks and UI limits.
 
 ## Stop, inspect and back up before replacement
 

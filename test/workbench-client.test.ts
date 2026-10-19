@@ -3,14 +3,15 @@ import { createHash } from 'node:crypto';
 import { WorkbenchError, WORKBENCH_LIMITS } from '../src/workbench-client';
 import {
   clientCommand,
-  domainEvent,
+  commitBatch,
   entryId,
   imageRef,
   operationId,
   sessionId,
-  sessionSnapshot,
+  sessionView,
 } from '../src/workbench-protocol';
-import { emptySnapshot, workbenchPeer } from './helpers/workbench-peer';
+import { emptyView, workbenchPeer } from './helpers/workbench-peer';
+const accepted = { Accepted: { session: sessionId.parse('session'), revision: 1 } };
 
 const peers: Awaited<ReturnType<typeof workbenchPeer>>[] = [];
 async function fixture() {
@@ -34,40 +35,32 @@ it('correlates out-of-order replies, live events and resync without a legacy env
   let resync = 0,
     observerErrors = 0;
   client.observe({
-    event() {
+    batch() {
       throw new Error('bad UI observer');
     },
     observerError() {
       observerErrors++;
     },
   });
-  client.observe({ event: (event) => events.push(event), resync: () => resync++ });
+  client.observe({ batch: (batch) => events.push(batch), resync: () => resync++ });
   const operation = operationId.parse('stable-operation');
   const first = client.request({ method: 'prompt', session, prompt: 'hello 世界' }, { operation });
   const second = client.request(query);
   await expect.poll(() => peer.requests.length).toBe(2);
   expect(peer.requests.map(({ socket: _, ...request }) => request)).toMatchObject([
-    { version: 2, id: first.id, operation, command: { method: 'prompt', prompt: 'hello 世界' } },
-    { version: 2, id: second.id, command: query },
+    { version: 3, id: first.id, operation, command: { method: 'prompt', prompt: 'hello 世界' } },
+    { version: 3, id: second.id, command: query },
   ]);
   expect(peer.requests[1].operation).toBeUndefined();
-  peer.reply(peer.requests[1], [{ SessionLoaded: emptySnapshot() }]);
+  peer.query(peer.requests[1], 'view', emptyView());
   peer.send(peer.requests[0].socket, {
-    type: 'event',
-    event: {
-      AgentText: {
-        session,
-        turn: 'turn',
-        entry: 'entry',
-        message: 'opaque group',
-        text: '你好😀',
-      },
-    },
+    type: 'batch',
+    batch: { session, revision: 1, view: emptyView(), entries: [], tools: [], removed: false },
   });
   peer.send(peer.requests[0].socket, { type: 'resync_required' });
   const result = await second.result;
-  expect(result).toHaveLength(1);
-  peer.reply(peer.requests[0]);
+  expect(result).toEqual(emptyView());
+  peer.reply(peer.requests[0], accepted);
   await first.result;
   expect(events).toHaveLength(1);
   expect(resync).toBe(1);
@@ -99,7 +92,7 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
   expect(() => client.request({ method: 'prompt', session, prompt: 'still full' })).toThrow(
     'pool is full',
   );
-  peer.reply(peer.requests[0]);
+  peer.reply(peer.requests[0], accepted);
   await expect
     .poll(() => {
       try {
@@ -112,8 +105,11 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
     })
     .toBeGreaterThan(24);
   // Old response IDs cannot consume the replacement's observer.
-  peer.reply(peer.requests[0]);
-  for (const request of peer.requests.slice(1)) peer.reply(request);
+  peer.reply(peer.requests[0], accepted);
+  for (const request of peer.requests.slice(1)) {
+    if (request.command.method === 'inspect') peer.query(request, 'view', emptyView());
+    else peer.reply(request, accepted);
+  }
   await Promise.all([...ordinary.slice(1), ...control, ...queries].map((t) => t.result));
 });
 
@@ -135,7 +131,7 @@ it('abandonment before connection sends nothing and does not generate cancellati
   expect(peer.requests).toHaveLength(0);
   const read = client.request(query);
   await expect.poll(() => peer.requests.length).toBe(1);
-  peer.reply(peer.requests[0]);
+  peer.query(peer.requests[0], 'view', emptyView());
   await read.result;
   expect(peer.requests[0].command.method).toBe('inspect');
 });
@@ -154,7 +150,7 @@ it('observer timeout retains its operation and never emits cancel or retries', a
   });
   await expect.poll(() => peer.requests.length).toBe(1);
   await failed;
-  peer.reply(peer.requests[0]);
+  peer.reply(peer.requests[0], accepted);
   await pause(20);
   expect(peer.requests).toHaveLength(1);
 });
@@ -177,7 +173,7 @@ it('disconnect rejects accepted observers and explicit reconnect does not resend
   await expect.poll(() => peer.requests.length).toBe(2);
   expect(next.id).toBeGreaterThan(first.id);
   expect(peer.requests[1].command.method).toBe('list');
-  peer.reply(peer.requests[1], [{ SessionsListed: [] }]);
+  peer.query(peer.requests[1], 'list', { sessions: [], next_cursor: null });
   await next.result;
 });
 
@@ -204,16 +200,16 @@ it('preserves split UTF-8 and does not slide an incomplete-frame deadline', asyn
   await expect.poll(() => peer.requests.length).toBe(1);
   const body = Buffer.from(
     JSON.stringify({
-      type: 'reply',
+      type: 'query',
       id: ticket.id,
-      events: [{ SessionError: { session, error: '😀世界' } }],
+      result: { kind: 'view', value: { ...emptyView(), status: { Failed: '😀世界' } } },
     }) + '\n',
   );
   const split = body.indexOf(Buffer.from('😀')) + 2;
   peer.requests[0].socket.write(body.subarray(0, split));
   await pause(10);
   peer.requests[0].socket.write(body.subarray(split));
-  expect(await ticket.result).toEqual([{ SessionError: { session, error: '😀世界' } }]);
+  expect((await ticket.result).status).toEqual({ Failed: '😀世界' });
   WORKBENCH_LIMITS.partialMs = 50;
   const held = client.request(query),
     failed = expect(held.result).rejects.toMatchObject({ code: 'protocol' });
@@ -322,20 +318,31 @@ describe('boundary validation', () => {
     ])
       expect(() => clientCommand.parse(value)).toThrow();
     expect(() =>
-      domainEvent.parse({ AgentText: { session, turn: 'turn', text: 'missing entry' } }),
-    ).toThrow();
-    expect(() =>
-      domainEvent.parse({
-        AgentImage: { session, turn: 'turn', entry: 'entry', image: asset().image, data: 'pixels' },
+      commitBatch.parse({
+        session,
+        revision: 1,
+        entries: [{ text: 'missing entry' }],
+        tools: [],
+        view: null,
+        removed: false,
       }),
     ).toThrow();
-    expect(() => domainEvent.parse({ ForkPrepared: {} })).toThrow();
     expect(() =>
-      sessionSnapshot.parse({ ...emptySnapshot(), revision: Number.MAX_SAFE_INTEGER + 1 }),
+      commitBatch.parse({
+        session,
+        revision: 1,
+        view: null,
+        entries: [],
+        tools: [],
+        removed: false,
+        data: 'pixels',
+      }),
     ).toThrow();
+    expect(() => commitBatch.parse({ ForkPrepared: {} })).toThrow();
     expect(() =>
-      sessionSnapshot.parse({ ...emptySnapshot(), cwd: '/workspace/../elsewhere' }),
+      sessionView.parse({ ...emptyView(), revision: Number.MAX_SAFE_INTEGER + 1 }),
     ).toThrow();
+    expect(() => sessionView.parse({ ...emptyView(), cwd: '/workspace/../elsewhere' })).toThrow();
   });
   it('forbids operation IDs on image/subscription requests before connecting', async () => {
     const peer = await fixture(),
@@ -343,7 +350,7 @@ describe('boundary validation', () => {
       operation = operationId.parse('op');
     for (const command of [
       { method: 'image' as const, image: asset().image },
-      { method: 'subscribe' as const, session },
+      { method: 'attach' as const, session },
     ])
       expect(() => client.request(command, { operation })).toThrow(WorkbenchError);
     await pause(10);

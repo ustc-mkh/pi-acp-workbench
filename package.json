@@ -137,6 +137,8 @@
     "workbench:storage": "node scripts/workbench-storage.mjs",
     "test:workbench:storage": "npm run build:workbenchd && vitest run test/workbench-storage.test.ts",
     "test:workbench:process-loss": "npm run build:workbenchd && node scripts/workbench-process-loss.mjs",
+    "test:workbench:startup": "npm run build:workbenchd && node scripts/workbench-startup.mjs",
+    "test:workbench:scale": "cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle -- --nocapture && node scripts/workbench-scale.mjs",
     "test:workbench:soak": "npm run build:workbenchd && node scripts/workbench-soak.mjs",
     "check:protocol": "npm run check",
     "test:service:artifact": "node scripts/service-artifact-smoke.mjs",

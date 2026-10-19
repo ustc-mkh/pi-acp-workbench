@@ -12,7 +12,7 @@ use crate::{
         Config, LimitsConfig, SessionsConfig, StorageConfig, TelegramConfig, WorkerConfig,
         WorkersConfig,
     },
-    domain::{DomainCommand, DomainEvent},
+    domain::{query::CommitBatch, DomainCommand, SessionStatus},
     persistence::outbox::DeliveryFailure,
 };
 use std::{
@@ -190,13 +190,15 @@ async fn execute(context: &Context<Fake>) {
         execute_record(context, &record).await.unwrap();
     }
 }
-async fn finished(events: &mut tokio::sync::broadcast::Receiver<DomainEvent>) {
+async fn finished(events: &mut tokio::sync::broadcast::Receiver<CommitBatch>) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match events.recv().await.unwrap() {
-                DomainEvent::TurnFinished { .. } => break,
-                DomainEvent::SessionError { error, .. } => panic!("{error}"),
-                _ => {}
+            if let Some(view) = events.recv().await.unwrap().view {
+                match view.status {
+                    SessionStatus::Idle if view.active_turn.is_none() => break,
+                    SessionStatus::Failed(error) => panic!("{error}"),
+                    _ => {}
+                }
             }
         }
     })
@@ -236,10 +238,13 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
     execute(&context).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if matches!(
-                events.recv().await.unwrap(),
-                DomainEvent::InteractionRequested { .. }
-            ) {
+            if events
+                .recv()
+                .await
+                .unwrap()
+                .view
+                .is_some_and(|view| !view.pending_interactions.is_empty())
+            {
                 break;
             }
         }
@@ -278,9 +283,7 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
         .await
         .unwrap()
         .unwrap()
-        .transcript
-        .entries
-        .len();
+        .last_entry_seq;
     api.0.lock().await.fail_send = true;
     deliver_once(&context).await.unwrap();
     let pending = app.delivery_store().pending(u64::MAX, 16).await.unwrap();
@@ -300,9 +303,7 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
             .await
             .unwrap()
             .unwrap()
-            .transcript
-            .entries
-            .len(),
+            .last_entry_seq,
         before
     );
     assert_eq!(api.0.lock().await.answers, 1);
@@ -392,8 +393,12 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
     poll_once(&context).await.unwrap();
     execute(&context).await;
     finished(&mut events).await;
-    let before = context.inspect(&session).await.unwrap().unwrap().transcript;
-    let image = before
+    let before = context.inspect(&session).await.unwrap().unwrap();
+    let image = first
+        .database()
+        .history(session.clone(), None, None)
+        .await
+        .unwrap()
         .entries
         .iter()
         .find_map(|entry| entry.image.clone())
@@ -467,7 +472,7 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
         .unwrap()
         .is_empty());
     assert_eq!(
-        serde_json::to_vec(&context.inspect(&session).await.unwrap().unwrap().transcript).unwrap(),
+        serde_json::to_vec(&context.inspect(&session).await.unwrap().unwrap()).unwrap(),
         serde_json::to_vec(&before).unwrap()
     );
     assert_eq!(
@@ -486,9 +491,12 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
 async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archive_order() {
     use crate::{
         domain::{
+            fork::ContentHash,
             image::ImageAsset,
-            transcript::{EntryRole, TranscriptEntry},
-            DeliveryId, EntryId, ProviderMessageId, TurnId,
+            query::{ContentKind, ContentRef, SafeInteger},
+            transcript::EntryRole,
+            transition::{NewContent, NewEntry, Transition},
+            ContentId, DeliveryId, EntryId, ProviderMessageId, TurnId,
         },
         persistence::outbox::{DeliveryEvent, DeliveryPayload},
     };
@@ -506,7 +514,15 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
     app.delivery_payloads().put_image(&asset).await.unwrap();
     let turn = TurnId::generate();
     let group = ProviderMessageId::generate();
-    let mut ids = Vec::new();
+    let mut view = crate::domain::tests::state();
+    view.cwd = config().workspace;
+    app.database().create(view.clone()).await.unwrap();
+    context
+        .store
+        .bind(topic.clone(), view.id.clone())
+        .await
+        .unwrap();
+    let mut append = Vec::new();
     for (text, image, message) in [
         ("前", None, group.clone()),
         ("🌏", None, group.clone()),
@@ -514,23 +530,47 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
         ("后🌏", None, group),
         ("next", None, ProviderMessageId::generate()),
     ] {
-        let entry = TranscriptEntry {
+        let sha256 = ContentHash::of(text);
+        append.push(NewEntry {
             id: EntryId::generate(),
             turn: turn.clone(),
             role: EntryRole::Agent,
-            text: text.into(),
             message: Some(message),
-            image,
-        };
-        app.delivery_payloads().put_entry(&entry).await.unwrap();
-        ids.push(entry.id);
+            text: NewContent {
+                content: ContentRef {
+                    id: ContentId::new(format!("fixture-{}", sha256.as_str())).unwrap(),
+                    sha256,
+                    bytes: SafeInteger::new(text.len() as u64).unwrap(),
+                    kind: ContentKind::Text,
+                },
+                text: text.into(),
+            },
+            image: image.map(|_| asset.clone()),
+        });
     }
-    app.delivery_store()
-        .enqueue(DeliveryEvent {
-            id: DeliveryId::generate(),
-            target: topic.delivery_target(99, config().workspace),
-            revision: crate::domain::query::SafeInteger::new(1).unwrap(),
-            payload: DeliveryPayload::Entries { turn, entries: ids },
+    view.revision = SafeInteger::new(1).unwrap();
+    view.last_entry_seq = SafeInteger::new(5).unwrap();
+    app.database()
+        .commit(Transition {
+            expected_revision: Default::default(),
+            next: view.clone(),
+            append,
+            contents: vec![],
+            tool_updates: vec![],
+            deliveries: vec![DeliveryEvent {
+                id: DeliveryId::generate(),
+                target: crate::domain::transition::DeliveryTarget::Session {
+                    session: view.id.clone(),
+                    cwd: view.cwd.clone(),
+                },
+                revision: view.revision,
+                payload: DeliveryPayload::Turn {
+                    session: view.id,
+                    turn,
+                    first_seq: SafeInteger::new(1).unwrap(),
+                    last_seq: SafeInteger::new(5).unwrap(),
+                },
+            }],
         })
         .await
         .unwrap();
@@ -580,9 +620,7 @@ async fn topic_creation_committed_but_response_lost_never_creates_a_second_topic
     execute_record(&context, &record).await.unwrap();
     execute_record(&context, &record).await.unwrap();
     assert_eq!(api.0.lock().await.topics, 1);
-    assert!(
-        matches!(&app.command(DomainCommand::ListSessions).await.unwrap()[0], DomainEvent::SessionsListed(sessions) if sessions.is_empty())
-    );
+    assert!(app.list(None, None).await.unwrap().sessions.is_empty());
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -641,9 +679,7 @@ async fn restart_between_side_effect_and_inbox_completion_replays_topic_and_sess
     execute(&restarted).await;
     deliver_once(&restarted).await.unwrap();
     assert_eq!(api.0.lock().await.topics, 1);
-    assert!(
-        matches!(&second.command(DomainCommand::ListSessions).await.unwrap()[0], DomainEvent::SessionsListed(sessions) if sessions.len() == 1)
-    );
+    assert_eq!(second.list(None, None).await.unwrap().sessions.len(), 1);
     assert_eq!(api.0.lock().await.sent.len(), 1);
     let (topic, session) = restarted
         .store

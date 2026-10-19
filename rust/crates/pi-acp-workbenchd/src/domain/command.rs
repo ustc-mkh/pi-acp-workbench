@@ -36,7 +36,7 @@ pub enum DomainCommand {
         candidates: Vec<super::fork::ForkCandidate>,
     },
     AdoptFork {
-        projection: Box<super::fork::ForkProjection>,
+        projection: Box<super::fork::ForkPlan>,
         native: ProviderSessionId,
     },
     SetModel {

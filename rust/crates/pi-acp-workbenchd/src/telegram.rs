@@ -9,6 +9,7 @@ mod execution;
 mod polling;
 pub mod render;
 pub mod runtime;
+pub(crate) mod turn_stream;
 pub use runtime::TelegramAdapter;
 pub mod state;
 pub mod types;

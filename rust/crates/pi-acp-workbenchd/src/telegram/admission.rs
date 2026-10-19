@@ -4,7 +4,7 @@ use super::{
     types::{ChatId, IncomingContent, IncomingUpdate, UserId},
 };
 use crate::{
-    domain::{error::DomainError, SessionSnapshot, WorkspacePath},
+    domain::{error::DomainError, query::SessionView, WorkspacePath},
     persistence::inbox::{Admission, AdmissionResult, TelegramStore},
 };
 use std::collections::BTreeSet;
@@ -16,12 +16,11 @@ pub struct AdmissionPolicy {
 pub async fn admit_update(
     store: &TelegramStore,
     update: IncomingUpdate,
-    snapshot: Option<&SessionSnapshot>,
+    snapshot: Option<&SessionView>,
     policy: &AdmissionPolicy,
     now: u64,
 ) -> Result<AdmissionResult, DomainError> {
-    let state = store.snapshot().await?;
-    let expected_binding = state.bindings.get(&update.topic).cloned();
+    let expected_binding = store.binding(&update.topic).await?;
     let snapshot = snapshot.filter(|snapshot| expected_binding.as_ref() == Some(&snapshot.id));
     let mut callback = None;
     let mut query = None;
@@ -42,10 +41,10 @@ pub async fn admit_update(
                 query: callback_query,
             } => {
                 query = Some(callback_query);
+                let callback_binding = store.callback(&key).await?;
                 let answer = (|| {
-                    let binding = state
-                        .callbacks
-                        .get(&key)
+                    let binding = callback_binding
+                        .as_ref()
                         .ok_or(RejectionReason::InvalidCallback)?;
                     if binding.topic != update.topic {
                         return Err(RejectionReason::WrongTopic);

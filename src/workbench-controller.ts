@@ -5,10 +5,11 @@ import {
   type ClientCommand,
   type OperationId,
   type SessionId,
-  type SessionSnapshot,
+  type SessionSummary,
+  type ContentRef,
+  type ListCursor,
 } from './workbench-protocol';
 import {
-  listed,
   uiCommand,
   type UiOperation,
   type WorkbenchUiMessage,
@@ -29,7 +30,10 @@ export class WorkbenchController {
   private closed = false;
   private sequence = 0;
   private listRequest = 0;
+  private listCursor?: ListCursor;
   private listFlight?: Promise<void>;
+  private authorizationGeneration = 0;
+  private uiRequest = 0;
   private emitTimer?: NodeJS.Timeout;
   private operations: UiOperation[] = [];
   private workflows = new Map<
@@ -77,7 +81,7 @@ export class WorkbenchController {
       switch (message.type) {
         case 'ready':
         case 'refresh':
-          await this.refresh();
+          await this.refresh(message.type === 'refresh' ? message.cursor : undefined);
           if (this.selected?.view.status !== 'disconnected') await this.selected?.refresh();
           break;
         case 'select':
@@ -85,14 +89,13 @@ export class WorkbenchController {
           break;
         case 'create': {
           if (message.command.method !== 'create') throw new Error('Only create is allowed here');
-          await this.authorize(message.command.cwd);
-          const events = await this.execute(message.command);
-          if (!Array.isArray(events)) throw new Error('Invalid create result');
-          const created = events.find((event) => 'SessionCreated' in event);
-          if (!created || !('SessionCreated' in created))
+          const token = await this.authorize(message.command.cwd);
+          this.assertAuthorization(token);
+          const result = await this.execute(message.command);
+          if (!result || typeof result !== 'object' || !('Created' in result))
             throw new Error('Created session missing');
-          await this.refresh();
-          await this.select(created.SessionCreated.id);
+          this.upsert(result.Created.summary);
+          await this.select(result.Created.summary.id);
           break;
         }
         case 'execute': {
@@ -110,7 +113,7 @@ export class WorkbenchController {
             )
           )
             throw new Error('Command is not a user mutation');
-          const snapshot = selected.view.snapshot;
+          const snapshot = selected.view.view;
           const control = ['cancel', 'answer', 'remove'].includes(message.command.method);
           if (
             !snapshot ||
@@ -119,20 +122,28 @@ export class WorkbenchController {
               : selected.view.status !== 'ready')
           )
             throw new Error('Refresh the authoritative session before modifying it');
-          await this.authorize(snapshot.cwd);
-          if (this.selected !== selected || selected.view.snapshot?.cwd !== snapshot.cwd)
+          let token = await this.authorize(snapshot.cwd);
+          this.assertAuthorization(token);
+          if (this.selected !== selected || selected.view.view?.cwd !== snapshot.cwd)
+            throw new Error('Session changed while authorizing');
+          if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
+          if (this.selected !== selected || selected.view.view?.cwd !== snapshot.cwd)
             throw new Error('Session changed while authorizing');
           if (message.command.method === 'fork') {
             const entry = message.command.request.entry;
-            if (!snapshot.transcript.entries.some((row) => row.id === entry))
+            if (!selected.view.entries.some((row) => row.id === entry))
               throw new Error('Fork entry is not in the committed transcript');
           }
           if (['prompt', 'set_model', 'set_mode'].includes(message.command.method)) {
             // Inspect remains cold. Only an explicit authorized user mutation loads a peer.
             await this.execute({ method: 'load', session: selected.id });
+            this.assertAuthorization(token);
             if (this.closed || this.selected !== selected)
               throw new Error('Session selection changed during load');
+            if (this.closed || !this.ports.trusted() || this.ports.workspace() !== token.workspace)
+              throw new Error('Workspace trust changed');
           }
+          this.assertAuthorization(token);
           const result = await this.execute(message.command);
           if (message.command.method === 'prompt' && this.selected === selected && !this.closed) {
             this.ports.post({
@@ -141,13 +152,21 @@ export class WorkbenchController {
               text: message.command.prompt,
             });
           }
-          if (message.command.method === 'fork' && Array.isArray(result)) {
-            const created = result.find((event) => 'SessionCreated' in event);
-            if (created && 'SessionCreated' in created && this.selected === selected)
-              await this.select(created.SessionCreated.id);
+          if (
+            message.command.method === 'fork' &&
+            result &&
+            typeof result === 'object' &&
+            'Forked' in result
+          ) {
+            this.upsert(result.Forked.summary);
+            if (this.selected === selected) await this.select(result.Forked.summary.id);
           }
-          await this.refresh();
-          if (this.selected === selected) await selected.refresh();
+          if (message.command.method === 'remove') {
+            this.invalidateList();
+            this.state.sessions = this.state.sessions.filter(
+              (summary) => summary.id !== selected.id,
+            );
+          }
           break;
         }
         case 'cancel_fork': {
@@ -157,7 +176,8 @@ export class WorkbenchController {
           const source = workflow.command.session;
           const snapshot = this.state.sessions.find((session) => session.id === source);
           if (!snapshot) throw new Error('Fork source is unavailable');
-          await this.authorize(snapshot.cwd);
+          const token = await this.authorize(snapshot.cwd);
+          this.assertAuthorization(token);
           await this.execute({
             method: 'cancel_fork',
             session: workflow.command.session,
@@ -165,14 +185,82 @@ export class WorkbenchController {
           });
           break;
         }
+        case 'earlier':
+        case 'latest': {
+          if (this.selected?.id !== message.session) throw new Error('Session selection changed');
+          if (message.type === 'earlier') await this.selected.earlier();
+          else await this.selected.latest();
+          break;
+        }
+        case 'read_tools': {
+          if (
+            this.selected?.id !== message.session ||
+            !this.selected.view.entries.some((entry) => entry.turn === message.turn)
+          )
+            throw new Error('Tool turn not in visible page');
+          await this.selected.loadTools(message.turn, message.cursor);
+          break;
+        }
+        case 'read_content': {
+          const selected = this.selected;
+          if (!selected || selected.id !== message.session)
+            throw new Error('Content session selection changed');
+          const refs: ContentRef[] = selected.view.entries.flatMap((row) =>
+            'Archived' in row.text ? [row.text.Archived.content] : [],
+          );
+          for (const tool of selected.view.tools)
+            for (const body of tool.content) {
+              if ('Text' in body) refs.push(body.Text.content);
+              if ('ResourceText' in body) refs.push(body.ResourceText.content);
+              if ('Diff' in body) {
+                if (body.Diff.old_text) refs.push(body.Diff.old_text);
+                refs.push(body.Diff.new_text);
+              }
+            }
+          const ref = refs.find(
+            (ref) =>
+              ref.id === message.ref.id &&
+              ref.sha256 === message.ref.sha256 &&
+              ref.bytes === message.ref.bytes &&
+              ref.kind === message.ref.kind,
+          );
+          if (!ref) throw new Error('Content reference is not in this confirmed view');
+          const request_id = message.request_id ?? ++this.uiRequest;
+          try {
+            const slice = await this.client.call({
+              method: 'content',
+              ref,
+              offset: message.offset,
+            });
+            if (slice.sha256 !== ref.sha256 || slice.total_bytes !== ref.bytes)
+              throw new Error('Content descriptor mismatch');
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'content',
+                session: selected.id,
+                request_id,
+                ref,
+                offset: message.offset,
+                slice,
+              });
+          } catch {
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'content_error',
+                session: selected.id,
+                request_id,
+                ref,
+                offset: message.offset,
+                error: 'Content archive read failed',
+              });
+          }
+          break;
+        }
         case 'read_image': {
           const selected = this.selected;
           if (!selected || selected.id !== message.session)
             throw new Error('Image session selection changed');
-          const rows = [
-            ...(selected.view.snapshot?.transcript.entries || []),
-            ...selected.view.provisional,
-          ];
+          const rows = selected.view.entries;
           const ref = rows.find((row) => row.image?.id === message.image.id)?.image;
           if (
             !ref ||
@@ -181,15 +269,17 @@ export class WorkbenchController {
             ref.sha256 !== message.image.sha256
           )
             throw new Error('Image reference is not in this session view');
+          const request_id = message.request_id ?? ++this.uiRequest;
           try {
             const asset = await this.client.call({ method: 'image', image: ref });
             if (this.selected === selected && !this.closed)
-              this.ports.post({ type: 'image', session: selected.id, asset });
+              this.ports.post({ type: 'image', session: selected.id, request_id, asset });
           } catch {
             if (this.selected === selected && !this.closed)
               this.ports.post({
                 type: 'image_error',
                 session: selected.id,
+                request_id,
                 image: ref.id,
                 error: 'Image archive read failed',
               });
@@ -205,16 +295,51 @@ export class WorkbenchController {
   }
   private async authorize(cwd: string) {
     if (!this.ports.trusted()) throw new Error('Workspace trust is required');
+    const token = {
+      generation: ++this.authorizationGeneration,
+      cwd,
+      workspace: this.ports.workspace(),
+    };
     await this.ports.authorize(cwd);
-    if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
+    this.assertAuthorization(token);
+    return token;
   }
-  refresh(): Promise<void> {
+  private assertAuthorization(token: {
+    generation: number;
+    cwd: string;
+    workspace: string | undefined;
+  }) {
+    if (
+      this.closed ||
+      !this.ports.trusted() ||
+      token.generation !== this.authorizationGeneration ||
+      token.workspace !== this.ports.workspace()
+    )
+      throw new Error('Workspace trust changed');
+  }
+  invalidateAuthorization() {
+    this.authorizationGeneration++;
+  }
+  private invalidateList() {
+    this.listRequest++;
+    this.listCursor = undefined;
+    this.state.sessionsCursor = undefined;
+  }
+  private upsert(summary: SessionSummary) {
+    this.invalidateList();
+    this.state.sessions = [summary, ...this.state.sessions.filter((item) => item.id !== summary.id)]
+      .sort((a, b) => b.created_seq - a.created_seq)
+      .slice(0, 100);
+  }
+  refresh(cursor?: ListCursor): Promise<void> {
     if (this.listFlight) return this.listFlight;
     const request = ++this.listRequest;
+    this.listCursor = cursor;
     const task = (async () => {
-      const events = await this.client.call({ method: 'list' });
+      const events = await this.client.call({ method: 'list', cursor: this.listCursor });
       if (!this.closed && request === this.listRequest) {
-        this.state.sessions = listed(events);
+        this.state.sessions = events.sessions;
+        this.state.sessionsCursor = events.next_cursor ?? undefined;
         this.emit();
       }
     })();
@@ -284,6 +409,7 @@ export class WorkbenchController {
     this.closed = true;
     this.selection++;
     this.listRequest++;
+    this.authorizationGeneration++;
     clearTimeout(this.emitTimer);
     this.unobserve();
     void this.selected?.stop();

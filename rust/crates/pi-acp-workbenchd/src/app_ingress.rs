@@ -2,12 +2,13 @@
 //! session state. Dropping a caller's oneshot does not drop an accepted operation.
 use super::*;
 use crate::domain::OperationId;
+#[cfg(test)]
 use crate::persistence::outbox::DeliveryRecord;
 use std::collections::VecDeque;
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
-type Events = Result<Vec<DomainEvent>, DomainError>;
+type Events = Result<CommandReceipt, DomainError>;
 type Lookup = Result<Option<Events>, DomainError>;
 type Outcome = Result<(), DomainError>;
 pub(super) type IngressTasks = Arc<Mutex<JoinSet<Option<SessionId>>>>;
@@ -32,10 +33,19 @@ pub(super) enum Request {
         image: crate::domain::image::ImageRef,
         reply: oneshot::Sender<Result<crate::domain::image::ImageAsset, DomainError>>,
     },
+    Query {
+        command: crate::domain::query::QueryCommand,
+        reply: oneshot::Sender<Result<crate::domain::query::QueryResult, DomainError>>,
+    },
+    Dispatch {
+        bot: i64,
+        limit: usize,
+        reply: oneshot::Sender<Result<crate::persistence::delivery::DispatchSnapshot, DomainError>>,
+    },
+    #[cfg(test)]
     Deliveries {
         now: u64,
         limit: usize,
-        bindings: Option<crate::persistence::delivery::TopicSnapshot>,
         reply: oneshot::Sender<Result<Vec<DeliveryRecord>, DomainError>>,
     },
 }
@@ -57,8 +67,11 @@ impl Request {
                 ..
             }
             | Self::Lookup { .. }
-            | Self::Deliveries { .. }
+            | Self::Query { .. }
+            | Self::Dispatch { .. }
             | Self::Image { .. } => 2,
+            #[cfg(test)]
+            Self::Deliveries { .. } => 2,
             _ => 0,
         }
     }
@@ -96,6 +109,13 @@ impl Request {
             Self::Lookup { reply, .. } => {
                 let _ = reply.send(Err(stopping()));
             }
+            Self::Query { reply, .. } => {
+                let _ = reply.send(Err(stopping()));
+            }
+            Self::Dispatch { reply, .. } => {
+                let _ = reply.send(Err(stopping()));
+            }
+            #[cfg(test)]
             Self::Deliveries { reply, .. } => {
                 let _ = reply.send(Err(stopping()));
             }
@@ -308,26 +328,93 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
             };
             let _ = reply.send(result);
         }
-        Request::Deliveries {
-            now,
-            limit,
-            bindings,
-            reply,
-        } => {
+        Request::Query { command, reply } => {
+            let result = async {
+                if core.closed.load(Ordering::Acquire) {
+                    return Err(stopping());
+                }
+                use crate::domain::query::{QueryCommand as Q, QueryResult as R};
+                command.validate()?;
+                let result = match command {
+                    Q::List { cursor, limit } => {
+                        core.database.list(cursor, limit).await.map(R::List)
+                    }
+                    Q::Inspect { session } => core
+                        .database
+                        .view(session)
+                        .await
+                        .map(|view| R::View(Box::new(view))),
+                    Q::History {
+                        session,
+                        cursor,
+                        limit,
+                    } => core
+                        .database
+                        .history(session, cursor, limit)
+                        .await
+                        .map(R::History),
+                    Q::Tools {
+                        session,
+                        turn,
+                        cursor,
+                        limit,
+                    } => core
+                        .database
+                        .tools(session, turn, cursor, limit)
+                        .await
+                        .map(R::Tools),
+                    Q::Content {
+                        r#ref,
+                        offset,
+                        length,
+                    } => core
+                        .database
+                        .content_slice(r#ref, offset, length)
+                        .await
+                        .map(R::Content),
+                    Q::Attach { session } => core
+                        .database
+                        .attached(session)
+                        .await
+                        .map(|attached| R::Attached(Box::new(attached))),
+                    Q::Image { .. } => {
+                        return Err(DomainError::Protocol(
+                            "image query uses the image response".into(),
+                        ))
+                    }
+                };
+                result.map_err(|error| match error {
+                    crate::persistence::database::StoreError::NotFound => {
+                        DomainError::Protocol("query target not found".into())
+                    }
+                    crate::persistence::database::StoreError::Query(error) => {
+                        DomainError::Query(error)
+                    }
+                    other => DomainError::Persistence(other.to_string()),
+                })
+            }
+            .await;
+            let _ = reply.send(result);
+        }
+        Request::Dispatch { bot, limit, reply } => {
+            let result = if core.closed.load(Ordering::Acquire) {
+                Err(stopping())
+            } else {
+                core.database
+                    .dispatch_snapshot(bot, limit)
+                    .await
+                    .map_err(|error| DomainError::Persistence(error.to_string()))
+            };
+            let _ = reply.send(result);
+        }
+        #[cfg(test)]
+        Request::Deliveries { now, limit, reply } => {
             let result = async {
                 if core.closed.load(Ordering::Acquire) {
                     return Err(stopping());
                 }
                 // Session state, immutable archives and delivery intent commit atomically.
-                match bindings {
-                    Some((bindings, bot_id)) => {
-                        core.history
-                            .outbox
-                            .topic_heads(limit, bindings, bot_id)
-                            .await
-                    }
-                    None => core.history.outbox.pending(now, limit).await,
-                }
+                core.history.outbox.pending(now, limit).await
             }
             .await;
             let _ = reply.send(result);
@@ -364,7 +451,7 @@ async fn run(
                 _ => {}
             },
             _ = core.fork_controls.changed.notified() => {
-                // Cancellation targets a workflow, not a SessionState mutation.
+                // Cancellation targets a workflow, not a session state mutation.
                 // Cancelled queued forks only seal journal failures; they may
                 // bypass a slow earlier mutation without releasing its lane.
                 for queue in lanes.values_mut() {

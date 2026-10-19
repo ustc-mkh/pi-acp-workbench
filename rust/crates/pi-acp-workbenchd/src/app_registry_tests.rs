@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    domain::SessionState,
+    domain::query::{ListCursor, ListPage, SessionSummary},
     persistence::{format::StorageLease, interface::SessionPersistence},
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -29,26 +29,31 @@ impl Store {
     }
 }
 impl SessionPersistence for Store {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
-        self.history.load(id).await
+    crate::persistence::interface_test_helpers::delegate_session_aux!();
+    async fn load(&self, id: &SessionId) -> Result<Option<SessionView>, String> {
+        SessionPersistence::load(&self.history, id).await
     }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
+    async fn list(
+        &self,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<ListPage, String> {
         assert!(
             !self.panic_list.load(Ordering::Acquire),
             "fixture Registry IO panic"
         );
-        self.history.list().await
+        SessionPersistence::list(&self.history, cursor, limit).await
     }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
+    async fn create(&self, state: &SessionView) -> Result<SessionSummary, String> {
         if self.gate_save.load(Ordering::Acquire) {
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
         }
-        self.history.save(state).await
+        SessionPersistence::create(&self.history, state).await
     }
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         let pid = self.pid.load(Ordering::Acquire);
         if pid != 0
@@ -65,8 +70,8 @@ impl SessionPersistence for Store {
         }
         self.history.commit(change).await
     }
-    async fn remove(&self, id: &str) -> Result<(), String> {
-        self.history.remove(id).await
+    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
+        SessionPersistence::remove(&self.history, id).await
     }
 }
 #[tokio::test]
@@ -123,7 +128,7 @@ async fn registry_storage_panic_propagates_to_host_joins_worker_before_terminal_
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     assert!(!store.premature_terminal.load(Ordering::Acquire));
     assert!(app.core.adapters.lock().await.is_empty());
-    let saved = store.history.load(id.as_str()).await.unwrap().unwrap();
+    let saved = store.history.database().view(id.clone()).await.unwrap();
     assert!(saved.active_turn.is_none() && saved.pending_interactions.is_empty());
     assert!(StorageLease::lock(&root).is_err());
     assert!(app.shutdown_checked().await.is_err());
@@ -186,13 +191,13 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
             .is_err()
     );
     let app = app_at(&root);
-    assert_eq!(app.core.history.list().await.unwrap().len(), 1);
+    assert_eq!(app.list(None, None).await.unwrap().sessions.len(), 1);
     let replay = app.command_durable(operation, command).await.unwrap();
     assert_eq!(
         serde_json::to_string(&replay).unwrap(),
         serde_json::to_string(&receipt).unwrap()
     );
-    assert_eq!(app.core.history.list().await.unwrap().len(), 1);
+    assert_eq!(app.list(None, None).await.unwrap().sessions.len(), 1);
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

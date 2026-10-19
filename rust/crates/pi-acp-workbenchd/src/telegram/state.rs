@@ -1,10 +1,16 @@
+#[cfg(test)]
+use super::types::{CallbackBinding, TopicKey};
 use super::{
     command::TelegramCommand,
-    types::{CallbackBinding, CallbackKey, TopicKey, UpdateId, UserId},
+    types::{CallbackKey, UpdateId, UserId},
 };
-use crate::domain::{OperationId, SessionId};
+use crate::domain::OperationId;
+#[cfg(test)]
+use crate::domain::SessionId;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::BTreeMap;
+#[cfg(test)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramState {

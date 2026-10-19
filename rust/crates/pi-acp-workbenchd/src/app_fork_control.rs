@@ -1,4 +1,4 @@
-//! Bounded workflow metadata, not SessionState. Register synchronously at host
+//! Bounded workflow metadata, not session state. Register synchronously at host
 //! admission so cancellation also identifies a fork queued behind slow work.
 use super::*;
 use crate::domain::{fork::ForkRequest, OperationId};
@@ -82,7 +82,7 @@ impl CommandCore {
         &self,
         session: &SessionId,
         operation: &OperationId,
-    ) -> Result<Vec<DomainEvent>, DomainError> {
+    ) -> Result<CommandReceipt, DomainError> {
         let control = self.fork_controls.get(session, operation)?;
         // execute_journaled has already persisted this cancellation's Started.
         control.stop.cancel();
@@ -122,10 +122,10 @@ impl CommandCore {
         };
         match outcome {
             Ok(receipt) => Ok(receipt), // Confirmed success won the cancellation race.
-            Err(DomainError::ForkCancelled) => Ok(vec![DomainEvent::ForkCancelled {
-                session: session.clone(),
+            Err(DomainError::ForkCancelled) => Ok(CommandReceipt::ForkCancelRequested {
+                source: session.clone(),
                 operation: operation.clone(),
-            }]),
+            }),
             Err(error) => Err(error), // Never claim cancellation of an uncertain effect.
         }
     }

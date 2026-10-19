@@ -1,6 +1,6 @@
 //! Isolated SQLite integration proofs, including a real killed transaction.
 use super::{
-    database::{Database, SessionCommit, StoreError, StoreRequest},
+    database::{Database, StoreError, StoreRequest},
     format::StorageLease,
     query,
 };
@@ -8,7 +8,9 @@ use crate::domain::{
     fork::ContentHash,
     query::{ContentKind, ContentRef, SafeInteger, SessionView},
     transcript::EntryRole,
-    transition::{DeliveryIntent, DeliveryPayload, DeliveryTarget, NewContent, NewEntry},
+    transition::{
+        DeliveryIntent, DeliveryPayload, DeliveryTarget, NewContent, NewEntry, Transition,
+    },
     ContentId, DeliveryId, EntryId, SessionId, TurnId,
 };
 use rusqlite::{params, Connection};
@@ -48,7 +50,7 @@ pub(super) enum TestRequest {
         resume: std::sync::mpsc::Receiver<()>,
     },
     Rollback {
-        commit: Box<SessionCommit>,
+        commit: Box<Transition>,
         reply: TestReply<()>,
     },
     CorruptImage {
@@ -61,7 +63,7 @@ pub(super) enum TestRequest {
         reply: TestReply<()>,
     },
     Hold {
-        commit: Box<SessionCommit>,
+        commit: Box<Transition>,
         ready: PathBuf,
     },
     Seed {
@@ -260,18 +262,17 @@ fn delivery(view: &SessionView, id: &str) -> DeliveryIntent {
         },
     }
 }
-fn update(mut view: SessionView, id: &str, text: &str) -> SessionCommit {
+fn update(mut view: SessionView, id: &str, text: &str) -> Transition {
     let expected_revision = view.revision;
     view.revision = view.revision.next().unwrap();
     view.last_entry_seq = view.last_entry_seq.next().unwrap();
-    SessionCommit {
+    Transition {
         expected_revision,
         deliveries: vec![delivery(&view, &format!("delivery-{id}"))],
         next: view,
         contents: vec![],
         append: vec![entry(id, text)],
         tool_updates: vec![],
-        view_changed: true,
     }
 }
 pub(super) async fn open(root: &Path) -> (StorageLease, Database) {

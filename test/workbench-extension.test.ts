@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as vscode from 'vscode';
 import type { WorkbenchProvider } from '../src/workbench-extension';
-import { workbenchPeer, emptySnapshot } from './helpers/workbench-peer';
+import { workbenchPeer, emptyView } from './helpers/workbench-peer';
 const host = vi.hoisted(() => ({
   socket: '',
   workspace: '',
@@ -96,7 +96,7 @@ it('production entry configures only v2 socket, restricts CSP resources and reje
     onDidDispose: () => ({ dispose() {} }),
   } as unknown as vscode.WebviewView);
   expect(webview.html).toContain("connect-src 'none'");
-  expect(webview.html).toContain('img-src data:');
+  expect(webview.html).toContain('img-src blob:');
   expect(webview.html).toMatch(/nonce-[A-Za-z0-9_-]+/);
   expect(receive).toBeTypeOf('function');
   await provider.controller.receive({
@@ -113,12 +113,24 @@ it('production entry configures only v2 socket, restricts CSP resources and reje
   const creating = host.commands.get('piAcp.newSession')!();
   await expect.poll(() => peer.requests.length).toBe(1);
   expect(peer.requests[0].command).toEqual({ method: 'create', harness: 'Pi', cwd: workspace });
-  const snapshot = { ...emptySnapshot(), cwd: workspace };
-  peer.reply(peer.requests[0], [{ SessionCreated: snapshot }]);
+  const view = { ...emptyView(), cwd: workspace };
+  peer.reply(peer.requests[0], {
+    Created: {
+      summary: {
+        id: view.id,
+        harness: view.harness,
+        cwd: view.cwd,
+        status: view.status,
+        revision: view.revision,
+        created_seq: 1,
+      },
+    },
+  });
   await expect.poll(() => peer.requests.length).toBe(2);
-  peer.reply(peer.requests[1], [{ SessionsListed: [snapshot] }]);
-  await expect.poll(() => peer.requests.length).toBe(4);
-  peer.reply(peer.requests[3], [{ SessionLoaded: snapshot }]);
+  peer.query(peer.requests[1], 'attached', {
+    view,
+    recent_page: { entries: [], next_cursor: null },
+  });
   await creating;
   await expect.poll(() => posted.length).toBeGreaterThan(0);
   expect(provider.controller.snapshot.view?.status).toBe('ready');

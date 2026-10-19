@@ -1,6 +1,7 @@
-//! Registry owns routing/lifecycle metadata, never a live SessionState. Store
-//! futures are bounded owned jobs, not awaits inside the routing loop.
+//! Registry owns routing/lifecycle metadata, never historical session contents.
+//! Store futures are bounded owned jobs, not awaits inside the routing loop.
 use super::*;
+use crate::domain::{query::SafeInteger, session::SessionConfig};
 use std::{collections::VecDeque, sync::Arc};
 use tokio::{
     sync::{watch, Mutex},
@@ -10,13 +11,13 @@ use tokio_util::sync::CancellationToken;
 type Outcome = Result<(), DomainError>;
 const MAX_IO: usize = 16;
 pub(super) type Shared = Arc<Mutex<RegistryState>>;
-#[derive(Default)]
 pub(super) struct RegistryState {
     sessions: BTreeMap<SessionId, mpsc::Sender<SessionCommand>>,
     actors: JoinSet<()>,
     stopping: JoinSet<Outcome>,
     io: JoinSet<Completion>,
     lanes: BTreeMap<SessionId, VecDeque<(DomainCommand, Reply)>>,
+    events: broadcast::Sender<CommitBatch>,
 }
 struct Completion {
     lane: Option<SessionId>,
@@ -24,12 +25,12 @@ struct Completion {
 }
 enum Effect {
     Ready {
-        state: Box<SessionState>,
-        events: Vec<DomainEvent>,
+        state: Box<SessionView>,
+        result: OwnerReply,
         reply: Reply,
     },
     Reply {
-        result: Result<Vec<DomainEvent>, DomainError>,
+        result: Result<OwnerReply, DomainError>,
         reply: Reply,
     },
 }
@@ -40,6 +41,16 @@ fn panic_error() -> DomainError {
     DomainError::Worker("registry storage task panicked".into())
 }
 impl RegistryState {
+    pub(super) fn new(events: broadcast::Sender<CommitBatch>) -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            actors: JoinSet::new(),
+            stopping: JoinSet::new(),
+            io: JoinSet::new(),
+            lanes: BTreeMap::new(),
+            events,
+        }
+    }
     fn reply(
         &mut self,
         completion: Completion,
@@ -54,13 +65,13 @@ impl RegistryState {
         match completion.effect {
             Effect::Ready {
                 state,
-                events,
+                result,
                 reply,
             } => {
                 if !closing {
                     self.spawn(*state, store, mailbox);
                 }
-                let _ = reply.send(Ok(events));
+                let _ = reply.send(Ok(result));
             }
             Effect::Reply { result, reply } => {
                 let _ = reply.send(result);
@@ -74,10 +85,11 @@ impl RegistryState {
             }
         }
     }
-    fn spawn(&mut self, state: SessionState, store: &impl SessionPersistence, mailbox: usize) {
+    fn spawn(&mut self, state: SessionView, store: &impl SessionPersistence, mailbox: usize) {
         let (tx, rx) = mpsc::channel(mailbox);
         self.sessions.insert(state.id.clone(), tx);
-        self.actors.spawn(session_loop(state, rx, store.clone()));
+        self.actors
+            .spawn(session_loop(state, rx, store.clone(), self.events.clone()));
     }
     fn route(
         &mut self,
@@ -114,20 +126,7 @@ impl RegistryState {
             return;
         }
         match command {
-            DomainCommand::Inspect(id)
-                if self
-                    .sessions
-                    .get(&id)
-                    .is_some_and(|sender| !sender.is_closed()) =>
-            {
-                forward(
-                    DomainCommand::Inspect(id.clone()),
-                    &id,
-                    reply,
-                    &self.sessions,
-                );
-            }
-            DomainCommand::LoadSession(id)
+            DomainCommand::Inspect(id) | DomainCommand::LoadSession(id)
                 if self
                     .sessions
                     .get(&id)
@@ -151,42 +150,24 @@ impl RegistryState {
                     return;
                 }
                 let store = store.clone();
+                let events = self.events.clone();
                 match command {
                     DomainCommand::AdoptFork { projection, native } => {
-                        let state = match projection.adopt(native) {
-                            Ok(state) => state,
-                            Err(error) => {
-                                let _ = reply.send(Err(error));
-                                return;
-                            }
-                        };
-                        let id = state.id.clone();
+                        let id = projection.new_session_id.clone();
                         if self.sessions.contains_key(&id) || self.lanes.contains_key(&id) {
                             let _ = reply.send(Err(DomainError::OperationConflict));
                             return;
                         }
                         self.lanes.insert(id.clone(), VecDeque::new());
                         self.io.spawn(async move {
-                            let saved = async {
-                                if store
-                                    .load(id.as_str())
-                                    .await
-                                    .map_err(DomainError::Persistence)?
-                                    .is_some()
-                                {
-                                    return Err(DomainError::OperationConflict);
-                                }
-                                store.save(&state).await.map_err(DomainError::Persistence)
-                            }
-                            .await;
-                            let effect = match saved {
-                                Ok(()) => Effect::Ready {
-                                    events: vec![DomainEvent::SessionCreated(state.snapshot())],
-                                    state: Box::new(state),
+                            let effect = match store.adopt_fork(*projection, native).await {
+                                Ok((view, summary)) => Effect::Ready {
+                                    state: Box::new(view),
+                                    result: OwnerReply::Receipt(CommandReceipt::Forked { summary }),
                                     reply,
                                 },
                                 Err(error) => Effect::Reply {
-                                    result: Err(error),
+                                    result: Err(DomainError::Persistence(error)),
                                     reply,
                                 },
                             };
@@ -197,13 +178,14 @@ impl RegistryState {
                         });
                     }
                     DomainCommand::CreateSession { harness, cwd } => {
-                        let state = SessionState {
+                        let state = SessionView {
                             id: SessionId::generate(),
                             provider_session: None,
                             harness,
                             cwd,
                             status: SessionStatus::Idle,
-                            transcript: Default::default(),
+                            origin: None,
+                            last_entry_seq: SafeInteger::default(),
                             plan: Default::default(),
                             active_turn: None,
                             pending_interactions: BTreeMap::new(),
@@ -214,14 +196,16 @@ impl RegistryState {
                                 mode: None,
                             },
                             catalogue: Default::default(),
-                            revision: 0,
+                            revision: SafeInteger::default(),
                         };
                         let id = state.id.clone();
                         self.lanes.insert(id.clone(), VecDeque::new());
                         self.io.spawn(async move {
-                            let effect = match store.save(&state).await {
-                                Ok(()) => Effect::Ready {
-                                    events: vec![DomainEvent::SessionCreated(state.snapshot())],
+                            let effect = match store.create(&state).await {
+                                Ok(summary) => Effect::Ready {
+                                    result: OwnerReply::Receipt(CommandReceipt::Created {
+                                        summary,
+                                    }),
                                     state: Box::new(state),
                                     reply,
                                 },
@@ -239,11 +223,12 @@ impl RegistryState {
                     DomainCommand::LoadSession(id) => {
                         self.lanes.insert(id.clone(), VecDeque::new());
                         self.io.spawn(async move {
-                            let loaded = load(&store, &id).await;
-                            let effect = match loaded {
-                                Ok((state, events)) => Effect::Ready {
+                            let effect = match load(&store, &id, &events).await {
+                                Ok(state) => Effect::Ready {
+                                    result: OwnerReply::Receipt(CommandReceipt::Loaded {
+                                        view: Box::new(state.clone()),
+                                    }),
                                     state: Box::new(state),
-                                    events,
                                     reply,
                                 },
                                 Err(error) => Effect::Reply {
@@ -262,16 +247,16 @@ impl RegistryState {
                         let sender = self.sessions.remove(&id);
                         self.io.spawn(async move {
                             let result = async {
-                                // The actor drains all accepted writes and commits
-                                // cancellation before its source can be unlinked.
+                                // Accepted writes and cancellation drain before unlinking.
                                 if let Some(sender) = sender {
                                     stop_actor(sender).await?;
                                 }
-                                store
-                                    .remove(id.as_str())
-                                    .await
-                                    .map_err(DomainError::Persistence)?;
-                                Ok(vec![DomainEvent::SessionRemoved(id.clone())])
+                                let terminal =
+                                    store.remove(&id).await.map_err(DomainError::Persistence)?;
+                                let _ = events.send(terminal);
+                                Ok(OwnerReply::Receipt(CommandReceipt::Removed {
+                                    session: id.clone(),
+                                }))
                             }
                             .await;
                             Completion {
@@ -282,9 +267,11 @@ impl RegistryState {
                     }
                     DomainCommand::Inspect(id) => {
                         self.io.spawn(async move {
-                            let result = match store.load(id.as_str()).await {
+                            let result = match store.load(&id).await {
                                 Ok(Some(state)) => {
-                                    Ok(vec![DomainEvent::SessionLoaded(state.snapshot())])
+                                    Ok(OwnerReply::Receipt(CommandReceipt::Loaded {
+                                        view: Box::new(state),
+                                    }))
                                 }
                                 Ok(None) => Err(DomainError::NotFound(id)),
                                 Err(error) => Err(DomainError::Persistence(error)),
@@ -298,13 +285,9 @@ impl RegistryState {
                     DomainCommand::ListSessions => {
                         self.io.spawn(async move {
                             let result = store
-                                .list()
+                                .list(None, None)
                                 .await
-                                .map(|states| {
-                                    vec![DomainEvent::SessionsListed(
-                                        states.iter().map(SessionState::snapshot).collect(),
-                                    )]
-                                })
+                                .map(OwnerReply::Listed)
                                 .map_err(DomainError::Persistence);
                             Completion {
                                 lane: None,
@@ -341,8 +324,7 @@ impl RegistryState {
         workers_stopped: Option<&CancellationToken>,
     ) -> Outcome {
         let mut outcome = Ok(());
-        // Never abort an accepted database transaction. Jobs
-        // removed an actor from the map may still own its stop/join receipt.
+        // Never abort an accepted transaction, even when its observer/root dies.
         while let Some(result) = self.io.join_next().await {
             match result {
                 Ok(completion) => self.reply(completion, store, mailbox, true),
@@ -354,8 +336,7 @@ impl RegistryState {
                 let _ = reply.send(Err(stopping()));
             }
         }
-        // Fatal admission closes immediately, but the host must stop physical
-        // protocol owners before actor shutdown publishes terminal intentions.
+        // Physical providers must be joined before publishing terminal intentions.
         if let Some(permit) = workers_stopped {
             permit.cancelled().await;
         }
@@ -369,7 +350,7 @@ impl RegistryState {
                 Err(_) => outcome = Err(DomainError::Worker("actor shutdown task failed".into())),
             }
         }
-        while self.actors.join_next().await.is_some() {} // session panic is isolated
+        while self.actors.join_next().await.is_some() {}
         outcome
     }
 }
@@ -384,14 +365,14 @@ async fn stop_actor(sender: mpsc::Sender<SessionCommand>) -> Outcome {
 async fn load(
     store: &impl SessionPersistence,
     id: &SessionId,
-) -> Result<(SessionState, Vec<DomainEvent>), DomainError> {
+    events: &broadcast::Sender<CommitBatch>,
+) -> Result<SessionView, DomainError> {
     let mut state = store
-        .load(id.as_str())
+        .load(id)
         .await
         .map_err(DomainError::Persistence)?
         .ok_or_else(|| DomainError::NotFound(id.clone()))?;
-    let previous = state.clone();
-    let recovery = if state.active_turn.is_some() {
+    if state.active_turn.is_some() {
         let command = if matches!(state.status, SessionStatus::Cancelling) {
             DomainCommand::Cancel {
                 session: id.clone(),
@@ -399,28 +380,14 @@ async fn load(
         } else {
             DomainCommand::Agent {
                 session: id.clone(),
-                event: crate::domain::command::AgentEvent::Crashed {
+                event: AgentEvent::Crashed {
                     reason: "daemon restarted during active turn".into(),
                 },
             }
         };
-        let events = crate::domain::reducer::apply(&mut state, command)?;
-        state.revision += 1;
-        events
-    } else {
-        vec![]
-    };
-    if !recovery.is_empty() {
-        let change = SessionCommit::between(&previous, &state, &recovery, None)
-            .map_err(|error| DomainError::Persistence(error.to_string()))?;
-        store
-            .commit(change)
-            .await
-            .map_err(DomainError::Persistence)?;
+        commit_command(&mut state, command, store, events).await?;
     }
-    let mut events = vec![DomainEvent::SessionLoaded(state.snapshot())];
-    events.extend(recovery);
-    Ok((state, events))
+    Ok(state)
 }
 pub(super) async fn run(
     mut rx: mpsc::Receiver<RegistryCommand>,
@@ -439,15 +406,13 @@ pub(super) async fn run(
             biased;
             result = state.io.join_next(), if !state.io.is_empty() => match result {
                 Some(Ok(result)) => state.reply(result, &store, mailbox, false),
-                Some(Err(_)) => { failure = Some(panic_error()); break; },
-                None => {},
+                Some(Err(_)) => { failure = Some(panic_error()); break; }, None => {},
             },
             _ = state.actors.join_next(), if !state.actors.is_empty() => { state.sessions.retain(|_, sender| !sender.is_closed()); },
             message = rx.recv() => match message {
                 Some(RegistryCommand::Command { command, reply }) => state.route(command, reply, &store, mailbox),
                 Some(RegistryCommand::Worker { session, epoch, event, reply }) => enqueue(SessionCommand::Worker { epoch, event, reply }, &session, &state.sessions),
-                Some(RegistryCommand::Shutdown(reply)) => { shutdown_reply = Some(reply); break; },
-                None => break,
+                Some(RegistryCommand::Shutdown(reply)) => { shutdown_reply = Some(reply); break; }, None => break,
             },
         }
     }
@@ -480,6 +445,5 @@ pub(super) async fn recover(
     store: impl SessionPersistence,
     mailbox: usize,
 ) -> Outcome {
-    // The root's dropped guard releases metadata, not the owned actor/IO jobs.
     shared.lock().await.drain(&store, mailbox, None).await
 }

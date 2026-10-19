@@ -10,11 +10,16 @@ use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+#[path = "dispatch_scale_tests.rs"]
+mod scale_tests;
+
 pub const MAX_DELIVERY_WINDOW: usize = 1024;
-pub type DeliveryBinding = (crate::domain::SessionId, i64, i64);
-pub type DeliveryBindings = Vec<DeliveryBinding>;
-pub type TopicSnapshot = (DeliveryBindings, i64);
+#[cfg(test)]
 type BorrowedTopics<'a> = (&'a [DeliveryBinding], i64);
+#[cfg(test)]
+type DeliveryBinding = (crate::domain::SessionId, i64, i64);
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Failure {
     Transport,
@@ -30,22 +35,37 @@ pub struct PendingDelivery {
     pub retry_at: SafeInteger,
     pub last_failure: Option<Failure>,
 }
+#[derive(Clone, Debug)]
+pub struct DispatchSnapshot {
+    pub bindings:
+        std::collections::BTreeMap<crate::telegram::types::TopicKey, crate::domain::SessionId>,
+    pub heads: Vec<PendingDelivery>,
+}
+
 type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
 pub(super) enum Request {
+    DispatchSnapshot {
+        bot: i64,
+        limit: usize,
+        reply: Reply<DispatchSnapshot>,
+    },
     Enqueue {
         intent: DeliveryIntent,
         reply: Reply<()>,
     },
+    #[cfg(test)]
     Heads {
         now: SafeInteger,
         limit: usize,
         reply: Reply<Vec<PendingDelivery>>,
     },
+    #[cfg(test)]
     All {
         now: SafeInteger,
         limit: usize,
         reply: Reply<Vec<PendingDelivery>>,
     },
+    #[cfg(test)]
     TopicHeads {
         now: SafeInteger,
         limit: usize,
@@ -158,6 +178,45 @@ fn pending(row: &Row<'_>) -> Result<PendingDelivery, StoreError> {
         last_failure,
     })
 }
+// Reduce the pending backlog to immutable target heads before resolving the
+// current binding. No correlated scan per candidate and no JSON binding input.
+fn dispatch_sql() -> String {
+    format!("WITH target_heads AS MATERIALIZED (SELECT target_key, MIN(order_seq) AS head FROM deliveries WHERE status='Pending' GROUP BY target_key), topic_heads AS (SELECT MIN(h.head) AS head FROM target_heads h LEFT JOIN telegram_bindings b ON b.bot_id=?1 AND substr(h.target_key,1,8)='session:' AND b.session=substr(h.target_key,9) GROUP BY CASE WHEN b.session IS NULL THEN h.target_key ELSE 'telegram:' || b.bot_id || ':' || b.chat || ':' || b.thread END) SELECT {COLUMNS} FROM topic_heads h JOIN deliveries d ON d.order_seq=h.head ORDER BY d.order_seq LIMIT ?2")
+}
+pub(super) fn dispatch_snapshot(
+    db: &Connection,
+    bot: i64,
+    limit: usize,
+) -> Result<DispatchSnapshot, StoreError> {
+    if !(0..=MAX_SAFE_INTEGER as i64).contains(&bot) || limit == 0 || limit > MAX_DELIVERY_WINDOW {
+        return Err(StoreError::Invalid("invalid dispatch window or bot"));
+    }
+    let mut bindings = std::collections::BTreeMap::new();
+    let mut statement = db.prepare(
+        "SELECT chat,thread,session,binding_json FROM telegram_bindings WHERE bot_id=?1",
+    )?;
+    let mut rows = statement.query([bot])?;
+    while let Some(row) = rows.next()? {
+        let (topic, session): (crate::telegram::types::TopicKey, crate::domain::SessionId) =
+            serde_json::from_str(&row.get::<_, String>(3)?)?;
+        if topic.chat.get() != row.get::<_, i64>(0)?
+            || topic.thread.map_or(0, |t| t.get()) != row.get::<_, i64>(1)?
+            || session.as_str() != row.get::<_, String>(2)?
+        {
+            return Err(StoreError::Invalid("Telegram binding identity mismatch"));
+        }
+        bindings.insert(topic, session);
+    }
+    let mut statement = db.prepare(&dispatch_sql())?;
+    let mut rows = statement.query(params![bot, limit as i64])?;
+    let mut heads = Vec::new();
+    while let Some(row) = rows.next()? {
+        heads.push(pending(row)?);
+    }
+    Ok(DispatchSnapshot { bindings, heads })
+}
+
+#[cfg(test)]
 fn selected(
     db: &Connection,
     now: SafeInteger,
@@ -185,15 +244,28 @@ fn selected(
                 return Err(StoreError::Invalid("invalid or duplicate delivery binding"));
             }
         }
-        let encoded = super::database::encode(&bindings)?;
-        // Frozen binding snapshot resolves Session and direct Telegram intents
-        // into the SAME topic key before applying the working window. Deferred
-        // heads are included by the caller's MAX_SAFE_INTEGER readiness bound.
-        let sql = format!("WITH bindings AS (SELECT 'session:' || json_extract(value,'$[0]') AS source, 'telegram:' || ?4 || ':' || json_extract(value,'$[1]') || ':' || json_extract(value,'$[2]') AS topic FROM json_each(?3)), effective AS NOT MATERIALIZED (SELECT d.*, COALESCE(b.topic,d.target_key) AS effective_key FROM deliveries d LEFT JOIN bindings b ON b.source=d.target_key WHERE d.status='Pending') SELECT {COLUMNS} FROM effective d WHERE d.next_retry<=?1 AND NOT EXISTS(SELECT 1 FROM effective p WHERE p.effective_key=d.effective_key AND p.order_seq<d.order_seq) ORDER BY d.order_seq LIMIT ?2");
-        let mut statement = db.prepare(&sql)?;
-        let mut rows = statement.query(params![now, limit as i64, encoded, bot_id])?;
+        // Test-only vector oracle for the retired dynamic-binding API.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut statement = db.prepare(&format!(
+            "SELECT {COLUMNS} FROM deliveries d WHERE d.status='Pending' ORDER BY d.order_seq"
+        ))?;
+        let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            records.push(pending(row)?);
+            let record = pending(row)?;
+            let effective = match &record.intent.target {
+                DeliveryTarget::Session { session, .. } => bindings
+                    .iter()
+                    .find(|(id, _, _)| id == session)
+                    .map(|(_, chat, thread)| format!("telegram:{bot_id}:{chat}:{thread}"))
+                    .unwrap_or_else(|| target_key(&record.intent.target)),
+                _ => target_key(&record.intent.target),
+            };
+            if seen.insert(effective) && record.retry_at <= now {
+                records.push(record);
+                if records.len() == limit {
+                    break;
+                }
+            }
         }
     } else {
         let sql = format!("SELECT {COLUMNS} FROM deliveries d WHERE d.status='Pending' AND d.next_retry<=?1 ORDER BY d.order_seq LIMIT ?2");
@@ -205,6 +277,7 @@ fn selected(
     }
     Ok(records)
 }
+#[cfg(test)]
 fn heads(
     db: &Connection,
     now: SafeInteger,
@@ -253,6 +326,15 @@ fn require(db: &Connection, id: &DeliveryId) -> Result<bool, StoreError> {
 }
 pub(super) fn execute(db: &mut Connection, request: Request) {
     match request {
+        Request::DispatchSnapshot { bot, limit, reply } => {
+            let result = (|| {
+                let tx = db.transaction()?;
+                let snapshot = dispatch_snapshot(&tx, bot, limit)?;
+                tx.commit()?;
+                Ok(snapshot)
+            })();
+            let _ = reply.send(result);
+        }
         Request::Enqueue { intent, reply } => {
             let result = (|| -> Result<(), StoreError> {
                 let tx = db.transaction()?;
@@ -262,9 +344,11 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             })();
             let _ = reply.send(result);
         }
+        #[cfg(test)]
         Request::All { now, limit, reply } => {
             let _ = reply.send(selected(db, now, limit, None));
         }
+        #[cfg(test)]
         Request::TopicHeads {
             now,
             limit,
@@ -274,6 +358,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
         } => {
             let _ = reply.send(selected(db, now, limit, Some((&bindings, bot_id))));
         }
+        #[cfg(test)]
         Request::Heads { now, limit, reply } => {
             let _ = reply.send(heads(db, now, limit));
         }

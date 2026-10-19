@@ -39,7 +39,7 @@ async fn poll_cancellable(
     if stop.is_cancelled() || context.app.is_closing() {
         return Ok(());
     }
-    let offset = context.store.snapshot().await?.offset;
+    let offset = context.store.offset().await?;
     // Only the read-only HTTP poll is cancellation-safe here. Once admission
     // starts, join its file transaction instead of dropping an atomic writer.
     let mut updates = tokio::select! { _ = stop.cancelled() => return Ok(()), result = context.api.get_updates(offset) => result? };
@@ -66,9 +66,8 @@ async fn poll_cancellable(
                 && (context.config.allowed_user_ids.is_empty()
                     || context.config.allowed_user_ids.contains(&incoming.sender));
             let snapshot = if authorized {
-                let state = context.store.snapshot().await?;
-                match state.bindings.get(&incoming.topic) {
-                    Some(session) => context.inspect(session).await?,
+                match context.store.binding(&incoming.topic).await? {
+                    Some(session) => context.inspect(&session).await?,
                     None => None,
                 }
             } else {

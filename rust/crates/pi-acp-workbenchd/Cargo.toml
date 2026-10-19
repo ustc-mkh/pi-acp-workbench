@@ -19,6 +19,9 @@ libc = "0.2"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 
+[dev-dependencies]
+rusqlite = { version = "=0.40.2", features = ["hooks"] }
+
 [[bin]]
 name = "pi-acp-workbenchd"
 path = "src/main.rs"

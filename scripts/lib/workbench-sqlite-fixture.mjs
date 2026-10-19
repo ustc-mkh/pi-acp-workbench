@@ -128,6 +128,14 @@ export function deliveryRecords(root) {
       })),
   );
 }
+export function deliveryEntryIds(root, delivery) {
+  return inspect(root, (database) =>
+    database
+      .prepare('SELECT entry_id FROM delivery_entries WHERE delivery_id=? ORDER BY seq')
+      .all(delivery)
+      .map((row) => row.entry_id),
+  );
+}
 export function archivedEntry(root, id) {
   return inspect(root, (database) => {
     const row = database

@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    domain::SessionState,
-    persistence::{interface::SessionPersistence, outbox::DeliveryPayload},
-};
+use crate::persistence::{interface::SessionPersistence, outbox::DeliveryPayload};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
@@ -12,21 +9,10 @@ struct CancelFault {
     final_commit: bool,
 }
 impl SessionPersistence for CancelFault {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
-        self.history.load(id).await
-    }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
-        self.history.list().await
-    }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
-        self.history.save(state).await
-    }
-    async fn remove(&self, id: &str) -> Result<(), String> {
-        self.history.remove(id).await
-    }
+    crate::persistence::interface_test_helpers::delegate_session_queries!();
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         let state = &change.next;
         let target = if self.final_commit {
@@ -44,15 +30,8 @@ impl SessionPersistence for CancelFault {
         self.history.commit(change).await
     }
 }
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
 async fn pid(trace: &std::path::Path) -> i32 {
     #[derive(serde::Deserialize)]
@@ -97,35 +76,44 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
                 .await
                 .unwrap();
         }
-        let mut crash_prefix = app.core.history.load(id.as_str()).await.unwrap().unwrap();
+        let mut crash_prefix = inspect_view(&app, &id).await;
         app.shutdown().await;
-        let app = app_at_with_env(&root, env.clone());
-        crash_prefix.revision = app
-            .core
-            .history
-            .load(id.as_str())
-            .await
-            .unwrap()
-            .unwrap()
-            .revision
-            + 1;
+        let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+        let revision: crate::domain::query::SafeInteger = sql
+            .query_row(
+                "SELECT revision FROM sessions WHERE id=?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        crash_prefix.revision = revision.next().unwrap();
         crash_prefix.status = if cancelling {
             SessionStatus::Cancelling
         } else {
             SessionStatus::Running
         };
-        app.core.history.save(&crash_prefix).await.unwrap();
-        app.shutdown().await;
+        sql.execute(
+            "UPDATE sessions SET revision=?2,status_json=?3,hot_state_json=?4 WHERE id=?1",
+            rusqlite::params![
+                id.as_str(),
+                crash_prefix.revision,
+                serde_json::to_string(&crash_prefix.status).unwrap(),
+                serde_json::to_string(&crash_prefix).unwrap()
+            ],
+        )
+        .unwrap();
+        drop(sql);
         let app = app_at_with_env(&root, env.clone());
         let recovered = app
             .command(DomainCommand::LoadSession(id.clone()))
             .await
             .unwrap();
-        assert!(recovered.iter().any(|event| if cancelling {
-            matches!(event, DomainEvent::TurnCancelled { .. })
+        let recovered = recovered.view().unwrap();
+        assert!(if cancelling {
+            matches!(recovered.status, SessionStatus::Idle)
         } else {
-            matches!(event, DomainEvent::SessionError { .. })
-        }));
+            matches!(recovered.status, SessionStatus::Failed(_))
+        });
         assert!(inspect(&app, &id).await.active_turn.is_none());
         let expected = if cancelling {
             "cancelled"
@@ -211,10 +199,9 @@ async fn cancellation_and_removal_terminal_publication_follow_physical_worker_jo
         };
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if matches!(
-                    events.recv().await.unwrap(),
-                    DomainEvent::TurnCancelled { .. }
-                ) {
+                if events.recv().await.unwrap().view.is_some_and(|view| {
+                    view.active_turn.is_none() && matches!(view.status, SessionStatus::Idle)
+                }) {
                     assert_eq!(
                         unsafe { libc::kill(pid, 0) },
                         -1,
@@ -230,7 +217,10 @@ async fn cancellation_and_removal_terminal_publication_follow_physical_worker_jo
         let trace = tokio::fs::read_to_string(trace).await.unwrap();
         assert!(trace.contains("session/cancel") && trace.contains("cancelled"));
         if remove {
-            assert!(app.core.history.load(id.as_str()).await.unwrap().is_none());
+            assert!(matches!(
+                app.core.database.view(id.clone()).await,
+                Err(crate::persistence::database::StoreError::NotFound)
+            ));
         } else {
             assert!(matches!(
                 inspect(&app, &id).await.status,

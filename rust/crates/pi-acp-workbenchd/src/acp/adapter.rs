@@ -7,14 +7,11 @@ use crate::domain::{
 };
 use crate::{
     actor::RegistryHandle,
-    domain::{
-        command::AgentEvent, error::DomainError, event::DomainEvent, SessionId, TurnId,
-        WorkspacePath,
-    },
+    domain::{command::AgentEvent, error::DomainError, SessionId, TurnId, WorkspacePath},
     worker::{WorkerEvent, WorkerHandle},
 };
 use std::collections::BTreeMap;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum AdapterCommand {
@@ -438,7 +435,6 @@ pub struct AdapterContext {
     pub cwd: WorkspacePath,
     pub provider_session: Option<crate::domain::ProviderSessionId>,
     pub registry: RegistryHandle,
-    pub output: broadcast::Sender<DomainEvent>,
     pub lifecycle: CancellationToken,
     pub pending_interactions: usize,
     pub recovery: Option<crate::domain::session::SessionConfig>,
@@ -490,13 +486,9 @@ impl AdapterContext {
         if matches!(event, AgentEvent::Crashed { .. }) {
             self.lifecycle.cancel();
         }
-        let events = self
-            .registry
+        self.registry
             .worker_event(self.session.clone(), self.epoch, event)
             .await?;
-        for event in events {
-            let _ = self.output.send(event);
-        }
         Ok(())
     }
 }

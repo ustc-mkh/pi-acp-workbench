@@ -9,8 +9,8 @@ use super::{
 };
 use crate::{
     domain::{
-        error::DomainError, DeliveryId, DomainCommand, DomainEvent, NoticeId, OperationId,
-        SessionId,
+        error::DomainError, query::CommandReceipt, DeliveryId, DomainCommand, NoticeId,
+        OperationId, SessionId,
     },
     persistence::{
         outbox::{DeliveryEvent, DeliveryPayload},
@@ -54,7 +54,7 @@ async fn domain(
     record: &InboxRecord,
     command: DomainCommand,
     scope: Option<&SessionId>,
-) -> Result<Vec<DomainEvent>, DomainError> {
+) -> Result<CommandReceipt, DomainError> {
     if let Some(result) = context
         .app
         .operation_result(&record.operation, &command)
@@ -170,18 +170,11 @@ pub(crate) async fn dispatch(
                             .await?
                     }
                 };
-                let snapshot = events
-                    .into_iter()
-                    .find_map(|event| {
-                        if let DomainEvent::SessionCreated(snapshot) = event {
-                            Some(snapshot)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        DomainError::Persistence("create receipt missing snapshot".into())
-                    })?;
+                let CommandReceipt::Created { summary: snapshot } = events else {
+                    return Err(DomainError::Persistence(
+                        "create receipt missing summary".into(),
+                    ));
+                };
                 context
                     .store
                     .bind(destination.clone(), snapshot.id.clone())
@@ -204,18 +197,9 @@ pub(crate) async fn dispatch(
                     Some(session),
                 )
                 .await?;
-                let snapshot = events
-                    .into_iter()
-                    .find_map(|event| {
-                        if let DomainEvent::SessionLoaded(snapshot) = event {
-                            Some(snapshot)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        DomainError::Persistence("load receipt missing snapshot".into())
-                    })?;
+                let CommandReceipt::Loaded { view: snapshot } = events else {
+                    return Err(DomainError::Persistence("load receipt missing view".into()));
+                };
                 authorize_workspace(&snapshot.cwd, &context.config.workspace).await?;
                 context.store.bind(topic.clone(), session.clone()).await?;
                 format!("Attached session {session}")
@@ -228,39 +212,31 @@ pub(crate) async fn dispatch(
                     Some(session),
                 )
                 .await?;
-                let snapshot = events
-                    .into_iter()
-                    .find_map(|event| {
-                        if let DomainEvent::SessionLoaded(snapshot) = event {
-                            Some(snapshot)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        DomainError::Persistence("status receipt missing snapshot".into())
-                    })?;
+                let CommandReceipt::Loaded { view: snapshot } = events else {
+                    return Err(DomainError::Persistence(
+                        "status receipt missing view".into(),
+                    ));
+                };
                 render::status(&snapshot)
             }
             ControlCommand::ListSessions => {
-                let events = domain(context, record, DomainCommand::ListSessions, None).await?;
+                let page = context.app.list(None, None).await?;
                 let mut text = String::new();
-                for event in events {
-                    if let DomainEvent::SessionsListed(sessions) = event {
-                        for session in sessions {
-                            if authorize_workspace(&session.cwd, &context.config.workspace)
-                                .await
-                                .is_ok()
-                            {
-                                text.push_str(&format!(
-                                    "{} · {:?} · {}\n",
-                                    session.id,
-                                    session.harness,
-                                    session.cwd.as_str()
-                                ));
-                            }
-                        }
+                for session in page.sessions {
+                    if authorize_workspace(&session.cwd, &context.config.workspace)
+                        .await
+                        .is_ok()
+                    {
+                        text.push_str(&format!(
+                            "{} · {:?} · {}\n",
+                            session.id,
+                            session.harness,
+                            session.cwd.as_str()
+                        ));
                     }
+                }
+                if page.next_cursor.is_some() {
+                    text.push_str("仅显示最新一页会话。\n");
                 }
                 if text.is_empty() {
                     "暂无授权会话。使用 /new。".into()
@@ -335,13 +311,7 @@ async fn queue_notice(
         .delivery_payloads()
         .put_notice(&notice_content)
         .await?;
-    let bot_id = context
-        .store
-        .snapshot()
-        .await?
-        .bot
-        .ok_or_else(|| DomainError::Persistence("missing Telegram bot identity".into()))?
-        .get();
+    let bot_id = context.bot_id;
     context
         .app
         .delivery_store()

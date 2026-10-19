@@ -4,8 +4,8 @@
 | --------------------------------------------------- | ----------------------------------------------------------------- |
 | [单宿主发布](workbench-release.md)                  | GNU/musl 构建范围、产物校验、配置/systemd、备份与替换边界         |
 | [项目 README](../README.md)                         | 单宿主架构、从源码运行、功能与限制                                |
-| [VS Code](workbench-vscode.md)                      | direct IPC v2 client/view、workspace trust、CSP、界面范围         |
-| [IPC v2](workbench-ipc.md)                          | domain commands/events、operation replay、容量及错误语义          |
+| [VS Code](workbench-vscode.md)                      | direct IPC v3 client/view、workspace trust、CSP、界面范围         |
+| [IPC v3](workbench-ipc.md)                          | domain commands/events、operation replay、容量及错误语义          |
 | [Telegram](workbench-telegram.md)                   | merged config、授权、命令、admission/inbox/outbox、图片投递       |
 | [显式离线存储维护](workbench-storage.md)            | 同一 binary/lease 下 export、marker-only reset、typed Telegram GC |
 | [重构计划](full-rewrite-plan.md)                    | 原始基线、阶段 0–8 与最终十项条件；基线结构不是现有实现           |

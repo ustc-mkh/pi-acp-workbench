@@ -1,7 +1,6 @@
 pub mod catalogue;
 pub mod command;
 pub mod error;
-pub mod event;
 pub mod fork;
 pub mod ids;
 pub mod image;
@@ -31,9 +30,8 @@ mod metadata_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use command::DomainCommand;
-pub use event::DomainEvent;
 pub use ids::*;
-pub use session::{Harness, SessionSnapshot, SessionState, SessionStatus};
+pub use session::{Harness, SessionStatus};

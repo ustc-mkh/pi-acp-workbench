@@ -12,14 +12,13 @@ async fn agent_images_are_archived_before_metadata_events_and_survive_restart_an
     prompt(&app, &id, "image-output").await;
     let (entry, image, message) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let DomainEvent::AgentImage {
-                entry,
-                image,
-                message,
-                ..
-            } = images.recv().await.unwrap()
+            let batch = images.recv().await.unwrap();
+            if let Some(entry) = batch
+                .entries
+                .into_iter()
+                .find(|entry| entry.image.is_some())
             {
-                break (entry, image, message);
+                break (entry.id, entry.image.unwrap(), entry.message);
             }
         }
     })
@@ -177,10 +176,16 @@ async fn malformed_agent_image_fails_the_turn_without_publishing_a_reference_and
     prompt(&app, &id, "image-malformed").await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match events.recv().await.unwrap() {
-                DomainEvent::AgentImage { .. } => panic!("invalid image reference was published"),
-                DomainEvent::SessionError { .. } => break,
-                _ => {}
+            let batch = events.recv().await.unwrap();
+            assert!(
+                batch.entries.iter().all(|entry| entry.image.is_none()),
+                "invalid image reference was published"
+            );
+            if batch
+                .view
+                .is_some_and(|view| matches!(view.status, SessionStatus::Failed(_)))
+            {
+                break;
             }
         }
     })

@@ -14,6 +14,9 @@ use std::{
 #[cfg(test)]
 #[path = "maintenance_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "maintenance_wal_tests.rs"]
+mod wal_tests;
 
 const USAGE: &str = "Usage: pi-acp-workbenchd storage export|reset|gc --root ABSOLUTE [--destination ABSOLUTE] --confirm";
 

@@ -4,14 +4,12 @@ use super::{
     database::{Database, StoreError},
     delivery::{Failure, MAX_DELIVERY_WINDOW},
 };
+#[cfg(test)]
+use crate::domain::query::MAX_SAFE_INTEGER;
 pub use crate::domain::transition::{
     DeliveryIntent as DeliveryEvent, DeliveryPayload, DeliveryTarget,
 };
-use crate::domain::{
-    error::DomainError,
-    query::{SafeInteger, MAX_SAFE_INTEGER},
-    DeliveryId,
-};
+use crate::domain::{error::DomainError, query::SafeInteger, DeliveryId};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DeliveryStatus {
@@ -50,6 +48,7 @@ impl OutboxStore {
     pub async fn enqueue(&self, event: DeliveryEvent) -> Result<(), DomainError> {
         self.database.enqueue_delivery(event).await.map_err(failure)
     }
+    #[cfg(test)]
     pub async fn pending(
         &self,
         now: u64,
@@ -69,37 +68,6 @@ impl OutboxStore {
         let rows = self
             .database
             .pending_delivery_records(now, limit.min(self.window))
-            .await
-            .map_err(failure)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| DeliveryRecord {
-                event: row.intent,
-                sequence: row.order.get(),
-                status: DeliveryStatus::Pending,
-                attempt: row.attempt,
-                retry_at: row.retry_at.get(),
-                last_failure: row.last_failure,
-            })
-            .collect())
-    }
-    pub async fn topic_heads(
-        &self,
-        limit: usize,
-        bindings: Vec<(crate::domain::SessionId, i64, i64)>,
-        bot_id: i64,
-    ) -> Result<Vec<DeliveryRecord>, DomainError> {
-        if limit == 0 {
-            return Ok(vec![]);
-        }
-        let rows = self
-            .database
-            .delivery_topic_heads(
-                SafeInteger::new(MAX_SAFE_INTEGER).expect("constant safe"),
-                limit.min(self.window),
-                bindings,
-                bot_id,
-            )
             .await
             .map_err(failure)?;
         Ok(rows

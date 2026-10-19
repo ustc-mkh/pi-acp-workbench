@@ -1,5 +1,5 @@
 use super::*;
-use crate::{domain::SessionState, persistence::interface::SessionPersistence};
+use crate::persistence::interface::SessionPersistence;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
@@ -8,21 +8,10 @@ struct FailPreferenceCommit {
     fail: Arc<AtomicBool>,
 }
 impl SessionPersistence for FailPreferenceCommit {
-    async fn load(&self, id: &str) -> Result<Option<SessionState>, String> {
-        self.history.load(id).await
-    }
-    async fn list(&self) -> Result<Vec<SessionState>, String> {
-        self.history.list().await
-    }
-    async fn save(&self, state: &SessionState) -> Result<(), String> {
-        self.history.save(state).await
-    }
-    async fn remove(&self, id: &str) -> Result<(), String> {
-        self.history.remove(id).await
-    }
+    crate::persistence::interface_test_helpers::delegate_session_queries!();
     async fn commit(
         &self,
-        change: crate::persistence::database::SessionCommit,
+        change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
         if change
             .next
@@ -37,15 +26,8 @@ impl SessionPersistence for FailPreferenceCommit {
         self.history.commit(change).await
     }
 }
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> crate::domain::session::SessionSnapshot {
-    let events = app
-        .command(DomainCommand::Inspect(id.clone()))
-        .await
-        .unwrap();
-    let DomainEvent::SessionLoaded(snapshot) = &events[0] else {
-        panic!("inspect")
-    };
-    snapshot.clone()
+async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
+    inspect_view(app, id).await
 }
 #[tokio::test]
 async fn rejected_restore_retains_intent_and_never_dispatches_prompt_until_recovery_succeeds() {
@@ -98,10 +80,13 @@ async fn rejected_restore_retains_intent_and_never_dispatches_prompt_until_recov
     prompt(&app, &id, "must not reach peer").await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if matches!(
-                events.recv().await.unwrap(),
-                DomainEvent::SessionError { .. }
-            ) {
+            if events
+                .recv()
+                .await
+                .unwrap()
+                .view
+                .is_some_and(|view| matches!(view.status, SessionStatus::Failed(_)))
+            {
                 break;
             }
         }
@@ -197,7 +182,7 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
     assert_eq!(inspect(&app, &id).await.revision, revision);
     app.shutdown().await;
     let app = app_at_with_env(&root, env.clone());
-    let persisted = app.core.history.load(id.as_str()).await.unwrap().unwrap();
+    let persisted = inspect_view(&app, &id).await;
     assert!(persisted.configuration_intent.is_some());
     app.command(DomainCommand::LoadSession(id.clone()))
         .await

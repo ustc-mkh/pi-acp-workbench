@@ -1,10 +1,12 @@
 //! Typed facade: offset, classification and callback use share one SQL transaction.
 use super::database::{Database, StoreRequest};
+#[cfg(test)]
+use crate::telegram::state::TelegramState;
 use crate::{
     domain::{error::DomainError, OperationId, SessionId},
     telegram::{
-        command::{TelegramAction, TelegramCommand},
-        state::{InboxOutcome, InboxRecord, InboxStatus, TelegramState},
+        command::TelegramCommand,
+        state::{InboxOutcome, InboxRecord},
         types::{CallbackBinding, CallbackKey, TopicKey, UpdateId, UserId},
     },
 };
@@ -29,7 +31,12 @@ pub struct Admission {
     pub expected_binding: Option<SessionId>,
 }
 pub(super) enum Action {
+    #[cfg(test)]
     Snapshot,
+    Offset,
+    Binding(TopicKey),
+    Topic(SessionId),
+    Callback(CallbackKey),
     Claim(UserId),
     Bind(TopicKey, SessionId),
     Unbind(TopicKey, SessionId),
@@ -41,7 +48,12 @@ pub(super) enum Action {
 }
 pub(super) enum Output {
     Unit,
+    #[cfg(test)]
     Snapshot(TelegramState),
+    Offset(u64),
+    Binding(Option<SessionId>),
+    Topic(Option<TopicKey>),
+    Callback(Option<CallbackBinding>),
     Pending(Vec<InboxRecord>),
     Admission(AdmissionResult),
     Compacted(usize, usize),
@@ -74,9 +86,37 @@ impl TelegramStore {
             .map_err(failure)?;
         result.await.map_err(failure)?
     }
+    #[cfg(test)]
     pub async fn snapshot(&self) -> Result<TelegramState, DomainError> {
         match self.request(Action::Snapshot).await? {
-            Output::Snapshot(state) => Ok(state),
+            Output::Snapshot(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn offset(&self) -> Result<u64, DomainError> {
+        match self.request(Action::Offset).await? {
+            Output::Offset(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn binding(&self, topic: &TopicKey) -> Result<Option<SessionId>, DomainError> {
+        match self.request(Action::Binding(topic.clone())).await? {
+            Output::Binding(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn topic(&self, session: &SessionId) -> Result<Option<TopicKey>, DomainError> {
+        match self.request(Action::Topic(session.clone())).await? {
+            Output::Topic(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn callback(
+        &self,
+        key: &CallbackKey,
+    ) -> Result<Option<CallbackBinding>, DomainError> {
+        match self.request(Action::Callback(key.clone())).await? {
+            Output::Callback(value) => Ok(value),
             _ => unreachable!(),
         }
     }
@@ -102,13 +142,16 @@ impl TelegramStore {
     }
     pub async fn admit(&self, admission: Admission) -> Result<AdmissionResult, DomainError> {
         match self.request(Action::Admit(admission)).await? {
-            Output::Admission(result) => Ok(result),
+            Output::Admission(value) => Ok(value),
             _ => unreachable!(),
         }
     }
     pub async fn pending(&self, limit: usize) -> Result<Vec<InboxRecord>, DomainError> {
-        match self.request(Action::Pending(limit)).await? {
-            Output::Pending(records) => Ok(records),
+        match self
+            .request(Action::Pending(limit.min(self.max_pending)))
+            .await?
+        {
+            Output::Pending(value) => Ok(value),
             _ => unreachable!(),
         }
     }
@@ -129,173 +172,4 @@ pub(super) fn operation(id: UpdateId) -> Result<OperationId, DomainError> {
 }
 pub(super) fn failure(error: impl std::fmt::Display) -> DomainError {
     DomainError::Persistence(error.to_string())
-}
-
-/// Pure admission logic runs only on the database thread, never across HTTP/await.
-pub(super) fn apply(
-    state: &mut TelegramState,
-    action: Action,
-    max_pending: usize,
-) -> Result<Output, DomainError> {
-    match action {
-        Action::Snapshot => return Ok(Output::Snapshot(state.clone())),
-        Action::Pending(limit) => {
-            return Ok(Output::Pending(
-                state
-                    .inbox
-                    .values()
-                    .filter(|r| matches!(r.status, InboxStatus::Pending))
-                    .take(limit)
-                    .cloned()
-                    .collect(),
-            ))
-        }
-        Action::Claim(bot) => {
-            if state.bot.is_some_and(|old| old != bot) {
-                return Err(failure("Telegram state belongs to another bot"));
-            }
-            state.bot = Some(bot);
-        }
-        Action::Bind(topic, session) => {
-            if state
-                .bindings
-                .iter()
-                .any(|(key, id)| id == &session && key != &topic)
-            {
-                return Err(DomainError::InvalidAnswer(
-                    "session already bound to another Telegram topic".into(),
-                ));
-            }
-            state.bindings.insert(topic, session);
-        }
-        Action::Unbind(topic, expected) => {
-            if state.bindings.get(&topic) == Some(&expected) {
-                state.bindings.remove(&topic);
-            }
-        }
-        Action::Register(key, binding) => {
-            if let Some(existing) = state.callbacks.get(&key) {
-                let mut expected = binding;
-                expected.used_by = existing.used_by;
-                if serde_json::to_vec(existing).map_err(failure)?
-                    != serde_json::to_vec(&expected).map_err(failure)?
-                {
-                    return Err(DomainError::OperationConflict);
-                }
-            } else {
-                if state.callbacks.len() >= 4096 {
-                    return Err(DomainError::Backpressure);
-                }
-                if binding.used_by.is_some() {
-                    return Err(DomainError::InvalidAnswer(
-                        "callback cannot start consumed".into(),
-                    ));
-                }
-                state.callbacks.insert(key, binding);
-            }
-        }
-        Action::Admit(admission) => {
-            if admission.id.get() < state.offset {
-                return Ok(Output::Admission(AdmissionResult::Duplicate));
-            }
-            if let Some(command) = &admission.command {
-                if state.bindings.get(&command.topic) != admission.expected_binding.as_ref() {
-                    return Err(DomainError::Backpressure);
-                }
-                if state
-                    .inbox
-                    .values()
-                    .filter(|r| matches!(r.status, InboxStatus::Pending))
-                    .count()
-                    >= max_pending
-                {
-                    return Err(DomainError::Backpressure);
-                }
-            }
-            if admission
-                .callback_query
-                .as_ref()
-                .is_some_and(|q| q.is_empty() || q.len() > 200 || q.chars().any(char::is_control))
-            {
-                return Err(DomainError::InvalidAnswer(
-                    "invalid callback query identity".into(),
-                ));
-            }
-            if let Some(key) = &admission.callback {
-                let binding = state
-                    .callbacks
-                    .get_mut(key)
-                    .ok_or_else(|| DomainError::InvalidAnswer("callback not found".into()))?;
-                let command = admission
-                    .command
-                    .as_ref()
-                    .ok_or_else(|| DomainError::InvalidAnswer("callback command missing".into()))?;
-                match &command.action {
-                    TelegramAction::Answer { session, answer }
-                        if binding.used_by.is_none()
-                            && binding.topic == command.topic
-                            && &binding.session == session
-                            && &binding.answer == answer =>
-                    {
-                        binding.used_by = Some(admission.id)
-                    }
-                    _ => {
-                        return Err(DomainError::InvalidAnswer(
-                            "callback already used or binding mismatch".into(),
-                        ))
-                    }
-                }
-            }
-            state.offset = admission.id.get() + 1;
-            crate::domain::query::SafeInteger::new(state.offset).map_err(failure)?;
-            let result = if let Some(command) = admission.command {
-                state.inbox.insert(
-                    admission.id,
-                    InboxRecord {
-                        id: admission.id,
-                        sender: admission.sender.ok_or_else(|| {
-                            DomainError::InvalidAnswer("inbox sender missing".into())
-                        })?,
-                        operation: operation(admission.id)?,
-                        command,
-                        callback: admission.callback,
-                        callback_query: admission.callback_query,
-                        status: InboxStatus::Pending,
-                    },
-                );
-                AdmissionResult::Accepted
-            } else {
-                AdmissionResult::Ignored
-            };
-            return Ok(Output::Admission(result));
-        }
-        Action::Compact(now) => {
-            let before = (state.inbox.len(), state.callbacks.len());
-            state
-                .inbox
-                .retain(|_, r| matches!(r.status, InboxStatus::Pending));
-            let protected: std::collections::BTreeSet<_> = state
-                .inbox
-                .values()
-                .filter_map(|r| r.callback.clone())
-                .collect();
-            state
-                .callbacks
-                .retain(|key, binding| binding.expires_at > now || protected.contains(key));
-            return Ok(Output::Compacted(
-                before.0 - state.inbox.len(),
-                before.1 - state.callbacks.len(),
-            ));
-        }
-        Action::Complete(id, outcome) => {
-            let record = state
-                .inbox
-                .get_mut(&id)
-                .ok_or_else(|| failure("inbox record missing"))?;
-            if matches!(record.status, InboxStatus::Pending) {
-                record.status = InboxStatus::Completed(outcome);
-            }
-        }
-    }
-    Ok(Output::Unit)
 }

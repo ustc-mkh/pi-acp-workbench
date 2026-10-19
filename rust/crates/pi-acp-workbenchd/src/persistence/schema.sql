@@ -5,6 +5,10 @@ CREATE TABLE store_meta (
     value INTEGER NOT NULL CHECK (value BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 INSERT INTO store_meta VALUES ('created_seq', 0), ('delivery_seq', 0);
+CREATE TABLE removed_sessions (
+    id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991)
+) STRICT;
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),
     created_seq INTEGER NOT NULL UNIQUE CHECK (created_seq BETWEEN 1 AND 9007199254740991),
@@ -33,6 +37,7 @@ CREATE TABLE entries (
     image_id TEXT REFERENCES contents(id),
     metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json))
 ) STRICT;
+CREATE INDEX entries_turn_role ON entries(turn, role, entry_id);
 CREATE TABLE session_entries (
     session TEXT NOT NULL REFERENCES sessions(id),
     seq INTEGER NOT NULL CHECK (seq BETWEEN 1 AND 9007199254740991),
@@ -66,6 +71,12 @@ CREATE TABLE deliveries (
     next_retry INTEGER NOT NULL DEFAULT 0 CHECK (next_retry BETWEEN 0 AND 9007199254740991),
     last_failure TEXT CHECK (last_failure IN ('Transport', 'RateLimited', 'InvalidTarget', 'PayloadUnavailable'))
 ) STRICT;
+CREATE TABLE delivery_entries (
+    delivery_id TEXT NOT NULL REFERENCES deliveries(delivery_id),
+    seq INTEGER NOT NULL CHECK (seq BETWEEN 1 AND 9007199254740991),
+    entry_id TEXT NOT NULL REFERENCES entries(entry_id),
+    PRIMARY KEY (delivery_id, seq)
+) STRICT;
 CREATE INDEX deliveries_retry ON deliveries(status, next_retry);
 CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq);
 CREATE TABLE telegram_meta (
@@ -91,6 +102,8 @@ CREATE TABLE telegram_inbox (
     outcome_json TEXT CHECK (outcome_json IS NULL OR json_valid(outcome_json)),
     PRIMARY KEY (bot_id, update_id)
 ) STRICT;
+CREATE INDEX telegram_inbox_pending ON telegram_inbox(bot_id, status, update_id);
+CREATE INDEX telegram_inbox_pending_ref ON telegram_inbox(bot_id, callback_ref) WHERE status = 'Pending';
 CREATE TABLE telegram_callbacks (
     bot_id INTEGER NOT NULL REFERENCES telegram_meta(bot_id),
     key TEXT NOT NULL,
