@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 enum Parts {
     Frozen(Box<super::turn_stream::TurnStream>),
+    History(Box<super::turn_stream::HistoryStream>),
     Messages(std::vec::IntoIter<render::DeliveryPart>),
 }
 impl Parts {
@@ -22,6 +23,7 @@ impl Parts {
     ) -> Result<Option<render::DeliveryPart>, DomainError> {
         match self {
             Self::Frozen(stream) => stream.next(payloads).await,
+            Self::History(stream) => stream.next(payloads).await,
             Self::Messages(parts) => Ok(parts.next()),
         }
     }
@@ -45,8 +47,22 @@ pub(super) async fn deliver_record(
         return Ok(());
     }
     let outbox = context.app.delivery_store();
-    if context.delivered.lock().await.contains(&record.event.id) {
-        outbox.ack(&record.event.id).await?;
+    let history = matches!(
+        &record.event.payload,
+        crate::domain::transition::DeliveryPayload::HistoryEntry { .. }
+    );
+    let sent_to = {
+        context
+            .delivered
+            .lock()
+            .await
+            .get(&record.event.id)
+            .cloned()
+    };
+    if let Some(sent_to) = sent_to {
+        outbox
+            .ack_sent(&record.event.id, context.bot_id, &sent_to)
+            .await?;
         context.delivered.lock().await.remove(&record.event.id);
         return Ok(());
     }
@@ -66,7 +82,17 @@ pub(super) async fn deliver_record(
                 .await
                 .is_err()
             {
-                outbox.ack(&record.event.id).await?;
+                if history {
+                    outbox
+                        .fail(
+                            &record.event.id,
+                            DeliveryFailure::InvalidTarget,
+                            now().saturating_add(60),
+                        )
+                        .await?;
+                } else {
+                    outbox.ack(&record.event.id).await?;
+                }
                 return Ok(());
             }
             (Some(TopicKey::from_delivery(*chat, *thread)?), None)
@@ -110,18 +136,103 @@ pub(super) async fn deliver_record(
     }
     let Some(topic) = topic.filter(|topic| context.config.allowed_chat_ids.contains(&topic.chat))
     else {
-        outbox.ack(&record.event.id).await?;
+        if history {
+            outbox
+                .fail(
+                    &record.event.id,
+                    DeliveryFailure::InvalidTarget,
+                    now().saturating_add(60),
+                )
+                .await?;
+        } else {
+            outbox.ack(&record.event.id).await?;
+        }
         return Ok(());
     };
+    if let crate::domain::transition::DeliveryPayload::Input {
+        session,
+        origin: Some(origin),
+        ..
+    } = &record.event.payload
+    {
+        if context
+            .app
+            .delivery_payloads()
+            .input_origin(
+                origin.clone(),
+                context.bot_id,
+                topic.clone(),
+                session.clone(),
+            )
+            .await?
+        {
+            // The accepted user update is already visible in this exact topic.
+            outbox
+                .ack_sent(&record.event.id, context.bot_id, &topic)
+                .await?;
+            return Ok(());
+        }
+    }
+    // Only automatic successful transcript/media delivery is optional. Typed
+    // interactions, task errors/control notices and explicit query replies stay
+    // visible. Muting acknowledges delivery intent, never deletes archives or
+    // sends a command to the Agent.
+    let automatic = matches!(&record.event.target, DeliveryTarget::Session { .. })
+        && matches!(
+            &record.event.payload,
+            crate::domain::transition::DeliveryPayload::Turn { .. }
+                | crate::domain::transition::DeliveryPayload::Input { .. }
+                | crate::domain::transition::DeliveryPayload::Entry { .. }
+                | crate::domain::transition::DeliveryPayload::Image { .. }
+        );
+    if automatic && !context.store.preferences(&topic).await?.notifications {
+        outbox.ack(&record.event.id).await?;
+        return Ok(());
+    }
     let payloads = context.app.delivery_payloads();
-    let mut parts = if let crate::domain::transition::DeliveryPayload::Turn { turn, .. } =
+    let mut parts = if let crate::domain::transition::DeliveryPayload::Input {
+        session,
+        entry,
+        seq,
+        ..
+    } = &record.event.payload
+    {
+        Parts::History(Box::new(
+            super::turn_stream::HistoryStream::new(
+                &payloads,
+                context.bot_id,
+                topic.clone(),
+                session,
+                entry,
+                *seq,
+            )
+            .await?
+            .into_input(session),
+        ))
+    } else if let crate::domain::transition::DeliveryPayload::Turn { turn, session, .. } =
         &record.event.payload
     {
-        Parts::Frozen(Box::new(super::turn_stream::TurnStream::new(
-            record.event.id.clone(),
-            turn.clone(),
-            topic.clone(),
-        )))
+        Parts::Frozen(Box::new(
+            super::turn_stream::TurnStream::new(
+                record.event.id.clone(),
+                turn.clone(),
+                topic.clone(),
+            )
+            .with_history_scope(context.bot_id, session.clone()),
+        ))
+    } else if let crate::domain::transition::DeliveryPayload::HistoryEntry { session, entries } =
+        &record.event.payload
+    {
+        Parts::History(Box::new(
+            super::turn_stream::HistoryStream::new_group(
+                &payloads,
+                context.bot_id,
+                topic.clone(),
+                session,
+                entries,
+            )
+            .await?,
+        ))
     } else {
         match render::render(
             &record.event,
@@ -167,14 +278,25 @@ pub(super) async fn deliver_record(
                 return Ok(());
             }
         };
+        // Recheck between multipart sends: preferences may change while HTTP
+        // was pending. A send already in flight cannot be recalled.
+        let preferences = context.store.preferences(&topic).await?;
+        if automatic && !preferences.notifications {
+            outbox.ack(&record.event.id).await?;
+            return Ok(());
+        }
         // Read/verify local immutable bytes outside HTTP cancellation. Neither
         // image URIs nor caller-supplied filesystem paths authorize reads.
         let outgoing = match part {
-            render::DeliveryPart::Message(message) => Outgoing::Message(message),
+            render::DeliveryPart::Message(mut message) => {
+                message.disable_notification = history || preferences.silent;
+                Outgoing::Message(message)
+            }
             render::DeliveryPart::Image { topic, image } => Outgoing::Media(SendMedia {
                 chat_id: topic.chat,
                 message_thread_id: topic.thread,
                 asset: context.app.delivery_payloads().image(&image).await?,
+                disable_notification: history || preferences.silent,
             }),
         };
         // Cancellation can leave an uncertain remote send: retain Pending.
@@ -215,8 +337,10 @@ pub(super) async fn deliver_record(
             .delivered
             .lock()
             .await
-            .insert(record.event.id.clone());
-        outbox.ack(&record.event.id).await?;
+            .insert(record.event.id.clone(), topic.clone());
+        outbox
+            .ack_sent(&record.event.id, context.bot_id, &topic)
+            .await?;
         context.delivered.lock().await.remove(&record.event.id);
     }
     Ok(())

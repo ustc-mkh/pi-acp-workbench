@@ -98,9 +98,13 @@ impl SessionPersistence for Store {
         }
         self.history.commit(change).await
     }
-    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
+    async fn remove(
+        &self,
+        id: &SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommitBatch, String> {
         self.gate(6).await;
-        SessionPersistence::remove(&self.history, id).await
+        SessionPersistence::remove(&self.history, id, operation).await
     }
 }
 fn submit(
@@ -111,7 +115,11 @@ fn submit(
     runtime
         .registry
         .tx
-        .try_send(RegistryCommand::Command { command, reply })
+        .try_send(RegistryCommand::Command {
+            command,
+            operation: None,
+            reply,
+        })
         .unwrap_or_else(|_| panic!("fixture admission"));
     wait
 }
@@ -224,6 +232,7 @@ async fn pending_load_lane_is_bounded_and_caller_disconnect_does_not_skip_accept
             .registry
             .tx
             .send(RegistryCommand::Command {
+                operation: None,
                 command: DomainCommand::SetModel {
                     session: cold_id.clone(),
                     model: crate::domain::ModelId::new(format!("slot-{index}")).unwrap(),
@@ -239,6 +248,7 @@ async fn pending_load_lane_is_bounded_and_caller_disconnect_does_not_skip_accept
         .registry
         .tx
         .send(RegistryCommand::Command {
+            operation: None,
             command: DomainCommand::SetMode {
                 session: cold_id.clone(),
                 mode: crate::domain::ModeId::new("overflow").unwrap(),

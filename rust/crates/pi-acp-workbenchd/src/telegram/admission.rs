@@ -1,7 +1,7 @@
 //! Classification is frozen at durable admission, never guessed again at execution.
 use super::{
     command::{parse_text, ControlCommand, RejectionReason, TelegramAction, TelegramCommand},
-    types::{ChatId, IncomingContent, IncomingUpdate, UserId},
+    types::{CallbackAction, ChatId, IncomingContent, IncomingUpdate, UserId},
 };
 use crate::{
     domain::{error::DomainError, query::SessionView, WorkspacePath},
@@ -55,21 +55,35 @@ pub async fn admit_update(
                     if now >= binding.expires_at {
                         return Err(RejectionReason::ExpiredInteraction);
                     }
-                    let snapshot = snapshot
-                        .filter(|snapshot| snapshot.id == binding.session)
-                        .ok_or(RejectionReason::InvalidCallback)?;
-                    let interaction = snapshot
-                        .pending_interactions
-                        .get(&binding.answer.interaction)
-                        .ok_or(RejectionReason::InvalidCallback)?;
-                    let answer = interaction
-                        .validate_answer(binding.answer.clone(), now)
-                        .map_err(|_| RejectionReason::InvalidAnswer)?;
+                    let action = match &binding.action {
+                        CallbackAction::Answer { session, answer } => {
+                            let snapshot = snapshot
+                                .filter(|snapshot| &snapshot.id == session)
+                                .ok_or(RejectionReason::InvalidCallback)?;
+                            let interaction = snapshot
+                                .pending_interactions
+                                .get(&answer.interaction)
+                                .ok_or(RejectionReason::InvalidCallback)?;
+                            let answer = interaction
+                                .validate_answer(answer.clone(), now)
+                                .map_err(|_| RejectionReason::InvalidAnswer)?;
+                            TelegramAction::Answer {
+                                session: snapshot.id.clone(),
+                                answer,
+                            }
+                        }
+                        CallbackAction::Control {
+                            command,
+                            expected_binding: expected,
+                        } => {
+                            if expected != &expected_binding {
+                                return Err(RejectionReason::InvalidCallback);
+                            }
+                            TelegramAction::Control(command.clone())
+                        }
+                    };
                     callback = Some(key);
-                    Ok(TelegramAction::Answer {
-                        session: snapshot.id.clone(),
-                        answer,
-                    })
+                    Ok(action)
                 })();
                 Some(answer.unwrap_or_else(TelegramAction::Rejected))
             }
@@ -77,12 +91,32 @@ pub async fn admit_update(
     };
     if let Some(ref mut action) = action {
         match action {
+            TelegramAction::Control(ControlCommand::Sync { forum, .. }) => {
+                if callback.is_some() && *forum != update.forum {
+                    *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
+                } else {
+                    *forum = update.forum;
+                }
+            }
+            TelegramAction::Control(ControlCommand::Menu { create_topic, .. }) => {
+                let forum_general = update.forum && update.topic.thread.is_none();
+                if callback.is_some() && *create_topic != forum_general {
+                    *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
+                } else {
+                    *create_topic = forum_general;
+                }
+            }
             TelegramAction::Control(ControlCommand::NewSession {
                 cwd, create_topic, ..
             }) => match authorize_workspace(cwd, &policy.cwd).await {
                 Ok(canonical) => {
-                    *cwd = canonical;
-                    *create_topic = update.forum && update.topic.thread.is_none();
+                    let forum_general = update.forum && update.topic.thread.is_none();
+                    if callback.is_some() && (*cwd != canonical || *create_topic != forum_general) {
+                        *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
+                    } else {
+                        *cwd = canonical;
+                        *create_topic = forum_general;
+                    }
                 }
                 Err(_) => *action = TelegramAction::Rejected(RejectionReason::WorkspaceForbidden),
             },
@@ -91,6 +125,8 @@ pub async fn admit_update(
             | TelegramAction::Control(
                 ControlCommand::Status { .. }
                 | ControlCommand::Cancel { .. }
+                | ControlCommand::Interrupt { .. }
+                | ControlCommand::Discover { .. }
                 | ControlCommand::Remove { .. }
                 | ControlCommand::SetModel { .. }
                 | ControlCommand::SetMode { .. },
@@ -107,6 +143,11 @@ pub async fn admit_update(
             }
             _ => {}
         }
+    }
+    // A failed revalidation is a durable rejection, not consumption of a
+    // different command under the callback key (which SQL correctly forbids).
+    if matches!(action, Some(TelegramAction::Rejected(_))) {
+        callback = None;
     }
     store
         .admit(Admission {

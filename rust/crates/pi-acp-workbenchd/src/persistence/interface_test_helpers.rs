@@ -75,8 +75,10 @@ macro_rules! delegate_session_queries {
         async fn remove(
             &self,
             id: &crate::domain::SessionId,
+            operation: Option<crate::domain::operation::OperationTicket>,
         ) -> Result<crate::domain::query::CommitBatch, String> {
-            crate::persistence::interface::SessionPersistence::remove(&self.history, id).await
+            crate::persistence::interface::SessionPersistence::remove(&self.history, id, operation)
+                .await
         }
     };
 }

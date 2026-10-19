@@ -19,6 +19,10 @@ pub mod interface;
 pub(crate) mod interface_test_helpers;
 pub mod journal;
 pub mod maintenance;
+mod metrics;
+#[cfg(test)]
+mod mixed_workload_tests;
+pub use metrics::RequestMetrics;
 pub mod outbox;
 pub mod payload;
 mod query;

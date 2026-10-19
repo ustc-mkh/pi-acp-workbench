@@ -6,7 +6,7 @@ async fn inspect(app: &WorkbenchApp, id: &SessionId) -> SessionView {
 }
 
 #[tokio::test]
-async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_and_replays_failure(
+async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_and_replays_acceptance(
 ) {
     for full in [false, true] {
         let (app, root) = app();
@@ -51,16 +51,20 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             session: id.clone(),
             answer,
         };
-        assert!(app
+        let accepted = app
             .command_durable(operation.clone(), command.clone())
             .await
-            .is_err());
+            .unwrap();
+        assert!(matches!(accepted, CommandReceipt::Accepted { .. }));
         assert!(!app.core.adapters.lock().await.contains_key(&id));
         let failed = inspect(&app, &id).await;
         assert!(matches!(failed.status, SessionStatus::Failed(_)));
         assert!(failed.active_turn.is_none());
         assert!(failed.pending_interactions.is_empty());
-        assert!(app.command_durable(operation, command).await.is_err());
+        assert!(matches!(
+            app.command_durable(operation, command).await.unwrap(),
+            CommandReceipt::Accepted { .. }
+        ));
         assert_eq!(inspect(&app, &id).await.revision, failed.revision);
         let mut saw_failure = false;
         while let Ok(event) = events.try_recv() {

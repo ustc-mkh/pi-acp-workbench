@@ -37,6 +37,9 @@ import type { WorkbenchSessionView } from './workbench-session';
 
 // Only user-originated commands; no internal event/ACP request or caller-selected operation ID.
 export const uiCommand = tagged('type', {
+  attach_files: object({ type: literal('attach_files'), session: sessionId }),
+  export: object({ type: literal('export'), session: sessionId }),
+  recover_operations: object({ type: literal('recover_operations') }),
   ready: object({ type: literal('ready') }),
   refresh: object({ type: literal('refresh'), cursor: optional(listCursor) }),
   create: object({ type: literal('create'), command: clientCommand }),
@@ -70,7 +73,7 @@ export interface UiOperation {
   operation: OperationId;
   method: string;
   session?: string;
-  status: 'pending' | 'completed' | 'failed';
+  status: 'pending' | 'completed' | 'failed' | 'uncertain';
   code?: string;
   error?: string;
 }
@@ -87,6 +90,7 @@ export interface WorkbenchUiState {
 export type WorkbenchUiMessage =
   | { type: 'state'; sequence: number; state: WorkbenchUiState }
   | { type: 'prompt_accepted'; session: string; text: string }
+  | { type: 'attachments'; session: string; files: import('./workbench-input').TextAttachment[] }
   | { type: 'image'; session: string; request_id?: number; asset: ImageAsset }
   | {
       type: 'content';
@@ -106,6 +110,14 @@ export type WorkbenchUiMessage =
       error: string;
     };
 // Shared output validation keeps the browser from trusting partial/old extension state.
+export const uiOperation = object({
+  operation: operationId,
+  method: string,
+  session: optional(string),
+  status: variants({ pending: null, completed: null, failed: null, uncertain: null }),
+  code: optional(string),
+  error: optional(string),
+});
 export const uiState = object({
   sessions: array(sessionSummary),
   sessionsCursor: optional(listCursor),
@@ -128,16 +140,7 @@ export const uiState = object({
       error: optional(string),
     }),
   ),
-  operations: array(
-    object({
-      operation: operationId,
-      method: string,
-      session: optional(string),
-      status: variants({ pending: null, completed: null, failed: null }),
-      code: optional(string),
-      error: optional(string),
-    }),
-  ),
+  operations: array(uiOperation),
   error: optional(string),
   workspace: optional(string),
   trusted: boolean,

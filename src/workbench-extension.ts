@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
-import { randomBytes } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtemp, open, realpath, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { WorkbenchClient } from './workbench-client';
 import { WorkbenchController } from './workbench-controller';
+import { readTextAttachment } from './workbench-attachments';
+import { MAX_ATTACHMENTS } from './workbench-input';
 
 /** New production entry. Legacy extension/controller/wire files are not imported or bundled. */
 export function activate(context: vscode.ExtensionContext) {
@@ -42,8 +44,88 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
     const client = new WorkbenchClient(path, {
       lost: (error) => this.log.appendLine(error.message),
     });
+    const operationKey = `workbench.operations:${path}`;
     this.controller = new WorkbenchController(client, {
+      loadSelection: () => context.workspaceState?.get(`workbench.selection:${path}`),
+      saveSelection: (session) =>
+        context.workspaceState?.update(`workbench.selection:${path}`, session) ?? Promise.resolve(),
+      loadOperations: () => context.workspaceState?.get(operationKey),
+      saveOperations: (operations) =>
+        context.workspaceState?.update(operationKey, operations) ?? Promise.resolve(),
       trusted: () => vscode.workspace.isTrusted,
+      attachFiles: async (cwd) => {
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
+        const result = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: false,
+          canSelectMany: true,
+          openLabel: 'Attach text files',
+          filters: {
+            'Text and source files': [
+              'txt',
+              'md',
+              'json',
+              'yaml',
+              'yml',
+              'toml',
+              'rs',
+              'ts',
+              'tsx',
+              'js',
+              'jsx',
+              'py',
+              'go',
+              'java',
+              'c',
+              'h',
+              'cpp',
+              'html',
+              'css',
+              'sql',
+              'sh',
+            ],
+          },
+        });
+        if (!result?.length) return [];
+        if (result.length > MAX_ATTACHMENTS)
+          throw new Error(`Attach at most ${MAX_ATTACHMENTS} files at once`);
+        const attachments = await Promise.all(
+          result.map(async (uri) => {
+            if (uri.scheme !== 'file')
+              throw new Error('Only local workspace files can be attached');
+            const file = await readTextAttachment(uri.fsPath, cwd);
+            return { id: randomUUID(), ...file };
+          }),
+        );
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+        return attachments;
+      },
+      exportMarkdown: async (session, chunks) => {
+        const destination = await vscode.window.showSaveDialog({
+          defaultUri: vscode.Uri.file(
+            join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || homedir(), `${session}.md`),
+          ),
+          filters: { Markdown: ['md'] },
+          title: 'Export full committed transcript',
+        });
+        if (!destination) return;
+        if (destination.scheme !== 'file') throw new Error('Choose a local Markdown file');
+        const directory = await mkdtemp(join(dirname(destination.fsPath), '.workbench-export-'));
+        const temporary = join(directory, 'transcript.md');
+        try {
+          const output = await open(temporary, 'wx', 0o600);
+          try {
+            for await (const chunk of chunks) await output.writeFile(chunk, 'utf8');
+            await output.sync();
+          } finally {
+            await output.close();
+          }
+          if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+          await rename(temporary, destination.fsPath);
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      },
       workspace: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       authorize: async (cwd) => {
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');

@@ -45,6 +45,9 @@ pub struct IpcRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientCommand {
+    Operation {
+        operation: crate::domain::OperationId,
+    },
     Create {
         harness: Harness,
         cwd: WorkspacePath,
@@ -118,7 +121,8 @@ pub enum ClientCommand {
 impl ClientCommand {
     fn pool(&self) -> usize {
         match self {
-            Self::List { .. }
+            Self::Operation { .. }
+            | Self::List { .. }
             | Self::Inspect { .. }
             | Self::History { .. }
             | Self::Tools { .. }
@@ -135,6 +139,9 @@ impl ClientCommand {
     }
     fn query(&self) -> Option<QueryCommand> {
         Some(match self {
+            Self::Operation { operation } => QueryCommand::Operation {
+                operation: operation.clone(),
+            },
             Self::List { cursor, limit } => QueryCommand::List {
                 cursor: cursor.clone(),
                 limit: *limit,

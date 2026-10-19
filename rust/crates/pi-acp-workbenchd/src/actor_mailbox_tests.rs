@@ -10,7 +10,13 @@ async fn full_session_mailbox_returns_backpressure_without_waiting() {
         .unwrap_or_else(|_| panic!("empty mailbox"));
     let sessions = BTreeMap::from([(id.clone(), sender)]);
     let (reply, wait) = oneshot::channel();
-    forward(DomainCommand::Inspect(id.clone()), &id, reply, &sessions);
+    forward(
+        DomainCommand::Inspect(id.clone()),
+        None,
+        &id,
+        reply,
+        &sessions,
+    );
     assert!(matches!(
         wait.await.unwrap(),
         Err(DomainError::Backpressure)
@@ -24,7 +30,13 @@ async fn closed_session_mailbox_reports_missing_actor() {
     drop(receiver);
     let sessions = BTreeMap::from([(id.clone(), sender)]);
     let (reply, wait) = oneshot::channel();
-    forward(DomainCommand::Inspect(id.clone()), &id, reply, &sessions);
+    forward(
+        DomainCommand::Inspect(id.clone()),
+        None,
+        &id,
+        reply,
+        &sessions,
+    );
     assert!(matches!(wait.await.unwrap(), Err(DomainError::NotFound(missing)) if missing == id));
 }
 

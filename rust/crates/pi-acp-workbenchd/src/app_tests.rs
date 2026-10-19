@@ -254,10 +254,34 @@ async fn committed_delivery_recovers_without_agent_reexecution_and_survives_sess
     let mut events = app.subscribe();
     prompt(&app, &session, "durable output").await;
     wait_finished(&mut events).await;
-    assert_eq!(app.delivery_store().pending(0, 16).await.unwrap().len(), 1);
+    assert_eq!(app.delivery_store().pending(0, 16).await.unwrap().len(), 2);
     app.shutdown().await;
     let restarted = app_at(&root);
-    let deliveries = restarted.pending_deliveries(0, 16).await.unwrap();
+    let all = restarted.pending_deliveries(0, 16).await.unwrap();
+    assert!(all.iter().any(|record| matches!(
+        &record.event.payload,
+        crate::persistence::outbox::DeliveryPayload::Input { .. }
+    )));
+    let input_deliveries: Vec<_> = all
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event.payload,
+                crate::persistence::outbox::DeliveryPayload::Input { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(input_deliveries.len(), 1);
+    let deliveries: Vec<_> = all
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                &record.event.payload,
+                crate::persistence::outbox::DeliveryPayload::Turn { .. }
+            )
+        })
+        .collect();
     assert_eq!(deliveries.len(), 1);
     assert!(matches!(
         deliveries[0].event.payload,
@@ -284,6 +308,11 @@ async fn committed_delivery_recovers_without_agent_reexecution_and_survives_sess
         serde_json::to_value(page).unwrap(),
         serde_json::to_value(after).unwrap()
     );
+    restarted
+        .delivery_store()
+        .ack(&input_deliveries[0].event.id)
+        .await
+        .unwrap();
     restarted
         .delivery_store()
         .ack(&deliveries[0].event.id)

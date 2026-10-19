@@ -2,6 +2,7 @@ use super::{
     admission::AdmissionPolicy,
     api::{ApiError, BotApi},
     state::InboxRecord,
+    types::TopicKey,
 };
 use crate::{
     app::WorkbenchApp,
@@ -40,9 +41,11 @@ pub(crate) struct Context<A: BotApi> {
     pub config: TelegramConfig,
     pub username: Option<String>,
     pub bot_id: i64,
+    pub preview: std::sync::Arc<tokio::sync::Mutex<super::preview::State>>,
     pub delivery: std::sync::Arc<super::delivery_scheduler::DeliveryJobs>,
-    pub delivered:
-        std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeSet<crate::domain::DeliveryId>>>,
+    pub delivered: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::BTreeMap<crate::domain::DeliveryId, TopicKey>>,
+    >,
 }
 impl<A: BotApi> Context<A> {
     pub async fn new(
@@ -66,6 +69,7 @@ impl<A: BotApi> Context<A> {
             config,
             bot_id: bot.id.get(),
             username: bot.username,
+            preview: Default::default(),
             delivery: Default::default(),
             delivered: Default::default(),
         })
@@ -191,6 +195,7 @@ async fn supervise(
     tasks.spawn(super::polling::run(context.clone(), stop.clone()));
     tasks.spawn(super::execution::run(context.clone(), stop.clone()));
     tasks.spawn(super::delivery::run(context.clone(), stop.clone()));
+    tasks.spawn(super::preview::observe(context.clone(), stop.clone()));
     let mut result = tokio::select! {
         biased;
         _ = stop.cancelled() => Ok(()),

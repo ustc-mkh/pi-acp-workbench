@@ -108,6 +108,47 @@ async fn token_bearing_calls_never_follow_redirects() {
     }
 }
 #[tokio::test]
+async fn text_silent_policy_uses_the_typed_telegram_flag_without_hiding_message_or_markup() {
+    for silent in [false, true] {
+        let (base, request) = peer(
+            "200 OK",
+            "",
+            r#"{"ok":true,"result":{"message_id":1,"chat":{"id":-100},"message_thread_id":2}}"#
+                .into(),
+        )
+        .await;
+        BotClient::new(&base, "123:SECRET")
+            .unwrap()
+            .send_message(&SendMessage {
+                chat_id: ChatId::new(-100).unwrap(),
+                message_thread_id: Some(TopicId::new(2).unwrap()),
+                text: "授权入口 🚀".into(),
+                disable_notification: silent,
+                reply_markup: Some(InlineKeyboard {
+                    inline_keyboard: vec![vec![InlineButton {
+                        text: "Allow".into(),
+                        callback_data: CallbackKey::for_option(
+                            &crate::domain::DeliveryId::generate(),
+                            0,
+                        ),
+                    }]],
+                }),
+            })
+            .await
+            .unwrap();
+        let request = String::from_utf8(request.await.unwrap()).unwrap();
+        assert!(request.starts_with("POST /bot123:SECRET/sendMessage "));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["disable_notification"], silent);
+        assert_eq!(body["text"], "授权入口 🚀");
+        assert_eq!(
+            body["reply_markup"]["inline_keyboard"][0][0]["text"],
+            "Allow"
+        );
+    }
+}
+#[tokio::test]
 async fn verified_media_uploads_binary_multipart_with_typed_topic_and_correct_endpoint() {
     use crate::domain::image::{ImageAsset, ImageMime};
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -146,6 +187,7 @@ async fn verified_media_uploads_binary_multipart_with_typed_topic_and_correct_en
             chat_id: ChatId::new(-100).unwrap(),
             message_thread_id: Some(TopicId::new(2).unwrap()),
             asset,
+            disable_notification: true,
         };
         let message = BotClient::new(&base, "123:SECRET")
             .unwrap()
@@ -160,6 +202,7 @@ async fn verified_media_uploads_binary_multipart_with_typed_topic_and_correct_en
         assert!(text.contains(&format!("name=\"{field}\"")) && text.contains(&filename));
         assert!(text.contains("name=\"chat_id\"\r\n\r\n-100"));
         assert!(text.contains("name=\"message_thread_id\"\r\n\r\n2"));
+        assert!(text.contains("name=\"disable_notification\"\r\n\r\ntrue"));
         assert!(text.contains(mime.as_str()));
         assert!(request.windows(bytes.len()).any(|window| window == bytes));
     }
@@ -172,6 +215,7 @@ async fn media_retry_errors_are_bounded_and_never_include_token_or_remote_descri
         chat_id: ChatId::new(-100).unwrap(),
         message_thread_id: None,
         asset,
+        disable_notification: false,
     };
     let error = BotClient::new(&base, "123:SECRET")
         .unwrap()

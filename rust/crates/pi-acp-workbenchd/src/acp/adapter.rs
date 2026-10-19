@@ -15,6 +15,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum AdapterCommand {
+    Ready {
+        reply: tokio::sync::oneshot::Sender<Result<(), DomainError>>,
+    },
     Prompt {
         turn: TurnId,
         text: String,
@@ -186,6 +189,10 @@ async fn run_protocol(
             break;
         };
         let (turn, text, config) = match command {
+            AdapterCommand::Ready { reply } => {
+                let _ = reply.send(Ok(()));
+                continue;
+            }
             AdapterCommand::Prompt { turn, text, config } => (turn, text, config),
             AdapterCommand::ForkPoints { reply, cancel } => {
                 let result = async {
@@ -347,6 +354,7 @@ async fn run_protocol(
                         let _ = reply.send(result);
                         break 'adapter;
                     }
+                    Some(AdapterCommand::Ready { reply }) => { let _ = reply.send(Err(DomainError::Busy)); }
                     Some(AdapterCommand::Configure { reply, .. }) => { let _ = reply.send(Err(DomainError::Busy)); }
                     Some(AdapterCommand::ForkPoints { reply, .. }) => { let _ = reply.send(Err(DomainError::Busy)); }
                     Some(AdapterCommand::ForkNative { reply, .. }) => { let _ = reply.send(Err(DomainError::Busy)); }

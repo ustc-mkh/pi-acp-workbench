@@ -38,6 +38,7 @@ pub enum InboxStatus {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InboxOutcome {
+    Cancelled { by: UpdateId },
     Applied,
     Rejected,
     Failed,

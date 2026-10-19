@@ -269,6 +269,7 @@ async fn sql_delivery_accepted_ack_survives_observer_drop_and_shutdown_retains_l
     let (reply, wait) = tokio::sync::oneshot::channel();
     db.enqueue(StoreRequest::Delivery(Box::new(Request::Ack {
         id: event.id.clone(),
+        destination: None,
         reply,
     })))
     .await

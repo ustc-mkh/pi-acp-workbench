@@ -99,7 +99,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "IPC v2 socket of pi-acp-workbenchd. Empty uses ~/.pi/pi-acp-workbench/workbench.sock. Configure workers/storage in workbench.json; reload after changing this path. No legacy socket fallback."
+          "description": "IPC v3 socket of pi-acp-workbenchd. Empty uses ~/.pi/pi-acp-workbench/workbench.sock. Configure workers/storage in workbench.json; reload after changing this path. No legacy socket fallback."
         }
       }
     }
@@ -139,6 +139,7 @@
     "test:workbench:process-loss": "npm run build:workbenchd && node scripts/workbench-process-loss.mjs",
     "test:workbench:startup": "npm run build:workbenchd && node scripts/workbench-startup.mjs",
     "test:workbench:scale": "cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle -- --nocapture && node scripts/workbench-scale.mjs",
+    "test:workbench:mixed": "node scripts/workbench-mixed.mjs",
     "test:workbench:soak": "npm run build:workbenchd && node scripts/workbench-soak.mjs",
     "check:protocol": "npm run check",
     "test:service:artifact": "node scripts/service-artifact-smoke.mjs",

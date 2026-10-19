@@ -145,6 +145,9 @@ impl WorkbenchApp {
         self.ingress.submit(Request::Query { command, reply })?;
         wait.await.map_err(|_| ingress::interrupted())?
     }
+    pub(crate) fn harness_configured(&self, harness: &crate::domain::Harness) -> bool {
+        self.core.supervisor.is_configured(harness)
+    }
     pub async fn list(
         &self,
         cursor: Option<crate::domain::query::ListCursor>,
@@ -157,6 +160,17 @@ impl WorkbenchApp {
             crate::domain::query::QueryResult::List(page) => Ok(page),
             _ => Err(DomainError::Protocol("invalid list query result".into())),
         }
+    }
+    pub(crate) async fn list_activity(
+        &self,
+        cursor: Option<crate::domain::query::ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<crate::domain::query::ListPage, DomainError> {
+        self.core
+            .database
+            .activity_list(cursor, limit)
+            .await
+            .map_err(|error| DomainError::Persistence(error.to_string()))
     }
     pub(crate) async fn dispatch_snapshot(
         &self,
@@ -203,6 +217,14 @@ impl WorkbenchApp {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<CommitBatch> {
         self.core.events.subscribe()
+    }
+    pub(crate) async fn discover_session(
+        &self,
+        session: SessionId,
+    ) -> Result<CommandReceipt, DomainError> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        self.ingress.submit(Request::Discover { session, reply })?;
+        wait.await.map_err(|_| ingress::stopping())?
     }
     pub async fn command(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
         self.enqueue_command(None, command)?.wait().await
@@ -303,10 +325,54 @@ impl CommandCore {
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainError::Worker("runtime shutting down".into()));
         }
+        if let DomainCommand::CreateSession { harness, cwd } = &command {
+            // Query replay before preflight: a later configuration change must
+            // not invalidate an already committed creation receipt.
+            if let Some(result) = self.journal.lookup(&operation, &command).await? {
+                return result;
+            }
+            if !self.supervisor.is_configured(harness) {
+                return Err(DomainError::ProviderNotConfigured);
+            }
+            let receipt = self
+                .journal
+                .create_local(operation, harness.clone(), cwd.clone())
+                .await?;
+            if let CommandReceipt::Created { summary } = &receipt {
+                // Warming an owner is advisory, not the creation commit point.
+                // A failed/closed registry cannot turn committed acceptance into
+                // a failed receipt or cause creation to run again on reload.
+                let _ = self
+                    .runtime
+                    .registry
+                    .command(DomainCommand::LoadSession(summary.id.clone()))
+                    .await;
+            }
+            return Ok(receipt);
+        }
         let ticket = match self.journal.begin(operation.clone(), &command).await? {
             Admission::Execute(ticket) => ticket,
             Admission::Replay(result) => return result,
         };
+        if matches!(
+            command,
+            DomainCommand::Prompt { .. }
+                | DomainCommand::SetModel { .. }
+                | DomainCommand::SetMode { .. }
+                | DomainCommand::Cancel { .. }
+                | DomainCommand::AnswerInteraction { .. }
+                | DomainCommand::RemoveSession(_)
+        ) {
+            let result = self
+                .execute_with_operation(command, Some(ticket.clone()))
+                .await;
+            // Successful terminal receipts are sealed with their local state.
+            // Only rejected, uncommitted commands need a failed receipt.
+            if result.is_err() {
+                self.journal.finish(ticket, &result).await?;
+            }
+            return result;
+        }
         let result = if let DomainCommand::Fork { session, request } = &command {
             match self.fork_controls.get(session, &operation) {
                 Ok(control) => self.fork_session(session, request, &control.stop).await,
@@ -319,6 +385,14 @@ impl CommandCore {
         result
     }
     async fn execute(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
+        self.execute_with_operation(command, None).await
+    }
+    async fn execute_with_operation(
+        &self,
+        command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommandReceipt, DomainError> {
+        let accepts_input = operation.is_some();
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainError::Worker("runtime shutting down".into()));
         }
@@ -360,10 +434,16 @@ impl CommandCore {
             // The final terminal event and delivery intent are committed only
             // after the provider process group has stopped and been joined.
             return self
-                .commit(DomainCommand::Cancel {
-                    session: session.clone(),
-                })
-                .await;
+                .runtime
+                .registry
+                .command_with_operation(
+                    DomainCommand::Cancel {
+                        session: session.clone(),
+                    },
+                    operation,
+                )
+                .await?
+                .receipt();
         }
         if let DomainCommand::RemoveSession(session) = &command {
             // A cold session has no current process owner. A live active owner
@@ -448,10 +528,16 @@ impl CommandCore {
                     wait.await.map_err(|_| {
                         DomainError::Worker("adapter stopped during configuration".into())
                     })??;
-                    self.commit(DomainCommand::CommitConfiguration {
-                        session: session.clone(),
-                    })
-                    .await
+                    self.runtime
+                        .registry
+                        .command_with_operation(
+                            DomainCommand::CommitConfiguration {
+                                session: session.clone(),
+                            },
+                            operation,
+                        )
+                        .await?
+                        .receipt()
                 }
                 .await;
                 if applied.is_err() {
@@ -475,11 +561,21 @@ impl CommandCore {
             DomainCommand::AnswerInteraction { session, .. } => Some(session.clone()),
             _ => None,
         };
-        let result = self.runtime.registry.command(command).await?;
+        let result = self
+            .runtime
+            .registry
+            .command_with_operation(command, operation)
+            .await?;
         if let Some((session, text)) = prompt {
             if let Some(turn) = result.view().and_then(|view| view.active_turn.clone()) {
                 if let Err(error) = self.dispatch_prompt(session.clone(), turn, text).await {
-                    self.fail_adapter(&session, &error).await?;
+                    let failure = self.fail_adapter(&session, &error).await;
+                    if accepts_input {
+                        // Dispatch is after durable acceptance. Its failure is
+                        // task state, never a rollback or failed input receipt.
+                        return result.receipt();
+                    }
+                    failure?;
                     return Err(error);
                 }
             }
@@ -503,7 +599,13 @@ impl CommandCore {
                     )),
                 };
                 if let Err(error) = sent {
-                    self.fail_adapter(&session, &error).await?;
+                    let failure = self.fail_adapter(&session, &error).await;
+                    if accepts_input {
+                        // The answer was durably accepted. Provider dispatch
+                        // failure is task state, not a second failed receipt.
+                        return result.receipt();
+                    }
+                    failure?;
                     return Err(error);
                 }
             }
@@ -562,6 +664,40 @@ impl CommandCore {
         };
         self.runtime.registry.command(terminal).await?;
         Ok(())
+    }
+    async fn discover(&self, session: SessionId) -> Result<CommandReceipt, DomainError> {
+        self.runtime
+            .registry
+            .command(DomainCommand::LoadSession(session.clone()))
+            .await?;
+        let view = self
+            .runtime
+            .registry
+            .command(DomainCommand::Inspect(session.clone()))
+            .await?;
+        if view
+            .view()
+            .is_some_and(|view| view.active_turn.is_some() || view.configuration_intent.is_some())
+        {
+            return Err(DomainError::Busy);
+        }
+        let (sender, _) = self.adapter_sender(session.clone()).await?;
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        sender
+            .try_send(AdapterCommand::Ready { reply })
+            .map_err(|_| DomainError::Backpressure)?;
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), wait).await;
+        if !matches!(ready, Ok(Ok(Ok(())))) {
+            self.stop_session_adapter(&session).await?;
+            return Err(DomainError::Worker(
+                "provider discovery did not become ready".into(),
+            ));
+        }
+        self.runtime
+            .registry
+            .command(DomainCommand::Inspect(session))
+            .await?
+            .receipt()
     }
     async fn dispatch_prompt(
         &self,

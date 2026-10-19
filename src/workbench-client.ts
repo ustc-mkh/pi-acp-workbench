@@ -282,6 +282,7 @@ export class WorkbenchClient {
         result = message.session;
       } else if (message.type === 'query') {
         const kinds = {
+          operation: 'operation',
           list: 'list',
           inspect: 'view',
           history: 'history',

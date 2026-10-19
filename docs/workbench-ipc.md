@@ -18,6 +18,8 @@ Queries return `type: query`, with `result: { kind, value }`. Errors have `type:
 
 ## Bounded queries
 
+- `operation {operation}` is a read-only recovery query by durable ID, without a command body. It returns `kind: operation` and a tagged status: `unknown`, `uncertain`, `expired`, `completed {receipt}`, or `failed {message}`. A Started record is conservatively `uncertain`, including while work is live; it does not prove dispatch or completion. Unknown never authorizes automatic resubmission. Lookup does not allocate a receipt or start a provider. The extension stores at most 64 handle rows, never command bodies, and only queries them after reload.
+
 - `inspect {session}` returns only the validated hot SessionView, not history or tool bodies. Cold inspect does not create an actor.
 - `list {cursor?,limit?}` defaults to 50, maximum 100 summaries. Descending created sequence/keyset cursors freeze the initial maximum.
 - `history {session,cursor?,limit?}` defaults to 100, maximum 200 headers, descending sequence pages returned in ascending order within each page. Cursors bind protocol version, session and immutable maximum boundary.
@@ -31,7 +33,7 @@ Normal query pages and batches must fit their complete 1 MiB JSON envelope, view
 
 `attach {session}` registers broadcast observation before obtaining an atomic view/recent-history read. That query establishes the initial revision. Subsequent `type: batch` messages carry a CommitBatch with session, revision, optional replacement view, appended committed entry headers and tool updates. The actor commits once, updates its hot view and synchronously publishes exactly one batch before the next mailbox command. No-op commands do not advance revision.
 
-The bounded subscription discards batches at or below its attached revision. Duplicate revisions are ignored; a gap/lag emits `resync_required` and terminates the connection. Clients explicitly reattach and must not replay mutations. Removal publishes a terminal batch using a persisted tombstone revision. `detach {session}` ends observation. There is no second persistent event log, snapshot polling or client domain reducer.
+The bounded subscription discards batches at or below its attached revision. Duplicate revisions are ignored; a gap/lag emits `resync_required` and terminates the connection. Clients reattach using a new snapshot and must not replay mutations. The desktop controller retries only cold observation/receipt queries with a single bounded-backoff reconnect task; Refresh also reattaches disconnected selections. Removal publishes a terminal batch using a persisted tombstone revision. `detach {session}` ends observation. There is no second persistent event log, snapshot polling or client domain reducer.
 
 ## Runtime safety
 

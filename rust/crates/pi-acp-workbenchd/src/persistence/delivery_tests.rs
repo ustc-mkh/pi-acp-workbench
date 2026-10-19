@@ -57,6 +57,7 @@ fn changed(view: &SessionView) -> Transition {
     let mut next = view.clone();
     next.revision = next.revision.next().unwrap();
     Transition {
+        operation: None,
         expected_revision: view.revision,
         next,
         contents: vec![],
@@ -74,7 +75,27 @@ async fn sql_session_commit_and_delivery_are_durable_without_projection_scan() {
     let entry = finish(&store, &mut view, "你好 immutable output").await;
     store.payloads.shutdown().await;
     let store = SessionStore::fixture(&root);
-    let pending = store.outbox.pending(0, 16).await.unwrap();
+    let all = store.outbox.pending(0, 16).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let input = all
+        .iter()
+        .find(|record| matches!(&record.event.payload, outbox::DeliveryPayload::Input { .. }))
+        .unwrap();
+    let outbox::DeliveryPayload::Input {
+        entry: input_entry, ..
+    } = &input.event.payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        store.payloads.entry_header(input_entry).await.unwrap().role,
+        crate::domain::transcript::EntryRole::User
+    );
+    store.outbox.ack(&input.event.id).await.unwrap();
+    let pending: Vec<_> = all
+        .into_iter()
+        .filter(|record| matches!(&record.event.payload, outbox::DeliveryPayload::Turn { .. }))
+        .collect();
     assert_eq!(pending.len(), 1);
     assert!(
         matches!(&pending[0].event.payload, outbox::DeliveryPayload::Turn { session, first_seq, last_seq, .. } if session == &view.id && first_seq.get() == 1 && last_seq.get() == 2)
@@ -85,7 +106,11 @@ async fn sql_session_commit_and_delivery_are_durable_without_projection_scan() {
         .await
         .unwrap();
     assert_eq!(frozen.entries[0].id, entry);
-    store.database().remove(view.id.clone()).await.unwrap();
+    store
+        .database()
+        .remove(view.id.clone(), None)
+        .await
+        .unwrap();
     assert!(store.database().view(view.id.clone()).await.is_err());
     assert_eq!(
         store.payloads.entry(&entry).await.unwrap().text,

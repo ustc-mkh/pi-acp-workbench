@@ -40,8 +40,10 @@ async fn telegram_sql_admission_rolls_back_consumed_callback_offset_and_record_t
             key.clone(),
             CallbackBinding {
                 topic: topic.clone(),
-                session: session.clone(),
-                answer: answer.clone(),
+                action: crate::telegram::types::CallbackAction::Answer {
+                    session: session.clone(),
+                    answer: answer.clone(),
+                },
                 expires_at: 100,
                 used_by: None,
             },

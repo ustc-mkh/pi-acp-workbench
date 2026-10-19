@@ -210,7 +210,7 @@ fn streaming_fork_large_groups_have_small_plans_and_adoption_is_atomic() {
         6
     );
     assert_eq!(branch.last_entry_seq.get(), 6);
-    super::super::query::remove(&mut db, &state.id).unwrap();
+    super::super::query::remove(&mut db, &state.id, None).unwrap();
     let page = query::history(&db, &branch.id, None, Some(200)).unwrap();
     assert_eq!(page.entries.len(), 6);
     assert!(matches!(&page.entries[3].text, TextBody::Archived { .. }));

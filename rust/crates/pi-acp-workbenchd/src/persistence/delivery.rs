@@ -75,6 +75,7 @@ pub(super) enum Request {
     },
     Ack {
         id: DeliveryId,
+        destination: Option<(i64, crate::telegram::types::TopicKey)>,
         reply: Reply<()>,
     },
     Fail {
@@ -132,7 +133,25 @@ pub(super) fn validate_intent(intent: &DeliveryIntent) -> Result<(), StoreError>
             }
             Ok(())
         }
-        DeliveryPayload::Notice { content } => {
+        DeliveryPayload::Input { seq, .. } => {
+            if seq.get() == 0 || !matches!(intent.target, DeliveryTarget::Session { .. }) {
+                return Err(StoreError::Invalid("invalid input delivery"));
+            }
+            Ok(())
+        }
+        DeliveryPayload::HistoryEntry { entries, .. } => {
+            if entries.is_empty()
+                || entries.len() > 200
+                || entries.iter().any(|(_, seq)| seq.get() == 0)
+                || !matches!(intent.target, DeliveryTarget::Telegram { .. })
+            {
+                return Err(StoreError::Invalid(
+                    "invalid explicit history target/entries",
+                ));
+            }
+            Ok(())
+        }
+        DeliveryPayload::Notice { content } | DeliveryPayload::Menu { content } => {
             content.validate()?;
             if content.kind != ContentKind::Text {
                 return Err(StoreError::Invalid("delivery notice is not text"));
@@ -362,10 +381,23 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
         Request::Heads { now, limit, reply } => {
             let _ = reply.send(heads(db, now, limit));
         }
-        Request::Ack { id, reply } => {
+        Request::Ack {
+            id,
+            destination,
+            reply,
+        } => {
             let result = (|| -> Result<(), StoreError> {
                 let tx = db.transaction()?;
                 if require(&tx, &id)? {
+                    if let Some((bot, topic)) = destination {
+                        let (pending, _) =
+                            record(&tx, &id)?.ok_or(StoreError::Invalid("missing delivery"))?;
+                        if let DeliveryPayload::Turn { session, .. }
+                        | DeliveryPayload::Input { session, .. } = &pending.intent.payload
+                        {
+                            tx.execute("INSERT INTO telegram_turn_receipts(delivery_id,bot_id,chat,thread,session) VALUES (?1,?2,?3,?4,?5)", rusqlite::params![id.as_str(), bot, topic.chat.get(), topic.thread.map_or(0, |thread| thread.get()), session.as_str()])?;
+                        }
+                    }
                     tx.execute(
                         "UPDATE deliveries SET status='Acked' WHERE delivery_id=?1",
                         [id.as_str()],

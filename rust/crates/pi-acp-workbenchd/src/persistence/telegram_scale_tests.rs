@@ -21,7 +21,7 @@ fn telegram_100k_completed_inbox_is_not_read_by_offset_pending_admit_or_complete
     }
     // An unrelated poisoned callback must not be loaded during admission.
     tx.execute(
-        "INSERT INTO telegram_callbacks VALUES (1,'unrelated','{}',100, NULL)",
+        "INSERT INTO telegram_callbacks(bot_id,key,action_kind,binding_json,expires_at,used_by) VALUES (1,'unrelated','Answer','{}',100, NULL)",
         [],
     )
     .unwrap();

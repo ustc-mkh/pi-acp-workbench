@@ -84,7 +84,7 @@ async fn frozen_turn_stream_matches_legacy_oracle_across_pages_unicode_images_an
     )
     .await;
     let delivery = DeliveryId::new(format!("turn-{turn}")).unwrap();
-    db.remove(session.clone()).await.unwrap();
+    db.remove(session.clone(), None).await.unwrap();
     db.shutdown().await.unwrap();
     let db = Database::open(root.data(), &lease).await.unwrap();
     let payloads = PayloadStore::new(db.clone());

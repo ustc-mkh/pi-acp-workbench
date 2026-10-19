@@ -9,7 +9,17 @@ import {
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  writeFile,
+  rm,
+  stat,
+  mkdir,
+  rename,
+  symlink,
+  unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { WorkbenchWire, turnFinished, inlineText } from '../test/helpers/workbench-wire.mjs';
@@ -45,6 +55,7 @@ let rateLimit = false;
 let rateFailures = 0;
 let fatalPoll = false;
 let checks = 0;
+const edits = [];
 let client;
 const check = (text) => {
   console.log(`ok   ${text}`);
@@ -57,7 +68,9 @@ async function until(predicate, description, timeout = 12000) {
     if (await predicate()) return;
     await delay(30);
   }
-  throw new Error(`timeout: ${description}`);
+  throw new Error(
+    `timeout: ${description}; recent fixture replies=${JSON.stringify(sent.slice(-6).map((message) => ({ thread: message.message_thread_id, text: message.text.slice(0, 180) })))}`,
+  );
 }
 function message(id, thread, text, sender = 5, chat = -100) {
   return {
@@ -129,7 +142,7 @@ const server = createServer(async (request, response) => {
     assert.deepEqual(body.allowed_updates, ['message', 'callback_query']);
     if (fatalPoll) error = { error_code: 401, description: `DO NOT LOG ${token}` };
     else result = updates.filter((update) => update.update_id >= body.offset);
-  } else if (method === 'createForumTopic') result = { message_thread_id: 100 + ++topics };
+  } else if (method === 'createForumTopic') result = { message_thread_id: 100 + 1000 * ++topics };
   else if (method === 'sendMessage') {
     if (rateLimit) {
       rateLimit = false;
@@ -142,6 +155,13 @@ const server = createServer(async (request, response) => {
       sendOrder.push(`text:${body.text}`);
       result = message(sent.length, body.message_thread_id, body.text, 999, body.chat_id);
     }
+  } else if (method === 'editMessageText') {
+    const original = sent[body.message_id - 1];
+    assert(original && original.chat_id === body.chat_id);
+    assert(body.text.length <= 4096);
+    edits.push(body);
+    original.text = body.text;
+    result = message(body.message_id, original.message_thread_id, body.text, 999, body.chat_id);
   } else if (['sendPhoto', 'sendAnimation', 'sendDocument'].includes(method)) {
     const field = { sendPhoto: 'photo', sendAnimation: 'animation', sendDocument: 'document' }[
       method
@@ -173,6 +193,7 @@ const server = createServer(async (request, response) => {
         file: body[field],
         chat: Number(body.chat_id),
         thread: Number(body.message_thread_id),
+        silent: body.disable_notification === 'true',
       });
       sendOrder.push('image');
       result = message(
@@ -384,6 +405,8 @@ try {
     'later notice follows image after restart',
   );
   assert.deepEqual(sendOrder.slice(imageOrderStart), [
+    'text:User input · session ' + session,
+    'text:image-output',
     'image',
     'text:image caption',
     `text:${laterNotice}`,
@@ -600,6 +623,1091 @@ try {
   assert(!(await client.call({ method: 'list' })).sessions.some((entry) => entry.id === session));
   check(
     'frozen workspace scope authorizes the original bound topic after external source deletion and restart, without ACP or different bytes',
+  );
+  // Independent topic: preferences are useful before a session even exists.
+  // Keep this after the source-removal oracle so its image counts stay independent.
+  const preferenceThread = thread + 2;
+  const coldBefore = (await trace()).filter((record) =>
+    ['boot', 'session/prompt'].includes(record.method),
+  );
+  text('/notifications off', preferenceThread);
+  text('/silent on', preferenceThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === preferenceThread && message.text.startsWith('Silent: on'),
+      ),
+    'durable topic settings confirmation',
+  );
+  await stop(daemon);
+  daemon = await start();
+  text('/notifications', preferenceThread);
+  await until(
+    () =>
+      sent.filter(
+        (message) =>
+          message.message_thread_id === preferenceThread &&
+          message.text.startsWith('Notifications: off'),
+      ).length === 2,
+    'topic preference restored after real daemon restart',
+  );
+  assert.deepEqual(
+    (await trace()).filter((record) => ['boot', 'session/prompt'].includes(record.method)),
+    coldBefore,
+  );
+  assert(
+    sent
+      .filter(
+        (message) =>
+          message.message_thread_id === preferenceThread &&
+          message.text.startsWith('Notifications: off'),
+      )
+      .at(-1).disable_notification,
+  );
+  check(
+    'topic notification/silent preferences survive real restart, remain cold and return silent explicit query replies',
+  );
+  const beforeCreate = new Set(
+    (await client.call({ method: 'list' })).sessions.map((entry) => entry.id),
+  );
+  text('/new', preferenceThread);
+  let preferenceSession;
+  await until(async () => {
+    preferenceSession = (await client.call({ method: 'list' })).sessions.find(
+      (entry) => !beforeCreate.has(entry.id),
+    )?.id;
+    return (
+      preferenceSession &&
+      sent.some(
+        (message) =>
+          message.message_thread_id === preferenceThread &&
+          message.text.startsWith(`Session ${preferenceSession}`),
+      )
+    );
+  }, 'new session bound to the muted topic');
+  await client.call({ method: 'attach', session: preferenceSession });
+  const mutedPromptCount = (await trace()).filter(
+    (record) => record.text === 'image-output',
+  ).length;
+  const mutedMedia = mediaSent.length;
+  const mutedMessages = sent.length;
+  finished = client.waitFor((batch) => turnFinished(batch, preferenceSession));
+  text('image-output', preferenceThread);
+  await finished;
+  await until(
+    () =>
+      deliveryRecords(data).some(
+        (record) =>
+          record.event.payload.Turn?.session === preferenceSession && record.status === 'Acked',
+      ),
+    'muted automatic intent settled without HTTP',
+  );
+  assert.equal(mediaSent.length, mutedMedia);
+  assert(
+    !sent
+      .slice(mutedMessages)
+      .some(
+        (message) =>
+          message.message_thread_id === preferenceThread && message.text === 'image caption',
+      ),
+  );
+  assert.equal(
+    (await trace()).filter((record) => record.text === 'image-output').length,
+    mutedPromptCount + 1,
+  );
+  assert(
+    (await client.call({ method: 'history', session: preferenceSession })).entries.some(
+      (entry) => entry.image,
+    ),
+  );
+  text('/history', preferenceThread);
+  await until(
+    () =>
+      sent
+        .slice(mutedMessages)
+        .some(
+          (message) =>
+            message.message_thread_id === preferenceThread &&
+            message.text.includes('image caption'),
+        ),
+    'explicit history while automatic notifications are off',
+  );
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === preferenceThread &&
+          message.text.startsWith(`History export · session ${preferenceSession}`),
+      ),
+    'explicit history images and summary complete',
+  );
+  const historyMedia = mediaSent.length;
+  assert.equal(historyMedia, mutedMedia + 1, 'explicit history exports the muted archived image');
+  check(
+    'notifications off skips successful text/image HTTP only; the Agent runs once and explicit cold history remains available',
+  );
+  text('/notifications on', preferenceThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === preferenceThread &&
+          message.text.startsWith('Notifications: on'),
+      ),
+    're-enable notifications',
+  );
+  assert.equal(mediaSent.length, historyMedia, 're-enable must not replay skipped images');
+  finished = client.waitFor((batch) => turnFinished(batch, preferenceSession));
+  text('image-output', preferenceThread);
+  await finished;
+  await until(
+    () =>
+      mediaSent.length === historyMedia + 1 &&
+      sent.some(
+        (message) =>
+          message.message_thread_id === preferenceThread && message.text === 'image caption',
+      ),
+    'silent text and media through the actual Bot HTTP boundary',
+  );
+  assert(mediaSent.at(-1).silent);
+  assert(
+    sent
+      .filter(
+        (message) =>
+          message.message_thread_id === preferenceThread && message.text === 'image caption',
+      )
+      .at(-1).disable_notification,
+  );
+  assert.equal(
+    (await trace()).filter((record) => record.text === 'image-output').length,
+    mutedPromptCount + 2,
+  );
+  check(
+    'silent uses disable_notification for real JSON text and binary multipart media, without hiding output or replaying skipped results',
+  );
+  // Opening another topic's bound session is intentionally not a binding
+  // transfer. Use an older unbound session as the paginated-open oracle.
+  const menuTargetSummary = (await client.call({ method: 'create', harness: 'Pi', cwd: root }))
+    .Created.summary;
+  const menuTarget = menuTargetSummary.id;
+  const menuThread = preferenceThread + 1;
+  const menuButtons = (heading) =>
+    sent
+      .findLast(
+        (message) =>
+          message.message_thread_id === menuThread &&
+          message.text.startsWith(heading) &&
+          message.reply_markup,
+      )
+      ?.reply_markup.inline_keyboard.flat();
+  text('/menu', menuThread);
+  await until(() => menuButtons('Workbench menu'), 'interactive menu keyboard');
+  const newButton = menuButtons('Workbench menu').find((button) => button.text === 'New Pi');
+  assert(newButton);
+  assert(
+    !menuButtons('Workbench menu').some((button) =>
+      ['New Codex', 'New Claude'].includes(button.text),
+    ),
+  );
+  const beforeMenu = new Set(
+    (await client.call({ method: 'list' })).sessions.map((entry) => entry.id),
+  );
+  const menuAcks = acknowledgements;
+  callback(newButton.callback_data, menuThread + 1);
+  callback(newButton.callback_data, menuThread, 6);
+  await until(
+    () => acknowledgements >= menuAcks + 2,
+    'wrong-topic/unauthorized menu acknowledgement',
+  );
+  assert.equal((await client.call({ method: 'list' })).sessions.length, beforeMenu.size);
+  await stop(daemon);
+  daemon = await start();
+  callback(newButton.callback_data, menuThread);
+  let menuSession;
+  await until(async () => {
+    menuSession = (await client.call({ method: 'list' })).sessions.find(
+      (entry) => !beforeMenu.has(entry.id),
+    )?.id;
+    return (
+      menuSession &&
+      sent.some(
+        (message) =>
+          message.message_thread_id === menuThread &&
+          message.text.startsWith(`Session ${menuSession}`),
+      )
+    );
+  }, 'persisted menu create callback after restart');
+  const usedStart = sent.length;
+  callback(newButton.callback_data, menuThread);
+  await until(
+    () =>
+      sent
+        .slice(usedStart)
+        .some(
+          (message) =>
+            message.message_thread_id === menuThread && message.text.includes('按钮已使用'),
+        ),
+    'single-use menu callback refusal',
+  );
+  assert.equal((await client.call({ method: 'list' })).sessions.length, beforeMenu.size + 1);
+  assert.equal(
+    (await client.call({ method: 'inspect', session: menuSession })).provider_session,
+    null,
+  );
+  check(
+    'interactive configured-harness menu survives restart; wrong-topic/unauthorized/double clicks cannot create extra sessions',
+  );
+  const preferenceNumber = menuTargetSummary.created_seq;
+  for (let i = 0; i < 12; i++) await client.call({ method: 'create', harness: 'Pi', cwd: root });
+  text('/menu sessions', menuThread);
+  await until(() => menuButtons('Open session'), 'bounded session menu');
+  let open;
+  let pages = 0;
+  while (!open && pages++ < 5) {
+    const buttons = menuButtons('Open session');
+    assert(buttons.filter((button) => button.text.startsWith('#')).length <= 10);
+    open = buttons.find((button) => button.text.startsWith(`#${preferenceNumber} `));
+    if (open) break;
+    const next = buttons.find((button) => button.text === 'Next session page');
+    assert(next, 'requested session remains reachable through menu pages');
+    const count = sent.filter(
+      (message) =>
+        message.message_thread_id === menuThread && message.text.startsWith('Open session'),
+    ).length;
+    callback(next.callback_data, menuThread);
+    await until(
+      () =>
+        sent.filter(
+          (message) =>
+            message.message_thread_id === menuThread && message.text.startsWith('Open session'),
+        ).length > count,
+      'next bounded menu page',
+    );
+  }
+  assert(open);
+  assert(pages > 1, 'contract must actually cross a menu page boundary');
+  // Opening a native session may explicitly restore its saved settings. The
+  // earlier fault-injection gate must not block this unrelated menu workflow.
+  await writeFile(`${configGate}.release`, 'release');
+  const openUpdate = callback(open.callback_data, menuThread);
+  const openReplyStart = sent.length;
+  await until(async () => {
+    if (
+      sent
+        .slice(openReplyStart)
+        .some(
+          (message) =>
+            message.message_thread_id === menuThread && message.text.startsWith('操作失败'),
+        )
+    ) {
+      const result = await client.call({
+        method: 'operation',
+        operation: `telegram-update-${openUpdate}`,
+      });
+      throw new Error(`menu open failed: ${JSON.stringify(result)}`);
+    }
+    return sent.some(
+      (message) =>
+        message.message_thread_id === menuThread &&
+        message.text === `Attached session ${menuTarget}`,
+    );
+  }, 'menu opens the selected cold session');
+  check(
+    'mobile session menu traverses bounded keyset pages and opens the exact selected existing session through the shared command path',
+  );
+  // Menus are cold catalogue queries: opening a never-run session must not
+  // implicitly start a provider just to populate a keyboard.
+  text('menu prime', menuThread);
+  await until(async () => {
+    const view = await client.call({ method: 'inspect', session: menuTarget });
+    return (
+      view.provider_session &&
+      view.active_turn === null &&
+      sent.some(
+        (message) =>
+          message.message_thread_id === menuThread && message.text.includes('echo: menu prime'),
+      )
+    );
+  }, 'explicit prompt populates committed provider offerings');
+  text('/menu models', menuThread);
+  await until(() => menuButtons('Models'), 'provider model menu');
+  const otherModel = menuButtons('Models').find((button) => button.text === 'Other');
+  assert(otherModel, 'only the actual committed provider offering can be selected');
+  callback(otherModel.callback_data, menuThread);
+  await until(
+    async () =>
+      (await client.call({ method: 'inspect', session: menuTarget })).config.model === 'other',
+    'menu model setting',
+  );
+  text('/menu modes', menuThread);
+  await until(() => menuButtons('Modes'), 'provider mode menu');
+  const highMode = menuButtons('Modes').find((button) => button.text === 'Thinking: high');
+  assert(highMode);
+  callback(highMode.callback_data, menuThread);
+  await until(
+    async () =>
+      (await client.call({ method: 'inspect', session: menuTarget })).config.mode === 'high',
+    'menu mode setting',
+  );
+  const newHome = sent.filter(
+    (message) =>
+      message.message_thread_id === menuThread && message.text.startsWith('Workbench menu'),
+  ).length;
+  text('/menu', menuThread);
+  await until(
+    () =>
+      sent.filter(
+        (message) =>
+          message.message_thread_id === menuThread && message.text.startsWith('Workbench menu'),
+      ).length > newHome,
+    'fresh bound menu',
+  );
+  const staleStop = menuButtons('Workbench menu').find(
+    (button) => button.text === 'Stop current turn',
+  );
+  assert(staleStop);
+  text(`/open ${menuSession}`, menuThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === menuThread &&
+          message.text === `Attached session ${menuSession}`,
+      ),
+    'topic rebind before stale menu click',
+  );
+  const rejectedStart = sent.length;
+  const staleTrace = await trace();
+  callback(staleStop.callback_data, menuThread);
+  await until(
+    () =>
+      sent
+        .slice(rejectedStart)
+        .some(
+          (message) =>
+            message.message_thread_id === menuThread && message.text.includes('按钮无效'),
+        ),
+    'stale menu refusal after topic rebind',
+  );
+  assert.deepEqual(
+    await trace(),
+    staleTrace,
+    'a stale menu must not cancel/configure a different bound task',
+  );
+  check(
+    'provider-offered model/mode menu buttons execute real configuration; rebinding invalidates old session controls before Agent effects',
+  );
+  const directoryRoot = join(root, 'directory-fixture');
+  for (let index = 0; index < 13; index++)
+    await mkdir(join(directoryRoot, `d${String(index).padStart(2, '0')}`), { recursive: true });
+  const chosenDirectory = join(directoryRoot, 'd12', '项目 😀');
+  await mkdir(chosenDirectory);
+  await mkdir(join(directoryRoot, '.private'));
+  await symlink(tmpdir(), join(directoryRoot, 'external-link'));
+  await symlink(join(directoryRoot, 'd12'), join(directoryRoot, 'internal-link'));
+  await writeFile(join(directoryRoot, 'binary-file'), Buffer.from([0xff, 0xfe]));
+  let directoryThread = menuThread + 2;
+  const directoryReplies = (heading) =>
+    sent.filter(
+      (message) =>
+        message.message_thread_id === directoryThread && message.text.startsWith(heading),
+    );
+  const directoryButtons = (heading = 'Choose directory') =>
+    directoryReplies(heading)
+      .findLast((message) => message.reply_markup)
+      ?.reply_markup.inline_keyboard.flat();
+  const directoryClick = async (
+    label,
+    heading = 'Choose directory',
+    source = 'Choose directory',
+  ) => {
+    const button = directoryButtons(source)?.find((button) => button.text === label);
+    assert(button, `directory workflow has ${label}`);
+    const count = directoryReplies(heading).length;
+    callback(button.callback_data, directoryThread);
+    await until(() => directoryReplies(heading).length > count, `directory menu ${label}`);
+  };
+  text('/menu', directoryThread);
+  await until(() => directoryButtons('Workbench menu'), 'directory workflow home');
+  await directoryClick('Browse directories', 'Choose directory', 'Workbench menu');
+  await directoryClick('Directory: directory-fixture');
+  assert.equal(
+    directoryButtons().filter((button) => button.text.startsWith('Directory:')).length,
+    10,
+  );
+  assert(!directoryButtons().some((button) => /private|link|binary/.test(button.text)));
+  await directoryClick('Next directories');
+  assert.equal(
+    directoryButtons().filter((button) => button.text.startsWith('Directory:')).length,
+    3,
+  );
+  await directoryClick('Directory: d12');
+  await directoryClick('Directory: 项目 😀');
+  await directoryClick('Use this directory', 'Choose harness');
+  assert(
+    !directoryButtons('Choose harness').some((button) =>
+      ['New Codex', 'New Claude'].includes(button.text),
+    ),
+  );
+  const directoryNew = directoryButtons('Choose harness').find(
+    (button) => button.text === 'New Pi',
+  );
+  assert(directoryNew);
+  const beforeDirectory = new Set(
+    (await client.call({ method: 'list' })).sessions.map((entry) => entry.id),
+  );
+  await stop(daemon);
+  daemon = await start();
+  const directoryBoots = (await trace()).filter((record) => record.method === 'boot').length;
+  callback(directoryNew.callback_data, directoryThread);
+  let directorySession;
+  await until(async () => {
+    directorySession = (await client.call({ method: 'list' })).sessions.find(
+      (entry) => !beforeDirectory.has(entry.id),
+    )?.id;
+    return (
+      directorySession &&
+      sent.some(
+        (message) =>
+          message.message_thread_id === directoryThread &&
+          message.text.startsWith(`Session ${directorySession}`),
+      )
+    );
+  }, 'selected directory callback creates after restart');
+  const directoryView = await client.call({ method: 'inspect', session: directorySession });
+  assert.equal(directoryView.cwd, chosenDirectory);
+  assert.equal(directoryView.provider_session, null);
+  const directoryUsed = sent.length;
+  callback(directoryNew.callback_data, directoryThread);
+  await until(
+    () =>
+      sent
+        .slice(directoryUsed)
+        .some(
+          (message) =>
+            message.message_thread_id === directoryThread && message.text.includes('按钮已使用'),
+        ),
+    'directory duplicate callback refusal',
+  );
+  assert.equal((await client.call({ method: 'list' })).sessions.length, beforeDirectory.size + 1);
+  assert.equal((await trace()).filter((record) => record.method === 'boot').length, directoryBoots);
+  check(
+    'mobile directory menu traverses bounded pages, omits symlinks/hidden/files, selects configured harness and creates exact Unicode cwd once after restart without ACP',
+  );
+  directoryThread += 1;
+  text('/menu directories', directoryThread);
+  await until(() => directoryButtons(), 'fresh directory command entry');
+  await directoryClick('Directory: directory-fixture');
+  await directoryClick('Next directories');
+  await directoryClick('Directory: d12');
+  await directoryClick('Directory: 项目 😀');
+  await directoryClick('Use this directory', 'Choose harness');
+  const guardedNew = directoryButtons('Choose harness').find((button) => button.text === 'New Pi');
+  assert(guardedNew);
+  const savedDirectory = join(directoryRoot, 'saved-directory');
+  await rename(chosenDirectory, savedDirectory);
+  await symlink(tmpdir(), chosenDirectory);
+  const deniedStart = sent.length;
+  const deniedUpdate = callback(guardedNew.callback_data, directoryThread);
+  await until(
+    () =>
+      sent
+        .slice(deniedStart)
+        .some(
+          (message) =>
+            message.message_thread_id === directoryThread &&
+            message.text.includes('工作区不在此 Bot 的授权范围内'),
+        ),
+    'changed directory scope rejection',
+  );
+  assert.equal(
+    (await client.call({ method: 'operation', operation: `telegram-update-${deniedUpdate}` }))
+      .status,
+    'unknown',
+  );
+  assert.equal((await client.call({ method: 'list' })).sessions.length, beforeDirectory.size + 1);
+  await unlink(chosenDirectory);
+  await rename(savedDirectory, chosenDirectory);
+  const restoredStart = sent.length;
+  callback(guardedNew.callback_data, directoryThread);
+  await until(
+    () =>
+      sent
+        .slice(restoredStart)
+        .some(
+          (message) =>
+            message.message_thread_id === directoryThread && message.text.startsWith('Session '),
+        ),
+    'rejected key remains unused after scope restored',
+  );
+  assert.equal((await client.call({ method: 'list' })).sessions.length, beforeDirectory.size + 2);
+  assert.equal((await trace()).filter((record) => record.method === 'boot').length, directoryBoots);
+  check(
+    'directory selection revalidates current canonical workspace before admission; escape cannot create or consume the key, and restored scope permits the original explicit choice',
+  );
+  const historyThread = menuThread + 2;
+  text('/notifications off', historyThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === historyThread &&
+          message.text.startsWith('Notifications: off'),
+      ),
+    'mute automatic output before explicit history fixture',
+  );
+  await client.call({ method: 'attach', session: directorySession });
+  finished = client.waitFor((batch) => turnFinished(batch, directorySession));
+  text('big', historyThread);
+  await finished;
+  await until(
+    () =>
+      deliveryRecords(data).some(
+        (record) =>
+          record.event.payload.Turn?.session === directorySession && record.status === 'Acked',
+      ),
+    'large automatic body muted and retained',
+  );
+  await stop(daemon);
+  daemon = await start();
+  const historyTrace = await trace();
+  const historyStart = sent.length;
+  rateLimit = true;
+  text('/history all', historyThread);
+  await until(
+    () =>
+      deliveryRecords(data).some(
+        (record) =>
+          record.event.payload.HistoryEntry?.session === directorySession &&
+          record.last_failure === 'RateLimited',
+      ),
+    'explicit history 429 receipt',
+  );
+  await stop(daemon);
+  daemon = await start();
+  await until(
+    () =>
+      sent
+        .slice(historyStart)
+        .some(
+          (message) =>
+            message.message_thread_id === historyThread &&
+            message.text.startsWith(`History export · session ${directorySession}`),
+        ),
+    'large archived history after 429/restart',
+  );
+  const historyChunks = () =>
+    sent
+      .slice(historyStart)
+      .filter(
+        (message) => message.message_thread_id === historyThread && /^x+$/.test(message.text),
+      );
+  assert.equal(
+    historyChunks()
+      .map((message) => message.text)
+      .join(''),
+    'x'.repeat(600 * 1024),
+  );
+  assert(
+    historyChunks().every(
+      (message) => message.text.length <= 4000 && message.disable_notification === true,
+    ),
+  );
+  assert(
+    !sent
+      .slice(historyStart)
+      .some(
+        (message) =>
+          message.message_thread_id === historyThread && message.text.includes('[Archived text:'),
+      ),
+  );
+  assert.deepEqual(
+    await trace(),
+    historyTrace,
+    'history export/retry must stay cold and never dispatch ACP',
+  );
+  check(
+    'explicit history streams the complete 600 KiB archived body with notifications off through persisted 429/restart, without placeholders or provider activity',
+  );
+  const historyCount = historyChunks().length;
+  const summaries = () =>
+    sent.filter(
+      (message) =>
+        message.message_thread_id === historyThread &&
+        message.text.startsWith(`History export · session ${directorySession}`),
+    );
+  let summaryCount = summaries().length;
+  text('/history', historyThread);
+  await until(() => summaries().length > summaryCount, 'recent explicit history dedup');
+  assert(summaries().at(-1).text.includes('0 new entries queued'));
+  await stop(daemon);
+  daemon = await start();
+  summaryCount = summaries().length;
+  text('/history all', historyThread);
+  await until(
+    () => summaries().length > summaryCount,
+    'history cursor/dedup survives real restart',
+  );
+  assert(summaries().at(-1).text.includes('0 new entries queued'));
+  assert.equal(historyChunks().length, historyCount);
+  assert.deepEqual(await trace(), historyTrace);
+  check(
+    'recent/all history share durable per-entry export identities and chronological cursor; repeated commands across restart do not resend completed entries',
+  );
+  const preferenceExportStart = sent.length;
+  const completedImageCount = mediaSent.length;
+  text('/history all', preferenceThread);
+  await until(
+    () =>
+      sent
+        .slice(preferenceExportStart)
+        .some(
+          (message) =>
+            message.message_thread_id === preferenceThread &&
+            message.text.startsWith(`History export · session ${preferenceSession}`),
+        ),
+    'completed automatic output is already exported',
+  );
+  assert.equal(
+    mediaSent.length,
+    completedImageCount,
+    'history must not resend a fully acknowledged automatic image',
+  );
+  assert(
+    !sent
+      .slice(preferenceExportStart)
+      .some(
+        (message) =>
+          message.message_thread_id === preferenceThread && message.text === 'image caption',
+      ),
+  );
+  assert.deepEqual(await trace(), historyTrace);
+  check(
+    'completed automatic text/image output shares durable topic-scoped export evidence with explicit history after restart; muted output remains recoverable',
+  );
+
+  await client.call({ method: 'attach', session: directorySession });
+  const beforeGated = await client.call({ method: 'inspect', session: directorySession });
+  const settingStart = sent.length;
+  text('/notifications on', historyThread);
+  await until(
+    () =>
+      sent
+        .slice(settingStart)
+        .some(
+          (message) =>
+            message.message_thread_id === historyThread &&
+            message.text.startsWith('Notifications: on'),
+        ),
+    'enable final delivery for history-before-finish',
+  );
+  finished = client.waitFor((batch) => turnFinished(batch, directorySession));
+  text('history-gated-image', historyThread);
+  let gatedTurn;
+  await until(async () => {
+    const view = await client.call({ method: 'inspect', session: directorySession });
+    gatedTurn = view.active_turn;
+    return gatedTurn !== null && view.last_entry_seq >= beforeGated.last_entry_seq + 3;
+  }, 'committed agent text/image before the provider finishes');
+  const gatedMedia = mediaSent.length;
+  const gatedHistoryStart = sent.length;
+  text('/history all', historyThread);
+  await until(
+    () =>
+      sent
+        .slice(gatedHistoryStart)
+        .some(
+          (message) =>
+            message.message_thread_id === historyThread &&
+            message.text.startsWith(`History export · session ${directorySession}`),
+        ),
+    'explicit export while the task is active',
+  );
+  assert.equal(mediaSent.length, gatedMedia + 1);
+  const captions = () =>
+    sent.filter(
+      (message) => message.message_thread_id === historyThread && message.text === 'image caption',
+    );
+  assert.equal(captions().length, 1);
+  await writeFile(`${configGate}.history-release`, 'released');
+  await finished;
+  await until(
+    () =>
+      deliveryRecords(data).some(
+        (record) => record.event.payload.Turn?.turn === gatedTurn && record.status === 'Acked',
+      ),
+    'final automatic turn receipt',
+  );
+  assert.equal(
+    mediaSent.length,
+    gatedMedia + 1,
+    'final output must not resend an image already exported during this task',
+  );
+  assert.equal(captions().length, 1);
+  assert(
+    sent.some(
+      (message) =>
+        message.message_thread_id === historyThread &&
+        message.text === 'Turn completed. Output already exported in this topic.',
+    ),
+  );
+  await stop(daemon);
+  daemon = await start();
+  const afterGated = await trace();
+  summaryCount = summaries().length;
+  text('/history', historyThread);
+  await until(
+    () => summaries().length > summaryCount,
+    'shared output identities survive another restart',
+  );
+  assert(summaries().at(-1).text.includes('0 new entries queued'));
+  assert.equal(mediaSent.length, gatedMedia + 1);
+  assert.equal(captions().length, 1);
+  assert.deepEqual(await trace(), afterGated);
+  check(
+    'history exported during an active task is not resent by final automatic text/image delivery; reliable completion remains visible and shared dedup survives restart without Agent replay',
+  );
+  // One integrated mobile workflow, not a new collection of isolated APIs.
+  const flowThread = menuThread + 500;
+  let flowStart = sent.length;
+  text(`/new pi ${chosenDirectory}`, flowThread);
+  await until(
+    () =>
+      sent
+        .slice(flowStart)
+        .some(
+          (message) =>
+            message.message_thread_id === flowThread && message.text.startsWith('Session '),
+        ),
+    'S4 mobile create',
+  );
+  const flowSession = sent
+    .slice(flowStart)
+    .find(
+      (message) => message.message_thread_id === flowThread && message.text.startsWith('Session '),
+    )
+    .text.split('\n')[0]
+    .slice(8);
+  const promptCountBeforeDiscovery = (await trace()).filter(
+    (record) => record.method === 'session/prompt',
+  ).length;
+  text('/discover', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith('Provider ready without a business prompt'),
+      ),
+    'S4 first-task provider discovery',
+  );
+  const discovered = await client.call({ method: 'inspect', session: flowSession });
+  assert(discovered.provider_session);
+  assert.equal(discovered.last_entry_seq, 0);
+  assert.equal(
+    (await trace()).filter((record) => record.method === 'session/prompt').length,
+    promptCountBeforeDiscovery,
+  );
+  text('/menu models', flowThread);
+  const flowButtons = (heading) =>
+    sent
+      .findLast(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith(heading) &&
+          message.reply_markup,
+      )
+      ?.reply_markup.inline_keyboard.flat();
+  await until(() => flowButtons('Models'), 'S4 pre-task model menu');
+  callback(
+    flowButtons('Models').find((button) => button.text === 'Other').callback_data,
+    flowThread,
+  );
+  await until(
+    async () =>
+      (await client.call({ method: 'inspect', session: flowSession })).config.model === 'other',
+    'S4 pre-task actual model selection',
+  );
+  const waitingFlow = async () =>
+    Object.keys(
+      (await client.call({ method: 'inspect', session: flowSession })).pending_interactions,
+    ).length === 1;
+  const flowEcho = (body) =>
+    sent.some(
+      (message) => message.message_thread_id === flowThread && message.text === `echo: ${body}`,
+    );
+  text('permission', flowThread);
+  await until(waitingFlow, 'S4 authorization');
+  const queueB = text('/prompt queued-B', flowThread);
+  const queueC = text('/prompt queued-C', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith(`Input ${queueC} queued`),
+      ),
+    'S4 durable queue feedback',
+  );
+  text('/queue', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith('Queued input IDs:') &&
+          message.text.includes(String(queueB)) &&
+          message.text.includes(String(queueC)),
+      ),
+    'S4 visible input IDs',
+  );
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.reply_markup?.inline_keyboard
+            .flat()
+            .some((button) => button.text.includes('Allow once')),
+      ),
+    'S4 permission keyboard',
+  );
+  const allowFlow = sent
+    .findLast(
+      (message) =>
+        message.message_thread_id === flowThread &&
+        message.reply_markup?.inline_keyboard
+          .flat()
+          .some((button) => button.text.includes('Allow once')),
+    )
+    .reply_markup.inline_keyboard.flat()
+    .find((button) => button.text.includes('Allow once'));
+  callback(allowFlow.callback_data, flowThread);
+  await until(
+    () => flowEcho('queued-B') && flowEcho('queued-C'),
+    'S4 queued inputs execute after authorization',
+  );
+  const queuedTrace = (await trace()).filter(
+    (record) =>
+      record.method === 'session/prompt' && ['queued-B', 'queued-C'].includes(record.text),
+  );
+  assert.deepEqual(
+    queuedTrace.map((record) => record.text),
+    ['queued-B', 'queued-C'],
+  );
+  text('permission', flowThread);
+  await until(waitingFlow, 'S4 stop waiting task');
+  const discardedStop = text('/prompt never-run-before-stop', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith(`Input ${discardedStop} queued`),
+      ),
+    'S4 stop queue range',
+  );
+  flowStart = sent.length;
+  text('/stop', flowThread);
+  await until(
+    () =>
+      sent
+        .slice(flowStart)
+        .some(
+          (message) =>
+            message.message_thread_id === flowThread &&
+            message.text.startsWith('Cancelled.') &&
+            message.text.includes(String(discardedStop)),
+        ),
+    'S4 stop barrier result',
+  );
+  text('permission', flowThread);
+  await until(waitingFlow, 'S4 interrupt waiting task');
+  const discardedInterrupt = text('/prompt never-run-before-interrupt', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith(`Input ${discardedInterrupt} queued`),
+      ),
+    'S4 interrupt queue range',
+  );
+  text('/interrupt replacement-input', flowThread);
+  await until(
+    () => flowEcho('replacement-input'),
+    'S4 stopped old worker then accepted replacement',
+  );
+  assert(
+    !(await trace()).some((record) =>
+      ['never-run-before-stop', 'never-run-before-interrupt'].includes(record.text),
+    ),
+  );
+  text('permission', flowThread);
+  await until(waitingFlow, 'S4 restart with accepted queue');
+  const survived = text('/prompt survives-queue-restart', flowThread);
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith(`Input ${survived} queued`),
+      ),
+    'S4 queue persisted before restart',
+  );
+  const permissionsBeforeRestart = (await trace()).filter(
+    (record) => record.method === 'session/prompt' && record.text === 'permission',
+  ).length;
+  await stop(daemon);
+  daemon = await start();
+  await until(
+    () => flowEcho('survives-queue-restart'),
+    'S4 recover accepted queued input without replaying old turn',
+  );
+  assert.equal(
+    (await trace()).filter(
+      (record) => record.method === 'session/prompt' && record.text === 'survives-queue-restart',
+    ).length,
+    1,
+  );
+  assert.equal(
+    (await trace()).filter(
+      (record) => record.method === 'session/prompt' && record.text === 'permission',
+    ).length,
+    permissionsBeforeRestart,
+  );
+  await client.call({
+    method: 'prompt',
+    session: flowSession,
+    prompt: 'desktop input mirror',
+  });
+  await until(
+    () =>
+      sent.some(
+        (message) =>
+          message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+      ) && flowEcho('desktop input mirror'),
+    'S4 automatic desktop input and output synchronization',
+  );
+  const mirrorCount = sent.filter(
+    (message) =>
+      message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+  ).length;
+  flowStart = sent.length;
+  text('/history all', flowThread);
+  await until(
+    () =>
+      sent
+        .slice(flowStart)
+        .some(
+          (message) =>
+            message.message_thread_id === flowThread &&
+            message.text.startsWith(`History export · session ${flowSession}`),
+        ),
+    'S4 history after input/output synchronization',
+  );
+  assert.equal(
+    sent.filter(
+      (message) =>
+        message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+    ).length,
+    mirrorCount,
+  );
+  // Preview uses the same sender lanes, no durable delta intents, and edits one message.
+  await rm(`${configGate}.history-release`, { force: true });
+  await rm(`${configGate}.history-more`, { force: true });
+  const previewStart = sent.length;
+  const editStart = edits.length;
+  const previewMedia = mediaSent.length;
+  text('history-gated-image', flowThread);
+  await until(
+    () =>
+      sent
+        .slice(previewStart)
+        .some(
+          (message) =>
+            message.message_thread_id === flowThread &&
+            message.text.startsWith('Running · preview only'),
+        ),
+    'S4 throttled running preview',
+  );
+  await writeFile(`${configGate}.history-more`, 'more');
+  await until(
+    () => edits.slice(editStart).some((message) => message.text.includes('preview tail update')),
+    'S4 preview edit/coalescing',
+  );
+  assert.equal(
+    sent
+      .slice(previewStart)
+      .filter(
+        (message) =>
+          message.message_thread_id === flowThread &&
+          message.text.startsWith('Running · preview only'),
+      ).length,
+    1,
+  );
+  assert(
+    sent.slice(previewStart).find((message) => message.text.startsWith('Running · preview only'))
+      .disable_notification,
+  );
+  await writeFile(`${configGate}.history-release`, 'released');
+  await until(
+    () =>
+      mediaSent.length === previewMedia + 1 &&
+      sent
+        .slice(previewStart)
+        .some(
+          (message) =>
+            message.message_thread_id === flowThread &&
+            !message.text.startsWith('Running ·') &&
+            message.text.includes('image caption') &&
+            message.text.includes('preview tail update'),
+        ),
+    'S4 reliable final output is not replaced by preview',
+  );
+  const syncTrace = await trace();
+  const syncStart = sent.length;
+  text('/sync', undefined);
+  await until(
+    () =>
+      sent
+        .slice(syncStart)
+        .some(
+          (message) =>
+            !message.message_thread_id && message.text.startsWith('Sync:') && message.reply_markup,
+        ),
+    'S4 bounded cross-session sync',
+  );
+  const syncReply = sent
+    .slice(syncStart)
+    .find(
+      (message) =>
+        !message.message_thread_id && message.text.startsWith('Sync:') && message.reply_markup,
+    );
+  assert(
+    syncReply.reply_markup.inline_keyboard
+      .flat()
+      .some((button) => button.text === 'Sync next session page'),
+  );
+  assert.deepEqual(await trace(), syncTrace, 'sync must not start or replay a provider');
+  const topicsAfterSync = topics;
+  const syncAgainStart = sent.length;
+  text('/sync', undefined);
+  await until(
+    () =>
+      sent
+        .slice(syncAgainStart)
+        .some((message) => !message.message_thread_id && message.text.startsWith('Sync:')),
+    'S4 repeat sync',
+  );
+  assert.equal(
+    topics,
+    topicsAfterSync,
+    'repeat sync reuses existing bindings and durable topic effects',
+  );
+  check(
+    'S4 integrated mobile create → pre-task discover/model → A/B queue → authorize → stop/interrupt barriers → restart queue → input/output/history → throttled edit preview/reliable final → cross-session sync, without queued-input or Agent replay',
   );
   await stop(daemon);
   console.log(`\n${checks} new-workbench Telegram/IPC contract checks passed`);

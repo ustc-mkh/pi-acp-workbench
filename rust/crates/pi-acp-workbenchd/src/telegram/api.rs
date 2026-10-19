@@ -120,6 +120,7 @@ pub struct SendMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<TopicId>,
     pub text: String,
+    pub disable_notification: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<InlineKeyboard>,
 }
@@ -129,6 +130,7 @@ pub struct SendMedia {
     pub chat_id: ChatId,
     pub message_thread_id: Option<TopicId>,
     pub asset: crate::domain::image::ImageAsset,
+    pub disable_notification: bool,
 }
 #[derive(Clone, Deserialize)]
 pub struct ForumTopic {
@@ -144,6 +146,13 @@ pub trait BotApi: Clone + Send + Sync + 'static {
         &self,
         message: &SendMessage,
     ) -> impl Future<Output = Result<WireMessage, ApiError>> + Send;
+    fn edit_message(
+        &self,
+        _id: MessageId,
+        _message: &SendMessage,
+    ) -> impl Future<Output = Result<WireMessage, ApiError>> + Send {
+        async { Err(ApiError::Protocol) }
+    }
     fn send_media(
         &self,
         _media: &SendMedia,
@@ -280,6 +289,27 @@ impl BotApi for BotClient {
     async fn send_message(&self, message: &SendMessage) -> Result<WireMessage, ApiError> {
         self.call("sendMessage", message).await
     }
+    async fn edit_message(
+        &self,
+        id: MessageId,
+        message: &SendMessage,
+    ) -> Result<WireMessage, ApiError> {
+        #[derive(Serialize)]
+        struct Edit<'a> {
+            chat_id: ChatId,
+            message_id: MessageId,
+            text: &'a str,
+        }
+        self.call(
+            "editMessageText",
+            &Edit {
+                chat_id: message.chat_id,
+                message_id: id,
+                text: &message.text,
+            },
+        )
+        .await
+    }
     async fn send_media(&self, media: &SendMedia) -> Result<WireMessage, ApiError> {
         use crate::domain::image::ImageMime;
         let image = media.asset.image();
@@ -294,6 +324,10 @@ impl BotApi for BotClient {
             .map_err(|_| ApiError::Protocol)?;
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", media.chat_id.get().to_string())
+            .text(
+                "disable_notification",
+                media.disable_notification.to_string(),
+            )
             .part(field, part);
         if let Some(thread) = media.message_thread_id {
             form = form.text("message_thread_id", thread.get().to_string());

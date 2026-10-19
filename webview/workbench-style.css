@@ -120,3 +120,38 @@ details {
 a {
   color: var(--vscode-textLink-foreground, #8ab4f8);
 }
+#plan {
+  max-height: 24vh;
+  overflow: auto;
+  background: var(--vscode-editor-background, #202124);
+}
+#plan:not(:empty) {
+  border: 1px solid var(--vscode-panel-border, #555);
+  border-radius: 4px;
+  padding: 4px 10px;
+}
+#plan [data-status='Completed'] {
+  color: var(--vscode-testing-iconPassed, #89d185);
+}
+#plan [data-status='InProgress'] {
+  font-weight: bold;
+}
+#plan [data-status='Failed'] {
+  color: var(--vscode-errorForeground, #f88);
+}
+.turn {
+  border-bottom: 1px solid var(--vscode-panel-border, #555);
+  padding-bottom: 8px;
+}
+.turn > h2 {
+  font-size: 0.85em;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+.turn > article.agent {
+  border-color: var(--vscode-testing-iconPassed, #89d185);
+}
+#attachments pre {
+  max-height: 20vh;
+  overflow: auto;
+}

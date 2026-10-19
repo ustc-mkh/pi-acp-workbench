@@ -376,7 +376,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       });
       return;
     }
-    if (text === 'image-output' || text === 'image-malformed') {
+    if (['image-output', 'image-malformed', 'history-gated-image'].includes(text)) {
       const messageId = randomUUID();
       update({
         sessionUpdate: 'agent_message_chunk',
@@ -386,7 +386,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           mimeType: 'image/png',
           uri: 'https://example.invalid/never-fetch',
           data:
-            text === 'image-output'
+            text !== 'image-malformed'
               ? 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
               : 'invalid-base64',
         },
@@ -396,6 +396,26 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         messageId,
         content: { type: 'text', text: 'image caption' },
       });
+      const historyGate = process.env.WORKBENCH_CONTRACT_CONFIG_GATE;
+      if (text === 'history-gated-image' && historyGate) {
+        writeFileSync(`${historyGate}.history-started`, 'started');
+        let moreSent = false;
+        const waiting = setInterval(() => {
+          if (!moreSent && existsSync(`${historyGate}.history-more`)) {
+            moreSent = true;
+            update({
+              sessionUpdate: 'agent_message_chunk',
+              messageId,
+              content: { type: 'text', text: ' preview tail update' },
+            });
+          }
+          if (existsSync(`${historyGate}.history-release`)) {
+            clearInterval(waiting);
+            reply(r.id, { stopReason: 'end_turn' });
+          }
+        }, 5);
+        return;
+      }
       reply(r.id, { stopReason: 'end_turn' });
       return;
     }

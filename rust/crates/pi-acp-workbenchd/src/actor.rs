@@ -59,9 +59,20 @@ pub struct RegistryHandle {
 }
 impl RegistryHandle {
     pub async fn command(&self, command: DomainCommand) -> Result<OwnerReply, DomainError> {
+        self.command_with_operation(command, None).await
+    }
+    pub(crate) async fn command_with_operation(
+        &self,
+        command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<OwnerReply, DomainError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .try_send(RegistryCommand::Command { command, reply })
+            .try_send(RegistryCommand::Command {
+                command,
+                operation,
+                reply,
+            })
             .map_err(registry_send_error)?;
         rx.await
             .map_err(|_| DomainError::Worker("registry request interrupted".into()))?
@@ -132,6 +143,7 @@ fn registry_send_error<T>(error: mpsc::error::TrySendError<T>) -> DomainError {
 enum RegistryCommand {
     Command {
         command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply,
     },
     Worker {
@@ -149,11 +161,20 @@ mod runtime;
 pub use runtime::Runtime;
 fn forward(
     command: DomainCommand,
+    operation: Option<crate::domain::operation::OperationTicket>,
     id: &SessionId,
     reply: Reply,
     sessions: &BTreeMap<SessionId, mpsc::Sender<SessionCommand>>,
 ) {
-    enqueue(SessionCommand::Command { command, reply }, id, sessions);
+    enqueue(
+        SessionCommand::Command {
+            command,
+            operation,
+            reply,
+        },
+        id,
+        sessions,
+    );
 }
 fn enqueue(
     message: SessionCommand,
@@ -176,6 +197,7 @@ fn enqueue(
 enum SessionCommand {
     Command {
         command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply,
     },
     Worker {
@@ -207,6 +229,7 @@ fn unix_now() -> u64 {
 async fn commit_command(
     state: &mut SessionView,
     command: DomainCommand,
+    operation: Option<crate::domain::operation::OperationTicket>,
     store: &impl SessionPersistence,
     events: &broadcast::Sender<CommitBatch>,
 ) -> Result<OwnerReply, DomainError> {
@@ -241,9 +264,17 @@ async fn commit_command(
         ),
         _ => None,
     };
-    let Some(change) = transition(state, command, &context, now)? else {
+    let Some(mut change) = transition(state, command, &context, now)? else {
         return Ok(accepted(state));
     };
+    for intent in &mut change.deliveries {
+        if let crate::domain::transition::DeliveryPayload::Input { origin, .. } =
+            &mut intent.payload
+        {
+            *origin = operation.as_ref().map(|ticket| ticket.operation.clone());
+        }
+    }
+    change.operation = operation;
     let next = change.next.clone();
     let batch = store
         .commit(change)
@@ -265,8 +296,12 @@ async fn session_loop(
 ) {
     let mut worker_epoch = None;
     while let Some(message) = rx.recv().await {
-        let (command, reply) = match message {
-            SessionCommand::Command { command, reply } => (command, reply),
+        let (command, reply, operation) = match message {
+            SessionCommand::Command {
+                command,
+                operation,
+                reply,
+            } => (command, reply, operation),
             SessionCommand::Worker {
                 epoch,
                 event: None,
@@ -299,6 +334,7 @@ async fn session_loop(
                         event,
                     },
                     reply,
+                    None,
                 )
             }
             SessionCommand::Shutdown(reply) => {
@@ -306,7 +342,7 @@ async fn session_loop(
                     let command = DomainCommand::Cancel {
                         session: state.id.clone(),
                     };
-                    commit_command(&mut state, command, &store, &events)
+                    commit_command(&mut state, command, None, &store, &events)
                         .await
                         .map(|_| ())
                 } else {
@@ -345,7 +381,7 @@ async fn session_loop(
                     ..
                 }
         );
-        let result = commit_command(&mut state, command, &store, &events).await;
+        let result = commit_command(&mut state, command, operation, &store, &events).await;
         if result.is_ok() && invalidate_worker {
             worker_epoch = None;
         }

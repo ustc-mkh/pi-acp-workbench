@@ -5,51 +5,24 @@ use crate::domain::{
     command::DomainCommand, error::DomainError, ids::OperationId, query::CommandReceipt,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct RequestFingerprint(String);
-impl RequestFingerprint {
-    pub fn of(command: &DomainCommand) -> Result<Self, DomainError> {
-        let bytes = serde_json::to_vec(command).map_err(failure)?;
-        Ok(Self(format!("{:x}", Sha256::digest(bytes))))
-    }
-}
-impl TryFrom<String> for RequestFingerprint {
-    type Error = &'static str;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err("invalid request fingerprint");
-        }
-        Ok(Self(value))
-    }
-}
-impl From<RequestFingerprint> for String {
-    fn from(value: RequestFingerprint) -> Self {
-        value.0
-    }
-}
+pub use crate::domain::operation::{OperationTicket, RequestFingerprint};
 
 type OperationResult = Result<CommandReceipt, DomainError>;
 type Reply<T> = oneshot::Sender<Result<T, DomainError>>;
-#[derive(Debug)]
-pub struct OperationTicket {
-    operation: OperationId,
-    fingerprint: RequestFingerprint,
-}
 pub enum Admission {
     Execute(OperationTicket),
     Replay(OperationResult),
 }
 /// Queue messages contain typed identities/results, not SQL or executable closures.
 pub(super) enum Request {
+    CreateLocal {
+        ticket: OperationTicket,
+        view: Box<crate::domain::query::SessionView>,
+        reply: Reply<CommandReceipt>,
+    },
     Begin {
         ticket: OperationTicket,
         reply: Reply<Admission>,
@@ -62,6 +35,10 @@ pub(super) enum Request {
         ticket: OperationTicket,
         result: OperationResult,
         reply: Reply<()>,
+    },
+    Status {
+        operation: OperationId,
+        reply: Reply<crate::domain::query::OperationStatus>,
     },
     Expire {
         operation: OperationId,
@@ -85,6 +62,30 @@ impl JournalStore {
             .enqueue(StoreRequest::Journal(Box::new(request)))
             .await
             .map_err(failure)
+    }
+    /// Pure local creation: fingerprint admission, session and terminal receipt
+    /// have one commit point. No Started row is observable without its result.
+    pub async fn create_local(
+        &self,
+        operation: OperationId,
+        harness: crate::domain::Harness,
+        cwd: crate::domain::WorkspacePath,
+    ) -> Result<CommandReceipt, DomainError> {
+        let command = DomainCommand::CreateSession {
+            harness: harness.clone(),
+            cwd: cwd.clone(),
+        };
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::CreateLocal {
+            ticket: OperationTicket {
+                operation,
+                fingerprint: RequestFingerprint::of(&command)?,
+            },
+            view: Box::new(crate::domain::query::SessionView::new(harness, cwd)),
+            reply,
+        })
+        .await?;
+        result.await.map_err(failure)?
     }
     pub async fn begin(
         &self,
@@ -137,6 +138,15 @@ impl JournalStore {
     pub(crate) async fn snapshot(&self) -> Result<Vec<ArchivedOperation>, DomainError> {
         let (reply, result) = oneshot::channel();
         self.submit(Request::Snapshot { reply }).await?;
+        result.await.map_err(failure)?
+    }
+    /// Read-only narrow recovery interface; no command body or provider load.
+    pub async fn status(
+        &self,
+        operation: OperationId,
+    ) -> Result<crate::domain::query::OperationStatus, DomainError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::Status { operation, reply }).await?;
         result.await.map_err(failure)?
     }
     /// Explicit expiry retains a tombstone. There is no automatic receipt GC.
@@ -230,6 +240,15 @@ fn finish(
     ticket: OperationTicket,
     result: &OperationResult,
 ) -> Result<(), DomainError> {
+    let tx = db.transaction().map_err(failure)?;
+    finish_in_transaction(&tx, &ticket, result)?;
+    tx.commit().map_err(failure)
+}
+pub(super) fn finish_in_transaction(
+    db: &Connection,
+    ticket: &OperationTicket,
+    result: &OperationResult,
+) -> Result<(), DomainError> {
     // Serialize once: the raw typed result bytes (not a reconstructed receipt or
     // checksummed JSON envelope) are immutable until explicit expiry.
     let bytes = serde_json::to_vec(result).map_err(failure)?;
@@ -239,13 +258,12 @@ fn finish(
     } else {
         "Failed"
     };
-    let tx = db.transaction().map_err(failure)?;
     let current =
-        record(&tx, &ticket.operation)?.ok_or_else(|| failure("journal admission missing"))?;
+        record(db, &ticket.operation)?.ok_or_else(|| failure("journal admission missing"))?;
     if current.fingerprint != ticket.fingerprint || current.status != "Started" {
         return Err(DomainError::OperationConflict);
     }
-    let changed = tx
+    let changed = db
         .execute(
             "UPDATE operations SET status=?3,result=?4,checksum=?5 WHERE operation=?1 AND fingerprint=?2 AND status='Started'",
             params![ticket.operation.as_str(), ticket.fingerprint.0, status, bytes, checksum],
@@ -254,7 +272,30 @@ fn finish(
     if changed != 1 {
         return Err(DomainError::OperationConflict);
     }
-    tx.commit().map_err(failure)
+    Ok(())
+}
+fn create_local(
+    db: &mut Connection,
+    ticket: OperationTicket,
+    view: &crate::domain::query::SessionView,
+) -> Result<CommandReceipt, DomainError> {
+    view.validate()?;
+    let tx = db.transaction().map_err(failure)?;
+    if let Some(stored) = record(&tx, &ticket.operation)? {
+        return replay(&ticket, stored)?;
+    }
+    tx.execute(
+        "INSERT INTO operations(operation,fingerprint,status) VALUES (?1,?2,'Started')",
+        params![ticket.operation.as_str(), ticket.fingerprint.0],
+    )
+    .map_err(failure)?;
+    let created = super::query::insert_view(&tx, view).map_err(failure)?;
+    let receipt = CommandReceipt::Created {
+        summary: super::query::summary(view, created),
+    };
+    finish_in_transaction(&tx, &ticket, &Ok(receipt.clone()))?;
+    tx.commit().map_err(failure)?;
+    Ok(receipt)
 }
 fn expire(db: &mut Connection, operation: &OperationId) -> Result<(), DomainError> {
     let tx = db.transaction().map_err(failure)?;
@@ -274,6 +315,38 @@ fn expire(db: &mut Connection, operation: &OperationId) -> Result<(), DomainErro
 pub(super) fn execute(db: &mut Connection, request: Request) {
     // Reply channels observe results; dropping them never cancels accepted work.
     match request {
+        Request::CreateLocal {
+            ticket,
+            view,
+            reply,
+        } => {
+            let _ = reply.send(create_local(db, ticket, &view));
+        }
+        Request::Status { operation, reply } => {
+            use crate::domain::query::OperationStatus as S;
+            let result = (|| {
+                let Some(stored) = record(db, &operation)? else {
+                    return Ok(S::Unknown);
+                };
+                match stored.status.as_str() {
+                    "Started" => Ok(S::Uncertain),
+                    "Tombstone" => Ok(S::Expired),
+                    _ => {
+                        let ticket = OperationTicket {
+                            operation,
+                            fingerprint: stored.fingerprint.clone(),
+                        };
+                        Ok(match replay(&ticket, stored)? {
+                            Ok(receipt) => S::Completed { receipt },
+                            Err(error) => S::Failed {
+                                message: error.to_string(),
+                            },
+                        })
+                    }
+                }
+            })();
+            let _ = reply.send(result);
+        }
         Request::Begin { ticket, reply } => {
             let _ = reply.send(begin(db, ticket));
         }

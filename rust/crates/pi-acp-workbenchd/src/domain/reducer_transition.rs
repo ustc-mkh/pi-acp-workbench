@@ -153,6 +153,7 @@ pub fn transition(
                 event,
                 AgentEvent::Crashed { .. }
                     | AgentEvent::Catalogue(_)
+                    | AgentEvent::ProviderSessionAttached { .. }
                     | AgentEvent::ConfigurationRestored(_)
                     | AgentEvent::AvailableCommands(_)
             )
@@ -161,6 +162,7 @@ pub fn transition(
         }
     }
     let mut change = Transition {
+        operation: None,
         expected_revision: view.revision,
         next: view.clone(),
         contents: vec![],
@@ -431,5 +433,20 @@ pub fn transition(
     )
     .map_err(invalid)?;
     change.next.validate().map_err(invalid)?;
+    if let Some(input) = change
+        .append
+        .iter()
+        .find(|entry| entry.role == EntryRole::User)
+    {
+        let payload = DeliveryPayload::Input {
+            session: change.next.id.clone(),
+            turn: input.turn.clone(),
+            entry: input.id.clone(),
+            seq: change.next.last_entry_seq,
+            origin: None,
+        };
+        let id = DeliveryId::new(format!("input-{}", input.turn))?;
+        delivery(&mut change, id, payload);
+    }
     Ok(Some(change))
 }

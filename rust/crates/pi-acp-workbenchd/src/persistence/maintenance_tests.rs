@@ -62,8 +62,10 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
                 key.clone(),
                 CallbackBinding {
                     topic: topic.clone(),
-                    session: session.clone(),
-                    answer: answer.clone(),
+                    action: crate::telegram::types::CallbackAction::Answer {
+                        session: session.clone(),
+                        answer: answer.clone(),
+                    },
                     expires_at: if i == 3 {
                         crate::domain::query::MAX_SAFE_INTEGER
                     } else {

@@ -24,7 +24,7 @@ use std::{
 use tokio::sync::oneshot;
 
 type TestReply<T> = oneshot::Sender<Result<T, StoreError>>;
-/// Test-only RAII pause of the sole executor. Drop releases it even when a
+/// Test-only RAII pause of a storage executor. Drop releases it even when a
 /// test assertion unwinds, so Database's physical join cannot deadlock cleanup.
 pub(crate) struct ExecutorPause(Option<std::sync::mpsc::Sender<()>>);
 impl ExecutorPause {
@@ -44,6 +44,10 @@ pub(super) enum TestRequest {
     RejectJournalAdmission {
         operation: crate::domain::OperationId,
         reply: TestReply<()>,
+    },
+    ReaderPause {
+        entered: oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
     },
     Pause {
         entered: oneshot::Sender<()>,
@@ -128,9 +132,9 @@ pub(super) fn execute(db: &mut Connection, request: TestRequest) {
                 });
             let _ = reply.send(result);
         }
-        TestRequest::Pause { entered, resume } => {
+        TestRequest::ReaderPause { entered, resume } | TestRequest::Pause { entered, resume } => {
             let _ = entered.send(());
-            resume.recv().unwrap();
+            let _ = resume.recv();
         }
         TestRequest::Rollback { commit, reply } => {
             let result = (|| {
@@ -267,6 +271,7 @@ fn update(mut view: SessionView, id: &str, text: &str) -> Transition {
     view.revision = view.revision.next().unwrap();
     view.last_entry_seq = view.last_entry_seq.next().unwrap();
     Transition {
+        operation: None,
         expected_revision,
         deliveries: vec![delivery(&view, &format!("delivery-{id}"))],
         next: view,
@@ -519,7 +524,7 @@ async fn sqlite_dropped_observer_is_not_write_cancellation_and_shutdown_drains()
     db.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn sqlite_queue_is_bounded_to_256_and_one_executor_per_lease() {
+async fn sqlite_writer_queue_is_bounded_to_256_and_one_storage_lifecycle_per_lease() {
     let root = Root::new();
     let (lease, db) = open(&root.data()).await;
     db.create(initial()).await.unwrap();
@@ -528,8 +533,9 @@ async fn sqlite_queue_is_bounded_to_256_and_one_executor_per_lease() {
     for _ in 0..super::database::STORE_QUEUE_CAPACITY {
         let (reply, result) = oneshot::channel();
         drop(result);
-        db.enqueue(StoreRequest::View {
-            session: initial().id,
+        db.enqueue(StoreRequest::Remove {
+            operation: None,
+            session: SessionId::generate(),
             reply,
         })
         .await
@@ -538,7 +544,8 @@ async fn sqlite_queue_is_bounded_to_256_and_one_executor_per_lease() {
     let (reply, _result) = oneshot::channel();
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
-        db.enqueue(StoreRequest::View {
+        db.enqueue(StoreRequest::Remove {
+            operation: None,
             session: initial().id,
             reply
         })
@@ -548,6 +555,145 @@ async fn sqlite_queue_is_bounded_to_256_and_one_executor_per_lease() {
     resume.send(()).unwrap();
     db.shutdown().await.unwrap();
 }
+#[tokio::test]
+async fn sqlite_readers_are_readonly_and_new_snapshots_see_acknowledged_commits() {
+    let root = Root::new();
+    let (_lease, db) = open(&root.data()).await;
+    db.create(initial()).await.unwrap();
+    let reader = super::schema::open_reader(&root.data()).unwrap();
+    assert!(reader.execute("DELETE FROM sessions", []).is_err());
+    let transaction = reader.unchecked_transaction().unwrap();
+    assert_eq!(
+        query::view(&transaction, &initial().id)
+            .unwrap()
+            .revision
+            .get(),
+        0
+    );
+    db.commit(update(initial(), "new", "committed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        query::view(&transaction, &initial().id)
+            .unwrap()
+            .revision
+            .get(),
+        0
+    );
+    transaction.commit().unwrap();
+    assert_eq!(
+        query::view(&reader, &initial().id).unwrap().revision.get(),
+        1
+    );
+    for _ in 0..4 {
+        assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 1);
+    }
+    drop(reader);
+    db.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_two_blocked_readers_do_not_block_writer_and_shutdown_joins_them() {
+    let root = Root::new();
+    let (lease, db) = open(&root.data()).await;
+    db.create(initial()).await.unwrap();
+    let mut guards = Vec::new();
+    for _ in 0..2 {
+        let (entered, ready) = oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        guards.push(ExecutorPause::new(resume));
+        db.enqueue(StoreRequest::Test(TestRequest::ReaderPause {
+            entered,
+            resume: wait,
+        }))
+        .await
+        .unwrap();
+        ready.await.unwrap();
+    }
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        db.commit(update(initial(), "writer", "durable")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let closing = db.clone();
+    let observer = tokio::spawn(async move { closing.shutdown().await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!observer.is_finished());
+    observer.abort();
+    let _ = observer.await;
+    assert!(StorageLease::lock(&root.data()).is_err());
+    assert!(matches!(
+        db.view(initial().id).await,
+        Err(StoreError::Closed)
+    ));
+    drop(guards);
+    tokio::time::timeout(Duration::from_secs(2), db.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let reopened = Database::open(root.data(), &lease).await.unwrap();
+    assert_eq!(reopened.view(initial().id).await.unwrap().revision.get(), 1);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_reader_queues_are_bounded_and_cancelled_wait_is_not_accepted() {
+    let root = Root::new();
+    let (_lease, db) = open(&root.data()).await;
+    db.create(initial()).await.unwrap();
+    let mut guards = Vec::new();
+    for _ in 0..2 {
+        let (entered, ready) = oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        guards.push(ExecutorPause::new(resume));
+        db.enqueue(StoreRequest::Test(TestRequest::ReaderPause {
+            entered,
+            resume: wait,
+        }))
+        .await
+        .unwrap();
+        ready.await.unwrap();
+    }
+    let mut observers = Vec::new();
+    for _ in 0..super::database::STORE_QUEUE_CAPACITY {
+        let (reply, observer) = oneshot::channel();
+        db.enqueue(StoreRequest::View {
+            session: initial().id,
+            reply,
+        })
+        .await
+        .unwrap();
+        observers.push(observer);
+    }
+    let before = db.metrics()["view"].accepted_requests;
+    let (reply, observer) = oneshot::channel();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        db.enqueue(StoreRequest::View {
+            session: initial().id,
+            reply
+        })
+    )
+    .await
+    .is_err());
+    assert!(observer.await.is_err());
+    assert_eq!(db.metrics()["view"].accepted_requests, before);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        db.commit(update(initial(), "queue", "writer progresses")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(guards);
+    for observer in observers {
+        assert_eq!(observer.await.unwrap().unwrap().revision.get(), 1);
+    }
+    db.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn sqlite_lease_survives_caller_drop_until_database_closes() {
     let root = Root::new();

@@ -1,4 +1,4 @@
-// Production v2 extension/browser graph + real new daemon. Synthetic ACP; no account/Bot/model.
+// Production v3 extension/browser graph + real new daemon. Synthetic ACP; no account/Bot/model.
 import { chromium } from '@playwright/test';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -128,6 +128,9 @@ try {
       void page.evaluate((value) => window.postMessage(value, '*'), message).catch(() => {});
     },
     trusted: () => true,
+    attachFiles: async () => [
+      { id: 'explicit-file', name: 'example.ts', text: 'export const answer = 42;' },
+    ],
     workspace: () => root,
     authorize: async (cwd) => {
       assert.equal(await realpath(cwd), await realpath(root));
@@ -232,6 +235,7 @@ try {
       controller.snapshot.view.view.status === 'Idle',
     'tool completion',
   );
+  await page.locator('.turn-process').last().locator('summary').first().click();
   await page
     .getByRole('button', { name: /^Tools for / })
     .last()
@@ -255,6 +259,20 @@ try {
   check(
     'explicit archive-only image read displays a real decoded raster with no remote/path fallback',
   );
+  await page.getByRole('button', { name: 'Attach files', exact: true }).click();
+  await page.locator('#attachments summary').click();
+  await page.getByRole('button', { name: 'Remove attachment example.ts', exact: true }).click();
+  assert.equal(await page.locator('#attachments pre').count(), 0);
+  check('explicit session-scoped attachment selection previews escaped text and supports removal');
+  await prompt('```mermaid\ngraph TD; A-->B\n```');
+  await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'diagram turn completion');
+  await page.getByRole('button', { name: 'Render diagrams', exact: true }).first().click();
+  await page.locator('.diagram-canvas svg').first().waitFor();
+  assert.equal(
+    await page.locator('.diagram-canvas image, .diagram-canvas foreignObject').count(),
+    0,
+  );
+  check('Mermaid renders through lazy bundled code under production CSP without remote resources');
   await prompt('crash');
   await wait(
     () =>

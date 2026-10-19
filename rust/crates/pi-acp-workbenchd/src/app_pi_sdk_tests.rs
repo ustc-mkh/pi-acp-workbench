@@ -129,6 +129,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         .collect();
     database
         .commit(crate::domain::transition::Transition {
+            operation: None,
             expected_revision: Default::default(),
             next: state.hot_view(),
             contents: vec![],

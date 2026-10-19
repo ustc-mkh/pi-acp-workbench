@@ -155,6 +155,46 @@ fn merged_telegram_config_rejects_plain_tokens_empty_authorization_and_remote_ht
 }
 
 #[test]
+fn familiar_control_aliases_map_to_existing_typed_commands() {
+    use super::command::{parse_text, ControlCommand};
+    let snapshot = snapshot();
+    let cwd = WorkspacePath::new("/tmp").unwrap();
+    assert!(matches!(
+        parse_text(Some(&snapshot), "/menu", &cwd, 1),
+        Ok(TelegramAction::Control(ControlCommand::Menu { .. }))
+    ));
+    for input in ["/start", "/help"] {
+        assert!(matches!(
+            parse_text(Some(&snapshot), input, &cwd, 1),
+            Ok(TelegramAction::Control(ControlCommand::Help))
+        ));
+    }
+    for input in ["/stop", "/cancel"] {
+        assert!(matches!(
+            parse_text(Some(&snapshot), input, &cwd, 1),
+            Ok(TelegramAction::Control(ControlCommand::Cancel { .. }))
+        ));
+    }
+    for input in ["/open existing-session", "/attach existing-session"] {
+        assert!(matches!(
+            parse_text(Some(&snapshot), input, &cwd, 1),
+            Ok(TelegramAction::Control(ControlCommand::Attach { session })) if session.as_str() == "existing-session"
+        ));
+    }
+    for input in ["/history", "/history all"] {
+        assert!(matches!(
+            parse_text(Some(&snapshot), input, &cwd, 1),
+            Ok(TelegramAction::Control(ControlCommand::History { .. }))
+        ));
+    }
+    assert!(matches!(
+        parse_text(Some(&snapshot), "/sync", &cwd, 1),
+        Ok(TelegramAction::Control(ControlCommand::Sync { .. }))
+    ));
+    assert!(parse_text(Some(&snapshot), "/history nope", &cwd, 1).is_err());
+}
+
+#[test]
 fn ambiguous_text_is_rejected_and_explicit_multifield_answers_are_typed() {
     use super::command::parse_text;
     use crate::domain::interaction::{FieldKind, FieldValue, InteractionField};
@@ -343,11 +383,13 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
             key.clone(),
             CallbackBinding {
                 topic: topic(1),
-                session: snapshot.id.clone(),
-                answer: InteractionAnswer {
-                    interaction: interaction.id,
-                    response: InteractionResponse::Permission {
-                        option: "yes".into(),
+                action: crate::telegram::types::CallbackAction::Answer {
+                    session: snapshot.id.clone(),
+                    answer: InteractionAnswer {
+                        interaction: interaction.id,
+                        response: InteractionResponse::Permission {
+                            option: "yes".into(),
+                        },
                     },
                 },
                 expires_at: 50,

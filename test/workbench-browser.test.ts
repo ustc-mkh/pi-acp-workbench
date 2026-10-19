@@ -10,14 +10,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetModules();
 });
-async function browser() {
+async function browser(saved?: unknown) {
   dom = new JSDOM('<main id="workbench"></main>', { pretendToBeVisual: true });
   const sent: UiCommand[] = [];
   vi.stubGlobal('window', dom.window);
   vi.stubGlobal('document', dom.window.document);
   vi.stubGlobal('requestAnimationFrame', dom.window.requestAnimationFrame.bind(dom.window));
+  let persisted = saved;
   vi.stubGlobal('acquireVsCodeApi', () => ({
     postMessage: (message: UiCommand) => sent.push(message),
+    getState: () => persisted,
+    setState: (value: unknown) => {
+      persisted = value;
+    },
   }));
   await import('../webview/workbench-main');
   const snapshot = emptyView();
@@ -42,6 +47,7 @@ async function browser() {
     dom!.window.dispatchEvent(new dom!.window.MessageEvent('message', { data: value }));
   return {
     sent,
+    saved: () => persisted,
     state,
     post,
     document: dom.window.document,
@@ -50,6 +56,41 @@ async function browser() {
     },
   };
 }
+it('keeps a restored selection visible outside the current session page without triggering a mutation', async () => {
+  const b = await browser();
+  b.state.sessions = [];
+  b.update();
+  const select = b.document.querySelector<HTMLSelectElement>('select[aria-label="Session"]')!;
+  await expect.poll(() => select.value).toBe('session');
+  expect(select.selectedOptions[0].textContent).toContain('outside this page');
+  expect(b.sent).toEqual([{ type: 'ready' }]);
+  b.state.sessions = [
+    {
+      id: b.state.view!.view!.id,
+      harness: 'Pi',
+      cwd: '/workspace',
+      status: 'Idle',
+      revision: 1,
+      created_seq: 42,
+    },
+  ];
+  b.update(2);
+  await expect.poll(() => select.selectedOptions[0].textContent).toContain('#42');
+  expect(select.options).toHaveLength(2);
+});
+
+it('offers full Markdown export as a distinct user action for the selected session', async () => {
+  const b = await browser();
+  b.update();
+  const exportButton = [...b.document.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Export Markdown',
+  )!;
+  expect(exportButton).toBeDefined();
+  exportButton.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'export', session: b.state.selected });
+  expect(b.sent.some((message) => message.type === 'execute')).toBe(false);
+});
+
 it('renders committed rows without merging group deltas, never fetching markdown/tool URIs', async () => {
   const b = await browser(),
     snapshot = b.state.view!.view!;
@@ -271,4 +312,142 @@ it('keeps failed prompt drafts and clears only the matching accepted draft; fork
     .find((button) => button.textContent === 'Cancel this fork')!
     .click();
   expect(b.sent.at(-1)).toEqual({ type: 'cancel_fork', operation: 'original-fork' });
+});
+
+it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepted', async () => {
+  const b = await browser();
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.disabled).toBe(false);
+  prompt.value = '你好';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  for (const options of [{ shiftKey: true }, { isComposing: true }, { keyCode: 229 }])
+    prompt.dispatchEvent(new dom!.window.KeyboardEvent('keydown', { key: 'Enter', ...options }));
+  expect(b.sent).toEqual([{ type: 'ready' }]);
+  prompt.dispatchEvent(
+    new dom!.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+  );
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: { method: 'prompt', prompt: '你好' },
+  });
+  expect(prompt.value).toBe('你好');
+  expect(b.saved()).toMatchObject({ drafts: [['session', '你好']] });
+  b.post({ type: 'prompt_accepted', session: 'session', text: '你好' });
+  expect(b.saved()).toMatchObject({ drafts: [] });
+});
+
+it('restores reload text without replaying a mutation', async () => {
+  const b = await browser({ drafts: [['session', 'not yet accepted']] });
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.value).toBe('not yet accepted');
+  expect(b.sent).toEqual([{ type: 'ready' }]);
+});
+
+it('previews explicit attachments, isolates sessions and clears only a matching accepted input', async () => {
+  const b = await browser();
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.disabled).toBe(false);
+  [...b.document.querySelectorAll('button')]
+    .find((row) => row.textContent === 'Attach files')!
+    .click();
+  expect(b.sent.at(-1)).toEqual({ type: 'attach_files', session: 'session' });
+  b.post({
+    type: 'attachments',
+    session: 'other',
+    files: [{ id: 'bad', name: 'bad', text: 'secret' }],
+  });
+  expect(b.document.querySelector('#attachments')!.textContent).not.toContain('secret');
+  b.post({
+    type: 'attachments',
+    session: 'session',
+    files: [{ id: 'f', name: 'src/a.ts', text: '<script>safe text</script>' }],
+  });
+  expect(b.document.querySelector('#attachments pre')!.textContent).toBe(
+    '<script>safe text</script>',
+  );
+  expect(b.document.querySelector('#attachments script')).toBeNull();
+  prompt.value = 'Review';
+  prompt
+    .closest('form')!
+    .dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
+  const sent = b.sent.at(-1);
+  expect(sent).toMatchObject({
+    type: 'execute',
+    command: {
+      method: 'prompt',
+      prompt: 'Review\n\nExplicit file attachment: src/a.ts\n\n<script>safe text</script>',
+    },
+  });
+  b.post({ type: 'prompt_accepted', session: 'session', text: 'Review' });
+  expect(prompt.value).toBe('Review');
+  expect(b.document.querySelector('#attachments pre')).not.toBeNull();
+  if (sent?.type !== 'execute' || sent.command.method !== 'prompt')
+    throw new Error('missing prompt');
+  b.post({ type: 'prompt_accepted', session: 'session', text: sent.command.prompt });
+  expect(prompt.value).toBe('');
+  expect(b.document.querySelector('#attachments pre')).toBeNull();
+  expect(b.saved()).toMatchObject({ attachments: [], drafts: [] });
+});
+
+it('restores attachments and thought preferences on reload without replaying any command', async () => {
+  const b = await browser({
+    drafts: [['session', 'Review']],
+    attachments: [['session', [{ id: 'f', name: 'a.ts', text: 'saved context' }]]],
+    preferences: { showThoughts: false, disclosures: [] },
+  });
+  b.update();
+  await expect
+    .poll(() => b.document.querySelector('#attachments pre')?.textContent)
+    .toBe('saved context');
+  expect(b.document.querySelector<HTMLTextAreaElement>('#prompt')!.value).toBe('Review');
+  expect(b.document.querySelector<HTMLInputElement>('label input[type=checkbox]')!.checked).toBe(
+    false,
+  );
+  expect(b.sent).toEqual([{ type: 'ready' }]);
+  [...b.document.querySelectorAll('button')]
+    .find((button) => button.textContent === 'Remove attachment a.ts')!
+    .click();
+  expect(b.saved()).toMatchObject({ attachments: [] });
+});
+
+it('retains plan DOM, turn expansion and thought preferences across streamed state refreshes', async () => {
+  const b = await browser();
+  const snapshot = b.state.view!.view!;
+  snapshot.plan = {
+    items: [{ description: 'Implement feature', status: 'InProgress' }],
+  } as typeof snapshot.plan;
+  b.state.view = {
+    ...b.state.view!,
+    entries: ['Thought', 'Agent'].map((role, i) => ({
+      seq: i + 1,
+      id: entryId.parse(`group-${i}`),
+      turn: 'turn' as never,
+      role: role as 'Thought' | 'Agent',
+      text: { Inline: { text: role } },
+      message: null,
+      image: null,
+    })),
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('[data-turn]').length).toBe(1);
+  const agentArticle = b.document.querySelector('article.agent');
+  const plan = b.document.querySelector('#plan details')!;
+  expect(b.document.querySelector('#transcript #plan')).toBeNull();
+  const process = b.document.querySelector<HTMLDetailsElement>('.turn-process')!;
+  process.open = true;
+  process.dispatchEvent(new dom!.window.Event('toggle'));
+  b.update(2);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(b.document.querySelector('#plan details')).toBe(plan);
+  expect(b.document.querySelector('article.agent')).toBe(agentArticle);
+  expect(b.document.querySelector<HTMLDetailsElement>('.turn-process')!.open).toBe(true);
+  const checkbox = b.document.querySelector<HTMLInputElement>('label input[type=checkbox]')!;
+  checkbox.checked = false;
+  checkbox.dispatchEvent(new dom!.window.Event('change'));
+  await expect.poll(() => b.document.querySelectorAll('article.thought').length).toBe(0);
+  expect(b.document.querySelectorAll('article.agent')).toHaveLength(1);
+  expect(b.saved()).toMatchObject({ preferences: { showThoughts: false } });
 });

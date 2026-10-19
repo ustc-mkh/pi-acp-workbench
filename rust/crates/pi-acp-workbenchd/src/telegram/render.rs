@@ -20,6 +20,17 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+pub fn preference_reply(
+    value: super::types::TopicPreferences,
+    preference: super::types::TopicPreference,
+) -> String {
+    use super::types::TopicPreference;
+    let (label, enabled) = match preference {
+        TopicPreference::Notifications(_) => ("Notifications", value.notifications),
+        TopicPreference::Silent(_) => ("Silent", value.silent),
+    };
+    format!("{label}: {} (this topic).\n关闭 notifications 不停止任务；投递时关闭会跳过待发自动正文/图片，重新开启不补发已跳过内容。授权、错误及主动查询仍投递。silent 只改变 Telegram 通知，不隐藏消息。", if enabled { "on" } else { "off" })
+}
 pub fn split_text(text: &str) -> Vec<String> {
     let mut result = vec![];
     let mut current = String::new();
@@ -45,6 +56,7 @@ pub fn messages(topic: &TopicKey, text: &str) -> Vec<SendMessage> {
             chat_id: topic.chat,
             message_thread_id: topic.thread,
             text,
+            disable_notification: false,
             reply_markup: None,
         })
         .collect()
@@ -191,6 +203,13 @@ pub async fn render(
         DeliveryPayload::Notice { content } => {
             Ok(text_parts(topic, &payloads.content(content).await?))
         }
+        DeliveryPayload::Menu { content } => {
+            let menu = super::menu::Menu::decode(&payloads.content(content).await?)?;
+            super::menu::render(&event.id, topic, menu, store, now).await
+        }
+        DeliveryPayload::Input { .. } | DeliveryPayload::HistoryEntry { .. } => Err(
+            DomainError::Persistence("history entry must use bounded HistoryStream".into()),
+        ),
         DeliveryPayload::Turn { .. } => Err(DomainError::Persistence(
             "turn manifest must use the bounded TurnStream".into(),
         )),
@@ -213,10 +232,12 @@ pub async fn render(
                         key.clone(),
                         CallbackBinding {
                             topic: topic.clone(),
-                            session: snapshot.id.clone(),
-                            answer: InteractionAnswer {
-                                interaction: interaction.id.clone(),
-                                response,
+                            action: super::types::CallbackAction::Answer {
+                                session: snapshot.id.clone(),
+                                answer: InteractionAnswer {
+                                    interaction: interaction.id.clone(),
+                                    response,
+                                },
                             },
                             // Buttons are intentionally short-lived even when the
                             // interaction itself has no provider deadline. Saturating

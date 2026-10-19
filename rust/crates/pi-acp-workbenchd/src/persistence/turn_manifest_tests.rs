@@ -87,7 +87,7 @@ async fn incremental_turn_manifest_freezes_agent_links_and_survives_remove_and_r
     )
     .await;
     let delivery = format!("turn-{turn}");
-    db.remove(session.clone()).await.unwrap();
+    db.remove(session.clone(), None).await.unwrap();
     db.shutdown().await.unwrap();
     let db = Database::open(root.data(), &lease).await.unwrap();
     assert!(matches!(
@@ -121,7 +121,7 @@ async fn incremental_turn_manifest_freezes_agent_links_and_survives_remove_and_r
     }
     assert_eq!(
         sql.query_row(
-            "SELECT count(*) FROM deliveries WHERE status='Pending'",
+            "SELECT count(*) FROM deliveries WHERE status='Pending' AND json_extract(payload_json,'$.Turn') IS NOT NULL",
             [],
             |r| r.get::<_, i64>(0)
         )

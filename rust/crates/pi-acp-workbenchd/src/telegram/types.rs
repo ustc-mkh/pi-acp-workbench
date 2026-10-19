@@ -172,11 +172,43 @@ impl From<CallbackKey> for String {
 #[serde(deny_unknown_fields)]
 pub struct CallbackBinding {
     pub topic: TopicKey,
-    pub session: SessionId,
-    pub answer: InteractionAnswer,
+    pub action: CallbackAction,
     pub expires_at: u64,
     pub used_by: Option<UpdateId>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum CallbackAction {
+    Answer {
+        session: SessionId,
+        answer: InteractionAnswer,
+    },
+    Control {
+        command: super::command::ControlCommand,
+        expected_binding: Option<SessionId>,
+    },
+}
+/// Topic-scoped delivery policy, independent of the currently bound session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TopicPreferences {
+    pub notifications: bool,
+    pub silent: bool,
+}
+impl Default for TopicPreferences {
+    fn default() -> Self {
+        Self {
+            notifications: true,
+            silent: false,
+        }
+    }
+}
+/// Absolute assignments are replay-safe; never persist a toggle operation.
+#[derive(Clone, Copy, Debug)]
+pub enum TopicPreference {
+    Notifications(Option<bool>),
+    Silent(Option<bool>),
+}
+
 #[derive(Clone, Debug)]
 pub struct IncomingUpdate {
     pub id: UpdateId,

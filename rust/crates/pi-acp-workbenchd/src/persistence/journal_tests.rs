@@ -378,3 +378,379 @@ async fn independent_lookup_does_not_allocate_or_change_a_receipt() {
         "no journal/results JSON files: {names:?}"
     );
 }
+
+#[tokio::test]
+async fn status_is_narrow_read_only_and_preserves_uncertainty_across_restart() {
+    use crate::domain::query::OperationStatus as S;
+    let mut fixture = Fixture::new().await;
+    let id = OperationId::generate();
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Unknown
+    ));
+    assert!(fixture.store().snapshot().await.unwrap().is_empty());
+    let Admission::Execute(ticket) = fixture.store().begin(id.clone(), &command()).await.unwrap()
+    else {
+        panic!("admit")
+    };
+    let before = fixture.store().snapshot().await.unwrap();
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Uncertain
+    ));
+    assert_eq!(before, fixture.store().snapshot().await.unwrap());
+    fixture
+        .store()
+        .finish(
+            ticket,
+            &Ok(CommandReceipt::Removed {
+                session: SessionId::generate(),
+            }),
+        )
+        .await
+        .unwrap();
+    fixture.restart().await;
+    let before = fixture.store().snapshot().await.unwrap();
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Completed {
+            receipt: CommandReceipt::Removed { .. }
+        }
+    ));
+    assert_eq!(before, fixture.store().snapshot().await.unwrap());
+    fixture.store().expire(&id).await.unwrap();
+    assert!(matches!(
+        fixture.store().status(id).await.unwrap(),
+        S::Expired
+    ));
+    let id = OperationId::generate();
+    let Admission::Execute(ticket) = fixture.store().begin(id.clone(), &command()).await.unwrap()
+    else {
+        panic!("admit")
+    };
+    fixture
+        .store()
+        .finish(ticket, &Err(DomainError::Busy))
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture.store().status(id).await.unwrap(),
+        S::Failed { .. }
+    ));
+    let id = OperationId::generate();
+    fixture.store().begin(id.clone(), &command()).await.unwrap();
+    fixture.restart().await;
+    assert!(matches!(
+        fixture.store().status(id).await.unwrap(),
+        S::Uncertain
+    ));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn local_create_receipt_failure_rolls_back_session_and_identity_then_replays_one_result() {
+    use crate::domain::query::OperationStatus as S;
+    let mut fixture = Fixture::new().await;
+    fixture.close().await;
+    let db = Connection::open(fixture.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_create_receipt BEFORE UPDATE ON operations WHEN NEW.status='Completed' BEGIN SELECT RAISE(ABORT,'test terminal receipt failure'); END;").unwrap();
+    drop(db);
+    fixture.restart().await;
+    let id = OperationId::generate();
+    let cwd = WorkspacePath::new("/tmp").unwrap();
+    assert!(fixture
+        .store()
+        .create_local(id.clone(), Harness::Pi, cwd.clone())
+        .await
+        .is_err());
+    assert!(fixture
+        .database
+        .list(None, None)
+        .await
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Unknown
+    ));
+    assert!(fixture.store().snapshot().await.unwrap().is_empty());
+    fixture.close().await;
+    let db = Connection::open(fixture.path()).unwrap();
+    db.execute_batch("DROP TRIGGER reject_create_receipt;")
+        .unwrap();
+    drop(db);
+    fixture.restart().await;
+    let receipt = fixture
+        .store()
+        .create_local(id.clone(), Harness::Pi, cwd.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .database
+            .list(None, None)
+            .await
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+    let before = fixture.store().snapshot().await.unwrap();
+    fixture.restart().await;
+    let replayed = fixture
+        .store()
+        .create_local(id.clone(), Harness::Pi, cwd)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&receipt).unwrap(),
+        serde_json::to_vec(&replayed).unwrap()
+    );
+    assert_eq!(before, fixture.store().snapshot().await.unwrap());
+    assert_eq!(
+        fixture
+            .database
+            .list(None, None)
+            .await
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+    assert!(matches!(
+        fixture
+            .store()
+            .create_local(id, Harness::Pi, WorkspacePath::new("/other").unwrap())
+            .await,
+        Err(DomainError::OperationConflict)
+    ));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn local_model_and_mode_receipt_failures_roll_back_configuration() {
+    use crate::domain::{
+        query::{OperationStatus as S, SessionView},
+        reducer::{transition, TransitionContext},
+    };
+    for model in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let mut view = SessionView::new(Harness::Pi, WorkspacePath::new("/tmp").unwrap());
+        view.catalogue.models = vec![crate::domain::catalogue::ModelChoice {
+            id: crate::domain::ModelId::new("fixture-model").unwrap(),
+            name: "Fixture model".into(),
+        }];
+        view.catalogue.modes = vec![crate::domain::catalogue::ModeChoice {
+            id: crate::domain::ModeId::new("fixture-mode").unwrap(),
+            name: "Fixture mode".into(),
+        }];
+        // Fixture capabilities are explicit; production only accepts observed choices.
+        let command = if model {
+            DomainCommand::SetModel {
+                session: view.id.clone(),
+                model: view.catalogue.models[0].id.clone(),
+            }
+        } else {
+            DomainCommand::SetMode {
+                session: view.id.clone(),
+                mode: view.catalogue.modes[0].id.clone(),
+            }
+        };
+        fixture.database.create(view.clone()).await.unwrap();
+        let id = OperationId::generate();
+        let Admission::Execute(ticket) = fixture.store().begin(id.clone(), &command).await.unwrap()
+        else {
+            panic!("admit")
+        };
+        let mut change = transition(&view, command.clone(), &TransitionContext::default(), 0)
+            .unwrap()
+            .unwrap();
+        change.operation = Some(ticket);
+        fixture.close().await;
+        let sql = Connection::open(fixture.path()).unwrap();
+        sql.execute_batch("CREATE TRIGGER reject_config_receipt BEFORE UPDATE ON operations WHEN NEW.status='Completed' BEGIN SELECT RAISE(ABORT,'test config receipt failure'); END;").unwrap();
+        drop(sql);
+        fixture.restart().await;
+        assert!(fixture.database.commit(change.clone()).await.is_err());
+        let unchanged = fixture.database.view(view.id.clone()).await.unwrap();
+        assert_eq!(unchanged.revision, view.revision);
+        assert_eq!(unchanged.config, view.config);
+        assert!(matches!(
+            fixture.store().status(id.clone()).await.unwrap(),
+            S::Uncertain
+        ));
+        fixture.close().await;
+        let sql = Connection::open(fixture.path()).unwrap();
+        sql.execute_batch("DROP TRIGGER reject_config_receipt")
+            .unwrap();
+        drop(sql);
+        fixture.restart().await;
+        let committed = fixture.database.commit(change).await.unwrap();
+        fixture.restart().await;
+        assert_eq!(
+            fixture
+                .database
+                .view(view.id.clone())
+                .await
+                .unwrap()
+                .revision,
+            committed.revision
+        );
+        assert!(
+            matches!(fixture.store().begin(id, &command).await.unwrap(), Admission::Replay(Ok(CommandReceipt::Accepted { revision, .. })) if revision == committed.revision)
+        );
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn remove_state_tombstone_and_receipt_share_one_commit_boundary() {
+    use crate::domain::query::{OperationStatus as S, SessionView};
+    let mut fixture = Fixture::new().await;
+    let view = SessionView::new(Harness::Pi, WorkspacePath::new("/tmp").unwrap());
+    fixture.database.create(view.clone()).await.unwrap();
+    let id = OperationId::generate();
+    let command = DomainCommand::RemoveSession(view.id.clone());
+    let Admission::Execute(ticket) = fixture.store().begin(id.clone(), &command).await.unwrap()
+    else {
+        panic!("admit")
+    };
+    fixture.close().await;
+    let sql = Connection::open(fixture.path()).unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_remove_receipt BEFORE UPDATE ON operations WHEN NEW.status='Completed' BEGIN SELECT RAISE(ABORT,'test remove receipt failure'); END;").unwrap();
+    drop(sql);
+    fixture.restart().await;
+    assert!(fixture
+        .database
+        .remove(view.id.clone(), Some(ticket.clone()))
+        .await
+        .is_err());
+    assert_eq!(
+        fixture
+            .database
+            .view(view.id.clone())
+            .await
+            .unwrap()
+            .revision,
+        view.revision
+    );
+    let sql = Connection::open(fixture.path()).unwrap();
+    assert_eq!(
+        sql.query_row("SELECT count(*) FROM removed_sessions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(sql);
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Uncertain
+    ));
+    fixture.close().await;
+    let sql = Connection::open(fixture.path()).unwrap();
+    sql.execute_batch("DROP TRIGGER reject_remove_receipt")
+        .unwrap();
+    drop(sql);
+    fixture.restart().await;
+    fixture
+        .database
+        .remove(view.id.clone(), Some(ticket))
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture.database.view(view.id.clone()).await,
+        Err(super::super::database::StoreError::NotFound)
+    ));
+    fixture.restart().await;
+    assert!(
+        matches!(fixture.store().begin(id.clone(), &command).await.unwrap(), Admission::Replay(Ok(CommandReceipt::Removed { session })) if session == view.id)
+    );
+    assert!(matches!(
+        fixture
+            .store()
+            .begin(id, &DomainCommand::ListSessions)
+            .await,
+        Err(DomainError::OperationConflict)
+    ));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn prompt_input_turn_delivery_and_receipt_share_one_commit_boundary() {
+    use crate::domain::{
+        query::{OperationStatus as S, SessionView},
+        reducer::{transition, TransitionContext},
+        Prompt,
+    };
+    let mut fixture = Fixture::new().await;
+    let view = SessionView::new(Harness::Pi, WorkspacePath::new("/tmp").unwrap());
+    fixture.database.create(view.clone()).await.unwrap();
+    let id = OperationId::generate();
+    let command = DomainCommand::Prompt {
+        session: view.id.clone(),
+        prompt: Prompt::new("preserved intent").unwrap(),
+    };
+    let Admission::Execute(ticket) = fixture.store().begin(id.clone(), &command).await.unwrap()
+    else {
+        panic!("admit")
+    };
+    let mut change = transition(&view, command.clone(), &TransitionContext::default(), 0)
+        .unwrap()
+        .unwrap();
+    change.operation = Some(ticket);
+    fixture.close().await;
+    let db = Connection::open(fixture.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_prompt_receipt BEFORE UPDATE ON operations WHEN NEW.status='Completed' BEGIN SELECT RAISE(ABORT,'test prompt receipt failure'); END;").unwrap();
+    drop(db);
+    fixture.restart().await;
+    assert!(fixture.database.commit(change.clone()).await.is_err());
+    let unchanged = fixture.database.view(view.id.clone()).await.unwrap();
+    assert_eq!(unchanged.revision, view.revision);
+    assert!(unchanged.active_turn.is_none());
+    assert!(fixture
+        .database
+        .history(view.id.clone(), None, None)
+        .await
+        .unwrap()
+        .entries
+        .is_empty());
+    assert!(matches!(
+        fixture.store().status(id.clone()).await.unwrap(),
+        S::Uncertain
+    ));
+    fixture.close().await;
+    let db = Connection::open(fixture.path()).unwrap();
+    db.execute_batch("DROP TRIGGER reject_prompt_receipt;")
+        .unwrap();
+    drop(db);
+    fixture.restart().await;
+    let batch = fixture.database.commit(change).await.unwrap();
+    assert_eq!(batch.entries.len(), 1);
+    assert!(
+        matches!(fixture.store().status(id.clone()).await.unwrap(), S::Completed { receipt: CommandReceipt::Accepted { revision, .. } } if revision == batch.revision)
+    );
+    fixture.restart().await;
+    assert_eq!(
+        fixture
+            .database
+            .history(view.id.clone(), None, None)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert!(fixture
+        .database
+        .view(view.id)
+        .await
+        .unwrap()
+        .active_turn
+        .is_some());
+    assert!(matches!(
+        fixture.store().begin(id, &command).await.unwrap(),
+        Admission::Replay(Ok(CommandReceipt::Accepted { .. }))
+    ));
+    fixture.close().await;
+}

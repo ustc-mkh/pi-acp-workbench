@@ -145,8 +145,14 @@ mod deleted_delivery_tests;
 mod delivery_tests;
 #[path = "execution_tests.rs"]
 mod execution_tests;
+#[path = "history_tests.rs"]
+mod history_tests;
+#[path = "menu_tests.rs"]
+mod menu_tests;
 #[path = "parallel_delivery_tests.rs"]
 mod parallel_delivery_tests;
+#[path = "preferences_tests.rs"]
+mod preferences_tests;
 fn app(root: &Path) -> WorkbenchApp {
     app_with_env(root, Default::default())
 }
@@ -419,7 +425,10 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
         Some(DeliveryFailure::RateLimited)
     ));
     assert_eq!(api.0.lock().await.media_attempts, 1);
-    assert!(api.0.lock().await.sequence.is_empty());
+    let input_sequence = api.0.lock().await.sequence.clone();
+    assert_eq!(input_sequence.len(), 2);
+    assert!(input_sequence[0].starts_with("text:User input · session"));
+    assert_eq!(input_sequence[1], "text:image-output");
     delivery_tests::notice(&first, &topic, "later notice".into(), 0).await;
     first.shutdown_checked().await.unwrap();
     let peer_before = tokio::fs::read(&trace).await.unwrap();
@@ -445,7 +454,7 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
         "retry_after survives restart"
     );
     assert!(
-        api.0.lock().await.sequence.is_empty(),
+        api.0.lock().await.sequence == input_sequence,
         "the deferred session head also blocks a direct Telegram notice to its topic"
     );
     second
@@ -461,7 +470,7 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
     assert_eq!(state.media[0].asset.bytes(), original);
     assert_eq!(state.media[0].message_thread_id, topic.thread);
     assert_eq!(
-        state.sequence,
+        &state.sequence[2..],
         ["image", "text:image caption", "text:later notice"]
     );
     drop(state);
@@ -552,6 +561,7 @@ async fn mixed_unicode_text_image_parts_and_standalone_image_ids_preserve_archiv
     view.last_entry_seq = SafeInteger::new(5).unwrap();
     app.database()
         .commit(Transition {
+            operation: None,
             expected_revision: Default::default(),
             next: view.clone(),
             append,

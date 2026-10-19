@@ -19,6 +19,10 @@ pub(super) enum Request {
         pool: usize,
         job: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     },
+    Discover {
+        session: SessionId,
+        reply: oneshot::Sender<Events>,
+    },
     Command {
         operation: Option<OperationId>,
         command: DomainCommand,
@@ -77,6 +81,7 @@ impl Request {
     }
     fn lane(&self) -> Option<SessionId> {
         match self {
+            Self::Discover { session, .. } => Some(session.clone()),
             #[cfg(test)]
             Self::Test { lane, .. } => lane.clone(),
             Self::Command {
@@ -103,7 +108,7 @@ impl Request {
         match self {
             #[cfg(test)]
             Self::Test { .. } => {}
-            Self::Command { reply, .. } => {
+            Self::Discover { reply, .. } | Self::Command { reply, .. } => {
                 let _ = reply.send(Err(stopping()));
             }
             Self::Lookup { reply, .. } => {
@@ -297,6 +302,9 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
     match request {
         #[cfg(test)]
         Request::Test { job, .. } => job.await,
+        Request::Discover { session, reply } => {
+            let _ = reply.send(core.discover(session).await);
+        }
         Request::Command {
             operation,
             command,
@@ -336,6 +344,9 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                 use crate::domain::query::{QueryCommand as Q, QueryResult as R};
                 command.validate()?;
                 let result = match command {
+                    Q::Operation { operation } => {
+                        return core.journal.status(operation).await.map(R::Operation);
+                    }
                     Q::List { cursor, limit } => {
                         core.database.list(cursor, limit).await.map(R::List)
                     }

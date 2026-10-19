@@ -1,7 +1,6 @@
 //! Registry owns routing/lifecycle metadata, never historical session contents.
 //! Store futures are bounded owned jobs, not awaits inside the routing loop.
 use super::*;
-use crate::domain::{query::SafeInteger, session::SessionConfig};
 use std::{collections::VecDeque, sync::Arc};
 use tokio::{
     sync::{watch, Mutex},
@@ -16,7 +15,14 @@ pub(super) struct RegistryState {
     actors: JoinSet<()>,
     stopping: JoinSet<Outcome>,
     io: JoinSet<Completion>,
-    lanes: BTreeMap<SessionId, VecDeque<(DomainCommand, Reply)>>,
+    lanes: BTreeMap<
+        SessionId,
+        VecDeque<(
+            DomainCommand,
+            Option<crate::domain::operation::OperationTicket>,
+            Reply,
+        )>,
+    >,
     events: broadcast::Sender<CommitBatch>,
 }
 struct Completion {
@@ -77,11 +83,11 @@ impl RegistryState {
                 let _ = reply.send(result);
             }
         }
-        for (command, reply) in queue {
+        for (command, operation, reply) in queue {
             if closing {
                 let _ = reply.send(Err(stopping()));
             } else {
-                self.route(command, reply, store, mailbox);
+                self.route(command, operation, reply, store, mailbox);
             }
         }
     }
@@ -94,6 +100,7 @@ impl RegistryState {
     fn route(
         &mut self,
         command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply,
         store: &impl SessionPersistence,
         mailbox: usize,
@@ -121,7 +128,7 @@ impl RegistryState {
                 self.lanes
                     .get_mut(lane.unwrap())
                     .expect("reserved lane")
-                    .push_back((command, reply));
+                    .push_back((command, operation, reply));
             }
             return;
         }
@@ -134,6 +141,7 @@ impl RegistryState {
             {
                 forward(
                     DomainCommand::Inspect(id.clone()),
+                    operation,
                     &id,
                     reply,
                     &self.sessions,
@@ -178,26 +186,7 @@ impl RegistryState {
                         });
                     }
                     DomainCommand::CreateSession { harness, cwd } => {
-                        let state = SessionView {
-                            id: SessionId::generate(),
-                            provider_session: None,
-                            harness,
-                            cwd,
-                            status: SessionStatus::Idle,
-                            origin: None,
-                            last_entry_seq: SafeInteger::default(),
-                            plan: Default::default(),
-                            active_turn: None,
-                            pending_interactions: BTreeMap::new(),
-                            usage: Default::default(),
-                            configuration_intent: None,
-                            config: SessionConfig {
-                                model: None,
-                                mode: None,
-                            },
-                            catalogue: Default::default(),
-                            revision: SafeInteger::default(),
-                        };
+                        let state = SessionView::new(harness, cwd);
                         let id = state.id.clone();
                         self.lanes.insert(id.clone(), VecDeque::new());
                         self.io.spawn(async move {
@@ -251,8 +240,10 @@ impl RegistryState {
                                 if let Some(sender) = sender {
                                     stop_actor(sender).await?;
                                 }
-                                let terminal =
-                                    store.remove(&id).await.map_err(DomainError::Persistence)?;
+                                let terminal = store
+                                    .remove(&id, operation)
+                                    .await
+                                    .map_err(DomainError::Persistence)?;
                                 let _ = events.send(terminal);
                                 Ok(OwnerReply::Receipt(CommandReceipt::Removed {
                                     session: id.clone(),
@@ -313,7 +304,7 @@ impl RegistryState {
                     | DomainCommand::Agent { session, .. } => session.clone(),
                     _ => unreachable!(),
                 };
-                forward(other, &id, reply, &self.sessions);
+                forward(other, operation, &id, reply, &self.sessions);
             }
         }
     }
@@ -332,7 +323,7 @@ impl RegistryState {
             }
         }
         for (_, queue) in std::mem::take(&mut self.lanes) {
-            for (_, reply) in queue {
+            for (_, _, reply) in queue {
                 let _ = reply.send(Err(stopping()));
             }
         }
@@ -385,7 +376,7 @@ async fn load(
                 },
             }
         };
-        commit_command(&mut state, command, store, events).await?;
+        commit_command(&mut state, command, None, store, events).await?;
     }
     Ok(state)
 }
@@ -410,7 +401,7 @@ pub(super) async fn run(
             },
             _ = state.actors.join_next(), if !state.actors.is_empty() => { state.sessions.retain(|_, sender| !sender.is_closed()); },
             message = rx.recv() => match message {
-                Some(RegistryCommand::Command { command, reply }) => state.route(command, reply, &store, mailbox),
+                Some(RegistryCommand::Command { command, operation, reply }) => state.route(command, operation, reply, &store, mailbox),
                 Some(RegistryCommand::Worker { session, epoch, event, reply }) => enqueue(SessionCommand::Worker { epoch, event, reply }, &session, &state.sessions),
                 Some(RegistryCommand::Shutdown(reply)) => { shutdown_reply = Some(reply); break; }, None => break,
             },

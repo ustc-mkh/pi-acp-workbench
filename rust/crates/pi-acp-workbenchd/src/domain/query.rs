@@ -100,6 +100,28 @@ pub struct SessionView {
     pub last_entry_seq: SafeInteger,
 }
 impl SessionView {
+    pub fn new(harness: Harness, cwd: WorkspacePath) -> Self {
+        Self {
+            id: SessionId::generate(),
+            provider_session: None,
+            harness,
+            cwd,
+            status: SessionStatus::Idle,
+            origin: None,
+            last_entry_seq: SafeInteger::default(),
+            plan: Default::default(),
+            active_turn: None,
+            pending_interactions: BTreeMap::new(),
+            usage: Default::default(),
+            configuration_intent: None,
+            config: SessionConfig {
+                model: None,
+                mode: None,
+            },
+            catalogue: Default::default(),
+            revision: SafeInteger::default(),
+        }
+    }
     pub fn validate(&self) -> Result<(), QueryError> {
         if self.pending_interactions.len() > MAX_PENDING_INTERACTIONS
             || self
@@ -481,6 +503,18 @@ pub struct Attached {
     pub recent_page: HistoryPage,
 }
 
+/// A lookup never retries an operation. Started is deliberately uncertain: a
+/// durable prepare alone cannot prove whether an external effect occurred.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperationStatus {
+    Unknown,
+    Uncertain,
+    Expired,
+    Completed { receipt: CommandReceipt },
+    Failed { message: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -489,6 +523,7 @@ pub struct Attached {
     deny_unknown_fields
 )]
 pub enum QueryResult {
+    Operation(OperationStatus),
     List(ListPage),
     View(Box<SessionView>),
     History(HistoryPage),
@@ -507,6 +542,9 @@ pub struct QueryRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueryCommand {
+    Operation {
+        operation: super::OperationId,
+    },
     List {
         cursor: Option<ListCursor>,
         limit: Option<usize>,

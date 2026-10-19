@@ -23,7 +23,9 @@ const peers: Awaited<ReturnType<typeof workbenchPeer>>[] = [];
 afterEach(async () => {
   for (const peer of peers.splice(0)) await peer.close();
 });
-async function setup() {
+async function setup(
+  attachFiles?: (cwd: string) => Promise<import('../src/workbench-input').TextAttachment[]>,
+) {
   const peer = await workbenchPeer();
   peers.push(peer);
   const messages: WorkbenchUiMessage[] = [],
@@ -33,6 +35,7 @@ async function setup() {
     post: (message) => messages.push(message),
     trusted: () => trusted,
     workspace: () => '/workspace',
+    attachFiles,
     authorize: async (cwd) => {
       authorization.push(cwd);
       if (cwd !== '/workspace') throw new Error('outside workspace');
@@ -55,6 +58,34 @@ async function setup() {
     setTrusted: (value: boolean) => (trusted = value),
   };
 }
+it('file picking is explicitly authorized, remains cold and rejects trust changes before posting results', async () => {
+  let finish!: (files: import('../src/workbench-input').TextAttachment[]) => void;
+  const { peer, controller, messages, setTrusted } = await setup(
+    async () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const selecting = controller.receive({ type: 'attach_files', session: 'session' });
+  await expect.poll(() => typeof finish).toBe('function');
+  setTrusted(false);
+  finish([{ id: 'f', name: 'a.ts', text: 'data' }]);
+  await selecting;
+  expect(messages.some((message) => message.type === 'attachments')).toBe(false);
+  expect(controller.snapshot.error).toContain('trust');
+  expect(peer.requests.map((request) => request.command.method)).toEqual(['list', 'attach']);
+});
+
+it('file picking posts only to its selected session without provider mutation', async () => {
+  const files = [{ id: 'f', name: 'a.ts', text: 'data' }];
+  const { peer, controller, messages } = await setup(async () => files);
+  await controller.receive({ type: 'attach_files', session: 'other' });
+  expect(messages.some((message) => message.type === 'attachments')).toBe(false);
+  await controller.receive({ type: 'attach_files', session: 'session' });
+  expect(messages).toContainEqual({ type: 'attachments', session: 'session', files });
+  expect(peer.requests.map((request) => request.command.method)).toEqual(['list', 'attach']);
+});
+
 it('selection is cold, typed state reaches the webview, and only user mutation explicitly loads a provider', async () => {
   const { peer, controller, messages, authorization } = await setup();
   expect(peer.requests.map((r) => r.command.method)).toEqual(['list', 'attach']);
@@ -165,6 +196,61 @@ it('fork cancellation uses the original operation while a pending fork observer 
   expect(
     controller.snapshot.operations.filter((o) => o.code === 'native_fork_uncertain'),
   ).toHaveLength(2);
-  expect(controller.snapshot.operations.every((o) => o.status === 'failed')).toBe(true);
+  expect(controller.snapshot.operations.every((o) => o.status === 'uncertain')).toBe(true);
   expect(controller.snapshot.operations[0].operation).toBe(original.operation);
+});
+
+it('reload recovers handles by ID without sending their original mutations', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const saved = [
+    { operation: 'old-prompt', method: 'prompt', session: 'session', status: 'pending' },
+  ];
+  let persisted: unknown;
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+    loadOperations: () => saved,
+    saveOperations: async (rows) => {
+      persisted = rows;
+    },
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const ready = controller.receive({ type: 'ready' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  expect(peer.requests[0].command).toEqual({ method: 'operation', operation: 'old-prompt' });
+  expect(peer.requests[0].operation).toBeUndefined();
+  peer.query(peer.requests[0], 'operation', {
+    status: 'completed',
+    receipt: { Accepted: { session: 'session', revision: 6 } },
+  });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  peer.query(peer.requests[1], 'list', { sessions: [summary(6)], next_cursor: null });
+  await ready;
+  expect(controller.snapshot.operations[0].status).toBe('completed');
+  expect(persisted).toEqual(controller.snapshot.operations);
+  expect(peer.requests.map((r) => r.command.method)).toEqual(['operation', 'list']);
+});
+
+it('does not dispatch if durable local handle persistence fails', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+    saveOperations: async () => {
+      throw new Error('preferences unavailable');
+    },
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  await controller.receive({
+    type: 'create',
+    command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+  });
+  expect(peer.requests).toEqual([]);
+  expect(controller.snapshot.error).toBe('preferences unavailable');
 });

@@ -1,4 +1,4 @@
-//! The only SQLite executor. Business code submits typed requests, never SQL or closures.
+//! Single SQLite writer and two fixed readonly executors. Business code submits typed requests, never SQL or closures.
 use super::{format::StorageLease, query, schema};
 use crate::domain::{
     query::{
@@ -13,6 +13,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
     thread::JoinHandle,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -83,6 +84,7 @@ pub(super) enum StoreRequest {
     },
     Remove {
         session: SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply<CommitBatch>,
     },
     Tool {
@@ -119,6 +121,11 @@ pub(super) enum StoreRequest {
         limit: Option<usize>,
         reply: Reply<ListPage>,
     },
+    ActivityList {
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+        reply: Reply<ListPage>,
+    },
     History {
         session: SessionId,
         cursor: Option<HistoryCursor>,
@@ -151,14 +158,287 @@ pub(super) enum StoreRequest {
     #[cfg(test)]
     Test(super::sqlite_tests::TestRequest),
 }
+#[derive(Clone)]
+struct Senders {
+    writer: mpsc::Sender<QueuedRequest>,
+    readers: [mpsc::Sender<QueuedRequest>; 2],
+}
+struct ReaderWorker {
+    sender: Option<mpsc::Sender<QueuedRequest>>,
+    thread: Option<JoinHandle<Result<(), StoreError>>>,
+}
+impl ReaderWorker {
+    fn start(
+        root: &Path,
+        index: usize,
+        metrics: Arc<super::metrics::Metrics>,
+    ) -> Result<Self, StoreError> {
+        let root = root.to_path_buf();
+        let (sender, mut requests) = mpsc::channel::<QueuedRequest>(STORE_QUEUE_CAPACITY / 2);
+        let (started, ready) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name(format!("workbench-read-{index}"))
+            .spawn(move || {
+                let mut connection = match schema::open_reader(&root) {
+                    Ok(connection) => {
+                        let _ = started.send(Ok(()));
+                        connection
+                    }
+                    Err(error) => {
+                        let _ = started.send(Err(error.clone()));
+                        return Err(error);
+                    }
+                };
+                while let Some(queued) = requests.blocking_recv() {
+                    let began = Instant::now();
+                    let wait = queued.enqueued.elapsed();
+                    let kind = queued.request.kind();
+                    execute_request(&mut connection, queued.request);
+                    metrics.record(
+                        kind,
+                        queued.enqueue_wait,
+                        wait,
+                        began.elapsed(),
+                        queued.depth,
+                    );
+                }
+                connection
+                    .close()
+                    .map_err(|(_, error)| StoreError::from(error))
+            })?;
+        let worker = Self {
+            sender: Some(sender),
+            thread: Some(thread),
+        };
+        ready.recv().unwrap_or(Err(StoreError::Closed))?;
+        Ok(worker)
+    }
+    fn join(&mut self) -> Result<(), StoreError> {
+        self.sender.take();
+        self.thread.take().map_or(Ok(()), |thread| {
+            thread
+                .join()
+                .unwrap_or(Err(StoreError::Invalid("reader thread panicked")))
+        })
+    }
+}
+impl Drop for ReaderWorker {
+    fn drop(&mut self) {
+        let _ = self.join();
+    }
+}
 struct Inner {
-    sender: Mutex<Option<mpsc::Sender<StoreRequest>>>,
+    metrics: Arc<super::metrics::Metrics>,
+    sender: Mutex<Option<Senders>>,
+    next_reader: std::sync::atomic::AtomicUsize,
     thread: Mutex<Option<JoinHandle<()>>>,
     finished: Mutex<Option<oneshot::Receiver<Result<(), StoreError>>>>,
     shutdown: tokio::sync::Mutex<()>,
     shutdown_started: Mutex<bool>,
     shutdown_result: Arc<Mutex<Option<Result<(), StoreError>>>>,
     shutdown_notify: Arc<tokio::sync::Notify>,
+}
+fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest) {
+    match request {
+        StoreRequest::Attached { session, reply } => {
+            let result = (|| {
+                let tx = connection.transaction()?;
+                let mut attached = crate::domain::query::Attached {
+                    view: query::view(&tx, &session)?,
+                    recent_page: query::history(&tx, &session, None, None)?,
+                };
+                while attached.validate().is_err() {
+                    if attached.recent_page.entries.len() <= 1 {
+                        return Err(crate::domain::query::QueryError::TooLarge.into());
+                    }
+                    attached.recent_page.entries.remove(0);
+                    attached.recent_page.next_cursor = Some(crate::domain::query::HistoryCursor {
+                        version: crate::domain::query::ProtocolVersion,
+                        session: session.clone(),
+                        max_entry_seq: attached.view.last_entry_seq,
+                        before_seq: attached.recent_page.entries[0].seq,
+                    });
+                }
+                tx.commit()?;
+                Ok(attached)
+            })();
+            let _ = reply.send(result);
+        }
+        StoreRequest::Tools {
+            session,
+            turn,
+            cursor,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(query::tools(connection, &session, &turn, cursor, limit));
+        }
+        StoreRequest::Remove {
+            session,
+            operation,
+            reply,
+        } => {
+            let _ = reply.send(query::remove(connection, &session, operation.as_ref()));
+        }
+        StoreRequest::Tool {
+            session,
+            turn,
+            tool,
+            reply,
+        } => {
+            let _ = reply.send(query::tool(connection, &session, &turn, &tool));
+        }
+        StoreRequest::PrepareFork {
+            view,
+            request,
+            candidates,
+            reply,
+        } => {
+            let result = (|| {
+                let tx = connection.transaction()?;
+                let plan = super::fork::prepare(&tx, &view, &request, &candidates)?;
+                tx.commit()?;
+                Ok(plan)
+            })();
+            let _ = reply.send(result);
+        }
+        StoreRequest::AdoptFork {
+            plan,
+            native,
+            reply,
+        } => {
+            let _ = reply.send(super::fork::adopt(connection, *plan, native));
+        }
+        StoreRequest::Create { view, reply } => {
+            let _ = reply.send(query::create(connection, &view));
+        }
+        StoreRequest::Commit { commit, reply } => {
+            let _ = reply.send(query::commit(connection, *commit));
+        }
+        StoreRequest::View { session, reply } => {
+            let _ = reply.send(query::view(connection, &session));
+        }
+        StoreRequest::List {
+            cursor,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(query::list(connection, cursor, limit));
+        }
+        StoreRequest::ActivityList {
+            cursor,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(query::activity_list(connection, cursor, limit));
+        }
+        StoreRequest::History {
+            session,
+            cursor,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(query::history(connection, &session, cursor, limit));
+        }
+        StoreRequest::ContentSlice {
+            content,
+            offset,
+            length,
+            reply,
+        } => {
+            let _ = reply.send(super::content::slice(connection, &content, offset, length));
+        }
+        StoreRequest::Content { content, reply } => {
+            let _ = reply.send(super::content::read_text(connection, &content));
+        }
+        StoreRequest::ArchiveImage { asset, reply } => {
+            let result = (|| -> Result<(), StoreError> {
+                let tx = connection.transaction()?;
+                super::content::put_image(&tx, &asset)?;
+                tx.commit()?;
+                Ok(())
+            })();
+            let _ = reply.send(result);
+        }
+        StoreRequest::Image { id, reply } => {
+            let _ = reply.send(super::content::image(connection, &id));
+        }
+        StoreRequest::Delivery(request) => {
+            super::delivery::execute(connection, *request);
+        }
+        StoreRequest::Payload(request) => {
+            super::payload::execute(connection, *request);
+        }
+        StoreRequest::TelegramInbox(request) => {
+            super::telegram_sql::execute(connection, *request);
+        }
+        StoreRequest::TelegramEffect(request) => {
+            super::telegram_effect::execute(connection, *request);
+        }
+        StoreRequest::Journal(request) => {
+            super::journal::execute(connection, *request);
+        }
+        #[cfg(test)]
+        StoreRequest::Test(request) => super::sqlite_tests::execute(connection, request),
+    }
+}
+
+struct QueuedRequest {
+    request: StoreRequest,
+    enqueued: Instant,
+    enqueue_wait: Duration,
+    depth: usize,
+}
+impl StoreRequest {
+    fn read_only(&self) -> bool {
+        match self {
+            Self::Attached { .. }
+            | Self::Tools { .. }
+            | Self::Tool { .. }
+            | Self::View { .. }
+            | Self::List { .. }
+            | Self::History { .. }
+            | Self::ContentSlice { .. }
+            | Self::Content { .. }
+            | Self::Image { .. } => true,
+            #[cfg(test)]
+            Self::Test(super::sqlite_tests::TestRequest::ReaderPause { .. }) => true,
+            Self::Delivery(request) => matches!(
+                request.as_ref(),
+                super::delivery::Request::DispatchSnapshot { .. }
+            ),
+            Self::Journal(request) => {
+                matches!(request.as_ref(), super::journal::Request::Status { .. })
+            }
+            _ => false,
+        }
+    }
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Attached { .. } => "attach",
+            Self::Tools { .. } => "tools",
+            Self::Remove { .. } => "remove",
+            Self::Tool { .. } => "tool",
+            Self::PrepareFork { .. } => "fork_prepare",
+            Self::AdoptFork { .. } => "fork_adopt",
+            Self::Create { .. } => "create",
+            Self::Commit { .. } => "commit",
+            Self::View { .. } => "view",
+            Self::List { .. } | Self::ActivityList { .. } => "list",
+            Self::History { .. } => "history",
+            Self::ContentSlice { .. } => "content_slice",
+            Self::Content { .. } => "content",
+            Self::Delivery(_) => "delivery",
+            Self::Payload(_) => "payload",
+            Self::TelegramInbox(_) => "inbox",
+            Self::TelegramEffect(_) => "telegram_effect",
+            Self::Journal(_) => "operation",
+            Self::ArchiveImage { .. } => "archive_image",
+            Self::Image { .. } => "image",
+            #[cfg(test)]
+            Self::Test(_) => "test",
+        }
+    }
 }
 #[derive(Clone)]
 pub struct Database {
@@ -168,7 +448,11 @@ impl Database {
     /// The retained lease prevents a host/maintenance race even if the caller
     /// drops its lease before all Database handles have drained.
     pub async fn open(root: impl AsRef<Path>, lease: &StorageLease) -> Result<Self, StoreError> {
-        Self::open_sync(root, lease)
+        let root = root.as_ref().to_path_buf();
+        let lease = lease.clone();
+        tokio::task::spawn_blocking(move || Self::open_sync(root, &lease))
+            .await
+            .map_err(|_| StoreError::Invalid("database startup task panicked"))?
     }
     /// Synchronous host construction waits only for the dedicated thread's
     /// startup result. All SQLite work, including open/validation, stays there.
@@ -180,184 +464,74 @@ impl Database {
             ));
         }
         let held_lease = lease.claim_database()?;
-        let (sender, mut requests) = mpsc::channel(STORE_QUEUE_CAPACITY);
+        let (sender, mut requests) = mpsc::channel::<QueuedRequest>(STORE_QUEUE_CAPACITY);
+        let metrics = Arc::new(super::metrics::Metrics::default());
+        let worker_metrics = metrics.clone();
         let (started, ready) = std::sync::mpsc::sync_channel(1);
         let (finished, done) = oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("workbench-sqlite".into())
             .spawn(move || {
                 let mut connection = match schema::open(&root) {
-                    Ok(connection) => {
-                        let _ = started.send(Ok(()));
-                        connection
-                    }
+                    Ok(connection) => connection,
                     Err(error) => {
                         let _ = started.send(Err(error.clone()));
                         let _ = finished.send(Err(error));
                         return;
                     }
                 };
+                let readers = (0..2)
+                    .map(|index| ReaderWorker::start(&root, index, worker_metrics.clone()))
+                    .collect::<Result<Vec<_>, _>>();
+                let mut readers = match readers {
+                    Ok(readers) => readers,
+                    Err(error) => {
+                        let _ = started.send(Err(error.clone()));
+                        let _ = finished.send(Err(error));
+                        return;
+                    }
+                };
+                let reader_senders = [
+                    readers[0].sender.take().unwrap(),
+                    readers[1].sender.take().unwrap(),
+                ];
+                let _ = started.send(Ok(reader_senders));
                 // A reply is an observer, not ownership of an accepted transaction.
-                while let Some(request) = requests.blocking_recv() {
-                    match request {
-                        StoreRequest::Attached { session, reply } => {
-                            let result = (|| {
-                                let tx = connection.transaction()?;
-                                let mut attached = crate::domain::query::Attached {
-                                    view: query::view(&tx, &session)?,
-                                    recent_page: query::history(&tx, &session, None, None)?,
-                                };
-                                while attached.validate().is_err() {
-                                    if attached.recent_page.entries.len() <= 1 {
-                                        return Err(
-                                            crate::domain::query::QueryError::TooLarge.into()
-                                        );
-                                    }
-                                    attached.recent_page.entries.remove(0);
-                                    attached.recent_page.next_cursor =
-                                        Some(crate::domain::query::HistoryCursor {
-                                            version: crate::domain::query::ProtocolVersion,
-                                            session: session.clone(),
-                                            max_entry_seq: attached.view.last_entry_seq,
-                                            before_seq: attached.recent_page.entries[0].seq,
-                                        });
-                                }
-                                tx.commit()?;
-                                Ok(attached)
-                            })();
-                            let _ = reply.send(result);
-                        }
-                        StoreRequest::Tools {
-                            session,
-                            turn,
-                            cursor,
-                            limit,
-                            reply,
-                        } => {
-                            let _ = reply.send(query::tools(
-                                &connection,
-                                &session,
-                                &turn,
-                                cursor,
-                                limit,
-                            ));
-                        }
-                        StoreRequest::Remove { session, reply } => {
-                            let _ = reply.send(query::remove(&mut connection, &session));
-                        }
-                        StoreRequest::Tool {
-                            session,
-                            turn,
-                            tool,
-                            reply,
-                        } => {
-                            let _ = reply.send(query::tool(&connection, &session, &turn, &tool));
-                        }
-                        StoreRequest::PrepareFork {
-                            view,
-                            request,
-                            candidates,
-                            reply,
-                        } => {
-                            let result = (|| {
-                                let tx = connection.transaction()?;
-                                let plan = super::fork::prepare(&tx, &view, &request, &candidates)?;
-                                tx.commit()?;
-                                Ok(plan)
-                            })();
-                            let _ = reply.send(result);
-                        }
-                        StoreRequest::AdoptFork {
-                            plan,
-                            native,
-                            reply,
-                        } => {
-                            let _ = reply.send(super::fork::adopt(&mut connection, *plan, native));
-                        }
-                        StoreRequest::Create { view, reply } => {
-                            let _ = reply.send(query::create(&mut connection, &view));
-                        }
-                        StoreRequest::Commit { commit, reply } => {
-                            let _ = reply.send(query::commit(&mut connection, *commit));
-                        }
-                        StoreRequest::View { session, reply } => {
-                            let _ = reply.send(query::view(&connection, &session));
-                        }
-                        StoreRequest::List {
-                            cursor,
-                            limit,
-                            reply,
-                        } => {
-                            let _ = reply.send(query::list(&connection, cursor, limit));
-                        }
-                        StoreRequest::History {
-                            session,
-                            cursor,
-                            limit,
-                            reply,
-                        } => {
-                            let _ =
-                                reply.send(query::history(&connection, &session, cursor, limit));
-                        }
-                        StoreRequest::ContentSlice {
-                            content,
-                            offset,
-                            length,
-                            reply,
-                        } => {
-                            let _ = reply.send(super::content::slice(
-                                &connection,
-                                &content,
-                                offset,
-                                length,
-                            ));
-                        }
-                        StoreRequest::Content { content, reply } => {
-                            let _ = reply.send(super::content::read_text(&connection, &content));
-                        }
-                        StoreRequest::ArchiveImage { asset, reply } => {
-                            let result = (|| -> Result<(), StoreError> {
-                                let tx = connection.transaction()?;
-                                super::content::put_image(&tx, &asset)?;
-                                tx.commit()?;
-                                Ok(())
-                            })();
-                            let _ = reply.send(result);
-                        }
-                        StoreRequest::Image { id, reply } => {
-                            let _ = reply.send(super::content::image(&connection, &id));
-                        }
-                        StoreRequest::Delivery(request) => {
-                            super::delivery::execute(&mut connection, *request);
-                        }
-                        StoreRequest::Payload(request) => {
-                            super::payload::execute(&mut connection, *request);
-                        }
-                        StoreRequest::TelegramInbox(request) => {
-                            super::telegram_sql::execute(&mut connection, *request);
-                        }
-                        StoreRequest::TelegramEffect(request) => {
-                            super::telegram_effect::execute(&mut connection, *request);
-                        }
-                        StoreRequest::Journal(request) => {
-                            super::journal::execute(&mut connection, *request);
-                        }
-                        #[cfg(test)]
-                        StoreRequest::Test(request) => {
-                            super::sqlite_tests::execute(&mut connection, request)
-                        }
+                while let Some(queued) = requests.blocking_recv() {
+                    let execution = Instant::now();
+                    let queue_wait = queued.enqueued.elapsed();
+                    let kind = queued.request.kind();
+                    execute_request(&mut connection, queued.request);
+                    worker_metrics.record(
+                        kind,
+                        queued.enqueue_wait,
+                        queue_wait,
+                        execution.elapsed(),
+                        queued.depth,
+                    );
+                }
+                let mut reader_result = Ok(());
+                for reader in &mut readers {
+                    if let Err(error) = reader.join() {
+                        reader_result = Err(error);
                     }
                 }
                 let result = connection
                     .close()
-                    .map_err(|(_, error)| StoreError::from(error));
+                    .map_err(|(_, error)| StoreError::from(error))
+                    .and(reader_result);
                 drop(held_lease);
                 let _ = finished.send(result);
             })?;
         match ready.recv().unwrap_or(Err(StoreError::Closed)) {
-            Ok(()) => Ok(Self {
+            Ok(readers) => Ok(Self {
                 inner: Arc::new(Inner {
-                    sender: Mutex::new(Some(sender)),
+                    metrics,
+                    sender: Mutex::new(Some(Senders {
+                        writer: sender,
+                        readers,
+                    })),
+                    next_reader: std::sync::atomic::AtomicUsize::new(0),
                     thread: Mutex::new(Some(thread)),
                     finished: Mutex::new(Some(done)),
                     shutdown: tokio::sync::Mutex::new(()),
@@ -380,7 +554,30 @@ impl Database {
             .expect("sender lock poisoned")
             .clone()
             .ok_or(StoreError::Closed)?;
-        sender.send(request).await.map_err(|_| StoreError::Closed)
+        let (sender, capacity) = if request.read_only() {
+            let index = self
+                .inner
+                .next_reader
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                % 2;
+            (sender.readers[index].clone(), STORE_QUEUE_CAPACITY / 2)
+        } else {
+            (sender.writer.clone(), STORE_QUEUE_CAPACITY)
+        };
+        let began = Instant::now();
+        let permit = sender.reserve().await.map_err(|_| StoreError::Closed)?;
+        let depth = capacity - sender.capacity();
+        self.inner.metrics.accepted(request.kind(), depth);
+        permit.send(QueuedRequest {
+            request,
+            enqueued: Instant::now(),
+            enqueue_wait: began.elapsed(),
+            depth,
+        });
+        Ok(())
+    }
+    pub fn metrics(&self) -> std::collections::BTreeMap<&'static str, super::RequestMetrics> {
+        self.inner.metrics.snapshot()
     }
     pub async fn content_slice(
         &self,
@@ -425,10 +622,18 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn remove(&self, session: SessionId) -> Result<CommitBatch, StoreError> {
+    pub async fn remove(
+        &self,
+        session: SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommitBatch, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Remove { session, reply })
-            .await?;
+        self.enqueue(StoreRequest::Remove {
+            session,
+            operation,
+            reply,
+        })
+        .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn tool(
@@ -507,6 +712,20 @@ impl Database {
     ) -> Result<ListPage, StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::List {
+            cursor,
+            limit,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn activity_list(
+        &self,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<ListPage, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ActivityList {
             cursor,
             limit,
             reply,
@@ -691,9 +910,20 @@ impl Database {
         result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn ack_delivery(&self, id: crate::domain::DeliveryId) -> Result<(), StoreError> {
+        self.ack_sent_delivery(id, None).await
+    }
+    pub(crate) async fn ack_sent_delivery(
+        &self,
+        id: crate::domain::DeliveryId,
+        destination: Option<(i64, crate::telegram::types::TopicKey)>,
+    ) -> Result<(), StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::Ack { id, reply },
+            super::delivery::Request::Ack {
+                id,
+                destination,
+                reply,
+            },
         )))
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
@@ -769,6 +999,9 @@ impl Database {
             });
         }
         loop {
+            let notified = self.inner.shutdown_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(result) = self
                 .inner
                 .shutdown_result
@@ -778,16 +1011,26 @@ impl Database {
             {
                 return result;
             }
-            self.inner.shutdown_notify.notified().await;
+            notified.await;
         }
     }
 }
 impl Drop for Inner {
     fn drop(&mut self) {
         self.sender.get_mut().expect("sender lock poisoned").take();
-        // Last-handle drop is also drain + physical join, never a write abort.
+        // Implicit teardown must not block a Tokio executor. The writer retains
+        // the lease while draining and joining both readers; a dedicated reaper
+        // owns its physical join when explicit async shutdown was not used.
         if let Some(thread) = self.thread.get_mut().expect("thread lock poisoned").take() {
-            let _ = thread.join();
+            if tokio::runtime::Handle::try_current().is_err() {
+                let _ = thread.join();
+                return;
+            }
+            let _ = std::thread::Builder::new()
+                .name("workbench-storage-reaper".into())
+                .spawn(move || {
+                    let _ = thread.join();
+                });
         }
     }
 }

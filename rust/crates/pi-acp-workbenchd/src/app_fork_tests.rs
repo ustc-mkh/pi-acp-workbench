@@ -484,8 +484,12 @@ impl SessionPersistence for FaultStore {
     ) -> Result<crate::domain::fork::ForkPlan, String> {
         SessionPersistence::prepare_fork(&self.history, view, request, candidates).await
     }
-    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
-        SessionPersistence::remove(&self.history, id).await
+    async fn remove(
+        &self,
+        id: &SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommitBatch, String> {
+        SessionPersistence::remove(&self.history, id, operation).await
     }
     async fn commit(
         &self,

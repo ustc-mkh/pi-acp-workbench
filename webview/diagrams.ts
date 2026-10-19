@@ -30,7 +30,7 @@ export function safeDiagramSvg(svg: string) {
     });
 }
 export function renderDiagrams(root: HTMLElement) {
-  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const dark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
   const theme =
     document.body.classList.contains('vscode-light') ||
     document.body.classList.contains('vscode-high-contrast-light')

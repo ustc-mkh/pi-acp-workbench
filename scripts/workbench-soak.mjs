@@ -1,12 +1,13 @@
 // Bounded, reproducible sustained local fixture run. Not live traffic or an
 // overnight production soak. Every round joins before the next round starts.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, copyFile, chmod } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
+import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
 const { values } = parseArgs({
   options: { 'duration-seconds': { type: 'string', default: '600' } },
 });
@@ -17,6 +18,40 @@ assert(
 );
 const directory = resolve('.test-results', `soak-${randomUUID()}`);
 await mkdir(directory, { recursive: true, mode: 0o700 });
+// Freeze executable inputs once. Recompiling each round allowed concurrent
+// development to silently change the code under a nominal 600-second sample.
+const built = spawnSync(
+  'cargo',
+  [
+    'test',
+    '--offline',
+    '--locked',
+    '--manifest-path',
+    'rust/Cargo.toml',
+    '-p',
+    'pi-acp-workbenchd',
+    '--lib',
+    '--no-run',
+    '--message-format=json',
+  ],
+  { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+);
+assert.equal(built.status, 0, built.stderr);
+const artifact = built.stdout
+  .split('\n')
+  .filter(Boolean)
+  .map(JSON.parse)
+  .find(
+    (item) =>
+      item.reason === 'compiler-artifact' && item.executable && item.target.kind.includes('lib'),
+  );
+assert(artifact?.executable);
+const tests = join(directory, 'soak-tests'),
+  binary = join(directory, 'pi-acp-workbenchd');
+await copyFile(artifact.executable, tests);
+await copyFile(resolveWorkbenchBinary(), binary);
+await chmod(tests, 0o700);
+await chmod(binary, 0o700);
 let interrupted = false;
 // Stop between joined phases, not by killing an accepted file transaction.
 for (const signal of ['SIGINT', 'SIGTERM'])
@@ -48,23 +83,7 @@ async function phase(name, command, args, expected) {
   );
 }
 const rust = (name, test) =>
-  phase(
-    name,
-    'cargo',
-    [
-      'test',
-      '--offline',
-      '--locked',
-      '--manifest-path',
-      'rust/Cargo.toml',
-      '-p',
-      'pi-acp-workbenchd',
-      test,
-      '--',
-      '--exact',
-    ],
-    'test result: ok. 1 passed; 0 failed;',
-  );
+  phase(name, tests, [test, '--exact'], 'test result: ok. 1 passed; 0 failed;');
 let error;
 try {
   while (!interrupted && (rounds < 2 || Date.now() - began < duration * 1000)) {
@@ -81,7 +100,7 @@ try {
     await phase(
       'process-loss',
       process.execPath,
-      ['scripts/workbench-process-loss.mjs'],
+      ['scripts/workbench-process-loss.mjs', '--binary', binary],
       '3 real host process-loss checks passed',
     );
     rounds++;
@@ -94,6 +113,14 @@ try {
 }
 const report = {
   passed: !error && !interrupted && rounds >= 2 && Date.now() - began >= duration * 1000,
+  executable_sha256: {
+    tests: createHash('sha256')
+      .update(await readFile(tests))
+      .digest('hex'),
+    host: createHash('sha256')
+      .update(await readFile(binary))
+      .digest('hex'),
+  },
   requested_seconds: duration,
   elapsed_ms: Date.now() - began,
   completed_rounds: rounds,

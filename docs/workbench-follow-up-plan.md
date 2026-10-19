@@ -1,6 +1,6 @@
 # Workbench 收尾完善计划：正确性、竞态与有界消费
 
-> **当前唯一有效执行计划。** 已完成的大重构不重做；本文件替代旧计划的后续执行指令。旧实现计划与完成声明见 [implementation checkpoint](workbench-follow-up-plan-implementation-checkpoint.md)，更早记录见 [T04 checkpoint](workbench-follow-up-plan-t04-checkpoint.md)。归档不是当前验收结论。
+> **历史执行记录，后续执行权已移交。** 新的功能恢复、架构减负与性能工作以 [功能对齐与架构减负计划](workbench-parity-and-simplification-plan.md) 为准。本文件保留上一轮 R01–R08 的任务与证据；其中“单 SQLite executor”“禁止第二数据库线程”等固定约束不再约束后续阶段。旧实现计划与完成声明见 [implementation checkpoint](workbench-follow-up-plan-implementation-checkpoint.md)，更早记录见 [T04 checkpoint](workbench-follow-up-plan-t04-checkpoint.md)。下文“当前”“本轮”均指原审查轮次，不代表新计划已验收。
 >
 > 审查基线：HEAD `7dd542d` **加当前工作区实现**，不是仅审 HEAD；本轮在既有工作区上完成收尾修复，不提交、不访问真实业务 root。R01–R08 已按下方证据验收；真实 Bot/model、真实 VS Code Extension Host、offline real Pi SDK 与 musl 构建仍明确列为未执行边界。
 

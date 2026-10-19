@@ -151,6 +151,49 @@ pub(super) async fn dispatch(
                         (record.event.id, result)
                     });
                 }
+                if !once {
+                    let preview_count = active
+                        .keys()
+                        .filter(|id| id.as_str().starts_with("preview-"))
+                        .count();
+                    if preview_count < 2 {
+                        for candidate in context
+                            .preview
+                            .lock()
+                            .await
+                            .due()
+                            .into_iter()
+                            .take(2 - preview_count)
+                        {
+                            if tasks.len() >= CAPACITY {
+                                break;
+                            }
+                            let target = DeliveryTarget::Session {
+                                session: candidate.session.clone(),
+                                cwd: candidate.cwd.clone(),
+                            };
+                            let Some(topic) = resolve(&target, &bindings)? else {
+                                continue;
+                            };
+                            if !seen.insert(topic.clone()) {
+                                continue;
+                            }
+                            let id = DeliveryId::new(format!(
+                                "preview-{}",
+                                crate::domain::fork::ContentHash::of(candidate.session.as_str())
+                                    .as_str()
+                            ))
+                            .map_err(DomainError::from)?;
+                            active.insert(id.clone(), (target, Some(topic.clone())));
+                            let context = context.clone();
+                            let stop = http_stop.clone();
+                            tasks.spawn(async move {
+                                super::preview::send(&context, candidate, topic, &stop).await;
+                                (id, Ok(()))
+                            });
+                        }
+                    }
+                }
                 if once && tasks.is_empty() {
                     break Ok(());
                 }

@@ -25,9 +25,56 @@ pub enum TelegramAction {
     Rejected(RejectionReason),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MenuPage {
+    Home,
+    Directories {
+        cwd: WorkspacePath,
+        after: Option<String>,
+    },
+    Harnesses {
+        cwd: WorkspacePath,
+    },
+    Sessions {
+        cursor: Option<crate::domain::query::ListCursor>,
+    },
+    Models {
+        offset: u32,
+    },
+    Modes {
+        offset: u32,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ControlCommand {
     Help,
+    Menu {
+        page: MenuPage,
+        create_topic: bool,
+    },
     ListSessions,
+    History {
+        session: SessionId,
+        all: bool,
+    },
+    Sync {
+        cursor: Option<crate::domain::query::ListCursor>,
+        recent: u8,
+        forum: bool,
+    },
+    Queue,
+    Discover {
+        session: SessionId,
+    },
+    Interrupt {
+        session: SessionId,
+        prompt: Prompt,
+    },
+    Notifications {
+        enabled: Option<bool>,
+    },
+    Silent {
+        enabled: Option<bool>,
+    },
     Status {
         session: SessionId,
     },
@@ -95,6 +142,14 @@ fn answer(
         answer,
     })
 }
+fn preference_value(args: &str) -> Result<Option<bool>, RejectionReason> {
+    match args {
+        "" => Ok(None),
+        "on" => Ok(Some(true)),
+        "off" => Ok(Some(false)),
+        _ => Err(RejectionReason::InvalidArguments),
+    }
+}
 pub fn parse_text(
     snapshot: Option<&SessionView>,
     text: &str,
@@ -113,17 +168,54 @@ pub fn parse_text(
         // Addressed bot commands are not guessed without a verified bot username.
         let control = match name {
             "help" | "start" if args.is_empty() => ControlCommand::Help,
+            "menu" => ControlCommand::Menu {
+                page: match args {
+                    "" => MenuPage::Home,
+                    "directories" => MenuPage::Directories {
+                        cwd: cwd.clone(),
+                        after: None,
+                    },
+                    "sessions" => MenuPage::Sessions { cursor: None },
+                    "models" => MenuPage::Models { offset: 0 },
+                    "modes" => MenuPage::Modes { offset: 0 },
+                    _ => return Err(RejectionReason::InvalidArguments),
+                },
+                create_topic: false,
+            },
             "sessions" if args.is_empty() => ControlCommand::ListSessions,
+            "history" if args.is_empty() || args == "all" => ControlCommand::History {
+                session: session(snapshot)?,
+                all: args == "all",
+            },
+            "sync" if args.is_empty() => ControlCommand::Sync {
+                cursor: None,
+                recent: 5,
+                forum: false,
+            },
+            "queue" if args.is_empty() => ControlCommand::Queue,
+            "discover" if args.is_empty() => ControlCommand::Discover {
+                session: session(snapshot)?,
+            },
+            "interrupt" if !args.is_empty() => ControlCommand::Interrupt {
+                session: session(snapshot)?,
+                prompt: Prompt::new(args).map_err(invalid)?,
+            },
+            "notifications" => ControlCommand::Notifications {
+                enabled: preference_value(args)?,
+            },
+            "silent" => ControlCommand::Silent {
+                enabled: preference_value(args)?,
+            },
             "status" if args.is_empty() => ControlCommand::Status {
                 session: session(snapshot)?,
             },
-            "cancel" if args.is_empty() => ControlCommand::Cancel {
+            "cancel" | "stop" if args.is_empty() => ControlCommand::Cancel {
                 session: session(snapshot)?,
             },
             "remove" if args.is_empty() => ControlCommand::Remove {
                 session: session(snapshot)?,
             },
-            "attach" => ControlCommand::Attach {
+            "attach" | "open" => ControlCommand::Attach {
                 session: SessionId::new(args).map_err(invalid)?,
             },
             "model" => ControlCommand::SetModel {

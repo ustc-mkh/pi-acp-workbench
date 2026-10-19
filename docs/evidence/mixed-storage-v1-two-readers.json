@@ -1,0 +1,724 @@
+{
+  "version": 1,
+  "scope": "Storage-only diagnostic baseline, enqueue through commit. Not admission-to-fence SLO, provider/Bot/Extension Host acceptance, delivery lane simulation, or a long-running RSS trend.",
+  "machine": {
+    "cpu": "Intel(R) Core(TM) i5-14400",
+    "logical_cpus": 16,
+    "total_memory_bytes": 16424108032,
+    "kernel": "7.2.11-200.fc44.x86_64",
+    "node": "v22.23.1"
+  },
+  "binary_sha256": "bd04c369a37d2f1092cdc55510a2d4e842c68abc781c343dd0cd13a89157bc0a",
+  "budgets": {
+    "admission_control_p95_ms": 100,
+    "admission_control_p99_ms": 250,
+    "page_p95_ms": 200,
+    "page_idle_regression_ratio": 1.2,
+    "enforced": false,
+    "reason": "S0 storage baseline; full host admission and reader A/B evidence remain separate gates."
+  },
+  "runs": [
+    {
+      "run": 0,
+      "elapsed_seconds": 11.35,
+      "peak_rss_kib": 74320,
+      "wal_bytes": 16636592,
+      "workload": "10000 sessions/100000 entries/1MiB content/4MiB image/2048 deferred topics/16 synthetic owners",
+      "request_ms": {
+        "dispatch": {
+          "count": 16,
+          "median": 59.047115999999995,
+          "p95": 115.35416099999999,
+          "p99": 115.35416099999999,
+          "max": 115.35416099999999
+        },
+        "export_slices": {
+          "count": 16,
+          "median": 2.359976,
+          "p95": 849.5543789999999,
+          "p99": 849.5543789999999,
+          "max": 849.5543789999999
+        },
+        "history": {
+          "count": 16,
+          "median": 30.436998,
+          "p95": 90.043994,
+          "p99": 90.043994,
+          "max": 90.043994
+        },
+        "idle_control_commit": {
+          "count": 768,
+          "median": 4.959942,
+          "p95": 6.106941,
+          "p99": 6.4768669999999995,
+          "max": 6.733166
+        },
+        "image": {
+          "count": 16,
+          "median": 65.324835,
+          "p95": 101.209439,
+          "p99": 101.209439,
+          "max": 101.209439
+        },
+        "list": {
+          "count": 16,
+          "median": 24.157802,
+          "p95": 99.97239400000001,
+          "p99": 99.97239400000001,
+          "max": 99.97239400000001
+        },
+        "mixed_control_commit": {
+          "count": 768,
+          "median": 2.838495,
+          "p95": 5.0742080000000005,
+          "p99": 5.698251,
+          "max": 5.8847309999999995
+        }
+      },
+      "storage": {
+        "commit": {
+          "accepted_requests": 1536,
+          "requests": 1536,
+          "enqueue_wait_ns": 2603524,
+          "queue_wait_ns": 5275320365,
+          "execution_ns": 463720107,
+          "total_ns": 5741643996,
+          "max_total_ns": 6613981,
+          "max_queue_depth": 15
+        },
+        "content_slice": {
+          "accepted_requests": 256,
+          "requests": 256,
+          "enqueue_wait_ns": 330376,
+          "queue_wait_ns": 1203585286,
+          "execution_ns": 43955419,
+          "total_ns": 1247871081,
+          "max_total_ns": 100376060,
+          "max_queue_depth": 11
+        },
+        "delivery": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 127277,
+          "queue_wait_ns": 699264609,
+          "execution_ns": 273955396,
+          "total_ns": 973347282,
+          "max_total_ns": 115086796,
+          "max_queue_depth": 10
+        },
+        "history": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 112653,
+          "queue_wait_ns": 305735983,
+          "execution_ns": 411353264,
+          "total_ns": 717201900,
+          "max_total_ns": 89982858,
+          "max_queue_depth": 12
+        },
+        "image": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 107770,
+          "queue_wait_ns": 182136000,
+          "execution_ns": 1031643967,
+          "total_ns": 1213887737,
+          "max_total_ns": 101145162,
+          "max_queue_depth": 2
+        },
+        "list": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 119004,
+          "queue_wait_ns": 413014462,
+          "execution_ns": 274964536,
+          "total_ns": 688098002,
+          "max_total_ns": 99950668,
+          "max_queue_depth": 11
+        },
+        "view": {
+          "accepted_requests": 32,
+          "requests": 32,
+          "enqueue_wait_ns": 79853,
+          "queue_wait_ns": 1082108171,
+          "execution_ns": 5390455,
+          "total_ns": 1087578479,
+          "max_total_ns": 116095558,
+          "max_queue_depth": 10
+        }
+      }
+    },
+    {
+      "run": 1,
+      "elapsed_seconds": 11.21,
+      "peak_rss_kib": 74188,
+      "wal_bytes": 13109872,
+      "workload": "10000 sessions/100000 entries/1MiB content/4MiB image/2048 deferred topics/16 synthetic owners",
+      "request_ms": {
+        "dispatch": {
+          "count": 16,
+          "median": 60.164475,
+          "p95": 117.88787,
+          "p99": 117.88787,
+          "max": 117.88787
+        },
+        "export_slices": {
+          "count": 16,
+          "median": 2.471279,
+          "p95": 732.482848,
+          "p99": 732.482848,
+          "max": 732.482848
+        },
+        "history": {
+          "count": 16,
+          "median": 35.834542,
+          "p95": 101.450417,
+          "p99": 101.450417,
+          "max": 101.450417
+        },
+        "idle_control_commit": {
+          "count": 768,
+          "median": 5.003622,
+          "p95": 6.103448,
+          "p99": 6.3099289999999995,
+          "max": 6.455210999999999
+        },
+        "image": {
+          "count": 16,
+          "median": 65.66219500000001,
+          "p95": 108.62495,
+          "p99": 108.62495,
+          "max": 108.62495
+        },
+        "list": {
+          "count": 16,
+          "median": 51.643884,
+          "p95": 108.974157,
+          "p99": 108.974157,
+          "max": 108.974157
+        },
+        "mixed_control_commit": {
+          "count": 768,
+          "median": 2.991003,
+          "p95": 5.623197,
+          "p99": 6.097768,
+          "max": 6.500192
+        }
+      },
+      "storage": {
+        "commit": {
+          "accepted_requests": 1536,
+          "requests": 1536,
+          "enqueue_wait_ns": 3132954,
+          "queue_wait_ns": 5547169710,
+          "execution_ns": 481721891,
+          "total_ns": 6032024555,
+          "max_total_ns": 6448025,
+          "max_queue_depth": 15
+        },
+        "content_slice": {
+          "accepted_requests": 256,
+          "requests": 256,
+          "enqueue_wait_ns": 617928,
+          "queue_wait_ns": 1200989283,
+          "execution_ns": 44520116,
+          "total_ns": 1246127327,
+          "max_total_ns": 107443859,
+          "max_queue_depth": 11
+        },
+        "delivery": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 132436,
+          "queue_wait_ns": 726537984,
+          "execution_ns": 274477843,
+          "total_ns": 1001148263,
+          "max_total_ns": 117675260,
+          "max_queue_depth": 10
+        },
+        "history": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 115293,
+          "queue_wait_ns": 338940930,
+          "execution_ns": 421333204,
+          "total_ns": 760389427,
+          "max_total_ns": 101388112,
+          "max_queue_depth": 12
+        },
+        "image": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 121425,
+          "queue_wait_ns": 169765706,
+          "execution_ns": 1042341676,
+          "total_ns": 1212228807,
+          "max_total_ns": 108563878,
+          "max_queue_depth": 2
+        },
+        "list": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 127224,
+          "queue_wait_ns": 621260263,
+          "execution_ns": 272437282,
+          "total_ns": 893824769,
+          "max_total_ns": 108538970,
+          "max_queue_depth": 11
+        },
+        "view": {
+          "accepted_requests": 32,
+          "requests": 32,
+          "enqueue_wait_ns": 94239,
+          "queue_wait_ns": 1074282115,
+          "execution_ns": 4180251,
+          "total_ns": 1078556605,
+          "max_total_ns": 118419666,
+          "max_queue_depth": 10
+        }
+      }
+    },
+    {
+      "run": 2,
+      "elapsed_seconds": 11.12,
+      "peak_rss_kib": 74104,
+      "wal_bytes": 15285232,
+      "workload": "10000 sessions/100000 entries/1MiB content/4MiB image/2048 deferred topics/16 synthetic owners",
+      "request_ms": {
+        "dispatch": {
+          "count": 16,
+          "median": 57.203005000000005,
+          "p95": 107.574029,
+          "p99": 107.574029,
+          "max": 107.574029
+        },
+        "export_slices": {
+          "count": 16,
+          "median": 2.4082,
+          "p95": 763.441049,
+          "p99": 763.441049,
+          "max": 763.441049
+        },
+        "history": {
+          "count": 16,
+          "median": 56.717847,
+          "p95": 104.242409,
+          "p99": 104.242409,
+          "max": 104.242409
+        },
+        "idle_control_commit": {
+          "count": 768,
+          "median": 5.030385,
+          "p95": 6.206346,
+          "p99": 6.7431399999999995,
+          "max": 7.046753
+        },
+        "image": {
+          "count": 16,
+          "median": 64.257566,
+          "p95": 106.393206,
+          "p99": 106.393206,
+          "max": 106.393206
+        },
+        "list": {
+          "count": 16,
+          "median": 17.152368000000003,
+          "p95": 89.180995,
+          "p99": 89.180995,
+          "max": 89.180995
+        },
+        "mixed_control_commit": {
+          "count": 768,
+          "median": 2.995781,
+          "p95": 5.400579,
+          "p99": 6.029768,
+          "max": 6.188905
+        }
+      },
+      "storage": {
+        "commit": {
+          "accepted_requests": 1536,
+          "requests": 1536,
+          "enqueue_wait_ns": 2323836,
+          "queue_wait_ns": 5572805394,
+          "execution_ns": 469898610,
+          "total_ns": 6045027840,
+          "max_total_ns": 6992692,
+          "max_queue_depth": 15
+        },
+        "content_slice": {
+          "accepted_requests": 256,
+          "requests": 256,
+          "enqueue_wait_ns": 453433,
+          "queue_wait_ns": 1216953334,
+          "execution_ns": 41556726,
+          "total_ns": 1258963493,
+          "max_total_ns": 107436921,
+          "max_queue_depth": 11
+        },
+        "delivery": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 83492,
+          "queue_wait_ns": 639119277,
+          "execution_ns": 264553882,
+          "total_ns": 903756651,
+          "max_total_ns": 107361058,
+          "max_queue_depth": 10
+        },
+        "history": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 86697,
+          "queue_wait_ns": 529328874,
+          "execution_ns": 394505258,
+          "total_ns": 923920829,
+          "max_total_ns": 104192708,
+          "max_queue_depth": 12
+        },
+        "image": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 99897,
+          "queue_wait_ns": 205757059,
+          "execution_ns": 1020601826,
+          "total_ns": 1226458782,
+          "max_total_ns": 106340351,
+          "max_queue_depth": 3
+        },
+        "list": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 72950,
+          "queue_wait_ns": 270585985,
+          "execution_ns": 267046206,
+          "total_ns": 537705141,
+          "max_total_ns": 89132036,
+          "max_queue_depth": 11
+        },
+        "view": {
+          "accepted_requests": 32,
+          "requests": 32,
+          "enqueue_wait_ns": 72527,
+          "queue_wait_ns": 948721172,
+          "execution_ns": 4017350,
+          "total_ns": 952811049,
+          "max_total_ns": 103417968,
+          "max_queue_depth": 10
+        }
+      }
+    },
+    {
+      "run": 3,
+      "elapsed_seconds": 10.97,
+      "peak_rss_kib": 74232,
+      "wal_bytes": 15581872,
+      "workload": "10000 sessions/100000 entries/1MiB content/4MiB image/2048 deferred topics/16 synthetic owners",
+      "request_ms": {
+        "dispatch": {
+          "count": 16,
+          "median": 58.428499,
+          "p95": 105.976632,
+          "p99": 105.976632,
+          "max": 105.976632
+        },
+        "export_slices": {
+          "count": 16,
+          "median": 2.263597,
+          "p95": 767.634405,
+          "p99": 767.634405,
+          "max": 767.634405
+        },
+        "history": {
+          "count": 16,
+          "median": 58.127928000000004,
+          "p95": 106.23543000000001,
+          "p99": 106.23543000000001,
+          "max": 106.23543000000001
+        },
+        "idle_control_commit": {
+          "count": 768,
+          "median": 4.886117,
+          "p95": 5.993149,
+          "p99": 6.199274,
+          "max": 6.341657
+        },
+        "image": {
+          "count": 16,
+          "median": 64.586884,
+          "p95": 105.813093,
+          "p99": 105.813093,
+          "max": 105.813093
+        },
+        "list": {
+          "count": 16,
+          "median": 16.962412999999998,
+          "p95": 91.388918,
+          "p99": 91.388918,
+          "max": 91.388918
+        },
+        "mixed_control_commit": {
+          "count": 768,
+          "median": 2.807328,
+          "p95": 6.124555,
+          "p99": 8.180692,
+          "max": 8.990492
+        }
+      },
+      "storage": {
+        "commit": {
+          "accepted_requests": 1536,
+          "requests": 1536,
+          "enqueue_wait_ns": 1984973,
+          "queue_wait_ns": 5390763323,
+          "execution_ns": 461113921,
+          "total_ns": 5853862217,
+          "max_total_ns": 8922282,
+          "max_queue_depth": 15
+        },
+        "content_slice": {
+          "accepted_requests": 256,
+          "requests": 256,
+          "enqueue_wait_ns": 194231,
+          "queue_wait_ns": 1218653678,
+          "execution_ns": 41432695,
+          "total_ns": 1260280604,
+          "max_total_ns": 101268635,
+          "max_queue_depth": 11
+        },
+        "delivery": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 70726,
+          "queue_wait_ns": 638254656,
+          "execution_ns": 265331484,
+          "total_ns": 903656866,
+          "max_total_ns": 105850365,
+          "max_queue_depth": 10
+        },
+        "history": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 73519,
+          "queue_wait_ns": 528343008,
+          "execution_ns": 392056959,
+          "total_ns": 920473486,
+          "max_total_ns": 106211235,
+          "max_queue_depth": 12
+        },
+        "image": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 84192,
+          "queue_wait_ns": 207385621,
+          "execution_ns": 1020302127,
+          "total_ns": 1227771940,
+          "max_total_ns": 105748097,
+          "max_queue_depth": 3
+        },
+        "list": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 53258,
+          "queue_wait_ns": 272286721,
+          "execution_ns": 265260270,
+          "total_ns": 537600249,
+          "max_total_ns": 90882154,
+          "max_queue_depth": 11
+        },
+        "view": {
+          "accepted_requests": 32,
+          "requests": 32,
+          "enqueue_wait_ns": 77024,
+          "queue_wait_ns": 946781743,
+          "execution_ns": 3989413,
+          "total_ns": 950848180,
+          "max_total_ns": 102901626,
+          "max_queue_depth": 10
+        }
+      }
+    },
+    {
+      "run": 4,
+      "elapsed_seconds": 11.02,
+      "peak_rss_kib": 74860,
+      "wal_bytes": 15421192,
+      "workload": "10000 sessions/100000 entries/1MiB content/4MiB image/2048 deferred topics/16 synthetic owners",
+      "request_ms": {
+        "dispatch": {
+          "count": 16,
+          "median": 58.240205,
+          "p95": 105.73224400000001,
+          "p99": 105.73224400000001,
+          "max": 105.73224400000001
+        },
+        "export_slices": {
+          "count": 16,
+          "median": 2.421849,
+          "p95": 770.930357,
+          "p99": 770.930357,
+          "max": 770.930357
+        },
+        "history": {
+          "count": 16,
+          "median": 57.852399,
+          "p95": 106.090873,
+          "p99": 106.090873,
+          "max": 106.090873
+        },
+        "idle_control_commit": {
+          "count": 768,
+          "median": 5.021322,
+          "p95": 6.108941,
+          "p99": 7.65346,
+          "max": 7.767739
+        },
+        "image": {
+          "count": 16,
+          "median": 64.77880599999999,
+          "p95": 105.006214,
+          "p99": 105.006214,
+          "max": 105.006214
+        },
+        "list": {
+          "count": 16,
+          "median": 17.572099,
+          "p95": 94.328368,
+          "p99": 94.328368,
+          "max": 94.328368
+        },
+        "mixed_control_commit": {
+          "count": 768,
+          "median": 2.865627,
+          "p95": 5.5604000000000005,
+          "p99": 6.018509,
+          "max": 6.409124
+        }
+      },
+      "storage": {
+        "commit": {
+          "accepted_requests": 1536,
+          "requests": 1536,
+          "enqueue_wait_ns": 2156277,
+          "queue_wait_ns": 5574909486,
+          "execution_ns": 467953378,
+          "total_ns": 6045019141,
+          "max_total_ns": 7712037,
+          "max_queue_depth": 15
+        },
+        "content_slice": {
+          "accepted_requests": 256,
+          "requests": 256,
+          "enqueue_wait_ns": 497386,
+          "queue_wait_ns": 1227246717,
+          "execution_ns": 40552801,
+          "total_ns": 1268296904,
+          "max_total_ns": 102737653,
+          "max_queue_depth": 11
+        },
+        "delivery": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 85279,
+          "queue_wait_ns": 635545543,
+          "execution_ns": 269340958,
+          "total_ns": 904971780,
+          "max_total_ns": 105525818,
+          "max_queue_depth": 11
+        },
+        "history": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 77508,
+          "queue_wait_ns": 529866953,
+          "execution_ns": 392896067,
+          "total_ns": 922840528,
+          "max_total_ns": 106020152,
+          "max_queue_depth": 12
+        },
+        "image": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 93624,
+          "queue_wait_ns": 210463644,
+          "execution_ns": 1024986706,
+          "total_ns": 1235543974,
+          "max_total_ns": 104957096,
+          "max_queue_depth": 3
+        },
+        "list": {
+          "accepted_requests": 16,
+          "requests": 16,
+          "enqueue_wait_ns": 73230,
+          "queue_wait_ns": 275692880,
+          "execution_ns": 267315691,
+          "total_ns": 543081801,
+          "max_total_ns": 94271301,
+          "max_queue_depth": 11
+        },
+        "view": {
+          "accepted_requests": 32,
+          "requests": 32,
+          "enqueue_wait_ns": 170588,
+          "queue_wait_ns": 965510485,
+          "execution_ns": 4082742,
+          "total_ns": 969763815,
+          "max_total_ns": 103008882,
+          "max_queue_depth": 10
+        }
+      }
+    }
+  ],
+  "pooled_request_ms": {
+    "dispatch": {
+      "count": 80,
+      "median": 58.633171999999995,
+      "p95": 107.36183100000001,
+      "p99": 117.88787,
+      "max": 117.88787
+    },
+    "export_slices": {
+      "count": 80,
+      "median": 2.421849,
+      "p95": 732.482848,
+      "p99": 849.5543789999999,
+      "max": 849.5543789999999
+    },
+    "history": {
+      "count": 80,
+      "median": 41.745121000000005,
+      "p95": 104.11585099999999,
+      "p99": 106.23543000000001,
+      "max": 106.23543000000001
+    },
+    "idle_control_commit": {
+      "count": 3840,
+      "median": 4.986159000000001,
+      "p95": 6.105772,
+      "p99": 6.495969,
+      "max": 7.767739
+    },
+    "image": {
+      "count": 80,
+      "median": 65.324835,
+      "p95": 103.101383,
+      "p99": 108.62495,
+      "max": 108.62495
+    },
+    "list": {
+      "count": 80,
+      "median": 21.262563,
+      "p95": 99.56463699999999,
+      "p99": 108.974157,
+      "max": 108.974157
+    },
+    "mixed_control_commit": {
+      "count": 3840,
+      "median": 2.8788210000000003,
+      "p95": 5.548435,
+      "p99": 6.272431999999999,
+      "max": 8.990492
+    }
+  },
+  "passed": true
+}

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct Transition {
+    pub operation: Option<super::operation::OperationTicket>,
     pub expected_revision: SafeInteger,
     pub next: SessionView,
     pub contents: Vec<NewContent>,
@@ -114,6 +115,13 @@ pub enum DeliveryTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum DeliveryPayload {
+    Input {
+        session: SessionId,
+        turn: TurnId,
+        entry: EntryId,
+        seq: SafeInteger,
+        origin: Option<crate::domain::OperationId>,
+    },
     /// Immutable archive references; no session snapshot is required to render.
     Turn {
         session: SessionId,
@@ -124,6 +132,11 @@ pub enum DeliveryPayload {
     Entry {
         entry: EntryId,
     },
+    /// Explicit history export: immutable body streamed in bounded slices.
+    HistoryEntry {
+        session: SessionId,
+        entries: Vec<(EntryId, SafeInteger)>,
+    },
     Image {
         image: ImageId,
     },
@@ -131,6 +144,9 @@ pub enum DeliveryPayload {
         interaction: InteractionId,
     },
     Notice {
+        content: ContentRef,
+    },
+    Menu {
         content: ContentRef,
     },
 }

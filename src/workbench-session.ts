@@ -79,7 +79,7 @@ export class WorkbenchSession {
         this.pendingBytes = 0;
         this.publish({
           status: 'disconnected',
-          error: 'Workbench disconnected; explicitly reattach to continue',
+          error: 'Workbench disconnected; restoring observation without resending requests',
         });
       },
     });
@@ -178,7 +178,10 @@ export class WorkbenchSession {
     this.publish({ status: 'syncing', error: undefined });
     const task = (async () => {
       try {
-        const attached = await this.client.call({ method: 'attach', session: this.id });
+        const attached = await this.client.call(
+          { method: 'attach', session: this.id },
+          { timeoutMs: 10_000 },
+        );
         if (!this.active || generation !== this.generation) return;
         if (
           attached.view.id !== this.id ||

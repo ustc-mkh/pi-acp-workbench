@@ -1,7 +1,11 @@
+import { randomUUID } from 'node:crypto';
+import { exportMarkdown } from './workbench-export';
 import { WorkbenchClient, WorkbenchError, type RequestTicket } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
 import {
   durableCommand,
+  operationId,
+  sessionId,
   type ClientCommand,
   type OperationId,
   type SessionId,
@@ -11,6 +15,7 @@ import {
 } from './workbench-protocol';
 import {
   uiCommand,
+  uiOperation,
   type UiOperation,
   type WorkbenchUiMessage,
   type WorkbenchUiState,
@@ -22,6 +27,12 @@ export interface WorkbenchPorts {
   workspace(): string | undefined;
   /** Canonical workspace authorization before any provider/session mutation. */
   authorize(cwd: string): Promise<void>;
+  loadSelection?(): unknown;
+  saveSelection?(session: SessionId | undefined): PromiseLike<void>;
+  loadOperations?(): unknown;
+  saveOperations?(operations: UiOperation[]): PromiseLike<void>;
+  exportMarkdown?(session: SessionId, chunks: AsyncIterable<string>): Promise<void>;
+  attachFiles?(cwd: string): Promise<import('./workbench-input').TextAttachment[]>;
 }
 /** UI owns only selection/display/workflow observers. The Rust actor owns all domain state. */
 export class WorkbenchController {
@@ -36,6 +47,7 @@ export class WorkbenchController {
   private uiRequest = 0;
   private emitTimer?: NodeJS.Timeout;
   private operations: UiOperation[] = [];
+  private persistence: Promise<void> = Promise.resolve();
   private workflows = new Map<
     OperationId,
     { command: ClientCommand; ticket: RequestTicket<ClientCommand> }
@@ -43,14 +55,40 @@ export class WorkbenchController {
   private state: WorkbenchUiState = { sessions: [], operations: [], trusted: false };
   private unobserve: () => void;
   private selecting = false;
+  private exporting = false;
+  private attaching = false;
+  private restoredSelection?: SessionId;
+  private reconnectTimer?: NodeJS.Timeout;
+  private reconnectAttempt = 0;
+  private reconnectFlight?: Promise<void>;
+  private recoveryFlight?: Promise<void>;
   constructor(
     readonly client: WorkbenchClient,
     private ports: WorkbenchPorts,
   ) {
+    try {
+      const savedSelection = ports.loadSelection?.();
+      if (savedSelection !== undefined) this.restoredSelection = sessionId.parse(savedSelection);
+    } catch {
+      // Local display preferences never authorize a mutation.
+    }
+    const saved = ports.loadOperations?.();
+    if (Array.isArray(saved) && saved.length <= 64) {
+      for (const value of saved) {
+        try {
+          const row = uiOperation.parse(value);
+          if (row.status === 'pending') row.status = 'uncertain';
+          this.operations.push(row);
+        } catch {
+          /* Invalid local preferences never authorize a command. */
+        }
+      }
+    }
     this.unobserve = client.observe({
       lost: () => {
         this.state.error =
-          'Workbench connection lost. No request was resent. Explicitly select a session to reconnect.';
+          'Workbench connection lost. Reconnecting observation only; no request was resent.';
+        this.scheduleReconnect();
         this.emit();
       },
     });
@@ -79,10 +117,65 @@ export class WorkbenchController {
     try {
       const message = uiCommand.parse(value);
       switch (message.type) {
+        case 'attach_files': {
+          const selected = this.selected;
+          const snapshot = selected?.view.view;
+          if (!selected || selected.id !== message.session || !snapshot)
+            throw new Error('Select a session before attaching files');
+          if (!this.ports.attachFiles) throw new Error('File attachments are unavailable');
+          if (this.attaching) throw new Error('File selection is already in progress');
+          this.attaching = true;
+          try {
+            const token = await this.authorize(snapshot.cwd);
+            this.assertAuthorization(token);
+            const files = await this.ports.attachFiles(snapshot.cwd);
+            this.assertAuthorization(token);
+            if (this.closed || this.selected !== selected)
+              throw new Error('Session selection changed while selecting files');
+            this.ports.post({ type: 'attachments', session: selected.id, files });
+          } finally {
+            this.attaching = false;
+          }
+          break;
+        }
+        case 'export': {
+          const selected = this.selected;
+          const snapshot = selected?.view.view;
+          if (!selected || selected.id !== message.session || !snapshot)
+            throw new Error('Select a session before exporting');
+          if (!this.ports.exportMarkdown) throw new Error('Export is unavailable');
+          if (this.exporting) throw new Error('An export is already in progress');
+          this.exporting = true;
+          try {
+            const token = await this.authorize(snapshot.cwd);
+            const guard = () => {
+              this.assertAuthorization(token);
+              if (this.closed || this.selected !== selected)
+                throw new Error('Export cancelled because session selection changed');
+            };
+            guard();
+            await this.ports.exportMarkdown(
+              selected.id,
+              exportMarkdown(this.client, selected.id, guard),
+            );
+          } finally {
+            this.exporting = false;
+          }
+          break;
+        }
+        case 'recover_operations':
+          await this.recoverOperations();
+          break;
         case 'ready':
         case 'refresh':
+          await this.recoverOperations();
           await this.refresh(message.type === 'refresh' ? message.cursor : undefined);
-          if (this.selected?.view.status !== 'disconnected') await this.selected?.refresh();
+          if (message.type === 'ready' && !this.selected && this.restoredSelection) {
+            const session = this.restoredSelection;
+            this.restoredSelection = undefined;
+            await this.select(session);
+          } else await this.selected?.refresh();
+          if (this.selected?.view.status === 'ready') this.resetReconnect();
           break;
         case 'select':
           await this.select(message.session);
@@ -145,7 +238,7 @@ export class WorkbenchController {
           }
           this.assertAuthorization(token);
           const result = await this.execute(message.command);
-          if (message.command.method === 'prompt' && this.selected === selected && !this.closed) {
+          if (message.command.method === 'prompt' && !this.closed) {
             this.ports.post({
               type: 'prompt_accepted',
               session: selected.id,
@@ -162,6 +255,7 @@ export class WorkbenchController {
             if (this.selected === selected) await this.select(result.Forked.summary.id);
           }
           if (message.command.method === 'remove') {
+            if (this.selected === selected) await this.ports.saveSelection?.(undefined);
             this.invalidateList();
             this.state.sessions = this.state.sessions.filter(
               (summary) => summary.id !== selected.id,
@@ -293,6 +387,62 @@ export class WorkbenchController {
     }
     this.emit();
   }
+  /** One bounded observer-recovery task, never a command replay or provider load. */
+  private scheduleReconnect() {
+    if (this.closed || this.reconnectTimer) return;
+    const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempt++, 5));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.reconnect();
+    }, delay);
+    this.reconnectTimer.unref();
+  }
+  private resetReconnect() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.reconnectAttempt = 0;
+  }
+  private reconnect(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.reconnectFlight) return this.reconnectFlight;
+    const selected = this.selected;
+    const task = (async () => {
+      try {
+        await this.recoverOperations();
+        if (this.closed || selected !== this.selected) return;
+        if (selected) await selected.refresh();
+        else {
+          await this.refresh();
+          if (this.closed || this.selected) return;
+          if (this.restoredSelection) {
+            const session = this.restoredSelection;
+            this.restoredSelection = undefined;
+            await this.select(session);
+            if (this.snapshot.view?.status !== 'ready') {
+              this.scheduleReconnect();
+              return;
+            }
+          }
+        }
+        if (selected && !['ready', 'removed'].includes(selected.view.status)) {
+          this.scheduleReconnect();
+          return;
+        }
+        this.resetReconnect();
+        this.state.error = undefined;
+      } catch (error) {
+        this.state.error = error instanceof Error ? error.message : 'Cannot reconnect';
+        this.scheduleReconnect();
+      } finally {
+        this.emit();
+      }
+    })();
+    this.reconnectFlight = task;
+    void task.finally(() => {
+      if (this.reconnectFlight === task) this.reconnectFlight = undefined;
+    });
+    return task;
+  }
   private async authorize(cwd: string) {
     if (!this.ports.trusted()) throw new Error('Workspace trust is required');
     const token = {
@@ -364,19 +514,74 @@ export class WorkbenchController {
       // Cold inspection is display-only and does not load a provider.
       const view = new WorkbenchSession(this.client, session);
       this.selected = view;
-      view.observe(() => this.emit());
+      view.observe((snapshot) => {
+        if (this.selected !== view) return;
+        if (snapshot.status === 'stale' || snapshot.status === 'disconnected')
+          this.scheduleReconnect();
+        this.emit();
+      });
       await view.start();
+      if (!this.closed && this.selected === view && view.view.view) {
+        await this.ports.saveSelection?.(session);
+        if (view.view.status === 'ready') this.resetReconnect();
+      }
     } finally {
       this.selecting = false;
       this.emit();
     }
   }
+  private persistOperations() {
+    const saved = this.operations.map((row) => ({ ...row }));
+    const task = this.persistence.catch(() => {}).then(() => this.ports.saveOperations?.(saved));
+    this.persistence = task;
+    return task;
+  }
+  private recoverOperations(): Promise<void> {
+    if (this.recoveryFlight) return this.recoveryFlight;
+    const task = this.queryOperations();
+    this.recoveryFlight = task;
+    void task
+      .finally(() => {
+        if (this.recoveryFlight === task) this.recoveryFlight = undefined;
+      })
+      .catch(() => {});
+    return task;
+  }
+  private async queryOperations() {
+    for (const row of this.operations) {
+      if (!['pending', 'uncertain'].includes(row.status) || this.workflows.has(row.operation))
+        continue;
+      const result = await this.client.call(
+        { method: 'operation', operation: row.operation },
+        { timeoutMs: 10_000 },
+      );
+      if (this.closed) return;
+      row.status =
+        result.status === 'completed'
+          ? 'completed'
+          : result.status === 'failed' || result.status === 'expired'
+            ? 'failed'
+            : 'uncertain';
+      row.code = result.status;
+      row.error =
+        result.status === 'failed'
+          ? result.message
+          : result.status === 'unknown'
+            ? 'No durable receipt found. No request was resent.'
+            : result.status === 'uncertain'
+              ? 'Acceptance or external outcome is uncertain. Inspect the session; no request was resent.'
+              : result.status === 'expired'
+                ? 'Receipt expired; this operation cannot execute again.'
+                : undefined;
+    }
+    await this.persistOperations();
+  }
   private async execute(command: ClientCommand) {
     if (!durableCommand(command)) throw new Error('Expected a mutation');
     // Bound both retained receipt display and concurrent long-running workflows.
-    if (this.workflows.size >= 16) throw new Error('Too many UI workflows are active');
-    const ticket = this.client.request(command);
-    const operation = ticket.operation!;
+    if (this.operations.filter((row) => row.status === 'pending').length >= 16)
+      throw new Error('Too many UI workflows are active');
+    const operation = operationId.parse(randomUUID());
     const row: UiOperation = {
       operation,
       method: command.method,
@@ -388,19 +593,26 @@ export class WorkbenchController {
       ...this.operations.filter((row) => row.status !== 'pending').slice(-47),
       row,
     ];
-    this.workflows.set(operation, { command, ticket });
     this.emit();
     try {
+      // Persist only a handle before bytes can leave this process, never a
+      // command body. Reload may query this identity but cannot replay it.
+      await this.persistOperations();
+      if (this.closed) throw new Error('Workbench view closed before dispatch');
+      const ticket = this.client.request(command, { operation });
+      this.workflows.set(operation, { command, ticket });
       const result = await ticket.result;
       row.status = 'completed';
       return result;
     } catch (error) {
-      row.status = 'failed';
+      row.status =
+        error instanceof WorkbenchError && error.sideEffectPossible ? 'uncertain' : 'failed';
       row.error = error instanceof Error ? error.message : 'Operation failed';
       if (error instanceof WorkbenchError) row.code = error.code;
       throw error;
     } finally {
       this.workflows.delete(operation);
+      await this.persistOperations();
       this.emit();
     }
   }
@@ -411,6 +623,7 @@ export class WorkbenchController {
     this.listRequest++;
     this.authorizationGeneration++;
     clearTimeout(this.emitTimer);
+    this.resetReconnect();
     this.unobserve();
     void this.selected?.stop();
     this.selected = undefined;

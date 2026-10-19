@@ -26,12 +26,24 @@ fn pool(record: &InboxRecord) -> usize {
     match record.command.action {
         TelegramAction::Rejected(_)
         | TelegramAction::Control(
-            ControlCommand::Help | ControlCommand::ListSessions | ControlCommand::Status { .. },
+            ControlCommand::Help
+            | ControlCommand::Menu { .. }
+            | ControlCommand::ListSessions
+            | ControlCommand::Queue
+            | ControlCommand::Status { .. }
+            | ControlCommand::Notifications { enabled: None }
+            | ControlCommand::Silent { enabled: None },
         ) => 2,
         TelegramAction::Answer { .. }
-        | TelegramAction::Control(ControlCommand::Cancel { .. } | ControlCommand::Remove { .. }) => {
-            1
-        }
+        | TelegramAction::Control(
+            ControlCommand::Cancel { .. }
+            | ControlCommand::Interrupt { .. }
+            | ControlCommand::History { .. }
+            | ControlCommand::Sync { .. }
+            | ControlCommand::Remove { .. }
+            | ControlCommand::Notifications { enabled: Some(_) }
+            | ControlCommand::Silent { enabled: Some(_) },
+        ) => 1,
         _ => 0,
     }
 }
@@ -43,7 +55,7 @@ pub(crate) async fn run(
     let mut active: BTreeMap<UpdateId, (TopicKey, usize)> = BTreeMap::new();
     let mut tick = interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let result = loop {
+    let result = 'scheduler: loop {
         tokio::select! {
             biased;
             _ = stop.cancelled() => break Ok(()),
@@ -67,12 +79,37 @@ pub(crate) async fn run(
                 let mut used = [0; 3];
                 let mut blocked = BTreeSet::new();
                 for (topic, class) in active.values() { used[*class] += 1; if *class != 2 { blocked.insert(topic.clone()); } }
+                let mut waiting = BTreeSet::new();
                 for record in records {
                     if active.contains_key(&record.id) { continue; }
-                    let class = pool(&record);
+                    let class = if context.authorized(&record) { pool(&record) } else { 2 };
                     // Reserve the first unscheduled mutation too: a later
                     // control must not jump an earlier same-topic config/new.
-                    if class != 2 && !blocked.insert(record.command.topic.clone()) { continue; }
+                    let barrier = matches!(&record.command.action, TelegramAction::Answer { .. } | TelegramAction::Control(ControlCommand::Cancel { .. } | ControlCommand::Interrupt { .. }));
+                    let queued_topic = waiting.contains(&record.command.topic);
+                    if class != 2 && !blocked.insert(record.command.topic.clone()) {
+                        if !(barrier && queued_topic) {
+                            // Only waiting prompts may be crossed. A config/new/history
+                            // between them and a control retains the causal boundary.
+                            if !matches!(&record.command.action, TelegramAction::Prompt { .. }) {
+                                waiting.remove(&record.command.topic);
+                            }
+                            continue;
+                        }
+                        waiting.remove(&record.command.topic);
+                    }
+                    if let TelegramAction::Prompt { session, .. } = &record.command.action {
+                        if context.authorized(&record) {
+                            if let Err(error) = context.app.command(crate::domain::DomainCommand::LoadSession(session.clone())).await {
+                                if matches!(error, DomainError::Persistence(_)) { break 'scheduler Err(AdapterError::Domain(error)); }
+                            }
+                        }
+                        match context.inspect(session).await {
+                            Ok(Some(view)) if context.authorized(&record) && (view.active_turn.is_some() || view.configuration_intent.is_some()) => { waiting.insert(record.command.topic.clone()); continue; }
+                            Err(error) => break 'scheduler Err(AdapterError::Domain(error)),
+                            _ => {}
+                        }
+                    }
                     if used[class] >= CAPACITY[class] { continue; }
                     used[class] += 1;
                     active.insert(record.id, (record.command.topic.clone(), class));

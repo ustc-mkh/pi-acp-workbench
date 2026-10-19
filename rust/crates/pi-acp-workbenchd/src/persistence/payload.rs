@@ -25,6 +25,29 @@ pub struct NoticeContent {
     pub id: NoticeId,
     pub text: String,
 }
+pub(crate) fn history_delivery_id(
+    bot: i64,
+    topic: &crate::telegram::types::TopicKey,
+    session: &crate::domain::SessionId,
+    entry: &EntryId,
+) -> Result<crate::domain::DeliveryId, DomainError> {
+    let key = serde_json::to_string(&(bot, topic, session, entry)).map_err(failure)?;
+    Ok(crate::domain::DeliveryId::new(format!(
+        "history-{}",
+        ContentHash::of(&key).as_str()
+    ))?)
+}
+pub(crate) fn automatic_delivered(
+    db: &Connection,
+    bot: i64,
+    topic: &crate::telegram::types::TopicKey,
+    session: &crate::domain::SessionId,
+    entry: &EntryId,
+    seq: SafeInteger,
+    turn: &crate::domain::TurnId,
+) -> Result<bool, StoreError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_turn_receipts r JOIN delivery_entries de ON de.delivery_id=r.delivery_id WHERE r.delivery_id=(CASE (SELECT role FROM entries WHERE entry_id=?7) WHEN 'User' THEN 'input-' || substr(?1,6) ELSE ?1 END) AND r.bot_id=?2 AND r.chat=?3 AND r.thread=?4 AND r.session=?5 AND de.seq=?6 AND de.entry_id=?7)", rusqlite::params![format!("turn-{turn}"), bot, topic.chat.get(), topic.thread.map_or(0, |thread| thread.get()), session.as_str(), seq, entry.as_str()], |row| row.get(0)).map_err(StoreError::from)
+}
 #[derive(Clone)]
 pub struct PayloadStore {
     database: Database,
@@ -42,6 +65,26 @@ pub struct DeliveryPage {
 }
 
 pub(super) enum Request {
+    InputOrigin {
+        operation: crate::domain::OperationId,
+        bot: i64,
+        topic: crate::telegram::types::TopicKey,
+        session: crate::domain::SessionId,
+        reply: Reply<bool>,
+    },
+    AutomaticDelivered {
+        bot: i64,
+        topic: crate::telegram::types::TopicKey,
+        session: crate::domain::SessionId,
+        entry: EntryId,
+        seq: SafeInteger,
+        turn: crate::domain::TurnId,
+        reply: Reply<bool>,
+    },
+    HistoryDelivered {
+        ids: Vec<crate::domain::DeliveryId>,
+        reply: Reply<Vec<bool>>,
+    },
     DeliveryPage {
         id: crate::domain::DeliveryId,
         after: SafeInteger,
@@ -57,7 +100,7 @@ pub(super) enum Request {
     },
     Notice {
         id: NoticeId,
-        reply: Reply<NoticeContent>,
+        reply: Reply<Option<NoticeContent>>,
     },
     Interaction {
         id: InteractionId,
@@ -141,6 +184,58 @@ impl PayloadStore {
         .await?;
         result.await.map_err(failure)?.map_err(failure)
     }
+    pub(crate) async fn input_origin(
+        &self,
+        operation: crate::domain::OperationId,
+        bot: i64,
+        topic: crate::telegram::types::TopicKey,
+        session: crate::domain::SessionId,
+    ) -> Result<bool, DomainError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::InputOrigin {
+            operation,
+            bot,
+            topic,
+            session,
+            reply,
+        })
+        .await?;
+        result.await.map_err(failure)?.map_err(failure)
+    }
+    pub(crate) async fn automatic_delivered(
+        &self,
+        bot: i64,
+        topic: &crate::telegram::types::TopicKey,
+        session: &crate::domain::SessionId,
+        entry: &EntryId,
+        seq: SafeInteger,
+        turn: &crate::domain::TurnId,
+    ) -> Result<bool, DomainError> {
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::AutomaticDelivered {
+            bot,
+            topic: topic.clone(),
+            session: session.clone(),
+            entry: entry.clone(),
+            seq,
+            turn: turn.clone(),
+            reply,
+        })
+        .await?;
+        result.await.map_err(failure)?.map_err(failure)
+    }
+    pub(crate) async fn history_delivered(
+        &self,
+        ids: Vec<crate::domain::DeliveryId>,
+    ) -> Result<Vec<bool>, DomainError> {
+        if ids.len() > 100 {
+            return Err(failure("history lookup budget exceeded"));
+        }
+        let (reply, result) = oneshot::channel();
+        self.submit(Request::HistoryDelivered { ids, reply })
+            .await?;
+        result.await.map_err(failure)?.map_err(failure)
+    }
     pub async fn entry_header(&self, id: &EntryId) -> Result<EntryHeader, DomainError> {
         let (reply, result) = oneshot::channel();
         self.submit(Request::Header {
@@ -160,6 +255,11 @@ impl PayloadStore {
         self.put(Payload::Notice(notice.clone())).await
     }
     pub async fn notice(&self, id: &NoticeId) -> Result<NoticeContent, DomainError> {
+        self.find_notice(id)
+            .await?
+            .ok_or_else(|| failure("notice payload missing"))
+    }
+    pub async fn find_notice(&self, id: &NoticeId) -> Result<Option<NoticeContent>, DomainError> {
         let (reply, result) = oneshot::channel();
         self.submit(Request::Notice {
             id: id.clone(),
@@ -363,6 +463,16 @@ pub(super) fn entry(db: &Connection, id: &EntryId) -> Result<TranscriptEntry, St
         image: header.image,
     })
 }
+pub(super) fn notice_optional(
+    db: &Connection,
+    id: NoticeId,
+) -> Result<Option<NoticeContent>, StoreError> {
+    match read(db, content_id("notice", id.as_str())?) {
+        Ok(text) => Ok(Some(NoticeContent { id, text })),
+        Err(StoreError::NotFound) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
 pub(super) fn execute(db: &mut Connection, request: Request) {
     match request {
         Request::Put { payload, reply } => {
@@ -375,9 +485,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             let _ = reply.send(result);
         }
         Request::Notice { id, reply } => {
-            let result = content_id("notice", id.as_str())
-                .and_then(|key| read(db, key))
-                .map(|text| NoticeContent { id, text });
+            let result = notice_optional(db, id);
             let _ = reply.send(result);
         }
         Request::Interaction { id, reply } => {
@@ -388,6 +496,45 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                     return Err(StoreError::Invalid("interaction payload identity mismatch"));
                 }
                 Ok(interaction)
+            })();
+            let _ = reply.send(result);
+        }
+        Request::InputOrigin {
+            operation,
+            bot,
+            topic,
+            session,
+            reply,
+        } => {
+            let result = db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_prompt_attempts p JOIN telegram_inbox i USING(bot_id,update_id) WHERE p.operation=?1 AND p.bot_id=?2 AND json_extract(i.command_json,'$.command.topic')=?3 AND coalesce(json_extract(i.command_json,'$.command.action.Prompt.session'),json_extract(i.command_json,'$.command.action.Control.Interrupt.session'))=?4)", rusqlite::params![operation.as_str(), bot, serde_json::to_string(&topic).map_err(|_| StoreError::Invalid("topic encoding")).unwrap_or_default(), session.as_str()], |row| row.get(0)).map_err(StoreError::from);
+            let _ = reply.send(result);
+        }
+        Request::AutomaticDelivered {
+            bot,
+            topic,
+            session,
+            entry,
+            seq,
+            turn,
+            reply,
+        } => {
+            let _ = reply.send(automatic_delivered(
+                db, bot, &topic, &session, &entry, seq, &turn,
+            ));
+        }
+        Request::HistoryDelivered { ids, reply } => {
+            let result = (|| {
+                if ids.len() > 100 {
+                    return Err(StoreError::Invalid("history lookup budget exceeded"));
+                }
+                let mut statement = db.prepare("SELECT EXISTS(SELECT 1 FROM deliveries WHERE delivery_id=?1 AND status='Acked') OR EXISTS(SELECT 1 FROM telegram_history_exports x JOIN deliveries d ON d.delivery_id=x.delivery_id WHERE x.export_id=?1 AND d.status='Acked')")?;
+                ids.iter()
+                    .map(|id| {
+                        statement
+                            .query_row([id.as_str()], |row| row.get(0))
+                            .map_err(StoreError::from)
+                    })
+                    .collect()
             })();
             let _ = reply.send(result);
         }

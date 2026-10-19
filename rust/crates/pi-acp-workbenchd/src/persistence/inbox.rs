@@ -7,7 +7,10 @@ use crate::{
     telegram::{
         command::TelegramCommand,
         state::{InboxOutcome, InboxRecord},
-        types::{CallbackBinding, CallbackKey, TopicKey, UpdateId, UserId},
+        types::{
+            CallbackBinding, CallbackKey, TopicKey, TopicPreference, TopicPreferences, UpdateId,
+            UserId,
+        },
     },
 };
 use tokio::sync::oneshot;
@@ -30,17 +33,35 @@ pub struct Admission {
     pub callback_query: Option<String>,
     pub expected_binding: Option<SessionId>,
 }
+pub struct HistoryExport {
+    pub topic: TopicKey,
+    pub update: UpdateId,
+    pub session: SessionId,
+    pub cwd: Option<crate::domain::WorkspacePath>,
+    pub all: bool,
+}
 pub(super) enum Action {
     #[cfg(test)]
     Snapshot,
     Offset,
     Binding(TopicKey),
+    Preferences(TopicKey),
+    PreferenceReply(TopicKey, UpdateId, TopicPreference),
+    HistoryReply(HistoryExport),
+    QueueBarrier(UpdateId),
+    SyncReply {
+        request: HistoryExport,
+        limit: usize,
+        max_seq: crate::domain::query::SafeInteger,
+    },
+    BindAvailable(TopicKey, SessionId),
+    PromptAttempt(UpdateId, Option<(Option<OperationId>, OperationId)>),
     Topic(SessionId),
     Callback(CallbackKey),
     Claim(UserId),
     Bind(TopicKey, SessionId),
     Unbind(TopicKey, SessionId),
-    Register(CallbackKey, CallbackBinding),
+    Register(CallbackKey, CallbackBinding, Option<u64>),
     Admit(Admission),
     Pending(usize),
     Compact(u64),
@@ -52,6 +73,11 @@ pub(super) enum Output {
     Snapshot(TelegramState),
     Offset(u64),
     Binding(Option<SessionId>),
+    Preferences(TopicPreferences),
+    PreferenceReply(String),
+    HistoryReply(String),
+    Barrier(Vec<UpdateId>),
+    Attempt(Option<OperationId>),
     Topic(Option<TopicKey>),
     Callback(Option<CallbackBinding>),
     Pending(Vec<InboxRecord>),
@@ -105,6 +131,77 @@ impl TelegramStore {
             _ => unreachable!(),
         }
     }
+    pub async fn preferences(&self, topic: &TopicKey) -> Result<TopicPreferences, DomainError> {
+        match self.request(Action::Preferences(topic.clone())).await? {
+            Output::Preferences(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    /// Commit an absolute topic preference (or query) and its immutable reply
+    /// together. Replay of this admitted update returns the original reply.
+    pub(crate) async fn sync_reply(
+        &self,
+        request: HistoryExport,
+        limit: usize,
+        max_seq: crate::domain::query::SafeInteger,
+    ) -> Result<String, DomainError> {
+        match self
+            .request(Action::SyncReply {
+                request,
+                limit,
+                max_seq,
+            })
+            .await?
+        {
+            Output::HistoryReply(text) => Ok(text),
+            _ => Err(failure("wrong sync response")),
+        }
+    }
+    pub(crate) async fn bind_available(
+        &self,
+        topic: TopicKey,
+        session: SessionId,
+    ) -> Result<(), DomainError> {
+        self.request(Action::BindAvailable(topic, session))
+            .await
+            .map(|_| ())
+    }
+    pub(crate) async fn queue_barrier(&self, id: UpdateId) -> Result<Vec<UpdateId>, DomainError> {
+        match self.request(Action::QueueBarrier(id)).await? {
+            Output::Barrier(ids) => Ok(ids),
+            _ => Err(failure("wrong queue response")),
+        }
+    }
+    pub(crate) async fn prompt_attempt(
+        &self,
+        id: UpdateId,
+        change: Option<(Option<OperationId>, OperationId)>,
+    ) -> Result<Option<OperationId>, DomainError> {
+        match self.request(Action::PromptAttempt(id, change)).await? {
+            Output::Attempt(id) => Ok(id),
+            _ => Err(failure("wrong attempt response")),
+        }
+    }
+    pub async fn history_reply(&self, request: HistoryExport) -> Result<String, DomainError> {
+        match self.request(Action::HistoryReply(request)).await? {
+            Output::HistoryReply(text) => Ok(text),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn preference_reply(
+        &self,
+        topic: &TopicKey,
+        update: UpdateId,
+        preference: TopicPreference,
+    ) -> Result<String, DomainError> {
+        match self
+            .request(Action::PreferenceReply(topic.clone(), update, preference))
+            .await?
+        {
+            Output::PreferenceReply(text) => Ok(text),
+            _ => unreachable!(),
+        }
+    }
     pub async fn topic(&self, session: &SessionId) -> Result<Option<TopicKey>, DomainError> {
         match self.request(Action::Topic(session.clone())).await? {
             Output::Topic(value) => Ok(value),
@@ -136,7 +233,17 @@ impl TelegramStore {
         key: CallbackKey,
         binding: CallbackBinding,
     ) -> Result<(), DomainError> {
-        self.request(Action::Register(key, binding))
+        self.request(Action::Register(key, binding, None))
+            .await
+            .map(|_| ())
+    }
+    pub(crate) async fn register_menu_callback(
+        &self,
+        key: CallbackKey,
+        binding: CallbackBinding,
+        now: u64,
+    ) -> Result<(), DomainError> {
+        self.request(Action::Register(key, binding, Some(now)))
             .await
             .map(|_| ())
     }

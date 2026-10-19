@@ -66,7 +66,8 @@ pub(super) fn insert_view(db: &Connection, view: &SessionView) -> Result<SafeInt
         return Err(StoreError::Conflict);
     }
     let created = next_counter(db, "created_seq")?;
-    db.execute("INSERT INTO sessions(id,created_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![view.id.as_str(), created, view.revision, view.last_entry_seq, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
+    let activity = next_counter(db, "activity_seq")?;
+    db.execute("INSERT INTO sessions(id,created_seq,activity_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![view.id.as_str(), created, activity, view.revision, view.last_entry_seq, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
     Ok(created)
 }
 pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, StoreError> {
@@ -117,11 +118,24 @@ pub(super) fn apply_commit(
     if commit.next.last_entry_seq != SafeInteger::new(last)? {
         return Err(StoreError::Invalid("next entry sequence mismatch"));
     }
-    let changed = tx.execute("UPDATE sessions SET revision = ?2,last_entry_seq = ?3,status_json = ?4,hot_state_json = ?5 WHERE id = ?1 AND revision = ?6", params![commit.next.id.as_str(), commit.next.revision, commit.next.last_entry_seq, encode(&commit.next.status)?, encode(&commit.next)?, commit.expected_revision])?;
+    let activity = next_counter(tx, "activity_seq")?;
+    let changed = tx.execute("UPDATE sessions SET activity_seq=?2,revision = ?3,last_entry_seq = ?4,status_json = ?5,hot_state_json = ?6 WHERE id = ?1 AND revision = ?7", params![commit.next.id.as_str(), activity, commit.next.revision, commit.next.last_entry_seq, encode(&commit.next.status)?, encode(&commit.next)?, commit.expected_revision])?;
     if changed != 1 {
         return Err(StoreError::Conflict);
     }
-    apply_records(tx, commit, old.last_entry_seq)
+    let batch = apply_records(tx, commit, old.last_entry_seq)?;
+    if let Some(operation) = &commit.operation {
+        super::journal::finish_in_transaction(
+            tx,
+            operation,
+            &Ok(CommandReceipt::Accepted {
+                session: batch.session.clone(),
+                revision: batch.revision,
+            }),
+        )
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    }
+    Ok(batch)
 }
 pub(super) fn apply_records(
     tx: &Transaction<'_>,
@@ -202,6 +216,45 @@ pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(
     let key = super::delivery::target_key(&intent.target);
     let order = next_counter(db, "delivery_seq")?;
     db.execute("INSERT INTO deliveries(delivery_id,order_seq,revision,target_key,target_json,payload_json,status) VALUES (?1,?2,?3,?4,?5,?6,'Pending')", params![intent.id.as_str(), order, intent.revision, key, target, payload])?;
+    if let crate::domain::transition::DeliveryPayload::HistoryEntry { session, entries } =
+        &intent.payload
+    {
+        let crate::domain::transition::DeliveryTarget::Telegram {
+            bot_id,
+            chat,
+            thread,
+            ..
+        } = &intent.target
+        else {
+            return Err(StoreError::Invalid(
+                "history export requires Telegram target",
+            ));
+        };
+        for (entry, _) in entries {
+            let export = super::payload::history_delivery_id(
+                *bot_id,
+                &crate::telegram::types::TopicKey {
+                    chat: crate::telegram::types::ChatId::new(*chat)
+                        .map_err(|_| StoreError::Invalid("invalid history chat"))?,
+                    thread: if *thread == 0 {
+                        None
+                    } else {
+                        Some(
+                            crate::telegram::types::TopicId::new(*thread)
+                                .map_err(|_| StoreError::Invalid("invalid history thread"))?,
+                        )
+                    },
+                },
+                session,
+                entry,
+            )
+            .map_err(|_| StoreError::Invalid("invalid history identity"))?;
+            db.execute(
+                "INSERT INTO telegram_history_exports(export_id,delivery_id) VALUES (?1,?2)",
+                params![export.as_str(), intent.id.as_str()],
+            )?;
+        }
+    }
     if let crate::domain::transition::DeliveryPayload::Turn {
         session,
         turn,
@@ -217,6 +270,18 @@ pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(
         // The turn index avoids walking historical entries; the session+entry
         // unique index then proves that each candidate belongs to this source.
         db.execute("INSERT INTO delivery_entries(delivery_id,seq,entry_id) SELECT ?1,se.seq,e.entry_id FROM entries e INDEXED BY entries_turn_role JOIN session_entries se ON se.session=?2 AND se.entry_id=e.entry_id WHERE e.turn=?3 AND e.role='Agent' AND se.seq BETWEEN ?4 AND ?5 ORDER BY se.seq", params![intent.id.as_str(), session.as_str(), turn.as_str(), first_seq, last_seq])?;
+    }
+    if let crate::domain::transition::DeliveryPayload::Input {
+        session,
+        entry,
+        seq,
+        ..
+    } = &intent.payload
+    {
+        let inserted = db.execute("INSERT INTO delivery_entries(delivery_id,seq,entry_id) SELECT ?1,se.seq,e.entry_id FROM session_entries se JOIN entries e ON e.entry_id=se.entry_id WHERE se.session=?2 AND se.seq=?3 AND e.entry_id=?4 AND e.role='User'", params![intent.id.as_str(), session.as_str(), seq, entry.as_str()])?;
+        if inserted != 1 {
+            return Err(StoreError::Invalid("input manifest identity mismatch"));
+        }
     }
     Ok(())
 }
@@ -246,7 +311,11 @@ pub(super) fn tool(
     Ok(header)
 }
 
-pub(super) fn remove(db: &mut Connection, session: &SessionId) -> Result<CommitBatch, StoreError> {
+pub(super) fn remove(
+    db: &mut Connection,
+    session: &SessionId,
+    operation: Option<&crate::domain::operation::OperationTicket>,
+) -> Result<CommitBatch, StoreError> {
     let tx = db.transaction()?;
     let current = view(&tx, session)?;
     if current.active_turn.is_some() {
@@ -272,6 +341,16 @@ pub(super) fn remove(db: &mut Connection, session: &SessionId) -> Result<CommitB
         removed: true,
     };
     batch.validate()?;
+    if let Some(operation) = operation {
+        super::journal::finish_in_transaction(
+            &tx,
+            operation,
+            &Ok(CommandReceipt::Removed {
+                session: session.clone(),
+            }),
+        )
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    }
     tx.commit()?;
     Ok(batch)
 }
@@ -356,14 +435,34 @@ pub(super) fn list(
     cursor: Option<ListCursor>,
     requested: Option<usize>,
 ) -> Result<ListPage, StoreError> {
+    list_impl(db, cursor, requested, false)
+}
+pub(super) fn activity_list(
+    db: &Connection,
+    cursor: Option<ListCursor>,
+    requested: Option<usize>,
+) -> Result<ListPage, StoreError> {
+    list_impl(db, cursor, requested, true)
+}
+fn list_impl(
+    db: &Connection,
+    cursor: Option<ListCursor>,
+    requested: Option<usize>,
+    activity: bool,
+) -> Result<ListPage, StoreError> {
     QueryCommand::List {
         cursor: cursor.clone(),
         limit: requested,
     }
     .validate()?;
     let limit = limit(requested, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT)?;
+    let order_key = if activity {
+        "activity_seq"
+    } else {
+        "created_seq"
+    };
     let high: SafeInteger = db.query_row(
-        "SELECT value FROM store_meta WHERE key='created_seq'",
+        &format!("SELECT COALESCE(MAX({order_key}),0) FROM sessions"),
         [],
         |r| r.get(0),
     )?;
@@ -375,13 +474,14 @@ pub(super) fn list(
     let before = cursor
         .as_ref()
         .map_or(MAX_SAFE_INTEGER + 1, |c| c.before_seq.get());
-    let mut statement = db.prepare("SELECT id,harness,cwd,status_json,revision,created_seq FROM sessions WHERE created_seq <= ?1 AND created_seq < ?2 ORDER BY created_seq DESC LIMIT ?3")?;
+    let mut statement = db.prepare(&format!("SELECT id,harness,cwd,status_json,revision,created_seq,{order_key} FROM sessions WHERE {order_key} <= ?1 AND {order_key} < ?2 ORDER BY {order_key} DESC,created_seq DESC LIMIT ?3"))?;
     let mut rows = statement.query(params![max, before as i64, (limit + 1) as i64])?;
     let mut page = ListPage {
         sessions: vec![],
         next_cursor: None,
     };
     let mut more = false;
+    let mut last_order_seq = SafeInteger::default();
     while let Some(row) = rows.next()? {
         if page.sessions.len() == limit {
             more = true;
@@ -397,11 +497,12 @@ pub(super) fn list(
             revision: row.get(4)?,
             created_seq: row.get(5)?,
         };
+        last_order_seq = row.get(6)?;
         page.sessions.push(item);
         page.next_cursor = Some(ListCursor {
             version: ProtocolVersion,
             max_created_seq: max,
-            before_seq: page.sessions.last().expect("pushed item").created_seq,
+            before_seq: last_order_seq,
         });
         if page.validate().is_err() {
             page.sessions.pop();
@@ -416,7 +517,7 @@ pub(super) fn list(
         Some(ListCursor {
             version: ProtocolVersion,
             max_created_seq: max,
-            before_seq: page.sessions.last().expect("nonempty page").created_seq,
+            before_seq: last_order_seq,
         })
     } else {
         None

@@ -22,6 +22,11 @@ const TABLES: &[&str] = &[
     "delivery_entries",
     "telegram_meta",
     "telegram_bindings",
+    "telegram_topic_preferences",
+    "telegram_history_cursors",
+    "telegram_prompt_attempts",
+    "telegram_turn_receipts",
+    "telegram_history_exports",
     "telegram_inbox",
     "telegram_callbacks",
     "telegram_effects",
@@ -103,6 +108,32 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
             return Err(StoreError::Invalid("required database table is missing"));
         }
     }
+    connection
+        .prepare("SELECT bot_id,chat,thread,notifications,silent FROM telegram_topic_preferences LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported Telegram preferences schema"))?;
+    connection
+        .prepare(
+            "SELECT delivery_id,bot_id,chat,thread,session FROM telegram_turn_receipts LIMIT 0",
+        )
+        .map_err(|_| StoreError::Invalid("unsupported Telegram turn receipt schema"))?;
+    connection
+        .prepare("SELECT activity_seq FROM sessions LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported activity-order schema"))?;
+    connection
+        .prepare("SELECT value FROM store_meta WHERE key='activity_seq'")
+        .map_err(|_| StoreError::Invalid("unsupported activity sequence"))?;
+    connection
+        .prepare("SELECT export_id,delivery_id FROM telegram_history_exports LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported Telegram history export schema"))?;
+    connection
+        .prepare("SELECT bot_id,chat,thread,session,last_seq FROM telegram_history_cursors LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported Telegram history schema"))?;
+    connection
+        .prepare("SELECT action_kind FROM telegram_callbacks LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported Telegram callback schema"))?;
+    connection
+        .prepare("SELECT bot_id,update_id,operation FROM telegram_prompt_attempts LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported Telegram queue schema"))?;
     // No migration or format guessing for pre-release v3 roots lacking the
     // immutable image descriptor. Such roots must be recreated explicitly.
     connection
@@ -136,6 +167,24 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     drop(foreign_keys);
     if initializing {
         format::complete_database(root)?;
+    }
+    Ok(connection)
+}
+
+/// Readers never initialize schema, change journal mode or run maintenance.
+pub(super) fn open_reader(root: &Path) -> Result<Connection, StoreError> {
+    let connection = Connection::open_with_flags(
+        root.join("workbench.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    connection.busy_timeout(Duration::from_millis(5000))?;
+    connection.pragma_update(None, "query_only", true)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 3 {
+        return Err(StoreError::Invalid("unsupported readonly schema"));
     }
     Ok(connection)
 }

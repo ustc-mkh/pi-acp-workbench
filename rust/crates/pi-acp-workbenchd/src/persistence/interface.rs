@@ -43,7 +43,11 @@ pub trait SessionPersistence: Clone + Send + Sync + 'static {
         &self,
         change: Transition,
     ) -> impl Future<Output = Result<CommitBatch, String>> + Send;
-    fn remove(&self, id: &SessionId) -> impl Future<Output = Result<CommitBatch, String>> + Send;
+    fn remove(
+        &self,
+        id: &SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> impl Future<Output = Result<CommitBatch, String>> + Send;
 }
 impl SessionPersistence for super::SessionStore {
     async fn load(&self, id: &SessionId) -> Result<Option<SessionView>, String> {
@@ -107,9 +111,13 @@ impl SessionPersistence for super::SessionStore {
             .await
             .map_err(|error| error.to_string())
     }
-    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
+    async fn remove(
+        &self,
+        id: &SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommitBatch, String> {
         self.database()
-            .remove(id.clone())
+            .remove(id.clone(), operation)
             .await
             .map_err(|error| error.to_string())
     }

@@ -270,6 +270,14 @@ export const commandReceipt = checked(
   (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
 );
 export type CommandReceipt = Infer<typeof commandReceipt>;
+export const operationStatus = tagged('status', {
+  unknown: object({ status: literal('unknown') }),
+  uncertain: object({ status: literal('uncertain') }),
+  expired: object({ status: literal('expired') }),
+  completed: object({ status: literal('completed'), receipt: commandReceipt }),
+  failed: object({ status: literal('failed'), message: string }),
+});
+export type OperationStatus = Infer<typeof operationStatus>;
 export const commitBatch = checked(
   object({
     session: sessionId,
@@ -328,6 +336,7 @@ const listLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_LIST_
 const historyLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_HISTORY_LIMIT)));
 export const queryCommand = checked(
   tagged('method', {
+    operation: object({ method: literal('operation'), operation: operationId }),
     list: object({
       method: literal('list'),
       cursor: optional(nullable(listCursor)),
@@ -406,7 +415,16 @@ const mutationCommand = tagged('method', {
   remove: object({ method: literal('remove'), ...session }),
 });
 const detachCommand = object({ method: literal('detach'), ...session });
-const queryMethods = new Set(['list', 'inspect', 'history', 'tools', 'content', 'attach', 'image']);
+const queryMethods = new Set([
+  'operation',
+  'list',
+  'inspect',
+  'history',
+  'tools',
+  'content',
+  'attach',
+  'image',
+]);
 export const clientCommand = schema(
   (value): QueryCommand | Infer<typeof mutationCommand> | Infer<typeof detachCommand> => {
     if (!value || typeof value !== 'object' || !('method' in value)) invalid();
@@ -417,6 +435,7 @@ export const clientCommand = schema(
 );
 export type ClientCommand = Infer<typeof clientCommand>;
 export const queryResult = tagged('kind', {
+  operation: object({ kind: literal('operation'), value: operationStatus }),
   list: object({ kind: literal('list'), value: listPage }),
   view: object({ kind: literal('view'), value: sessionView }),
   history: object({ kind: literal('history'), value: historyPage }),
@@ -438,23 +457,25 @@ export const ipcMessage = checked(
   (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
 );
 export type IpcMessage = Infer<typeof ipcMessage>;
-export type CommandResult<C extends ClientCommand> = C extends { method: 'image' }
-  ? ImageAsset
-  : C extends { method: 'list' }
-    ? ListPage
-    : C extends { method: 'inspect' }
-      ? SessionView
-      : C extends { method: 'history' }
-        ? HistoryPage
-        : C extends { method: 'tools' }
-          ? ToolPage
-          : C extends { method: 'content' }
-            ? ContentSlice
-            : C extends { method: 'attach' }
-              ? Attached
-              : C extends { method: 'detach' }
-                ? SessionId
-                : CommandReceipt;
+export type CommandResult<C extends ClientCommand> = C extends { method: 'operation' }
+  ? OperationStatus
+  : C extends { method: 'image' }
+    ? ImageAsset
+    : C extends { method: 'list' }
+      ? ListPage
+      : C extends { method: 'inspect' }
+        ? SessionView
+        : C extends { method: 'history' }
+          ? HistoryPage
+          : C extends { method: 'tools' }
+            ? ToolPage
+            : C extends { method: 'content' }
+              ? ContentSlice
+              : C extends { method: 'attach' }
+                ? Attached
+                : C extends { method: 'detach' }
+                  ? SessionId
+                  : CommandReceipt;
 export function commandPool(command: ClientCommand): 0 | 1 | 2 {
   if (queryMethods.has(command.method) || command.method === 'detach') return 2;
   if (['cancel', 'cancel_fork', 'answer', 'remove'].includes(command.method)) return 1;

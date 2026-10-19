@@ -1,7 +1,7 @@
 // Five independent process samples; timings/RSS are diagnostic, spies are gates.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 const directory = resolve('.test-results', `scale-${randomUUID()}`);
@@ -32,6 +32,11 @@ const artifact = built.stdout
       item.reason === 'compiler-artifact' && item.executable && item.target.kind.includes('lib'),
   );
 assert(artifact?.executable);
+// Cargo may relink its artifact while developers run other test commands.
+// Benchmark one immutable executable for all samples, not a changing target.
+const executable = join(directory, 'scale-tests');
+copyFileSync(artifact.executable, executable);
+chmodSync(executable, 0o700);
 const cases = [
   'sqlite_100k_indexed_pagination_no_duplicates_or_missing_rows',
   'scale_10k_summaries_keyset_pages_do_not_read_history_or_hot_state',
@@ -53,7 +58,7 @@ for (const name of cases) {
     const metric = join(directory, `${name}-${i}.metrics`);
     const result = spawnSync(
       '/usr/bin/time',
-      ['-f', '%e %M', '-o', metric, artifact.executable, name, '--nocapture', '--test-threads=1'],
+      ['-f', '%e %M', '-o', metric, executable, name, '--nocapture', '--test-threads=1'],
       { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
     );
     writeFileSync(join(directory, `${name}-${i}.log`), result.stdout + result.stderr);

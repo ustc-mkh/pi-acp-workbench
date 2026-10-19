@@ -70,8 +70,12 @@ impl SessionPersistence for Store {
         }
         self.history.commit(change).await
     }
-    async fn remove(&self, id: &SessionId) -> Result<CommitBatch, String> {
-        SessionPersistence::remove(&self.history, id).await
+    async fn remove(
+        &self,
+        id: &SessionId,
+        operation: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<CommitBatch, String> {
+        SessionPersistence::remove(&self.history, id, operation).await
     }
 }
 #[tokio::test]
@@ -142,15 +146,13 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
         "workbench-registry-create-{}",
         uuid::Uuid::new_v4()
     ));
-    let mut fixture = None;
-    let app = WorkbenchApp::start(config_at(&root, Default::default()), |history, mailbox| {
-        let store = Store::new(history);
-        fixture = Some(store.clone());
-        Runtime::start(store, mailbox)
-    })
-    .unwrap();
-    let store = fixture.unwrap();
-    store.gate_save.store(true, Ordering::Release);
+    let app = app_at(&root);
+    let pause = app.database().pause_executor().await.unwrap();
+    let before = app
+        .database()
+        .metrics()
+        .get("operation")
+        .map_or(0, |m| m.accepted_requests);
     let operation = crate::domain::OperationId::generate();
     let command = DomainCommand::CreateSession {
         harness: Harness::Pi,
@@ -162,11 +164,21 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
         let command = command.clone();
         tokio::spawn(async move { app.command_durable(operation, command).await })
     };
-    tokio::time::timeout(Duration::from_secs(3), store.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    // Wait for the host-owned lookup to be accepted by storage, not for the
+    // retired registry create facade. The observer cannot revoke that work.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while app
+            .database()
+            .metrics()
+            .get("operation")
+            .map_or(0, |m| m.accepted_requests)
+            <= before
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     app.runtime.abort_root();
     assert!(app.runtime.wait_closed().await.is_err());
     let mut shutdown = Box::pin(app.shutdown_checked());
@@ -177,8 +189,7 @@ async fn registry_root_abort_with_accepted_host_create_settles_io_and_journal_be
     );
     drop(shutdown);
     assert!(StorageLease::lock(&root).is_err());
-    store.gate_save.store(false, Ordering::Release);
-    store.release.add_permits(1);
+    drop(pause);
     let receipt = tokio::time::timeout(Duration::from_secs(3), caller)
         .await
         .unwrap()

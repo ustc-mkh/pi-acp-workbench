@@ -95,6 +95,17 @@ impl OutboxStore {
             .await
             .map_err(failure)
     }
+    pub(crate) async fn ack_sent(
+        &self,
+        id: &DeliveryId,
+        bot: i64,
+        topic: &crate::telegram::types::TopicKey,
+    ) -> Result<(), DomainError> {
+        self.database
+            .ack_sent_delivery(id.clone(), Some((bot, topic.clone())))
+            .await
+            .map_err(failure)
+    }
     pub async fn ack(&self, id: &DeliveryId) -> Result<(), DomainError> {
         self.database
             .ack_delivery(id.clone())

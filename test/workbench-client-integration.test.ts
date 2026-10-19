@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { operationRecords } from '../scripts/lib/workbench-sqlite-fixture.mjs';
 import { WorkbenchClient } from '../src/workbench-client';
 import { WorkbenchSession } from '../src/workbench-session';
-import { imageRef, type SessionId } from '../src/workbench-protocol';
+import { WorkbenchController } from '../src/workbench-controller';
+import { exportMarkdown } from '../src/workbench-export';
+import { imageRef, operationId, type SessionId } from '../src/workbench-protocol';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -39,8 +41,8 @@ async function host(forkGate = false) {
     limits: { pending_interactions: 32 },
   };
   await writeFile(file, JSON.stringify(config));
-  async function stop() {
-    clients.splice(0).forEach((client) => client.dispose());
+  async function stop(disposeClients = true) {
+    if (disposeClients) clients.splice(0).forEach((client) => client.dispose());
     if (!process || !done) return;
     const child = process,
       exited = done;
@@ -97,6 +99,7 @@ async function host(forkGate = false) {
     data,
     client,
     stop,
+    disconnect: () => stop(false),
     start,
     journal: () => operationRecords(data),
     trace: () => readFile(trace, 'utf8'),
@@ -130,6 +133,60 @@ async function turn(client: WorkbenchClient, session: SessionId, prompt: string)
     unobserve();
   }
 }
+
+it('controller reattaches after a real daemon restart without replay, provider load or journal writes', async () => {
+  const runtime = await host();
+  const client = runtime.client();
+  const created = await create(client, runtime.root);
+  await turn(client, created.id, 'streamed-message');
+  const controller = new WorkbenchController(runtime.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => runtime.root,
+    authorize: async () => {
+      throw new Error('Recovery cannot authorize a mutation');
+    },
+  });
+  cleanups.push(async () => controller.dispose());
+  await controller.receive({ type: 'select', session: created.id });
+  expect(controller.snapshot.view?.status).toBe('ready');
+  const revision = controller.snapshot.view!.view!.revision;
+  const journal = await runtime.journal();
+  await runtime.disconnect();
+  await expect.poll(() => controller.snapshot.view?.status).toBe('disconnected');
+  // Graceful host shutdown may emit session/cancel while physically joining the worker.
+  // Recovery itself must add no provider traffic.
+  const trace = await runtime.trace();
+  await runtime.start();
+  await expect.poll(() => controller.snapshot.view?.status, { timeout: 10000 }).toBe('ready');
+  expect(controller.snapshot.selected).toBe(created.id);
+  expect(controller.snapshot.view?.view?.revision).toBe(revision);
+  expect(
+    controller.snapshot.view?.entries.some(
+      (entry) => 'Inline' in entry.text && entry.text.Inline.text === 'streamed-message',
+    ),
+  ).toBe(true);
+  expect(await runtime.journal()).toEqual(journal);
+  expect(await runtime.trace()).toBe(trace);
+}, 20000);
+
+it('exports a cold committed transcript after restart without provider load or operation writes', async () => {
+  const runtime = await host();
+  const client = runtime.client();
+  const created = await create(client, runtime.root);
+  await turn(client, created.id, 'streamed-message');
+  await runtime.stop();
+  await runtime.start();
+  const before = await runtime.journal();
+  const trace = await runtime.trace();
+  let markdown = '';
+  for await (const chunk of exportMarkdown(runtime.client(), created.id)) markdown += chunk;
+  expect(markdown).toContain('streamed-message');
+  expect(markdown).toContain('世界');
+  expect(markdown.indexOf('## 1 · User')).toBeLessThan(markdown.indexOf('## 2 · Thought'));
+  expect(await runtime.journal()).toEqual(before);
+  expect(await runtime.trace()).toBe(trace);
+});
 
 it('real v3 host streams bounded text/tool/form DTOs into the authoritative TypeScript session view', async () => {
   const runtime = await host(),
@@ -264,4 +321,34 @@ it('real one-worker native fork returns typed independent origin and stable repl
   const trace = await runtime.trace();
   expect(await client.call(command, { operation: fork.operation })).toEqual(receipt);
   expect(await runtime.trace()).toBe(trace);
+}, 20000);
+
+it('operation lookup survives host restart without command replay, journal writes or provider startup', async () => {
+  const runtime = await host();
+  let client = runtime.client();
+  const operation = operationId.parse('reload-create');
+  const receipt = await client.call(
+    { method: 'create', harness: 'Pi', cwd: runtime.root },
+    { operation },
+  );
+  const before = await runtime.journal();
+  expect(await client.call({ method: 'operation', operation })).toEqual({
+    status: 'completed',
+    receipt,
+  });
+  expect(
+    await client.call({ method: 'operation', operation: operationId.parse('unknown') }),
+  ).toEqual({ status: 'unknown' });
+  expect(await runtime.journal()).toEqual(before);
+  await expect(runtime.trace()).rejects.toMatchObject({ code: 'ENOENT' });
+  await runtime.stop();
+  await runtime.start();
+  client = runtime.client();
+  expect(await client.call({ method: 'operation', operation })).toEqual({
+    status: 'completed',
+    receipt,
+  });
+  expect(await runtime.journal()).toEqual(before);
+  expect((await client.call({ method: 'list' })).sessions).toHaveLength(1);
+  await expect(runtime.trace()).rejects.toMatchObject({ code: 'ENOENT' });
 }, 20000);

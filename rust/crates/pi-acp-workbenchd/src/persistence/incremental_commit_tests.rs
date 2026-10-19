@@ -30,6 +30,7 @@ fn append(previous: &SessionView) -> Transition {
     next.last_entry_seq = next.last_entry_seq.next().unwrap();
     let turn = TurnId::generate();
     Transition {
+        operation: None,
         expected_revision: previous.revision,
         deliveries: vec![DeliveryIntent {
             id: DeliveryId::new(format!("turn-{turn}")).unwrap(),
@@ -325,7 +326,11 @@ async fn incremental_frozen_turn_intents_survive_window_source_removal_and_resta
         store.commit(change).await.unwrap();
     }
     assert_eq!(window.pending(0, 10).await.unwrap().len(), 1);
-    store.database().remove(next.id.clone()).await.unwrap();
+    store
+        .database()
+        .remove(next.id.clone(), None)
+        .await
+        .unwrap();
     store.payloads.shutdown().await;
     let store = SessionStore::fixture(root.data());
     let window = outbox::OutboxStore::new(store.database().clone(), 1);
