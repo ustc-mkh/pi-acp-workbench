@@ -10,7 +10,7 @@
 - 事实以 `turn:<workbench session>:<turn>` 去重，在 prompt 接受的同一个 SQLite 事务中创建。只有当前轮实际返回的用量才填充 token 字段；没有数据是 NULL，**不是 0**。摘要保留最后一次已报告用量，当前轮事实与之分开。
 - 输入、输出、缓存读取、缓存写入分别记录；缺失 usage、缺失缓存、未定价数量分别展示。费用是已知部分的 USD 估算，不是订阅额度或账单；不使用累计 token 猜上下文占用。
 - ACP prompt response 是来源 `acp_prompt_usage`。Pi 只读取本次 prompt 期间追加到原生文件的字节（最多 4 MiB/500 个 assistant records），不是全量 native history；截断/替换/不完整时不补造零。不读取/回填 load 或 fork 的继承历史。
-- 独立标题调用以 `title:<session>:<index>` 记账；开始前就记录缺失用量事实，超时/中断仍显示 missing，不自动重试。独立 turn（包括未来完整接通的自主轮次）使用相同 turn key 规则；**这不代表 S3 的自主轮次生命周期已经完成**。
+- 独立标题调用以 `title:<session>:<index>` 记账；开始前就记录缺失用量事实，超时/中断仍显示 missing，不自动重试。独立 turn（包括未来完整接通的自主轮次）使用相同 turn key 规则；**这不代表自主轮次生命周期已经完整接通**。
 - `usage_facts` 使用日期、模型、会话索引，SQL 聚合后只返回一页，不把全量 records 放入 SessionView。会话用稳定编号/当前名称显示；单会话删除后保留其已发生的费用事实和编号，名称失效时显示 Archived session，不回删账目或 native 文件。
 
 ### 模型与价格
@@ -49,4 +49,4 @@ Telegram setup 在受信任 Extension Host 中选择明确工作目录，收集 
 - `app_management_tests.rs`：真实子进程/隔离 root，价格、cache、missing、冷恢复、分页、标题与下一 prompt 并行、manual-wins、fork/load 不重复计数、receipt/外部设置 settlement 丢失。
 - `test/workbench-management.test.ts`、`test/pi-model-settings.test.ts`、controller tests：实际 UI 动作、配置生成与注册命令、正文复制预算；`scripts/workbench-browser-smoke.mjs`：真实 Chromium→controller→IPC→synthetic ACP 的集成。
 
-这些自动化不是在线 provider、真实 Extension Host/剪贴板/Bot 的证明。统一验收结果和未跑环境见 [执行记录](workbench-parity-execution.md)。
+这些自动化不是在线provider、真实Extension Host/剪贴板/Bot的证明；剩余任务与验收要求统一见[下一版重构计划](workbench-next-rewrite-plan.md)。

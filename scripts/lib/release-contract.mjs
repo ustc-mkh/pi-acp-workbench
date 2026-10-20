@@ -16,13 +16,8 @@ export const releaseDocuments = Object.freeze([
   'workbench-storage.md',
   'turn-diff.md',
   'workbench-management.md',
-  'feature-parity.md',
-  'workbench-parity-execution.md',
-  'workbench-parity-and-simplification-plan.md',
-  // Historical evidence linked by the current plan, explicitly labelled historical.
-  'workbench-follow-up-plan.md',
-  'workbench-follow-up-plan-implementation-checkpoint.md',
-  'workbench-follow-up-plan-t04-checkpoint.md',
+  'persistence-recovery.md',
+  'workbench-next-rewrite-plan.md',
 ]);
 export async function verifyReleaseSources() {
   const root = 'rust/crates/pi-acp-workbenchd/src/';

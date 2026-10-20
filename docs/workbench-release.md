@@ -18,7 +18,7 @@ Default output:
 
 - `service-dist/pi-acp-workbenchd`, `manifest.json` (one control binary).
 - `service-artifacts/pi-acp-services-VERSION-TARGET.tar.gz` and `.sha256`.
-- Archive content: binary/manifest (including matching IPC/storage/root policy contracts), `SHA256SUMS`, licenses/notices, the fixed public documentation allowlist including Diff/management/cutover and linked evidence (with package-local links checked), and only `examples/pi-acp-workbenchd.service` + `examples/workbench.json`.
+- Archive content: binary/manifest (including matching IPC/storage/root policy contracts), `SHA256SUMS`, licenses/notices, the fixed public documentation allowlist including current usage/contracts, the next rewrite plan and cutover checklist (with package-local links checked), and only `examples/pi-acp-workbenchd.service` + `examples/workbench.json`.
 
 `build:services` supports GNU and musl x86_64 target flags. Building or testing the GNU artifact locally does **not** establish musl/cross-target acceptance; verify each actual target separately. Provider workers remain separately installed external executables. Rustls uses bundled roots; Node is needed for Node-based provider adapters, not for native maintenance itself.
 
@@ -32,7 +32,7 @@ sha256sum -c SHA256SUMS
 ./pi-acp-workbenchd --help
 ```
 
-Checksums detect corruption, not publisher authenticity. Source provenance and local package hashes are recorded in the verification ledger; independently verify the release source/signer for an externally obtained archive.
+Checksums detect corruption, not publisher authenticity. Verify source provenance against the artifact manifest and independently verify the release source/signer for an externally obtained archive; a local package hash alone is not publisher authentication.
 
 ## Configure the only control process
 
@@ -50,7 +50,7 @@ For a manual foreground check after configuration:
 
 VS Code must use the matching current-source VSIX and [IPC v3](workbench-ipc.md) socket `<storage.root>/workbench.sock`. The extension does not start the daemon. See [VS Code](workbench-vscode.md) for trust/canonical-workspace checks and UI limits.
 
-Before any authorized switch, follow the [candidate release/cutover checklist](workbench-cutover.md), including unresolved parity/live/SLO blockers and whole-combination rollback. Passing local artifact smoke does not approve deployment.
+Before any authorized switch, follow the [release/cutover checklist](workbench-cutover.md), including unresolved parity/live/SLO blockers and whole-combination rollback. Passing local artifact smoke does not approve deployment.
 
 ## Stop, inspect and back up before replacement
 

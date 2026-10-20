@@ -21,7 +21,6 @@ import {
   type WorkbenchUiState,
 } from './workbench-ui';
 
-const turnDiffCache = new Map<string, import('./workbench-protocol').TurnDiff>();
 export interface WorkbenchPorts {
   post(message: WorkbenchUiMessage): void;
   trusted(): boolean;
@@ -42,6 +41,7 @@ export interface WorkbenchPorts {
 }
 /** UI owns only selection/display/workflow observers. The Rust actor owns all domain state. */
 export class WorkbenchController {
+  private turnDiffCache = new Map<string, import('./workbench-protocol').TurnDiff>();
   private selected?: WorkbenchSession;
   private selection = 0;
   private closed = false;
@@ -488,16 +488,18 @@ export class WorkbenchController {
               turn: message.turn,
               offset: message.offset,
             });
+            if (this.selected !== selected || this.closed) break;
             const key = `${selected.id}:${message.turn}`;
-            const previous = turnDiffCache.get(key);
+            const previous = this.turnDiffCache.get(key);
             const start = message.offset ?? 0;
             if (start > 0 && (!previous || previous.files.length !== start))
               throw new Error('Diff page is out of order');
             const merged =
               start > 0 && previous ? { ...diff, files: [...previous.files, ...diff.files] } : diff;
-            turnDiffCache.set(key, merged);
-            while (turnDiffCache.size > 16)
-              turnDiffCache.delete(turnDiffCache.keys().next().value!);
+            if (merged.files.length > 5000) throw new Error('Diff exceeds file budget');
+            this.turnDiffCache.set(key, merged);
+            while (this.turnDiffCache.size > 16)
+              this.turnDiffCache.delete(this.turnDiffCache.keys().next().value!);
             if (this.selected === selected && !this.closed)
               this.ports.post({
                 type: 'turn_diff',
@@ -519,7 +521,7 @@ export class WorkbenchController {
         }
         case 'read_turn_diff_content': {
           const selected = this.selected;
-          const diff = turnDiffCache.get(`${message.session}:${message.turn}`);
+          const diff = this.turnDiffCache.get(`${message.session}:${message.turn}`);
           if (
             !selected ||
             selected.id !== message.session ||
@@ -780,6 +782,7 @@ export class WorkbenchController {
     try {
       const previous = this.selected;
       this.selected = undefined;
+      this.turnDiffCache.clear();
       this.emit();
       if (previous) await previous.stop();
       if (this.closed || generation !== this.selection) return;
@@ -853,6 +856,12 @@ export class WorkbenchController {
     // Bound both retained receipt display and concurrent long-running workflows.
     if (this.operations.filter((row) => row.status === 'pending').length >= 16)
       throw new Error('Too many UI workflows are active');
+    const unresolved = this.operations.filter((row) =>
+      ['pending', 'uncertain'].includes(row.status),
+    );
+    const control = ['cancel', 'answer', 'remove', 'cancel_fork'].includes(command.method);
+    if (unresolved.length >= (control ? 64 : 48))
+      throw new Error('Resolve uncertain operation receipts before starting more workflows');
     const operation = operationId.parse(randomUUID());
     const row: UiOperation = {
       operation,
@@ -860,9 +869,13 @@ export class WorkbenchController {
       ...('session' in command ? { session: command.session } : {}),
       status: 'pending',
     };
+    const terminal = this.operations.filter(
+      (row) => !['pending', 'uncertain'].includes(row.status),
+    );
+    const terminalSlots = Math.min(47, 63 - unresolved.length);
     this.operations = [
-      ...this.operations.filter((row) => row.status === 'pending'),
-      ...this.operations.filter((row) => row.status !== 'pending').slice(-47),
+      ...unresolved,
+      ...(terminalSlots ? terminal.slice(-terminalSlots) : []),
       row,
     ];
     this.emit();
@@ -899,6 +912,7 @@ export class WorkbenchController {
     this.unobserve();
     void this.selected?.stop();
     this.selected = undefined;
+    this.turnDiffCache.clear();
     // Drop observers, not host operations. No implicit cancel/remove/retry.
     this.client.dispose();
   }

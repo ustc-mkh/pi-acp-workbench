@@ -259,4 +259,22 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   expect(api.window.showWarningMessage).toHaveBeenCalledTimes(1);
   expect(provider.controller.snapshot.error).toContain('dirty editor buffers');
   expect(peer.requests.some((r) => r.command.method === 'undo_turn')).toBe(false);
+  // A selected cold session may be outside the current list page. Its attached
+  // authoritative view, not the unrelated list window, scopes confirmation.
+  host.documents = [];
+  const listing = provider.controller.receive({ type: 'refresh_names' });
+  await expect.poll(() => peer.requests.length).toBe(10);
+  peer.query(peer.requests[9], 'list', { sessions: [], next_cursor: null });
+  await listing;
+  const outsidePage = provider.controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(11);
+  peer.query(peer.requests[10], 'validate_undo', { files: [] });
+  await outsidePage;
+  expect(api.window.showWarningMessage).toHaveBeenCalledTimes(2);
+  expect(provider.controller.snapshot.error).toBeUndefined();
+  expect(peer.requests.some((r) => r.command.method === 'undo_turn')).toBe(false);
 });

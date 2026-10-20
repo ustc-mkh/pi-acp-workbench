@@ -172,12 +172,7 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
       confirmUndo: async (_session, turn) => {
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
         const view = this.controller.snapshot.view;
-        if (
-          !view ||
-          !view.view ||
-          view.view.active_turn ||
-          view.view.cwd !== this.controller.snapshot.sessions.find((s) => s.id === _session)?.cwd
-        )
+        if (!view || !view.view || view.view.active_turn || view.view.id !== _session)
           throw new Error('Session changed or task is active');
         const cwd = view.view.cwd;
         if (await hasDirtyDocuments(cwd))

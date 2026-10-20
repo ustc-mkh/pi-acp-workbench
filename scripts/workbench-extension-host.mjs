@@ -12,6 +12,18 @@ export function extensionHostBlocker(platform, env) {
   if (!env.DISPLAY && !env.WAYLAND_DISPLAY)
     return 'No display available: run under an isolated xvfb-run display or explicitly provided graphical test environment';
 }
+export function extensionHostConfig(root) {
+  return {
+    workers: {
+      pi: { command: process.execPath, args: [resolve('test/contract-agent.mjs')], env: {} },
+      codex: null,
+      claude: null,
+    },
+    storage: { root: join(root, 'data') },
+    sessions: { mailbox: 128, max_workers: 1 },
+    limits: { pending_interactions: 32 },
+  };
+}
 export async function run() {
   const blocker = extensionHostBlocker(process.platform, process.env);
   if (blocker) {
@@ -55,19 +67,7 @@ export async function run() {
     const workspace = join(root, 'workspace'),
       socket = join(root, 'data/workbench.sock');
     const config = join(root, 'config.json');
-    await writeFile(
-      config,
-      JSON.stringify({
-        workers: {
-          pi: { command: process.execPath, args: [resolve('test/contract-agent.mjs')], env: {} },
-          codex: null,
-          claude: null,
-        },
-        storage: { root: join(root, 'data') },
-        sessions: { mailbox: 128, max_workers: 1 },
-      }),
-      { mode: 0o600 },
-    );
+    await writeFile(config, JSON.stringify(extensionHostConfig(root)), { mode: 0o600 });
     const env = {
       ...process.env,
       HOME: join(root, 'home'),

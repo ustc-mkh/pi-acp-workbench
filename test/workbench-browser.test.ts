@@ -79,6 +79,70 @@ it('keeps a restored selection visible outside the current session page without 
   expect(select.options).toHaveLength(2);
 });
 
+it('bounds review caches and ignores duplicate diff pages across session changes', async () => {
+  const b = await browser();
+  b.state.view = {
+    ...b.state.view!,
+    entries: Array.from({ length: 18 }, (_, i) => ({
+      seq: i + 1,
+      id: entryId.parse(`entry-${i}`),
+      turn: `turn-${i}` as never,
+      role: 'User',
+      text: { Inline: { text: 'review' } },
+      message: null,
+      image: null,
+    })),
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('article').length).toBe(18);
+  const diff = {
+    status: 'complete',
+    files: [],
+    warnings: [],
+    added: 0,
+    removed: 0,
+    next_offset: null,
+  };
+  for (let i = 0; i < 18; i++)
+    b.post({ type: 'turn_diff', session: 'session', turn: `turn-${i}`, diff });
+  await expect
+    .poll(() => b.document.body.textContent?.match(/No captured workspace changes/g)?.length)
+    .toBe(16);
+  const file = {
+    path: 'only-once.txt',
+    status: 'added',
+    before: null,
+    after: 'saved',
+    old_mode: null,
+    new_mode: 33188,
+    added: 1,
+    removed: 0,
+    omitted: null,
+  };
+  b.post({
+    type: 'turn_diff',
+    session: 'session',
+    turn: 'turn-17',
+    diff: { ...diff, next_offset: 1, files: [file] },
+  });
+  const page = {
+    type: 'turn_diff',
+    session: 'session',
+    turn: 'turn-17',
+    offset: 1,
+    diff: { ...diff, files: [{ ...file, path: 'second.txt' }] },
+  };
+  b.post(page);
+  b.post(page);
+  await expect
+    .poll(() => [...b.document.querySelectorAll('h3')].map((n) => n.textContent))
+    .toEqual(['added · only-once.txt', 'added · second.txt']);
+  b.state.selected = 'other' as never;
+  b.state.view!.view!.id = 'other' as never;
+  b.update(2);
+  await expect.poll(() => b.document.querySelectorAll('h3').length).toBe(0);
+});
+
 it('offers full Markdown export as a distinct user action for the selected session', async () => {
   const b = await browser();
   b.update();

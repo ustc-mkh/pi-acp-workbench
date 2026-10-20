@@ -27,7 +27,7 @@
 
 快照不是文件系统事务或修改归属证明。同轮手工或其他会话修改也可能计入净变化。工作目录外、ignored 文件及任务留下的后台程序不在采集保证范围内。宿主门控不锁住外部编辑器、Git、其他程序或残留后台进程；检查与发布之间仍可能有外部写入，使用前必须审阅，失败/崩溃后检查实际工作区。
 
-当前对符号链接采取保守 partial/拒绝策略，不读取其目标，也不提供旧 main 的链接文本对比。自主轮次的端到端输入/历史生命周期属于 S3 的独立缺口，不能以此模块已存在声称已恢复。
+当前对符号链接采取保守 partial/拒绝策略，不读取其目标，也不提供旧 main 的链接文本对比。自主轮次的端到端生命周期与链接文本对比统一在[下一版计划](workbench-next-rewrite-plan.md)中补齐，不能以审阅模块已存在声称这些能力已恢复。
 
 ## 实现与证据
 
@@ -37,4 +37,4 @@
 - `scripts/workbench-browser-smoke.mjs`：真实 Chromium 和生产 controller/IPC 链路；编辑器通过 port 捕获调用，不等于真实 Extension Host。
 - `test/workbench-extension.test.ts`：mock VS Code API 验证原生多文件对比参数、只读 URI 与内容隔离；真实编辑器窗口/脏 buffer 竞态仍需 Extension Host 人工验收。
 
-阶段执行结果与未测项见 [执行记录](workbench-parity-execution.md)。
+剩余Diff/撤回差异及真实环境验收统一见[下一版重构计划](workbench-next-rewrite-plan.md)。

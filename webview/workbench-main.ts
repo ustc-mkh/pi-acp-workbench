@@ -860,6 +860,8 @@ function render() {
     for (const image of images.values()) URL.revokeObjectURL(image.url);
     images.clear();
     contentPages.clear();
+    turnDiffs.clear();
+    diffContents.clear();
     imageBytes = 0;
     imageErrors.clear();
     pendingImages.clear();
@@ -1049,12 +1051,15 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       ) {
         const key = `${message.session}:${message.turn}`,
           previous = turnDiffs.get(key);
-        turnDiffs.set(
-          key,
+        if (message.offset && (!previous || previous.files.length !== message.offset)) return;
+        const files =
           previous && message.offset
-            ? { ...message.diff, files: [...previous.files, ...message.diff.files] }
-            : message.diff,
-        );
+            ? [...previous.files, ...message.diff.files]
+            : message.diff.files;
+        if (files.length > 5000) return;
+        turnDiffs.delete(key);
+        turnDiffs.set(key, { ...message.diff, files });
+        while (turnDiffs.size > 16) turnDiffs.delete(turnDiffs.keys().next().value!);
         schedule();
       }
     } else if (
@@ -1076,10 +1081,11 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         const key = `${m.session}:${m.turn}:${m.file}:${m.after}`,
           previous = diffContents.get(key);
         if (m.offset > 0 && (!previous || previous.nextOffset !== m.offset)) return;
-        diffContents.set(key, {
-          text: m.offset && previous ? previous.text + m.bytes : m.bytes,
-          nextOffset: m.next_offset,
-        });
+        const text = m.offset && previous ? previous.text + m.bytes : m.bytes;
+        if (text.length > 128 * 1024) return;
+        diffContents.delete(key);
+        diffContents.set(key, { text, nextOffset: m.next_offset });
+        while (diffContents.size > 8) diffContents.delete(diffContents.keys().next().value!);
         schedule();
       }
     } else if (raw.type === 'turn_diff_error') {
@@ -1210,6 +1216,8 @@ window.addEventListener('unload', () => {
   for (const image of images.values()) URL.revokeObjectURL(image.url);
   images.clear();
   contentPages.clear();
+  turnDiffs.clear();
+  diffContents.clear();
   pendingImages.clear();
 });
 send({ type: 'ready' });

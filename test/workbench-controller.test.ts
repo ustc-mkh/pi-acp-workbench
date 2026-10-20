@@ -490,6 +490,89 @@ it('reload recovers handles by ID without sending their original mutations', asy
   expect(peer.requests.map((r) => r.command.method)).toEqual(['operation', 'list']);
 });
 
+it.each([47, 63, 64])(
+  'retains all %i uncertain handles rather than silently evicting reload recovery identities',
+  async (count) => {
+    const peer = await workbenchPeer();
+    peers.push(peer);
+    const saved = Array.from({ length: count }, (_, i) => ({
+      operation: `uncertain-${i}`,
+      method: 'prompt',
+      session: 'session',
+      status: 'uncertain',
+    }));
+    let persisted: unknown;
+    const controller = new WorkbenchController(peer.client(), {
+      post: () => {},
+      trusted: () => true,
+      workspace: () => '/workspace',
+      authorize: async () => {},
+      loadOperations: () => saved,
+      saveOperations: async (rows) => {
+        persisted = rows;
+      },
+    });
+    peer.cleanups.push(async () => controller.dispose());
+    const action = controller.receive({
+      type: 'create',
+      command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+    });
+    if (count < 48) {
+      await expect.poll(() => peer.requests.length).toBe(1);
+      peer.send(peer.requests[0].socket, {
+        type: 'error',
+        id: peer.requests[0].id,
+        code: 'provider_not_configured',
+        message: 'Provider unavailable',
+      });
+    }
+    await action;
+    expect(controller.snapshot.operations.slice(0, count)).toMatchObject(saved);
+    expect(controller.snapshot.operations.length).toBeLessThanOrEqual(64);
+    if (count >= 48) {
+      expect(peer.requests).toEqual([]);
+      expect(controller.snapshot.error).toContain('uncertain operation receipts');
+    } else expect(persisted).toEqual(controller.snapshot.operations);
+  },
+);
+
+it('keeps reserved receipt capacity for control commands when ordinary workflows are blocked', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const saved = Array.from({ length: 63 }, (_, i) => ({
+    operation: `uncertain-${i}`,
+    method: 'prompt',
+    session: 'session',
+    status: 'uncertain',
+  }));
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+    loadOperations: () => saved,
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const selecting = controller.receive({ type: 'select', session: 'session' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.query(peer.requests[0], 'attached', attached());
+  await selecting;
+  const cancel = controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'cancel', session: 'session' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  peer.reply(peer.requests[1], { Accepted: { session: 'session', revision: 6 } });
+  await cancel;
+  expect(controller.snapshot.operations.slice(0, 63)).toMatchObject(saved);
+  expect(controller.snapshot.operations).toHaveLength(64);
+  expect(controller.snapshot.operations[63]).toMatchObject({
+    method: 'cancel',
+    status: 'completed',
+  });
+});
+
 it('does not dispatch if durable local handle persistence fails', async () => {
   const peer = await workbenchPeer();
   peers.push(peer);
