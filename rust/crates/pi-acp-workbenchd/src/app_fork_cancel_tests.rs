@@ -90,7 +90,7 @@ async fn queued_fork_cancellation_bypasses_a_saturated_lane_without_touching_its
         serde_json::to_vec(&inspect(&app, &source).await).unwrap()
     );
     assert_eq!(
-        app.core.adapters.lock().await.len(),
+        app.core.coordinator.adapters.lock().await.len(),
         1,
         "queued cancellation must not stop another source workflow"
     );
@@ -106,7 +106,7 @@ async fn queued_fork_cancellation_bypasses_a_saturated_lane_without_touching_its
         serde_json::to_vec(&replay).unwrap(),
         serde_json::to_vec(&cancelled).unwrap()
     );
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -166,7 +166,7 @@ async fn active_fork_cancellation_is_exactly_scoped_flushes_joins_and_preserves_
         ticket.wait().await,
         Err(DomainError::NativeForkUncertain)
     ));
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),
         serde_json::to_vec(&inspect(&app, &source).await).unwrap()
@@ -308,7 +308,8 @@ async fn shutdown_of_a_cancelled_queued_fork_seals_the_original_operation_before
         loop {
             if app
                 .core
-                .fork_controls
+                .coordinator
+                .forks
                 .get(&source, &operation)
                 .is_ok_and(|control| control.stop.is_cancelled())
                 || cancel.is_finished()
@@ -330,7 +331,7 @@ async fn shutdown_of_a_cancelled_queued_fork_seals_the_original_operation_before
         app.command_durable(operation, command).await,
         Err(DomainError::ForkCancelled)
     ));
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

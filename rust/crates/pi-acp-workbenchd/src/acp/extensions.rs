@@ -25,6 +25,10 @@ pub struct PiWorkbenchCapabilities {
     pub title: bool,
     #[serde(default)]
     pub models: bool,
+    /// Explicit true means background wakeups may exist; false is affirmative
+    /// evidence that the provider may be suspended when otherwise idle.
+    #[serde(default)]
+    pub autonomous_runs: Option<bool>,
 }
 pub(super) fn deserialize_metadata<'de, D: serde::Deserializer<'de>>(
     deserializer: D,

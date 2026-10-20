@@ -132,6 +132,7 @@
     "workbench:storage": "node scripts/workbench-storage.mjs",
     "test:workbench:storage": "npm run build:workbenchd && vitest run test/workbench-storage.test.ts",
     "test:workbench:process-loss": "npm run build:workbenchd && node scripts/workbench-process-loss.mjs",
+    "test:workbench:capacity": "npm run build:workbenchd && node scripts/workbench-idle-worker-repro.mjs",
     "test:workbench:startup": "npm run build:workbenchd && node scripts/workbench-startup.mjs",
     "test:workbench:scale": "node scripts/workbench-scale.mjs",
     "test:workbench:mixed": "node scripts/workbench-mixed.mjs",

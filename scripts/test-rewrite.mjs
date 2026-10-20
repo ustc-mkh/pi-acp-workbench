@@ -10,6 +10,7 @@ const checks = [
   ['cargo', ['test', '--manifest-path', 'rust/Cargo.toml', '--workspace']],
   ['npm', ['run', 'test:contract:workbench']],
   ['npm', ['run', 'test:contract:workbench:telegram']],
+  ['npm', ['run', 'test:workbench:capacity']],
   ['npm', ['run', 'test:workbench:process-loss']],
   ['npm', ['run', 'test:browser']],
   ['npm', ['run', 'test:full']],

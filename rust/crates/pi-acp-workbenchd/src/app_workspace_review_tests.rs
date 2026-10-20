@@ -180,7 +180,7 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
         _ => panic!("cold diff"),
     };
     assert_eq!(persisted.files.len(), 3);
-    assert!(restarted.core.adapters.lock().await.is_empty());
+    assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
     let operation = crate::domain::OperationId::generate();
     let receipt = restarted
         .command_durable(
@@ -415,7 +415,7 @@ async fn shell_changes_are_captured_after_cancel_and_provider_crash() {
                 .unwrap(),
             QueryResult::ValidateUndo(_)
         ));
-        assert!(restarted.core.adapters.lock().await.is_empty());
+        assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
         assert_eq!(fs::read_to_string(&file).unwrap(), "after\n");
         restarted.shutdown_checked().await.unwrap();
         fs::remove_dir_all(root).unwrap();

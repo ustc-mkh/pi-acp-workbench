@@ -89,7 +89,7 @@ async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_co
         );
     }
     assert!(
-        app.core.adapters.lock().await.is_empty(),
+        app.core.coordinator.adapters.lock().await.is_empty(),
         "cold metadata inspect must not launch workers"
     );
     app.shutdown_checked().await.unwrap();
@@ -373,7 +373,7 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
             "cold inspect/load must not boot {name}"
         );
     }
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     for (id, name, expected) in saved {
         prompt(&app, &id, "worker-profile").await;
         wait_finished(&mut events).await;

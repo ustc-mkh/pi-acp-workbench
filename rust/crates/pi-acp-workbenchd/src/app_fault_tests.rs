@@ -14,7 +14,14 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
         let mut events = app.subscribe();
         prompt(&app, &id, "permission").await;
         let interaction = wait_interaction(&mut events).await;
-        let old = app.core.adapters.lock().await.remove(&id).unwrap();
+        let old = app
+            .core
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .remove(&id)
+            .unwrap();
         old.stop().await;
         let answer = InteractionAnswer {
             interaction: interaction.id,
@@ -30,19 +37,24 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             let task_stop = stop.clone();
             let task = app
                 .core
-                .adapter_tasks
+                .coordinator
+                .tasks
                 .spawn(async move {
                     task_stop.cancelled().await;
                     drop(rx);
                 })
                 .unwrap();
-            app.core.adapters.lock().await.insert(
+            app.core.coordinator.adapters.lock().await.insert(
                 id.clone(),
                 super::super::AdapterHandle {
                     _workspace_lease: None,
                     tx,
                     stop,
                     worker_completion: task.clone(),
+                    resumable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    background_safe: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pins: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    last_used: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     task,
                 },
             );
@@ -57,7 +69,7 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             .await
             .unwrap();
         assert!(matches!(accepted, CommandReceipt::Accepted { .. }));
-        assert!(!app.core.adapters.lock().await.contains_key(&id));
+        assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
         let failed = inspect(&app, &id).await;
         assert!(matches!(failed.status, SessionStatus::Failed(_)));
         assert!(failed.active_turn.is_none());

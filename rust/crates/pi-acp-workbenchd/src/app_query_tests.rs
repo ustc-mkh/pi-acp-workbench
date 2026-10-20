@@ -32,7 +32,7 @@ async fn inspect_and_list_are_bounded_cold_queries_without_broadcasting_echoes()
         Err(broadcast::error::TryRecvError::Empty)
     ));
     assert_eq!(inspect_view(&app, &session).await.revision.get(), 0);
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }

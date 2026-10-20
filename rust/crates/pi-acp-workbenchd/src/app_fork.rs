@@ -23,7 +23,7 @@ impl CommandCore {
         let Some(snapshot) = inspected.view() else {
             return Err(DomainError::NotFound(session.clone()));
         };
-        if !self.supervisor.is_configured(&snapshot.harness) {
+        if !self.coordinator.supervisor.is_configured(&snapshot.harness) {
             return Err(DomainError::ProviderNotConfigured);
         }
         if !matches!(snapshot.harness, crate::domain::Harness::Pi) {

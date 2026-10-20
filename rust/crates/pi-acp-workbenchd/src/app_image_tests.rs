@@ -59,7 +59,7 @@ async fn agent_images_are_archived_before_metadata_events_and_survive_restart_an
         serde_json::to_vec(&inspect(&app, &id).await.transcript).unwrap(),
         snapshot
     );
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     assert_eq!(
         app.delivery_payloads().image(&image).await.unwrap().bytes(),
         bytes
@@ -104,7 +104,7 @@ async fn image_query_is_read_only_validates_full_reference_and_corruption_and_ne
         app.image(asset.image()).await,
         Err(DomainError::Persistence(_))
     ));
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     assert_eq!(app.journal_snapshot().await.unwrap(), journal);
     app.close_admission();
     assert!(matches!(

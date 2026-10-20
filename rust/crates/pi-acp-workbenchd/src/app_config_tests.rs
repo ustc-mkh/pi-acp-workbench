@@ -159,7 +159,7 @@ async fn successful_remote_setting_with_failed_local_commit_retains_intent_and_r
         Err(DomainError::Persistence(_))
     ));
     assert_eq!(tokio::fs::read_to_string(&native).await.unwrap(), "other");
-    assert!(!app.core.adapters.lock().await.contains_key(&id));
+    assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
     let pending = inspect(&app, &id).await;
     assert_eq!(pending.config, original.config);
     assert_eq!(

@@ -42,6 +42,10 @@ struct AdapterHandle {
     stop: CancellationToken,
     task: OwnedTask,
     worker_completion: OwnedTask,
+    resumable: Arc<std::sync::atomic::AtomicBool>,
+    background_safe: Arc<std::sync::atomic::AtomicBool>,
+    pins: Arc<std::sync::atomic::AtomicUsize>,
+    last_used: Arc<std::sync::atomic::AtomicU64>,
 }
 impl AdapterHandle {
     async fn cancel_and_stop(self) -> Result<(), DomainError> {
@@ -80,23 +84,46 @@ pub struct WorkbenchApp {
     ingress: IngressHandle,
 }
 
-// Runtime handles and protocol/lifecycle metadata only. SessionView remains
-// exclusively inside SessionActor; ingress never owns a session projection.
+struct SessionCoordinator {
+    adapters: Arc<Mutex<HashMap<SessionId, AdapterHandle>>>,
+    admission: Mutex<()>,
+    stop: CancellationToken,
+    forks: Arc<fork_control::ForkControls>,
+    reviews: Arc<crate::workspace_reviews::Reviews>,
+    supervisor: Arc<WorkerSupervisor>,
+    tasks: TaskScope,
+    clock: std::sync::atomic::AtomicU64,
+}
+impl SessionCoordinator {
+    fn new(database: Database, supervisor: Arc<WorkerSupervisor>) -> Self {
+        Self {
+            adapters: Arc::new(Mutex::new(HashMap::new())),
+            admission: Mutex::new(()),
+            stop: CancellationToken::new(),
+            forks: Arc::new(fork_control::ForkControls::default()),
+            reviews: crate::workspace_reviews::Reviews::new(database),
+            supervisor,
+            tasks: TaskScope::default(),
+            clock: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+    fn touch(&self, handle: &AdapterHandle) {
+        handle.last_used.store(
+            self.clock.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+}
 struct CommandCore {
     runtime: Runtime,
     events: broadcast::Sender<CommitBatch>,
-    supervisor: Arc<WorkerSupervisor>,
-    adapters: Arc<Mutex<HashMap<SessionId, AdapterHandle>>>,
-    adapter_tasks: TaskScope,
-    adapters_stop: CancellationToken,
+    coordinator: SessionCoordinator,
     closed: Arc<AtomicBool>,
     storage_lease: Arc<Mutex<Option<StorageLease>>>,
     database: Database,
     journal: JournalStore,
     history: SessionStore,
     pending_interactions: usize,
-    fork_controls: Arc<fork_control::ForkControls>,
-    reviews: Arc<crate::workspace_reviews::Reviews>,
     workspace_gate: Arc<WorkspaceGate>,
 }
 impl WorkbenchApp {
@@ -122,18 +149,13 @@ impl WorkbenchApp {
         let core = Arc::new(CommandCore {
             events: runtime.events.clone(),
             runtime,
-            supervisor: Arc::new(supervisor),
-            adapters: Arc::new(Mutex::new(HashMap::new())),
-            adapter_tasks: TaskScope::default(),
-            adapters_stop: CancellationToken::new(),
+            coordinator: SessionCoordinator::new(database.clone(), Arc::new(supervisor)),
             closed: Arc::new(AtomicBool::new(false)),
             storage_lease: Arc::new(Mutex::new(Some(lease))),
             journal: JournalStore::new(database.clone()),
-            reviews: crate::workspace_reviews::Reviews::new(database.clone()),
             database,
             history,
             pending_interactions: config.limits.pending_interactions,
-            fork_controls: Arc::new(fork_control::ForkControls::default()),
             workspace_gate: Arc::new(WorkspaceGate::default()),
         });
         let ingress = IngressHandle::start(core.clone());
@@ -152,7 +174,7 @@ impl WorkbenchApp {
         wait.await.map_err(|_| ingress::interrupted())?
     }
     pub(crate) fn harness_configured(&self, harness: &crate::domain::Harness) -> bool {
-        self.core.supervisor.is_configured(harness)
+        self.core.coordinator.supervisor.is_configured(harness)
     }
     pub async fn list(
         &self,
@@ -358,23 +380,13 @@ impl CommandCore {
             if let Some(result) = self.journal.lookup(&operation, &command).await? {
                 return result;
             }
-            if !self.supervisor.is_configured(harness) {
+            if !self.coordinator.supervisor.is_configured(harness) {
                 return Err(DomainError::ProviderNotConfigured);
             }
             let receipt = self
                 .journal
                 .create_local(operation, harness.clone(), cwd.clone())
                 .await?;
-            if let CommandReceipt::Created { summary } = &receipt {
-                // Warming an owner is advisory, not the creation commit point.
-                // A failed/closed registry cannot turn committed acceptance into
-                // a failed receipt or cause creation to run again on reload.
-                let _ = self
-                    .runtime
-                    .registry
-                    .command(DomainCommand::LoadSession(summary.id.clone()))
-                    .await;
-            }
             return Ok(receipt);
         }
         // Only paths with no possible remote effect may omit durable prepare.
@@ -383,7 +395,7 @@ impl CommandCore {
         let local = match &command {
             DomainCommand::Manage { action, .. } => !action.external(),
             DomainCommand::SetModel { session, .. } | DomainCommand::SetMode { session, .. } => {
-                !self.adapters.lock().await.contains_key(session)
+                !self.coordinator.adapters.lock().await.contains_key(session)
             }
             _ => false,
         };
@@ -398,6 +410,24 @@ impl CommandCore {
             Admission::Execute(ticket) => ticket,
             Admission::Replay(result) => return result,
         };
+        let owner_session = match &command {
+            DomainCommand::Prompt { session, .. }
+            | DomainCommand::Cancel { session }
+            | DomainCommand::RequestCancel { session }
+            | DomainCommand::AnswerInteraction { session, .. }
+            | DomainCommand::Fork { session, .. }
+            | DomainCommand::SetModel { session, .. }
+            | DomainCommand::SetMode { session, .. }
+            | DomainCommand::UndoTurn { session, .. } => Some(session.clone()),
+            DomainCommand::Manage { session, action } if action.external() => Some(session.clone()),
+            _ => None,
+        };
+        if let Some(session) = owner_session {
+            self.runtime
+                .registry
+                .command(DomainCommand::LoadSession(session))
+                .await?;
+        }
         if let DomainCommand::Manage { action, .. } = &command {
             let external = action.external();
             let result = self
@@ -435,7 +465,7 @@ impl CommandCore {
             return result;
         }
         let result = if let DomainCommand::Fork { session, request } = &command {
-            match self.fork_controls.get(session, &operation) {
+            match self.coordinator.forks.get(session, &operation) {
                 Ok(control) => self.fork_session(session, request, &control.stop).await,
                 Err(error) => Err(error),
             }
@@ -459,7 +489,7 @@ impl CommandCore {
         }
         match &command {
             DomainCommand::CreateSession { harness, .. }
-                if !self.supervisor.is_configured(harness) =>
+                if !self.coordinator.supervisor.is_configured(harness) =>
             {
                 return Err(DomainError::ProviderNotConfigured)
             }
@@ -472,7 +502,7 @@ impl CommandCore {
                 let Some(snapshot) = events.view() else {
                     return Err(DomainError::NotFound(session.clone()));
                 };
-                if !self.supervisor.is_configured(&snapshot.harness) {
+                if !self.coordinator.supervisor.is_configured(&snapshot.harness) {
                     return Err(DomainError::ProviderNotConfigured);
                 }
             }
@@ -492,7 +522,7 @@ impl CommandCore {
             })
             .await?;
             self.stop_session_adapter(session).await?;
-            self.reviews.finish(session, None).await?;
+            self.coordinator.reviews.finish(session, None).await?;
             // The final terminal event and delivery intent are committed only
             // after the provider process group has stopped and been joined.
             return self
@@ -626,6 +656,7 @@ impl CommandCore {
                 _ => unreachable!(),
             }
             let sender = self
+                .coordinator
                 .adapters
                 .lock()
                 .await
@@ -676,7 +707,7 @@ impl CommandCore {
                 }
                 .await;
                 if applied.is_err() {
-                    let adapter = self.adapters.lock().await.remove(session);
+                    let adapter = self.coordinator.adapters.lock().await.remove(session);
                     if let Some(adapter) = adapter {
                         adapter.stop().await;
                     }
@@ -707,17 +738,6 @@ impl CommandCore {
         } else {
             None
         };
-        let terminal = match &command {
-            DomainCommand::Agent {
-                session,
-                event: AgentEvent::Finished { turn },
-            } => Some((session.clone(), Some(turn.clone()))),
-            DomainCommand::Agent {
-                session,
-                event: AgentEvent::Crashed { .. },
-            } => Some((session.clone(), None)),
-            _ => None,
-        };
         // Side effects use the accepted command and its committed view, not a
         // second event/reducer projection. The owner already published its batch.
         let prompt = match &command {
@@ -739,7 +759,10 @@ impl CommandCore {
             before_snapshot,
             result.view().and_then(|view| view.active_turn.clone()),
         ) {
-            self.reviews.start(session, turn, before, lease).await;
+            self.coordinator
+                .reviews
+                .start(session, turn, before, lease)
+                .await;
         }
         if let Some((session, text)) = prompt {
             if let Some(turn) = result.view().and_then(|view| view.active_turn.clone()) {
@@ -755,14 +778,12 @@ impl CommandCore {
                 }
             }
         }
-        if let Some((session, turn)) = terminal {
-            self.reviews.finish(&session, turn.as_ref()).await?;
-        }
         if let Some(session) = answer_session {
             // Forward only the canonical validated response, and only after the
             // owner has committed it. Raw text answers are not ACP wire values.
             if let crate::actor::OwnerReply::Answered { answer, .. } = &result {
                 let sender = self
+                    .coordinator
                     .adapters
                     .lock()
                     .await
@@ -790,15 +811,61 @@ impl CommandCore {
         }
         result.receipt()
     }
+    async fn reclaim_idle_worker(&self, exclude: &SessionId) -> Result<(), DomainError> {
+        let mut adapters = self.coordinator.adapters.lock().await;
+        let mut candidates: Vec<_> = adapters
+            .keys()
+            .filter(|id| *id != exclude)
+            .cloned()
+            .collect();
+        candidates.sort_by_key(|id| {
+            adapters
+                .get(id)
+                .map(|handle| handle.last_used.load(Ordering::Relaxed))
+                .unwrap_or(u64::MAX)
+        });
+        for id in candidates {
+            let Some(handle) = adapters.get(&id) else {
+                continue;
+            };
+            if handle.pins.load(Ordering::Acquire) != 0
+                || !handle.resumable.load(Ordering::Acquire)
+                || !handle.background_safe.load(Ordering::Acquire)
+                || handle.stop.is_cancelled()
+                || handle.task.is_finished()
+                || handle.tx.is_closed()
+            {
+                continue;
+            }
+            let view = match self.database.view(id.clone()).await {
+                Ok(view) => view,
+                Err(_) => continue,
+            };
+            if view.active_turn.is_some()
+                || !view.pending_interactions.is_empty()
+                || view.configuration_intent.is_some()
+            {
+                continue;
+            }
+            let handle = adapters.remove(&id).expect("candidate is still registered");
+            // Fence map ownership before requesting physical termination. The
+            // admission lock prevents a concurrent session start from replacing it.
+            handle.stop.cancel();
+            handle.stop().await;
+            return Ok(());
+        }
+        Err(DomainError::WorkerCapacity)
+    }
     async fn stop_session_adapter(&self, session: &SessionId) -> Result<(), DomainError> {
-        let adapter = self.adapters.lock().await.remove(session);
+        let _worker_admission = self.coordinator.admission.lock().await;
+        let adapter = self.coordinator.adapters.lock().await.remove(session);
         if let Some(adapter) = adapter {
             // Native cancel errors do not undo a successful physical stop.
             // cancel_and_stop always joins the process before returning.
             let _ = adapter.cancel_and_stop().await;
         } else if self.closed.load(Ordering::Acquire) {
             // Root shutdown may temporarily own this adapter outside the map.
-            self.supervisor.shutdown().await?;
+            self.coordinator.supervisor.shutdown().await?;
         }
         Ok(())
     }
@@ -810,7 +877,7 @@ impl CommandCore {
         session: &SessionId,
         error: &DomainError,
     ) -> Result<(), DomainError> {
-        let adapter = self.adapters.lock().await.remove(session);
+        let adapter = self.coordinator.adapters.lock().await.remove(session);
         if let Some(adapter) = &adapter {
             adapter.stop.cancel();
         }
@@ -826,7 +893,7 @@ impl CommandCore {
         if let Some(adapter) = adapter {
             adapter.stop().await;
         } else if self.closed.load(Ordering::Acquire) {
-            self.supervisor.shutdown().await?;
+            self.coordinator.supervisor.shutdown().await?;
         }
         let terminal = if self.closed.load(Ordering::Acquire) {
             DomainCommand::Cancel {
@@ -840,7 +907,7 @@ impl CommandCore {
                 },
             }
         };
-        self.reviews.finish(session, None).await?;
+        self.coordinator.reviews.finish(session, None).await?;
         self.runtime.registry.command(terminal).await?;
         Ok(())
     }
@@ -899,8 +966,9 @@ impl CommandCore {
         ),
         DomainError,
     > {
+        let _worker_admission = self.coordinator.admission.lock().await;
         let obsolete = {
-            let mut adapters = self.adapters.lock().await;
+            let mut adapters = self.coordinator.adapters.lock().await;
             if self.closed.load(Ordering::Acquire) {
                 return Err(ingress::stopping());
             }
@@ -934,23 +1002,32 @@ impl CommandCore {
             ),
             _ => return Err(DomainError::NotFound(session)),
         };
-        let sender = self
-            .adapters
-            .lock()
-            .await
-            .get(&session)
-            .map(|adapter| adapter.tx.clone());
-        if let Some(sender) = sender {
-            return Ok((sender, config));
+        {
+            let adapters = self.coordinator.adapters.lock().await;
+            if let Some(adapter) = adapters.get(&session) {
+                self.coordinator.touch(adapter);
+                return Ok((adapter.tx.clone(), config));
+            }
         }
         let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
             .map_err(DomainError::Persistence)?;
         let workspace_lease = self.workspace_gate.enter(root, false)?;
-        let (events, updates) = mpsc::channel(32);
-        let worker = self
+        let (mut events, mut updates) = mpsc::channel(32);
+        let mut worker = self
+            .coordinator
             .supervisor
             .spawn_for(session.clone(), &harness, events)
-            .await?;
+            .await;
+        if matches!(worker, Err(DomainError::WorkerCapacity)) {
+            self.reclaim_idle_worker(&session).await?;
+            (events, updates) = mpsc::channel(32);
+            worker = self
+                .coordinator
+                .supervisor
+                .spawn_for(session.clone(), &harness, events)
+                .await;
+        }
+        let worker = worker?;
         let epoch = worker.epoch;
         if let Err(error) = self
             .runtime
@@ -962,15 +1039,18 @@ impl CommandCore {
             return Err(error);
         }
         let (tx, commands) = mpsc::channel(8);
-        let stop = self.adapters_stop.child_token();
-        let mut adapters = self.adapters.lock().await;
+        let stop = self.coordinator.stop.child_token();
+        let mut adapters = self.coordinator.adapters.lock().await;
         if self.closed.load(Ordering::Acquire) {
             drop(adapters);
             worker.stop().await;
             return Err(ingress::stopping());
         }
+        let resumable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let background_safe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker_completion = worker.completion();
-        let task = self.adapter_tasks.spawn(adapter::run(
+        let task = self.coordinator.tasks.spawn(adapter::run(
             worker,
             AdapterContext {
                 session: session.clone(),
@@ -980,9 +1060,17 @@ impl CommandCore {
                 registry: self.runtime.registry.clone(),
                 lifecycle: stop.clone(),
                 pending_interactions: self.pending_interactions,
-                reviews: Some(self.reviews.clone()),
+                reviews: Some(self.coordinator.reviews.clone()),
                 database: Some(self.database.clone()),
                 recovery,
+                worker_capabilities: Some((resumable.clone(), background_safe.clone())),
+                pins: Some(pins.clone()),
+                session_harness: match harness {
+                    crate::domain::Harness::Pi => "Pi",
+                    crate::domain::Harness::Codex => "Codex",
+                    crate::domain::Harness::Claude => "Claude",
+                }
+                .into(),
             },
             commands,
             updates,
@@ -996,13 +1084,20 @@ impl CommandCore {
                 stop,
                 task,
                 worker_completion,
+                resumable,
+                background_safe,
+                pins,
+                last_used: Arc::new(std::sync::atomic::AtomicU64::new(
+                    self.coordinator.clock.fetch_add(1, Ordering::Relaxed),
+                )),
             },
         );
         Ok((tx, config))
     }
     async fn stop_adapters(&self) {
         self.closed.store(true, Ordering::Release);
-        let adapters = std::mem::take(&mut *self.adapters.lock().await);
+        let _worker_admission = self.coordinator.admission.lock().await;
+        let adapters = std::mem::take(&mut *self.coordinator.adapters.lock().await);
         // Graceful ACP cancellation is bounded and concurrent, never N timeouts.
         let mut stopping = tokio::task::JoinSet::new();
         for (_, adapter) in adapters {
@@ -1017,10 +1112,10 @@ impl CommandCore {
     }
     async fn emergency_shutdown(&self, executions: &ingress::IngressTasks) {
         self.closed.store(true, Ordering::Release);
-        self.adapters_stop.cancel();
+        self.coordinator.stop.cancel();
         self.stop_adapters().await;
-        let _ = self.supervisor.shutdown().await;
-        self.adapter_tasks.close_and_join().await;
+        let _ = self.coordinator.supervisor.shutdown().await;
+        self.coordinator.tasks.close_and_join().await;
         self.runtime.workers_stopped();
         let mut tasks = executions.lock().await;
         let _ = ingress::drain_commands(self, &mut tasks).await;

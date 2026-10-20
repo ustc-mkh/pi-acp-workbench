@@ -138,7 +138,7 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
         }
         let (event, notice) = recovered_notice.expect("durable recovery notice");
         app.delivery_store().ack(&event.id).await.unwrap();
-        assert!(app.core.adapters.lock().await.is_empty());
+        assert!(app.core.coordinator.adapters.lock().await.is_empty());
         app.shutdown().await;
         let app = app_at_with_env(&root, env);
         assert!(!app
@@ -289,7 +289,7 @@ async fn cancellation_prepare_failure_keeps_live_turn_and_final_failure_keeps_fe
         if final_commit {
             assert!(matches!(pending.status, SessionStatus::Cancelling));
             assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-            assert!(!app.core.adapters.lock().await.contains_key(&id));
+            assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
             assert!(matches!(
                 app.command(DomainCommand::Prompt {
                     session: id.clone(),

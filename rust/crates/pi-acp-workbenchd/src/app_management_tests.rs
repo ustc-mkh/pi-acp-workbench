@@ -169,7 +169,7 @@ async fn management_prices_stats_missing_usage_filters_and_restart_are_cold_and_
         panic!("list")
     };
     assert_eq!(list.sessions[0].title.as_deref(), Some("手动名称"));
-    assert!(restarted.core.adapters.lock().await.is_empty());
+    assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
     restarted
         .command(DomainCommand::LoadSession(session.clone()))
         .await
@@ -324,7 +324,7 @@ async fn provider_context_settlement_loss_is_uncertain_and_never_reissued() {
         Err(crate::domain::error::DomainError::OperationInterrupted)
     ));
     assert_eq!(fs::read(&trace).unwrap(), before);
-    assert!(restarted.core.adapters.lock().await.is_empty());
+    assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
     restarted.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -352,7 +352,7 @@ async fn statistics_keyset_pages_keep_filtered_totals_without_hydrating_records(
     }
     assert_eq!(keys.len(), 205);
     assert!(keys.windows(2).all(|w| w[0] < w[1]));
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }

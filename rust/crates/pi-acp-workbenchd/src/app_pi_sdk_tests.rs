@@ -195,7 +195,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
     );
     assert_eq!(tokio::fs::read(&fixture.source).await.unwrap(), original);
     assert!(
-        app.core.adapters.lock().await.is_empty(),
+        app.core.coordinator.adapters.lock().await.is_empty(),
         "source peer/capacity is joined before adoption"
     );
     let (grouped_entry, grouped_end) = grouped_target.unwrap();
@@ -229,7 +229,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
     );
     assert_ne!(grouped_branch.provider_session, state.provider_session);
     assert_eq!(tokio::fs::read(&fixture.source).await.unwrap(), original);
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.command(DomainCommand::RemoveSession(source.clone()))
         .await
         .unwrap();
@@ -241,7 +241,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
         serde_json::to_vec(&receipt).unwrap()
     );
     assert!(
-        app.core.adapters.lock().await.is_empty(),
+        app.core.coordinator.adapters.lock().await.is_empty(),
         "replay must not spawn a peer or repeat native fork"
     );
     app.command(DomainCommand::LoadSession(branch.id.clone()))

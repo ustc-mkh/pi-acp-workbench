@@ -292,7 +292,7 @@ async fn root_abort_during_adapter_drain_joins_protocol_owners_outside_map_and_s
     };
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if app.core.adapters.lock().await.is_empty() {
+            if app.core.coordinator.adapters.lock().await.is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -335,7 +335,7 @@ async fn owned_task_panic_is_fatal_and_cleanup_retains_lease_until_host_shutdown
             .unwrap()
             .is_err()
     );
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     assert!(app.command(DomainCommand::ListSessions).await.is_err());
     assert!(crate::persistence::format::StorageLease::lock(&root).is_err());
     assert!(app.shutdown_checked().await.is_err());

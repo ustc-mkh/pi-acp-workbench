@@ -168,7 +168,7 @@ async fn streamed_message_fork_keeps_immutable_deltas_and_matches_the_complete_n
         serde_json::to_vec(&before.transcript).unwrap()
     );
     assert!(
-        app.core.adapters.lock().await.is_empty(),
+        app.core.coordinator.adapters.lock().await.is_empty(),
         "cold inspect must not spawn a peer"
     );
     let receipt = app
@@ -222,7 +222,7 @@ async fn streamed_message_fork_keeps_immutable_deltas_and_matches_the_complete_n
         );
     }
     assert_eq!(tokio::fs::read(&native_path).await.unwrap(), native_before);
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -266,7 +266,7 @@ async fn native_fork_is_actor_projected_durable_independent_and_replays_after_so
     );
     assert_eq!(tokio::fs::read(&native_path).await.unwrap(), native_before);
     assert!(
-        app.core.adapters.lock().await.is_empty(),
+        app.core.coordinator.adapters.lock().await.is_empty(),
         "idle source capacity must be released"
     );
     let mut events = app.subscribe();
@@ -354,7 +354,7 @@ async fn fork_busy_and_unknown_targets_do_not_touch_a_live_turn_or_start_replace
         })
         .await
         .is_err());
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

@@ -129,9 +129,24 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 
 **出口：**真实宿主定向契约复现从红转绿；commit 前/后丢连接和重启得到同一终态；no-op 零 session batch；超限输入有确定错误且无副作用。此阶段不顺便重写全部 actor。
 
-### P1 [ ] 会话生命周期收敛与容量周转
+### P1 [~] 生命周期与容量周转（核心回归已修复；完整收敛待续）
 
-**依赖：**P0 receipt 合同。先引入 Coordinator 生命周期消息/handle 所有权，再迁移既有 prompt/cancel/config/fork/review；每迁移一条就删除对应 `CommandCore` 分支或独立 map，不保留双所有者。
+**依赖：**P0 receipt 合同。
+
+**验收分层：**P1 实现阶段保留快速定向回归（单 worker A→B→A、基本 cancel/shutdown、epoch 拒绝旧事件）；其余重型矩阵集中到 P6 最终验收统一运行，不在 P1 每次实现时重复跑。P6 增补并发回收/不超额不双启动、授权与不确定 fork/pin 保护、旧 epoch/generation 迟到事件、discovery/config/fork/title barrier 公平性，以及大量会话 owner/task 平台化与限定时长 RSS soak。只有这些最终证据通过后，才将 P1 验收状态改为完成；若测试暴露实现缺陷，需回到 P1 修复，不能用“延期验收”豁免正确性。
+
+**P1 当前实现与验收结果：**
+
+- 冷创建不预热 actor；session-scoped 命令按需加载，外部管理动作先加载持久 owner。
+- worker admission 串行化；容量满时只回收可恢复、无活动轮次/交互/配置意图、后台安全且无标题 pin 的 idle worker，并 join 后重试。Pi 的 `autonomousRuns` 能力用于保守判定后台安全；未知能力不驱逐 Pi 会话。
+- ingress 保持显式生命周期 lane；可中断的发现/配置/原生 fork 工作被 Cancel/Remove 抢占，执行任务在 lane 排空时 join。
+- `SessionCoordinator` 统一持有 adapter handles、worker supervisor/admission、fork controls、review manager、stop token 和 adapter task scope；`CommandCore` 保留命令编排与持久化，不再各自持有这些生命周期资源。idle 回收按最近使用序号选择 LRU 候选；输入/发现会触碰活动 adapter。
+- actual host 单 worker A→B→A turnover 纳入 `test:rewrite`，断言同一 native session 恢复、每次输入仅提交一次、会话保留。日志：`.test-results/p1-capacity.log`、`.test-results/p1-coordinator-final-gate.log`。
+- 统一门禁通过，Rust 宿主 345 passed、2 ignored。未运行真实在线 provider/Bot 或 soak，未部署、未操作真实数据。
+
+- 统一门禁通过，Rust 宿主 345 passed、2 ignored。P1 重型矩阵计划在 P6 最终验收统一执行；未运行真实在线 provider/Bot 或 soak，未部署、未操作真实数据。
+
+**待最终验收（P6）：**并发回收压力、授权/不确定 fork 下回收保护、旧 epoch/generation 晚到隔离、长期大量会话 owner/task 平台化及 RSS soak；provider barrier 公平性专门注入矩阵。
 
 1. 明确各状态、pin、completion fence、控制抢占点；在既有 actor 中收拢句柄和 turn/workflow 生命周期。协议状态仍留 adapter。
 2. 加压力 LRU、有限 TTL、join 后交槽；一槽 A完成→B完成→A原生继续，不删会话、不回放 prompt。无安全 idle 候选时快速给出容量原因，不把新输入无限挂起。

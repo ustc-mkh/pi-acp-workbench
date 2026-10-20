@@ -118,6 +118,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         _meta: {
           'pi-workbench': {
             version: 1,
+            autonomousRuns:
+              process.env.WORKBENCH_CONTRACT_AUTONOMOUS === '1'
+                ? true
+                : process.env.WORKBENCH_CONTRACT_AUTONOMOUS === 'unknown'
+                  ? undefined
+                  : false,
             inspect: true,
             nativeFork: true,
             title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,

@@ -133,16 +133,19 @@ async fn worker_capacity_failure_is_task_state_not_a_failed_prompt_receipt() {
     let operation = OperationId::generate();
     let command = DomainCommand::Prompt {
         session: second.clone(),
-        prompt: Prompt::new("accepted before capacity failure").unwrap(),
+        prompt: Prompt::new("accepted before idle worker reclamation").unwrap(),
     };
+    let finished = events.resubscribe();
+    let mut finished = finished;
     let receipt = app
         .command_durable(operation.clone(), command.clone())
         .await
         .unwrap();
     assert!(matches!(receipt, CommandReceipt::Accepted { .. }));
-    let view = inspect_view(&app, &second).await;
-    assert!(
-        matches!(view.status, SessionStatus::Failed(ref reason) if reason.contains("worker capacity exhausted"))
+    wait_finished(&mut finished).await;
+    assert_eq!(
+        history_text(&app, &second).await.last().unwrap(),
+        "echo: accepted before idle worker reclamation"
     );
     assert!(matches!(
         app.core.journal.status(operation.clone()).await.unwrap(),

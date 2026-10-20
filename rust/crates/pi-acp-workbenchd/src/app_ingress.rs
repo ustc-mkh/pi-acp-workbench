@@ -54,6 +54,28 @@ pub(super) enum Request {
     },
 }
 impl Request {
+    fn interruptible(&self) -> bool {
+        matches!(self, Self::Discover { .. })
+            || matches!(
+                self,
+                Self::Command {
+                    command: DomainCommand::SetModel { .. }
+                        | DomainCommand::SetMode { .. }
+                        | DomainCommand::Fork { .. },
+                    ..
+                }
+            )
+            || matches!(self, Self::Command { command: DomainCommand::Manage { action, .. }, .. } if action.external())
+    }
+    fn is_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::Command {
+                command: DomainCommand::Cancel { .. } | DomainCommand::RemoveSession(_),
+                ..
+            }
+        )
+    }
     fn pool(&self) -> usize {
         match self {
             #[cfg(test)]
@@ -133,6 +155,7 @@ impl Request {
 struct Envelope {
     request: Request,
     permit: OwnedSemaphorePermit,
+    stop: CancellationToken,
     fork_lease: Option<super::fork_control::ForkLease>,
 }
 struct CloseOnExit(Arc<AtomicBool>);
@@ -182,7 +205,7 @@ impl IngressHandle {
         let executions = Arc::new(Mutex::new(JoinSet::new()));
         let owned = executions.clone();
         let close_on_exit = CloseOnExit(closed.clone());
-        let fork_controls = core.fork_controls.clone();
+        let fork_controls = core.coordinator.forks.clone();
         let task = tokio::spawn(async move {
             let _closed = close_on_exit;
             let result = run(core, rx, run_stop, owned).await;
@@ -232,6 +255,7 @@ impl IngressHandle {
             .try_send(Envelope {
                 request,
                 permit,
+                stop: CancellationToken::new(),
                 fork_lease,
             })
             .map_err(|error| match error {
@@ -296,6 +320,7 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
     let Envelope {
         request,
         permit,
+        stop,
         fork_lease,
     } = envelope;
     let lane = request.lane();
@@ -303,16 +328,28 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
         #[cfg(test)]
         Request::Test { job, .. } => job.await,
         Request::Discover { session, reply } => {
-            let _ = reply.send(core.discover(session).await);
+            let result = tokio::select! {
+                biased;
+                _ = stop.cancelled() => Err(DomainError::OperationInterrupted),
+                result = core.discover(session) => result,
+            };
+            let _ = reply.send(result);
         }
         Request::Command {
             operation,
             command,
             reply,
         } => {
-            let result = match operation {
-                Some(operation) => core.execute_journaled(operation, command).await,
-                None => core.execute(command).await,
+            let stop_wait = stop.clone();
+            let result = tokio::select! {
+                biased;
+                _ = stop_wait.cancelled() => Err(DomainError::OperationInterrupted),
+                result = async {
+                    match operation {
+                        Some(operation) => core.execute_journaled(operation, command).await,
+                        None => core.execute(command).await,
+                    }
+                } => result,
             };
             let _ = reply.send(result);
         }
@@ -507,6 +544,7 @@ async fn run(
     // cancels protocol waits and joins this same set before releasing storage.
     let mut tasks = executions.lock().await;
     let mut lanes: HashMap<SessionId, VecDeque<Envelope>> = HashMap::new();
+    let mut running: HashMap<SessionId, (CancellationToken, bool)> = HashMap::new();
     let mut failure = None;
     loop {
         tokio::select! {
@@ -515,14 +553,18 @@ async fn run(
             result = core.runtime.wait_closed() => { failure = Some(result.err().unwrap_or_else(|| DomainError::Worker("registry exited unexpectedly".into()))); break; },
             completed = tasks.join_next(), if !tasks.is_empty() => match completed {
                 Some(Ok(Some(lane))) => {
+                    running.remove(&lane);
                     let next = lanes.get_mut(&lane).and_then(VecDeque::pop_front);
-                    if let Some(envelope) = next { tasks.spawn(execute(core.clone(), envelope)); }
+                    if let Some(envelope) = next {
+                        running.insert(lane, (envelope.stop.clone(), envelope.request.interruptible()));
+                        tasks.spawn(execute(core.clone(), envelope));
+                    }
                     else { lanes.remove(&lane); }
                 }
                 Some(Err(_)) => { failure = Some(DomainError::Worker("owned ingress task panicked".into())); break; }
                 _ => {}
             },
-            _ = core.fork_controls.changed.notified() => {
+            _ = core.coordinator.forks.changed.notified() => {
                 // Cancellation targets a workflow, not a session state mutation.
                 // Cancelled queued forks only seal journal failures; they may
                 // bypass a slow earlier mutation without releasing its lane.
@@ -544,9 +586,17 @@ async fn run(
                     tasks.spawn(async move { execute(core, envelope).await; None });
                     continue;
                 }
+                if envelope.request.is_stop() {
+                    if let Some(lane) = envelope.request.lane() {
+                        if let Some((stop, true)) = running.get(&lane) { stop.cancel(); }
+                    }
+                }
                 if let Some(lane) = envelope.request.lane() {
                     if let Some(queue) = lanes.get_mut(&lane) { queue.push_back(envelope); }
-                    else { lanes.insert(lane, VecDeque::new()); tasks.spawn(execute(core.clone(), envelope)); }
+                    else {
+                        running.insert(lane.clone(), (envelope.stop.clone(), envelope.request.interruptible()));
+                        lanes.insert(lane, VecDeque::new()); tasks.spawn(execute(core.clone(), envelope));
+                    }
                 } else { tasks.spawn(execute(core.clone(), envelope)); }
             }
         }
@@ -564,9 +614,9 @@ async fn run(
     // Accepted running tasks retain their receipts. Closing protocol adapters
     // releases pending configure/answer waits; they settle before actors stop.
     core.stop_adapters().await;
-    let workers = core.supervisor.shutdown().await;
-    core.adapters_stop.cancel();
-    core.adapter_tasks.close_and_join().await;
+    let workers = core.coordinator.supervisor.shutdown().await;
+    core.coordinator.stop.cancel();
+    core.coordinator.tasks.close_and_join().await;
     core.runtime.workers_stopped();
     let actors = drain_commands(&core, &mut tasks).await;
     if let Some(error) = failure {

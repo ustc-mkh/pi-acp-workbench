@@ -83,10 +83,10 @@ impl CommandCore {
         session: &SessionId,
         operation: &OperationId,
     ) -> Result<CommandReceipt, DomainError> {
-        let control = self.fork_controls.get(session, operation)?;
+        let control = self.coordinator.forks.get(session, operation)?;
         // execute_journaled has already persisted this cancellation's Started.
         control.stop.cancel();
-        self.fork_controls.changed.notify_one();
+        self.coordinator.forks.changed.notify_one();
         let mut finished = control.finished.subscribe();
         while !*finished.borrow_and_update() {
             finished

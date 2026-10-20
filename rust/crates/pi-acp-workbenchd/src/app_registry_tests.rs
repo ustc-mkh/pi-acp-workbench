@@ -131,7 +131,7 @@ async fn registry_storage_panic_propagates_to_host_joins_worker_before_terminal_
     );
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     assert!(!store.premature_terminal.load(Ordering::Acquire));
-    assert!(app.core.adapters.lock().await.is_empty());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
     let saved = store.history.database().view(id.clone()).await.unwrap();
     assert!(saved.active_turn.is_none() && saved.pending_interactions.is_empty());
     assert!(StorageLease::lock(&root).is_err());

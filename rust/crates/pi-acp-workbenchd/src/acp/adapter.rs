@@ -105,6 +105,7 @@ async fn run_protocol(
                             native.clone(),
                             loaded.details,
                             initialized.agent_capabilities.metadata,
+                            initialized.agent_capabilities.load_session,
                         ))
                     }
                     None => {
@@ -113,12 +114,13 @@ async fn run_protocol(
                             created.session_id,
                             created.details,
                             initialized.agent_capabilities.metadata,
+                            initialized.agent_capabilities.load_session,
                         ))
                     }
                 }
             })
             .await?;
-        let ((native, mut details, metadata), captured) = initialized;
+        let ((native, mut details, metadata, resumable), captured) = initialized;
         let patch = captured.finish(
             &mut details,
             &native,
@@ -156,9 +158,9 @@ async fn run_protocol(
                 .publish(AgentEvent::ConfigurationRestored(restored))
                 .await?;
         }
-        Ok::<_, DomainError>((native, details, metadata))
+        Ok::<_, DomainError>((native, details, metadata, resumable))
     };
-    let (native, mut details, metadata) = match startup.await {
+    let (native, mut details, metadata, resumable) = match startup.await {
         Ok(result) => result,
         Err(error) => {
             if !stop.is_cancelled() {
@@ -172,6 +174,21 @@ async fn run_protocol(
             return;
         }
     };
+    if let Some((resumable_state, background_state)) = &context.worker_capabilities {
+        resumable_state.store(resumable, std::sync::atomic::Ordering::Release);
+        background_state.store(
+            if matches!(context.session_harness.as_str(), "Pi") {
+                metadata
+                    .pi_workbench
+                    .as_ref()
+                    .and_then(|cap| cap.autonomous_runs)
+                    == Some(false)
+            } else {
+                true
+            },
+            std::sync::atomic::Ordering::Release,
+        );
+    }
     let client = std::sync::Arc::new(client);
     let mut title_tasks = tokio::task::JoinSet::new();
     'adapter: loop {
@@ -459,6 +476,14 @@ async fn run_protocol(
                         break;
                     }
                 }
+                let title_pin = if title_job.is_some() {
+                    context.pins.as_ref().map(|pins| {
+                        pins.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        TitlePin(pins.clone())
+                    })
+                } else {
+                    None
+                };
                 if context
                     .publish(AgentEvent::Finished { turn })
                     .await
@@ -470,6 +495,7 @@ async fn run_protocol(
                     let (client, native, session) =
                         (client.clone(), native.clone(), context.session.clone());
                     title_tasks.spawn(async move {
+                        let _pin = title_pin;
                         if let Ok(Ok(response)) = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             client.title(&native, &model, &title_text),
@@ -511,7 +537,19 @@ pub struct AdapterContext {
     pub pending_interactions: usize,
     pub(crate) reviews: Option<std::sync::Arc<crate::workspace_reviews::Reviews>>,
     pub(crate) database: Option<crate::persistence::database::Database>,
+    pub(crate) worker_capabilities: Option<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    )>,
+    pub(crate) pins: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    pub(crate) session_harness: String,
     pub recovery: Option<crate::domain::session::SessionConfig>,
+}
+struct TitlePin(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for TitlePin {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 impl AdapterContext {
     async fn notification(
