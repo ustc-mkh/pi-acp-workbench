@@ -114,17 +114,7 @@ async function runTests() {
       node('workbench-telegram-contract', 'scripts/workbench-telegram-contract.mjs'),
       node('workbench-process-loss', 'scripts/workbench-process-loss.mjs'),
       node('workbench-browser', 'scripts/workbench-browser-smoke.mjs'),
-      node(
-        'runner-unit',
-        '--test',
-        'scripts/test-pool.test.mjs',
-        'scripts/test-reports.test.mjs',
-        'scripts/ci-failure-diagnostics.test.mjs',
-        'scripts/typescript-graph.test.mjs',
-        'scripts/workbench-binary.test.mjs',
-        'scripts/prepare-release.test.mjs',
-        'scripts/workbench-sqlite-fixture.test.mjs',
-      ),
+      command('runner-unit', 'npm', ['run', 'test:runner']),
     ];
     const results = await testPool(suites, jobs);
     outcomes = [...prep, ...results];

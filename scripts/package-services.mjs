@@ -7,6 +7,11 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { writeRustNotices } from './rust-licenses.mjs';
+import {
+  releaseContract,
+  releaseDocuments,
+  verifyReleaseDocuments,
+} from './lib/release-contract.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -18,6 +23,8 @@ const source = resolve(values.dir),
   output = resolve(values['out-dir']);
 const manifest = JSON.parse(await readFile(join(source, 'manifest.json'), 'utf8'));
 assert.equal(manifest.production, true);
+assert.deepEqual(manifest.contracts, releaseContract);
+await verifyReleaseDocuments();
 assert.deepEqual(manifest.features, []);
 assert.equal(manifest.platform, 'linux');
 assert.equal(manifest.arch, 'x64');
@@ -49,11 +56,7 @@ try {
   for (const file of [...files, 'manifest.json']) await cp(join(source, file), join(staging, file));
   await cp('LICENSE', join(staging, 'LICENSE'));
   await cp('docs/workbench-release.md', join(staging, 'README.md'));
-  await cp('docs/workbench-release.md', join(staging, 'workbench-release.md'));
-  await cp('docs/workbench-vscode.md', join(staging, 'workbench-vscode.md'));
-  await cp('docs/workbench-ipc.md', join(staging, 'workbench-ipc.md'));
-  await cp('docs/workbench-telegram.md', join(staging, 'workbench-telegram.md'));
-  await cp('docs/workbench-storage.md', join(staging, 'workbench-storage.md'));
+  for (const file of releaseDocuments) await cp(join('docs', file), join(staging, file));
   await cp('THIRD_PARTY_NOTICES.txt', join(staging, 'THIRD_PARTY_NOTICES.txt'));
   await writeRustNotices(manifest.target, staging);
   await mkdir(join(staging, 'examples'));

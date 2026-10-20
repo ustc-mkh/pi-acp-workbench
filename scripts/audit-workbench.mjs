@@ -5,6 +5,9 @@ import { access, readFile, readdir } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { dirname, resolve } from 'node:path';
 import { typescriptGraph } from './lib/typescript-graph.mjs';
+import { verifyReleaseSources, verifyReleaseDocuments } from './lib/release-contract.mjs';
+await verifyReleaseSources();
+await verifyReleaseDocuments();
 
 const text = (path) => readFile(path, 'utf8');
 const absent = [
@@ -88,6 +91,21 @@ const workspace = await text('rust/Cargo.toml');
 assert(!/pi-acp-(session|telegram)-daemon/.test(workspace), 'legacy workspace member');
 const packageJson = JSON.parse(await text('package.json'));
 assert.equal(packageJson.main, './dist/extension.cjs');
+assert.equal(
+  new Set(Object.values(packageJson.scripts)).size,
+  Object.keys(packageJson.scripts).length,
+  'duplicate npm aliases',
+);
+for (const retired of [
+  'build:service:test',
+  'test:all',
+  'test:contract',
+  'test:contract:telegram',
+  'test:integration:rust',
+  'workbenchd',
+  'check:protocol',
+])
+  assert(!Object.hasOwn(packageJson.scripts, retired), `retired script alias: ${retired}`);
 assert.deepEqual(Object.keys(packageJson.contributes.configuration.properties), [
   'piAcp.workbenchSocket',
 ]);

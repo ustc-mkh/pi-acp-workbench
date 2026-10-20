@@ -7,6 +7,7 @@
 | [VS Code](workbench-vscode.md)                                        | direct IPC v3 client/view、workspace trust、CSP、界面范围         |
 | [IPC v3](workbench-ipc.md)                                            | domain commands/events、operation replay、容量及错误语义          |
 | [Telegram](workbench-telegram.md)                                     | merged config、授权、命令、admission/inbox/outbox、图片投递       |
+| [候选发布与切换](workbench-cutover.md)                                | 功能/差异、破坏性边界、备份/整组回退及未测环境                    |
 | [每轮 Diff/撤回](turn-diff.md)                                        | 快照预算、原生编辑器、撤回门控及部分结果                          |
 | [用量与模型管理](workbench-management.md)                             | 统计/价格、Pi context、命名、导出及配置向导                       |
 | [显式离线存储维护](workbench-storage.md)                              | 同一 binary/lease 下 export、marker-only reset、typed Telegram GC |

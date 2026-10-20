@@ -1,5 +1,6 @@
 //! External v3 IPC. Only bounded queries, typed original receipts and committed
 //! revision batches cross the wire. No internal Agent command is decodable.
+pub use crate::domain::query::PROTOCOL_VERSION;
 use crate::{
     app::WorkbenchApp,
     domain::{
@@ -28,7 +29,6 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-pub const PROTOCOL_VERSION: u32 = 3;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_SUBSCRIPTIONS: usize = 32;

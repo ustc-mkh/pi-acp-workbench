@@ -154,6 +154,7 @@ pub(super) enum StoreRequest {
         native: crate::domain::ProviderSessionId,
         reply: Reply<(SessionView, SessionSummary)>,
     },
+    #[cfg(test)]
     Create {
         view: Box<SessionView>,
         reply: Reply<SessionSummary>,
@@ -197,6 +198,7 @@ pub(super) enum StoreRequest {
     TelegramInbox(Box<super::inbox::Request>),
     TelegramEffect(Box<super::telegram_effect::Request>),
     Journal(Box<super::journal::Request>),
+    #[cfg(test)]
     ArchiveImage {
         asset: crate::domain::image::ImageAsset,
         reply: Reply<()>,
@@ -487,6 +489,7 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
         } => {
             let _ = reply.send(super::fork::adopt(connection, *plan, native));
         }
+        #[cfg(test)]
         StoreRequest::Create { view, reply } => {
             let _ = reply.send(query::create(connection, &view));
         }
@@ -529,6 +532,7 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
         StoreRequest::Content { content, reply } => {
             let _ = reply.send(super::content::read_text(connection, &content));
         }
+        #[cfg(test)]
         StoreRequest::ArchiveImage { asset, reply } => {
             let result = (|| -> Result<(), StoreError> {
                 let tx = connection.transaction()?;
@@ -612,6 +616,7 @@ impl StoreRequest {
             Self::Tool { .. } => "tool",
             Self::PrepareFork { .. } => "fork_prepare",
             Self::AdoptFork { .. } => "fork_adopt",
+            #[cfg(test)]
             Self::Create { .. } => "create",
             Self::Commit { .. } => "commit",
             Self::View { .. } => "view",
@@ -624,6 +629,7 @@ impl StoreRequest {
             Self::TelegramInbox(_) => "inbox",
             Self::TelegramEffect(_) => "telegram_effect",
             Self::Journal(_) => "operation",
+            #[cfg(test)]
             Self::ArchiveImage { .. } => "archive_image",
             Self::Image { .. } => "image",
             #[cfg(test)]
@@ -998,7 +1004,8 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn create(&self, view: SessionView) -> Result<SessionSummary, StoreError> {
+    #[cfg(test)]
+    pub(crate) async fn create(&self, view: SessionView) -> Result<SessionSummary, StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::Create {
             view: Box::new(view),
@@ -1125,7 +1132,8 @@ impl Database {
         .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
-    pub async fn archive_image(
+    #[cfg(test)]
+    pub(crate) async fn archive_image(
         &self,
         asset: crate::domain::image::ImageAsset,
     ) -> Result<(), StoreError> {

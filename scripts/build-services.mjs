@@ -5,6 +5,8 @@ import { join, resolve, relative } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { releaseContract, verifyReleaseSources } from './lib/release-contract.mjs';
+await verifyReleaseSources();
 
 const { values } = parseArgs({
   options: {
@@ -148,6 +150,7 @@ try {
         libc: targets[triple].libc,
         node: '>=22',
         production: true,
+        contracts: releaseContract,
         features: [],
         rustc: execFileSync('rustc', ['--version'], { encoding: 'utf8' }).trim(),
         source,

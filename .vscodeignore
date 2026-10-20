@@ -15,8 +15,5 @@ dist/**/*.map
 !THIRD_PARTY_NOTICES.txt
 !docs/*.md
 !CONTRIBUTING.md
-!examples/telegram.json
-!examples/pi-telegram.service
-
-!examples/sessions.json
-!examples/pi-sessions.service
+!examples/workbench.json
+!examples/pi-acp-workbenchd.service

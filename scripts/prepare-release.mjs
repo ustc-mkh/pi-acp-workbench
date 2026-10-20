@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { releaseContract } from './lib/release-contract.mjs';
 
 const target = 'x86_64-unknown-linux-musl';
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -27,6 +28,7 @@ export function validateRelease({
   assert.equal(manifest.version, version);
   assert.equal(manifest.target, target);
   assert.equal(manifest.production, true);
+  assert.deepEqual(manifest.contracts, releaseContract);
   assert.deepEqual(manifest.features, []);
   assert.equal(manifest.source.commit, commit);
   assert.equal(manifest.source.modified, false);
@@ -37,12 +39,23 @@ export function validateRelease({
   assert.equal(packaged.version, version);
   assert(entries.includes('extension/dist/extension.cjs'));
   assert(entries.includes('extension/docs/workbench-release.md'));
+  for (const name of ['workbench.json', 'pi-acp-workbenchd.service'])
+    assert(
+      entries.includes(`extension/examples/${name}`),
+      'VSIX must include current single-host examples',
+    );
+  assert(
+    !entries.some((p) =>
+      /\/examples\/(?:telegram\.json|sessions\.json|pi-(?:sessions|telegram)\.service)$/.test(p),
+    ),
+  );
   assert(
     !entries.some((p) =>
       /(?:\.map$|\/node_modules\/|\/archive\/|\/service-dist\/|-daemon$)/.test(p),
     ),
   );
   assert.equal(smoke.passed, true);
+  assert.deepEqual(smoke.contracts, manifest.contracts);
   assert.equal(smoke.target, target);
   assert.deepEqual(smoke.files, manifest.files, 'Smoke must verify the packaged binary');
   assert.deepEqual(smoke.abi, manifest.abi);

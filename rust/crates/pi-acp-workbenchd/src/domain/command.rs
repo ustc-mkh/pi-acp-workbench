@@ -7,6 +7,7 @@ pub enum DomainCommand {
         cwd: WorkspacePath,
     },
     LoadSession(SessionId),
+    #[cfg(test)]
     ListSessions,
     Prompt {
         session: SessionId,
@@ -69,6 +70,16 @@ pub enum DomainCommand {
         event: AgentEvent,
     },
 }
+impl DomainCommand {
+    pub(crate) fn is_query(&self) -> bool {
+        match self {
+            Self::Inspect(_) => true,
+            #[cfg(test)]
+            Self::ListSessions => true,
+            _ => false,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AgentEvent {
     Catalogue(super::catalogue::CataloguePatch),
@@ -114,9 +125,4 @@ pub enum AgentEvent {
     Crashed {
         reason: String,
     },
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CreateSession {
-    pub harness: Harness,
-    pub cwd: WorkspacePath,
 }

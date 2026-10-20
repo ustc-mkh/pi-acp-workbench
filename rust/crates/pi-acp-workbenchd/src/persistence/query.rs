@@ -41,6 +41,7 @@ pub(super) fn summary(view: &SessionView, created_seq: SafeInteger) -> SessionSu
         created_seq,
     }
 }
+#[cfg(test)]
 pub(super) fn create(
     db: &mut Connection,
     view: &SessionView,

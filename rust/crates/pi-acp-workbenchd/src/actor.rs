@@ -3,7 +3,7 @@ use crate::{
         command::{AgentEvent, DomainCommand},
         error::DomainError,
         ids::*,
-        query::{CommandReceipt, CommitBatch, ListPage, SessionView},
+        query::{CommandReceipt, CommitBatch, SessionView},
         reducer::{transition, TransitionContext},
         session::SessionStatus,
     },
@@ -22,7 +22,8 @@ pub enum OwnerReply {
         batch: CommitBatch,
         answer: crate::domain::interaction::InteractionAnswer,
     },
-    Listed(ListPage),
+    #[cfg(test)]
+    Listed(crate::domain::query::ListPage),
     ForkPrepared(Box<crate::domain::fork::ForkPlan>),
 }
 impl OwnerReply {

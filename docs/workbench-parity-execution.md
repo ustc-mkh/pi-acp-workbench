@@ -111,3 +111,49 @@ GNU 制品 `service-artifacts/pi-acp-services-1.0.0-x86_64-unknown-linux-gnu.tar
 - S3 未完成的 typed 图片/thinking-Fast/autonomous 生命周期、S5 已列的保守差异不在 S6 中偷换为完成；S6 自身 P2 向导/显示偏好已提供代码及自动化，没有自行默认延期的 P2 实现项。
 - 收尾时已检查所有验收 exit 文件均为 0，未遗留运行中的验收任务。完整门禁和扩展 scale/mixed/startup/soak 均在上述最终源码上结束；文档随后格式化与审计，不重建业务代码。
 - 后续不应再连续深化 S6 辅助层：剩余是原计划的真实/发布验收与 S7 删除旧路径、切换检查。没有部署、systemctl、push，也没有读写/重置真实业务 root。
+
+---
+
+# S7：清理生产路径、契约与候选切换
+
+## 本次代码范围
+
+基于已提交的 S5/S6 `63ad406`，按 S7 连续完成代码清理后统一验收，没有扩展 S3/S5/S6 既有功能或用新辅助框架替代删除工作。
+
+- **唯一 create/receipt 路径**：生产的会话创建只经 host admission→JournalStore 同事务创建/receipt；旧 registry 创建、列会话结果 `OwnerReply::Listed`、DomainCommand::ListSessions 及对应 store 请求只在 cfg(test) 留作故障/拥塞 fixture。冷 list 继续直接走 QueryCommand/readers；生产误投 owner 返回 Protocol，不 panic 或创建无 receipt 会话。
+- **去除生产 fixture 写入口**：raw entry/interaction/image archive 构造、直接 Database create、journal expiry 及其 queue variants/序列化 helper 限定 cfg(test)/crate scope。真实 Notice/interaction/image 读取、图片身份/哈希校验、不可变归档、tombstone replay 和 uncertain 拒绝都保留；未删测试断言。
+- **合同与重复入口**：移除无调用的独立 CreateSession DTO，transport 重用领域 PROTOCOL_VERSION。删除七个重复/过期 npm 别名（build:service:test、test:all、test:contract、test:contract:telegram、test:integration:rust、workbenchd、check:protocol），改为 canonical 命令；scale 不再预跑随后又运行五遍的同一 delivery-scale 测试。审计拒绝重复脚本值与被删除别名恢复。test-full 的 runner suite 改为调用 canonical `test:runner`，不再维护第二份易遗漏新测试的文件清单。
+- **发布闭合**：Rust/TS 常量、manifest.contracts、artifact smoke report、prepare-release fixture/验证同步，保持开发 IPC/schema 3，不新增永久兼容 reader。包内固定公开文档 allowlist，补齐 Diff/management/cutover 及其链接证据；缺失/越界链接在打包前失败，不复制 operator 配置。
+- **真实 Extension Host 入口**：`test:extension-host` 使用安装版 VS Code、临时 profile/extensions/home/workspace/root、生产扩展和实际宿主；不下载、不访问默认 socket、不替换 vscode API。无 display 明确 BLOCKED/exit 2；基本激活/新建/未知快照 URI smoke 不声称覆盖完整原生 Diff/modal 矩阵。
+
+保留 SessionPersistence 的故障隔离 seam（生产有具体实现，测试用于失败/panic/barrier）、OwnerReply 必要的 commit/answer/fork 结果、外部 journal prepare/settle 及 ACP 可选字段/native 解析路径。它们不是无调用兼容层，不为减少文件数强删。完整发布功能、差异、备份/切换/回退与阻塞表见 [候选切换清单](workbench-cutover.md)，当前 VS Code/发布指南已同步，不把旧 S5/S6 功能继续写作缺失。
+
+## 冻结源码与失败记录
+
+```text
+486485dca1e0013cc9602b6d96b199b8a4a4a8fb739309e3e62c3da42bed08ec
+```
+
+计算方式同前，包含新的 runner、fixture 和 package.json，不包含文档/生成制品。静态检查第一次发现 `PayloadStore.image` 仍被 app ingress/Telegram delivery 生产调用，不能当 fixture 删除；已恢复该正常只读方法，同时将仅 fixture 使用的 encode/import/helper 正确 cfg。失败 `/tmp/s7-closure-check.log`、`/tmp/s7-closure-rewrite.log`（exit 101）、早期 soak/startup 编译失败均保留，不算最终通过。随后 clippy 全 targets/typecheck/审计/格式先通过才启动下表最终验收。早期 `s7-closure-*` 性能采样不作最终源码证据。生产源码冻结后将 test-full 的 runner 文件清单收敛到 `npm run test:runner`（全量指纹由 `664c9909…` 变为 `e5839614…`），补跑 canonical full，随后因上次契约失败重新跑完整 test:rewrite，最终整条 exit 0。最后发现 .vscodeignore 仍只 allowlist 旧双 daemon 例子，改为当前两个例子并增加发布校验/负例；仅打包规则/validator fixture 变化使全量指纹成为上值，另记 .vscodeignore SHA-256 `7f8f8e666f3d65d326fd7bd34498fcad2d7ff023c37c75d7d6fe0d5c390270f0`。这部分重跑受影响的 runner（51 tests）、实际 VSIX 打包/内容检查及服务归档 hash/文档闭合，不再重复未变化的 Rust/TS 生产、依赖/构建配置及 600 秒循环。
+
+| 命令 / 证据                                       | 本轮最终结果                                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| clippy workspace/all-targets + check/audit/format | 通过，`/tmp/s7-final-{clippy,check,audit,format}.log`                                                                                                                                                                                                           |
+| release contract / prepare-release fixture        | 28 项定向通过；完整 runner suite 由整条门禁再次覆盖；`/tmp/s7-release-tests.log`                                                                                                                                                                                |
+| `npm run test:rewrite`                            | exit 0；`.test-results/run-NoWQcA`，Rust 338 passed/2 ignored、TS 230 tests、runner 49 tests、13 Chromium/IPC/Telegram/process-loss/GNU artifact smoke 均通过；`/tmp/s7-verified-rewrite.log`。前次 `/tmp/s7-final-rewrite.log` 图片 batch timeout 为失败，保留 |
+| 最终 canonical `npm run test:full`                | exit 0；`.test-results/run-h2C69u`，Rust 338 passed/2 ignored、TS 230 tests、runner 49 tests（含新的 release-contract）；`/tmp/s7-canonical-full.log`                                                                                                           |
+| startup                                           | exit 0；`/tmp/s7-final-startup.log`                                                                                                                                                                                                                             |
+| scale                                             | exit 0；7 组各 5 次，`.test-results/scale-bbf4273c-4db8-4479-87aa-f6f1b9699d46`；`/tmp/s7-final-scale.log`                                                                                                                                                      |
+| mixed                                             | exit 0；五轮 `.test-results/mixed-v1-705e3be1-919a-4a57-aacb-0e8e0aaa5c59`；`/tmp/s7-final-mixed.log`。storage-only 并行诊断，非 admission-to-fence SLO                                                                                                         |
+| 600 秒 soak                                       | exit 0；103 完整循环 / 607512 ms，`.test-results/soak-be1e21e7-8bd0-4982-af7a-d9c54e60ea9c/report.json`；`/tmp/s7-final-soak.log`。保留三 provider/故障/join 与 S6 management/title 循环                                                                        |
+| 真实 Extension Host                               | **BLOCKED / exit 2**；已安装 VS Code 1.142.0，但 DISPLAY/WAYLAND_DISPLAY 均缺且无 Xvfb；`/tmp/s7-extension-host.log`。没有用 Chromium 代替                                                                                                                      |
+
+最终 GNU binary SHA-256：`57b0ba8d106e9a17df66db2fdf7e015719d93e9a8645c335b4f18d3d0d748095`；manifest Rust source hash `fdcaabc7751ec401d6c70c2865fecbb9833a6b1a74a4ffbcfedb71bad7d50e7e`，base commit `63ad406`、modified=true，契约 `ipc=3/storage=3/new-root-no-migration`。生产源码在整个最终性能/故障窗口保持相同。实际 VSIX 已打包为 204 files，必须包含当前两个单宿主例子；相关 runner 51 项通过（`/tmp/s7-packaging-runner.log`、`/tmp/s7-vsix.log`）。最终仅文档收尾后重打包服务/VSIX，不重编译 Rust；本轮具体归档/VSIX 哈希与链接/hash核验结果另存 `/tmp/s7-candidate-artifacts.json`，避免把归档自身哈希嵌入归档文档形成自引用。历史 S5/S6 同名产物路径已被新候选覆盖，以各轮哈希辨认，不拿旧哈希对应当前文件。
+
+## 严格出口 / 未获授权的切换
+
+- 一次 full-suite IPC 契约在 `image-output` 等待 image revision batch 时 15 秒超时（`.test-results/run-ZU1ZBu/workbench-contract.log`），该轮整条门禁 exit 1。其前独立契约通过，之后同一生产源码的 canonical full suite 通过；没有增加 timeout、删除断言或证明根因，故仍记为待定位的间歇问题，不因后续通过抹去。最后整条复核单独记录在上表。
+- S7 代码清理不补做 S0–S3 未完成流程，也不默认确认 S5 保守差异。整体体验对齐/严格 S7 尚未勾选。
+- 在线 Pi/Codex/Claude/Bot 未执行：没有指定测试账号/chat、费用授权或专用环境，不尝试读取日常凭据。musl target/toolchain 本机缺失；既有 CI 有独立 musl build/artifact 契约，不把 GNU 通过算 musl 本轮通过。
+- 未启动两小时正式混合 soak，未证明 admission/page p95/p99、空载 A/B 20% 或单进程 RSS/WAL 平台值。并行编译/本地 storage-only diagnostics 不能替代这些门槛，不更改原预算。
+- 仅在隔离临时 root 验收；没有部署、push、systemctl、迁移、清空/读写真实业务 root。正式切换需另行授权，严格按 binary/VSIX/config/root 整组备份与回退；不能重发 uncertain 操作弥补结果。

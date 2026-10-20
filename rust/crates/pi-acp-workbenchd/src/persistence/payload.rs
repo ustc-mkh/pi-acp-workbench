@@ -1,7 +1,9 @@
 //! Immutable delivery content in the host's sole SQLite database.
+#[cfg(test)]
+use super::database::encode;
 use super::{
     content,
-    database::{encode, Database, StoreError, StoreRequest},
+    database::{Database, StoreError, StoreRequest},
 };
 use crate::domain::{
     error::DomainError,
@@ -12,7 +14,7 @@ use crate::domain::{
         ContentKind, ContentRef, ContentSlice, EntryHeader, SafeInteger, TextBody, MAX_QUERY_BYTES,
     },
     transcript::TranscriptEntry,
-    transition::{NewContent, NewEntry},
+    transition::NewContent,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -55,7 +57,9 @@ pub struct PayloadStore {
 type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
 pub(super) enum Payload {
     Notice(NoticeContent),
+    #[cfg(test)]
     Interaction(Interaction),
+    #[cfg(test)]
     Entry(TranscriptEntry),
 }
 #[derive(Debug, Serialize)]
@@ -130,7 +134,8 @@ impl PayloadStore {
         .await?;
         result.await.map_err(failure)?.map_err(failure)
     }
-    pub async fn put_image(
+    #[cfg(test)]
+    pub(crate) async fn put_image(
         &self,
         asset: &crate::domain::image::ImageAsset,
     ) -> Result<(), DomainError> {
@@ -254,7 +259,8 @@ impl PayloadStore {
     pub async fn put_notice(&self, notice: &NoticeContent) -> Result<(), DomainError> {
         self.put(Payload::Notice(notice.clone())).await
     }
-    pub async fn notice(&self, id: &NoticeId) -> Result<NoticeContent, DomainError> {
+    #[cfg(test)]
+    pub(crate) async fn notice(&self, id: &NoticeId) -> Result<NoticeContent, DomainError> {
         self.find_notice(id)
             .await?
             .ok_or_else(|| failure("notice payload missing"))
@@ -268,7 +274,8 @@ impl PayloadStore {
         .await?;
         result.await.map_err(failure)?.map_err(failure)
     }
-    pub async fn put_entry(&self, entry: &TranscriptEntry) -> Result<(), DomainError> {
+    #[cfg(test)]
+    pub(crate) async fn put_entry(&self, entry: &TranscriptEntry) -> Result<(), DomainError> {
         self.put(Payload::Entry(entry.clone())).await
     }
     pub async fn entry(&self, id: &EntryId) -> Result<TranscriptEntry, DomainError> {
@@ -280,7 +287,11 @@ impl PayloadStore {
         .await?;
         result.await.map_err(failure)?.map_err(failure)
     }
-    pub async fn put_interaction(&self, interaction: &Interaction) -> Result<(), DomainError> {
+    #[cfg(test)]
+    pub(crate) async fn put_interaction(
+        &self,
+        interaction: &Interaction,
+    ) -> Result<(), DomainError> {
         self.put(Payload::Interaction(interaction.clone())).await
     }
     pub async fn interaction(&self, id: &InteractionId) -> Result<Interaction, DomainError> {
@@ -367,6 +378,7 @@ pub(super) fn notice_content(notice: &NoticeContent) -> Result<NewContent, Store
         notice.text.clone(),
     )
 }
+#[cfg(test)]
 pub(super) fn interaction_content(interaction: &Interaction) -> Result<NewContent, StoreError> {
     interaction
         .validate_definition()
@@ -376,6 +388,7 @@ pub(super) fn interaction_content(interaction: &Interaction) -> Result<NewConten
         encode(interaction)?,
     )
 }
+#[cfg(test)]
 pub(super) fn entry_content(entry: &TranscriptEntry) -> Result<NewContent, StoreError> {
     text(content_id("entry", entry.id.as_str())?, entry.text.clone())
 }
@@ -416,9 +429,11 @@ fn read(db: &Connection, id: ContentId) -> Result<String, StoreError> {
 fn put(db: &Connection, payload: Payload) -> Result<(), StoreError> {
     match payload {
         Payload::Notice(notice) => content::put_text(db, &notice_content(&notice)?),
+        #[cfg(test)]
         Payload::Interaction(interaction) => {
             content::put_text(db, &interaction_content(&interaction)?)
         }
+        #[cfg(test)]
         Payload::Entry(entry) => {
             let image = entry
                 .image
@@ -434,7 +449,7 @@ fn put(db: &Connection, payload: Payload) -> Result<(), StoreError> {
             let text = entry_content(&entry)?;
             content::put_entry(
                 db,
-                &NewEntry {
+                &crate::domain::transition::NewEntry {
                     id: entry.id,
                     turn: entry.turn,
                     role: entry.role,

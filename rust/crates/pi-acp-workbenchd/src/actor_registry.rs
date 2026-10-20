@@ -133,6 +133,53 @@ impl RegistryState {
             return;
         }
         match command {
+            #[cfg(test)]
+            DomainCommand::CreateSession { harness, cwd } => {
+                if self.io.len() >= MAX_IO {
+                    let _ = reply.send(Err(DomainError::Backpressure));
+                    return;
+                }
+                let store = store.clone();
+                let state = SessionView::new(harness, cwd);
+                let id = state.id.clone();
+                self.lanes.insert(id.clone(), VecDeque::new());
+                self.io.spawn(async move {
+                    let effect = match store.create(&state).await {
+                        Ok(summary) => Effect::Ready {
+                            result: OwnerReply::Receipt(CommandReceipt::Created { summary }),
+                            state: Box::new(state),
+                            reply,
+                        },
+                        Err(error) => Effect::Reply {
+                            result: Err(DomainError::Persistence(error)),
+                            reply,
+                        },
+                    };
+                    Completion {
+                        lane: Some(id),
+                        effect,
+                    }
+                });
+            }
+            #[cfg(test)]
+            DomainCommand::ListSessions => {
+                if self.io.len() >= MAX_IO {
+                    let _ = reply.send(Err(DomainError::Backpressure));
+                    return;
+                }
+                let store = store.clone();
+                self.io.spawn(async move {
+                    let result = store
+                        .list(None, None)
+                        .await
+                        .map(OwnerReply::Listed)
+                        .map_err(DomainError::Persistence);
+                    Completion {
+                        lane: None,
+                        effect: Effect::Reply { result, reply },
+                    }
+                });
+            }
             DomainCommand::Inspect(id) | DomainCommand::LoadSession(id)
                 if self
                     .sessions
@@ -147,12 +194,10 @@ impl RegistryState {
                     &self.sessions,
                 );
             }
-            command @ (DomainCommand::CreateSession { .. }
-            | DomainCommand::AdoptFork { .. }
+            command @ (DomainCommand::AdoptFork { .. }
             | DomainCommand::LoadSession(_)
             | DomainCommand::RemoveSession(_)
-            | DomainCommand::Inspect(_)
-            | DomainCommand::ListSessions) => {
+            | DomainCommand::Inspect(_)) => {
                 if self.io.len() >= MAX_IO {
                     let _ = reply.send(Err(DomainError::Backpressure));
                     return;
@@ -172,30 +217,6 @@ impl RegistryState {
                                 Ok((view, summary)) => Effect::Ready {
                                     state: Box::new(view),
                                     result: OwnerReply::Receipt(CommandReceipt::Forked { summary }),
-                                    reply,
-                                },
-                                Err(error) => Effect::Reply {
-                                    result: Err(DomainError::Persistence(error)),
-                                    reply,
-                                },
-                            };
-                            Completion {
-                                lane: Some(id),
-                                effect,
-                            }
-                        });
-                    }
-                    DomainCommand::CreateSession { harness, cwd } => {
-                        let state = SessionView::new(harness, cwd);
-                        let id = state.id.clone();
-                        self.lanes.insert(id.clone(), VecDeque::new());
-                        self.io.spawn(async move {
-                            let effect = match store.create(&state).await {
-                                Ok(summary) => Effect::Ready {
-                                    result: OwnerReply::Receipt(CommandReceipt::Created {
-                                        summary,
-                                    }),
-                                    state: Box::new(state),
                                     reply,
                                 },
                                 Err(error) => Effect::Reply {
@@ -273,19 +294,6 @@ impl RegistryState {
                             }
                         });
                     }
-                    DomainCommand::ListSessions => {
-                        self.io.spawn(async move {
-                            let result = store
-                                .list(None, None)
-                                .await
-                                .map(OwnerReply::Listed)
-                                .map_err(DomainError::Persistence);
-                            Completion {
-                                lane: None,
-                                effect: Effect::Reply { result, reply },
-                            }
-                        });
-                    }
                     _ => unreachable!(),
                 }
             }
@@ -302,7 +310,12 @@ impl RegistryState {
                     | DomainCommand::PrepareConfiguration { session, .. }
                     | DomainCommand::CommitConfiguration { session }
                     | DomainCommand::Agent { session, .. } => session.clone(),
-                    _ => unreachable!(),
+                    _ => {
+                        let _ = reply.send(Err(DomainError::Protocol(
+                            "command must pass host admission".into(),
+                        )));
+                        return;
+                    }
                 };
                 forward(other, operation, &id, reply, &self.sessions);
             }

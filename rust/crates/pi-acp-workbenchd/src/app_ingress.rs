@@ -67,11 +67,8 @@ impl Request {
                     | DomainCommand::RemoveSession(_),
                 ..
             } => 1,
-            Self::Command {
-                command: DomainCommand::ListSessions | DomainCommand::Inspect(_),
-                ..
-            }
-            | Self::Lookup { .. }
+            Self::Command { command, .. } if command.is_query() => 2,
+            Self::Lookup { .. }
             | Self::Query { .. }
             | Self::Dispatch { .. }
             | Self::Image { .. } => 2,

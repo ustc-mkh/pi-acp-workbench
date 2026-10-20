@@ -294,13 +294,8 @@ impl WorkbenchApp {
         operation: Option<crate::domain::OperationId>,
         command: DomainCommand,
     ) -> Result<CommandTicket, DomainError> {
-        let operation = operation.or_else(|| {
-            (!matches!(
-                command,
-                DomainCommand::ListSessions | DomainCommand::Inspect(_)
-            ))
-            .then(crate::domain::OperationId::generate)
-        });
+        let operation =
+            operation.or_else(|| (!command.is_query()).then(crate::domain::OperationId::generate));
         let (reply, wait) = tokio::sync::oneshot::channel();
         self.ingress.submit(Request::Command {
             operation,

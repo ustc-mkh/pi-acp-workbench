@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { releaseNotes, validateRelease } from './prepare-release.mjs';
+import { releaseContract } from './lib/release-contract.mjs';
 
 function fixture() {
   const bytes = Buffer.from('fixture binary');
@@ -14,15 +15,22 @@ function fixture() {
       version: '1.2.3',
       target: 'x86_64-unknown-linux-musl',
       production: true,
+      contracts: { ...releaseContract },
       features: [],
       source: { commit: 'a'.repeat(40), modified: false },
       files,
       abi: { interpreter: null },
     },
     packaged: { version: '1.2.3' },
-    entries: ['extension/dist/extension.cjs', 'extension/docs/workbench-release.md'],
+    entries: [
+      'extension/dist/extension.cjs',
+      'extension/docs/workbench-release.md',
+      'extension/examples/workbench.json',
+      'extension/examples/pi-acp-workbenchd.service',
+    ],
     smoke: {
       passed: true,
+      contracts: { ...releaseContract },
       target: 'x86_64-unknown-linux-musl',
       files: { ...files },
       abi: { interpreter: null },
@@ -54,6 +62,12 @@ const failures = {
   },
   documentation: (f) => {
     f.entries[1] = 'extension/docs/service-release.md';
+  },
+  'missing single-host examples': (f) => {
+    f.entries = f.entries.filter((p) => !p.includes('/examples/'));
+  },
+  'old dual daemon examples': (f) => {
+    f.entries.push('extension/examples/pi-telegram.service');
   },
   'forbidden VSIX contents': (f) => {
     f.entries.push('extension/node_modules/secret');
@@ -96,6 +110,18 @@ const failures = {
   },
   'wrong smoke ABI': (f) => {
     f.smoke.abi.interpreter = '/ld.so';
+  },
+  'old manifest without cutover contract': (f) => {
+    delete f.manifest.contracts;
+  },
+  'wrong IPC contract': (f) => {
+    f.manifest.contracts.ipc = 2;
+  },
+  'wrong storage contract': (f) => {
+    f.manifest.contracts.storage = 2;
+  },
+  'wrong smoke contract': (f) => {
+    f.smoke.contracts.ipc = 2;
   },
   'empty smoke': (f) => {
     f.smoke.checks = [];

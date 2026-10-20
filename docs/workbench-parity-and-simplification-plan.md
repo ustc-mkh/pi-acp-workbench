@@ -309,6 +309,14 @@ SQLite WAL 允许读写并行，但仍只有一个 writer；长读事务也会�
 
 **出口：**第 1 节完成标准满足；只保留一条生产实现和一套当前设计说明。
 
+#### S7 当前收尾状态
+
+代码清理已连续完成：纯本地 create 只保留宿主事务/receipt 生产路径；registry 的旧 create/list、原始 payload/image fixture 写入与 receipt-expire 构造仅在 `cfg(test)` 编译；过期 CreateSession DTO/重复协议常量和七个 npm 别名已清理。正常只读图片校验、operation tombstone/uncertain、native/provider 可选字段和 fencing/join 均保留。生产仍需的 SessionPersistence 故障隔离 seam、OwnerReply 的 commit/answer/fork 结果及外部 journal prepare/settle 不按名称强删。
+
+发布构建、打包、smoke/prepare-release 同步契约元数据并检查文档包链接闭合；[候选发布与切换清单](workbench-cutover.md) 已列功能、破坏性边界、行为差异、备份/整组回退和未测环境。新增安装版 VS Code 的隔离 Extension Host smoke 入口，不下载或以 mock 回退。
+
+严格 S7 出口仍受既有 S0–S3 缺口、S5 保守差异确认、真实 Extension Host/provider/Bot、musl 和正式性能/长期负载验收阻塞；本轮一次图片 batch 超时尚未定位，后续 full suite 通过不视为已修复；代码清理不表示这些缺项已消失。当前机器缺图形 display，真实 Extension Host runner 明确 BLOCKED/exit 2；结果见执行记录，不把基本 smoke 当完整 Diff/modal 矩阵，也不进入部署/切换。
+
 ## 7. 验证与性能门槛
 
 ### 7.1 场景测试先于补实现

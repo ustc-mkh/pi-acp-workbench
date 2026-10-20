@@ -40,6 +40,7 @@ pub(super) enum Request {
         operation: OperationId,
         reply: Reply<crate::domain::query::OperationStatus>,
     },
+    #[cfg(test)]
     Expire {
         operation: OperationId,
         reply: Reply<()>,
@@ -149,8 +150,9 @@ impl JournalStore {
         self.submit(Request::Status { operation, reply }).await?;
         result.await.map_err(failure)?
     }
-    /// Explicit expiry retains a tombstone. There is no automatic receipt GC.
-    pub async fn expire(&self, operation: &OperationId) -> Result<(), DomainError> {
+    /// Fixture-only expiry exercises tombstone replay; no online receipt GC.
+    #[cfg(test)]
+    pub(crate) async fn expire(&self, operation: &OperationId) -> Result<(), DomainError> {
         let (reply, result) = oneshot::channel();
         self.submit(Request::Expire {
             operation: operation.clone(),
@@ -297,6 +299,7 @@ fn create_local(
     tx.commit().map_err(failure)?;
     Ok(receipt)
 }
+#[cfg(test)]
 fn expire(db: &mut Connection, operation: &OperationId) -> Result<(), DomainError> {
     let tx = db.transaction().map_err(failure)?;
     let Some(current) = record(&tx, operation)? else {
@@ -366,6 +369,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
         Request::Snapshot { reply } => {
             let _ = reply.send(snapshot(db));
         }
+        #[cfg(test)]
         Request::Expire { operation, reply } => {
             let _ = reply.send(expire(db, &operation));
         }

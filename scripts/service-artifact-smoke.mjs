@@ -8,12 +8,14 @@ import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { WorkbenchWire, inlineText } from '../test/helpers/workbench-wire.mjs';
 import { assertStorageLayout } from './lib/workbench-sqlite-fixture.mjs';
+import { releaseContract } from './lib/release-contract.mjs';
 
 const { values } = parseArgs({ options: { dir: { type: 'string' }, report: { type: 'string' } } });
 assert(values.dir, '--dir is required');
 const directory = resolve(values.dir);
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
 assert.equal(manifest.production, true);
+assert.deepEqual(manifest.contracts, releaseContract);
 assert.deepEqual(manifest.features, []);
 assert.equal(manifest.platform, 'linux');
 assert.equal(manifest.arch, 'x64');
@@ -199,7 +201,14 @@ try {
     await writeFile(
       values.report,
       JSON.stringify(
-        { passed: true, target: manifest.target, checks, files: manifest.files, abi: manifest.abi },
+        {
+          passed: true,
+          target: manifest.target,
+          contracts: manifest.contracts,
+          checks,
+          files: manifest.files,
+          abi: manifest.abi,
+        },
         null,
         2,
       ) + '\n',

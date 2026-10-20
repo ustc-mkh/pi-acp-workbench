@@ -1,7 +1,9 @@
 //! Session owners submit bounded hot-state reads and one incremental transaction.
+#[cfg(test)]
+use crate::domain::query::{ListCursor, ListPage};
 use crate::domain::{
     fork::{ForkCandidate, ForkPlan, ForkRequest},
-    query::{CommitBatch, ListCursor, ListPage, SessionSummary, SessionView, ToolHeader},
+    query::{CommitBatch, SessionSummary, SessionView, ToolHeader},
     transition::Transition,
     ProviderSessionId, SessionId, ToolCallId, TurnId,
 };
@@ -11,11 +13,13 @@ pub trait SessionPersistence: Clone + Send + Sync + 'static {
         &self,
         id: &SessionId,
     ) -> impl Future<Output = Result<Option<SessionView>, String>> + Send;
+    #[cfg(test)]
     fn list(
         &self,
         cursor: Option<ListCursor>,
         limit: Option<usize>,
     ) -> impl Future<Output = Result<ListPage, String>> + Send;
+    #[cfg(test)]
     fn create(
         &self,
         view: &SessionView,
@@ -57,6 +61,7 @@ impl SessionPersistence for super::SessionStore {
             Err(error) => Err(error.to_string()),
         }
     }
+    #[cfg(test)]
     async fn list(
         &self,
         cursor: Option<ListCursor>,
@@ -67,6 +72,7 @@ impl SessionPersistence for super::SessionStore {
             .await
             .map_err(|error| error.to_string())
     }
+    #[cfg(test)]
     async fn create(&self, view: &SessionView) -> Result<SessionSummary, String> {
         self.database()
             .create(view.clone())

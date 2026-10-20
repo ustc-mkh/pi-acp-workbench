@@ -18,7 +18,7 @@ Default output:
 
 - `service-dist/pi-acp-workbenchd`, `manifest.json` (one control binary).
 - `service-artifacts/pi-acp-services-VERSION-TARGET.tar.gz` and `.sha256`.
-- Archive content: binary/manifest, `SHA256SUMS`, licenses/notices, current IPC/Telegram/VS Code/storage guides, and only `examples/pi-acp-workbenchd.service` + `examples/workbench.json`.
+- Archive content: binary/manifest (including matching IPC/storage/root policy contracts), `SHA256SUMS`, licenses/notices, the fixed public documentation allowlist including Diff/management/cutover and linked evidence (with package-local links checked), and only `examples/pi-acp-workbenchd.service` + `examples/workbench.json`.
 
 `build:services` supports GNU and musl x86_64 target flags. Building or testing the GNU artifact locally does **not** establish musl/cross-target acceptance; verify each actual target separately. Provider workers remain separately installed external executables. Rustls uses bundled roots; Node is needed for Node-based provider adapters, not for native maintenance itself.
 
@@ -40,7 +40,7 @@ Edit `examples/workbench.json`: substitute the absolute storage root and explici
 
 For Telegram, add the merged optional Telegram section as described in [Telegram](workbench-telegram.md): canonical workspace, allowed chat/user IDs, and the **name** of the token environment variable. Token bytes never belong in JSON, archive, CLI arguments or repository. Provider/Bot credentials are operator-managed and are not included in an artifact.
 
-The single unit example has an absolute `ExecStart` placeholder. Configure it to this artifact and a private operator-owned config file before manually installing/enabling it. The service account needs access to its workspace/storage and configured provider executable, not root privileges. There is no second Telegram unit, relay, internal session socket or interactive setup tool.
+The single unit example has an absolute `ExecStart` placeholder. Configure it to this artifact and a private operator-owned config file before manually installing/enabling it. The service account needs access to its workspace/storage and configured provider executable, not root privileges. There is no second Telegram unit, relay or internal session socket. The desktop Telegram setup wizard only creates a new config with explicit user/chat allowlists; it does not collect token bytes or install/start a service.
 
 For a manual foreground check after configuration:
 
@@ -49,6 +49,8 @@ For a manual foreground check after configuration:
 ```
 
 VS Code must use the matching current-source VSIX and [IPC v3](workbench-ipc.md) socket `<storage.root>/workbench.sock`. The extension does not start the daemon. See [VS Code](workbench-vscode.md) for trust/canonical-workspace checks and UI limits.
+
+Before any authorized switch, follow the [candidate release/cutover checklist](workbench-cutover.md), including unresolved parity/live/SLO blockers and whole-combination rollback. Passing local artifact smoke does not approve deployment.
 
 ## Stop, inspect and back up before replacement
 
