@@ -7,7 +7,21 @@ import { WorkbenchClient } from './workbench-client';
 import { WorkbenchController } from './workbench-controller';
 import { readTextAttachment } from './workbench-attachments';
 import { MAX_ATTACHMENTS } from './workbench-input';
+import { telegramConfiguration } from './workbench-setup';
 
+function isWithin(root: string, target: string) {
+  const part = relative(root, target);
+  return part === '' || (!part.startsWith('..' + '/') && part !== '..' && !isAbsolute(part));
+}
+async function hasDirtyDocuments(cwd: string) {
+  const root = await realpath(cwd);
+  for (const document of vscode.workspace.textDocuments) {
+    if (!document.isDirty || document.uri.scheme !== 'file') continue;
+    const target = await realpath(document.uri.fsPath).catch(() => document.uri.fsPath);
+    if (isWithin(root, target)) return true;
+  }
+  return false;
+}
 /** New production entry. Legacy extension/controller/wire files are not imported or bundled. */
 export function activate(context: vscode.ExtensionContext) {
   const provider = new WorkbenchProvider(context);
@@ -39,6 +53,17 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
   private view?: vscode.WebviewView;
   private resources: vscode.Disposable[] = [];
   constructor(private context: vscode.ExtensionContext) {
+    // Only immutable daemon snapshots enter this provider. No URI maps to disk.
+    const snapshots = new Map<string, string>();
+    this.resources.push(
+      vscode.workspace.registerTextDocumentContentProvider('workbench-diff', {
+        provideTextDocumentContent: (uri) => {
+          const text = snapshots.get(uri.toString());
+          if (text === undefined) throw new Error('Snapshot expired; reopen the turn diff');
+          return text;
+        },
+      }),
+    );
     const configured = vscode.workspace.getConfiguration('piAcp').get<string>('workbenchSocket');
     const path = configured || join(homedir(), '.pi', 'pi-acp-workbench', 'workbench.sock');
     const client = new WorkbenchClient(path, {
@@ -53,6 +78,125 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
       saveOperations: (operations) =>
         context.workspaceState?.update(operationKey, operations) ?? Promise.resolve(),
       trusted: () => vscode.workspace.isTrusted,
+      copyText: (text) => vscode.env.clipboard.writeText(text),
+      configureTelegram: async () => {
+        const trusted = () => {
+          if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+        };
+        trusted();
+        const directories = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          openLabel: 'Choose allowed Telegram workspace',
+        });
+        if (!directories?.[0]) return;
+        if (directories[0].scheme !== 'file') throw new Error('Choose a local directory');
+        const workspace = await realpath(directories[0].fsPath);
+        const tokenEnv = await vscode.window.showInputBox({
+          title: 'Bot token environment variable (not the secret token)',
+          value: 'TELEGRAM_BOT_TOKEN',
+          ignoreFocusOut: true,
+        });
+        if (tokenEnv === undefined) return;
+        const user = await vscode.window.showInputBox({
+          title: 'Explicitly authorized Telegram user ID',
+          ignoreFocusOut: true,
+        });
+        if (user === undefined) return;
+        const chat = await vscode.window.showInputBox({
+          title: 'Allowed private/group chat ID (groups are negative)',
+          ignoreFocusOut: true,
+        });
+        if (chat === undefined) return;
+        const config = telegramConfiguration({
+          workspace,
+          root: join(homedir(), '.pi', 'pi-acp-workbench'),
+          tokenEnv,
+          user,
+          chat,
+        });
+        trusted();
+        const destination = await vscode.window.showSaveDialog({
+          title: 'Save NEW workbench config (no installation or restart)',
+          defaultUri: vscode.Uri.file(join(workspace, 'workbench.generated.json')),
+          filters: { JSON: ['json'] },
+        });
+        if (!destination) return;
+        trusted();
+        if (destination.scheme !== 'file') throw new Error('Choose a local config file');
+        const file = await open(destination.fsPath, 'wx', 0o600);
+        try {
+          await file.writeFile(JSON.stringify(config, null, 2) + '\n');
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        await vscode.window.showInformationMessage(
+          `Config created. Set ${tokenEnv} in the daemon environment, inspect the explicit allowed IDs, then start the single daemon yourself. No credentials were saved and no service was installed.`,
+        );
+      },
+      openDiff: async (turn, files) => {
+        snapshots.clear();
+        const resources = files.map((file) => {
+          const id = randomUUID();
+          const original = vscode.Uri.from({
+            scheme: 'workbench-diff',
+            path: `/${id}/before/${file.path}`,
+          });
+          const modified = vscode.Uri.from({
+            scheme: 'workbench-diff',
+            path: `/${id}/after/${file.path}`,
+          });
+          snapshots.set(original.toString(), file.before);
+          snapshots.set(modified.toString(), file.after);
+          return { original, modified };
+        });
+        if (resources.length === 1) {
+          await vscode.commands.executeCommand(
+            'vscode.diff',
+            resources[0].original,
+            resources[0].modified,
+            `${turn} · ${files[0].path}`,
+          );
+        } else {
+          await vscode.commands.executeCommand('_workbench.openMultiDiffEditor', {
+            title: `Turn ${turn} · workspace changes`,
+            resources: resources.map(({ original, modified }) => ({
+              originalUri: original,
+              modifiedUri: modified,
+            })),
+          });
+        }
+      },
+      confirmUndo: async (_session, turn) => {
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
+        const view = this.controller.snapshot.view;
+        if (
+          !view ||
+          !view.view ||
+          view.view.active_turn ||
+          view.view.cwd !== this.controller.snapshot.sessions.find((s) => s.id === _session)?.cwd
+        )
+          throw new Error('Session changed or task is active');
+        const cwd = view.view.cwd;
+        if (await hasDirtyDocuments(cwd))
+          throw new Error('Save or close dirty editor buffers before undo');
+        const choice = await vscode.window.showWarningMessage(
+          `Undo workspace changes from turn ${turn}? This does not change chat history or model context. Multi-file undo can partially fail. External editors and residual background processes are not locked; inspect the diff first.`,
+          { modal: true },
+          'Undo turn',
+        );
+        return choice === 'Undo turn';
+      },
+      validateUndo: async (_session) => {
+        const view = this.controller.snapshot.view?.view;
+        if (!vscode.workspace.isTrusted || !view || view.active_turn || view.id !== _session)
+          throw new Error('Workspace trust, session, or task state changed');
+        if (await hasDirtyDocuments(view.cwd))
+          throw new Error('Save or close dirty editor buffers before undo');
+        await this.controller.authorizeForUndo?.(view.cwd);
+      },
       attachFiles: async (cwd) => {
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
         const result = await vscode.window.showOpenDialog({

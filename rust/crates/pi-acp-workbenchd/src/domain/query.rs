@@ -73,6 +73,8 @@ impl From<SafeInteger> for u64 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub id: SessionId,
     pub harness: Harness,
     pub cwd: WorkspacePath,
@@ -143,6 +145,8 @@ impl SessionView {
             Some(usage.cost_micros),
             usage.context_used,
             usage.context_size,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
         ]
         .into_iter()
         .flatten()
@@ -335,6 +339,10 @@ pub enum CommandReceipt {
     },
     Forked {
         summary: SessionSummary,
+    },
+    UndoCompleted {
+        session: SessionId,
+        report: crate::workspace_undo::UndoReport,
     },
     Removed {
         session: SessionId,
@@ -530,6 +538,10 @@ pub enum QueryResult {
     Tools(ToolPage),
     Content(ContentSlice),
     Attached(Box<Attached>),
+    Management(super::management::ManagementData),
+    ValidateUndo(crate::workspace_undo::UndoReport),
+    TurnDiff(crate::workspace_review::TurnDiff),
+    TurnDiffContent(crate::workspace_review::DiffContent),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -574,10 +586,43 @@ pub enum QueryCommand {
     Image {
         image: ImageRef,
     },
+    Management {
+        query: super::management::ManagementQuery,
+    },
+    ValidateUndo {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+    },
+    TurnDiff {
+        session: SessionId,
+        turn: TurnId,
+        #[serde(default)]
+        offset: usize,
+    },
+    TurnDiffContent {
+        session: SessionId,
+        turn: TurnId,
+        file: usize,
+        after: bool,
+        offset: SafeInteger,
+    },
 }
 impl QueryCommand {
     pub fn validate(&self) -> Result<(), QueryError> {
         match self {
+            Self::TurnDiff { offset, .. } if *offset > 5000 => {
+                return Err(QueryError::InvalidInput)
+            }
+            Self::TurnDiffContent { file, offset, .. }
+                if *file >= 5000 || offset.get() > 1048576 =>
+            {
+                return Err(QueryError::InvalidInput)
+            }
+            Self::Management { query } if !query.valid() => return Err(QueryError::InvalidInput),
+            Self::Management { .. }
+            | Self::ValidateUndo { .. }
+            | Self::TurnDiff { .. }
+            | Self::TurnDiffContent { .. } => {}
             Self::List { cursor, limit: n } => {
                 limit(*n, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT)?;
                 if cursor

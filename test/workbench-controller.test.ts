@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { WorkbenchController } from '../src/workbench-controller';
 import { uiStateMessage, type WorkbenchUiMessage } from '../src/workbench-ui';
 import { entryId, imageRef, operationId, sessionId } from '../src/workbench-protocol';
@@ -25,6 +26,9 @@ afterEach(async () => {
 });
 async function setup(
   attachFiles?: (cwd: string) => Promise<import('../src/workbench-input').TextAttachment[]>,
+  confirmUndo?: (session: string, turn: string) => Promise<boolean>,
+  entries: unknown[] = [],
+  copyText?: (text: string) => PromiseLike<void>,
 ) {
   const peer = await workbenchPeer();
   peers.push(peer);
@@ -36,6 +40,8 @@ async function setup(
     trusted: () => trusted,
     workspace: () => '/workspace',
     attachFiles,
+    confirmUndo,
+    copyText,
     authorize: async (cwd) => {
       authorization.push(cwd);
       if (cwd !== '/workspace') throw new Error('outside workspace');
@@ -48,7 +54,7 @@ async function setup(
   await ready;
   const selecting = controller.receive({ type: 'select', session: 'session' });
   await expect.poll(() => peer.requests.length).toBe(2);
-  peer.query(peer.requests[1], 'attached', attached());
+  peer.query(peer.requests[1], 'attached', attached(5, entries));
   await selecting;
   return {
     peer,
@@ -58,6 +64,256 @@ async function setup(
     setTrusted: (value: boolean) => (trusted = value),
   };
 }
+it('copies only a confirmed message with exact bounded content cursors and checksum', async () => {
+  const text = '你好🌍';
+  const ref = {
+    id: 'body',
+    kind: 'Text',
+    bytes: Buffer.byteLength(text),
+    sha256: createHash('sha256').update(text).digest('hex'),
+  };
+  const entry = {
+    seq: 1,
+    id: 'entry',
+    turn: 'turn',
+    role: 'Agent',
+    text: { Archived: { content: ref } },
+    message: null,
+    image: null,
+  };
+  const copied: string[] = [];
+  const { peer, controller } = await setup(undefined, undefined, [entry], async (text) => {
+    copied.push(text);
+  });
+  let action = controller.receive({ type: 'copy_message', session: 'session', entry: 'entry' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'content', {
+    text: '你好',
+    sha256: ref.sha256,
+    total_bytes: ref.bytes,
+    next_offset: 6,
+  });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  peer.query(peer.requests[3], 'content', {
+    text: '🌍',
+    sha256: ref.sha256,
+    total_bytes: ref.bytes,
+    next_offset: null,
+  });
+  await action;
+  expect(copied).toEqual([text]);
+  action = controller.receive({ type: 'copy_message', session: 'session', entry: 'entry' });
+  await expect.poll(() => peer.requests.length).toBe(5);
+  peer.query(peer.requests[4], 'content', {
+    text: '你好',
+    sha256: ref.sha256,
+    total_bytes: ref.bytes,
+    next_offset: 1,
+  });
+  await action;
+  expect(copied).toEqual([text]);
+  expect(controller.snapshot.error).toContain('cursor');
+});
+it('reads only a turn diff whose turn is present in the selected committed page', async () => {
+  const entry = {
+    seq: 1,
+    id: entryId.parse('entry'),
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'prompt' } },
+    message: null,
+    image: null,
+  };
+  const { peer, controller, messages } = await setup(undefined, undefined, [entry]);
+  const reading = controller.receive({ type: 'read_turn_diff', session: 'session', turn: 'turn' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command.method).toBe('turn_diff');
+  peer.query(peer.requests[2], 'turn_diff', {
+    status: 'complete',
+    files: [],
+    warnings: [],
+    added: 0,
+    removed: 0,
+    next_offset: null,
+  });
+  await reading;
+  expect(messages).toContainEqual(
+    expect.objectContaining({ type: 'turn_diff', session: 'session', turn: 'turn' }),
+  );
+  const count = peer.requests.length;
+  await controller.receive({ type: 'read_turn_diff', session: 'session', turn: 'not-visible' });
+  expect(peer.requests).toHaveLength(count);
+});
+it('reads paged diff content through the selected turn identity', async () => {
+  const entry = {
+    seq: 1,
+    id: entryId.parse('entry'),
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'prompt' } },
+    message: null,
+    image: null,
+  };
+  const { peer, controller, messages } = await setup(undefined, undefined, [entry]);
+  const diffRead = controller.receive({ type: 'read_turn_diff', session: 'session', turn: 'turn' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'turn_diff', {
+    status: 'complete',
+    files: [
+      {
+        path: 'large.txt',
+        status: 'modified',
+        before_hash: 'a'.repeat(64),
+        after_hash: 'b'.repeat(64),
+        before: null,
+        after: null,
+        old_mode: 33188,
+        new_mode: 33188,
+        added: 1,
+        removed: 1,
+        patch: null,
+        omitted: 'large',
+      },
+    ],
+    warnings: [],
+    added: 1,
+    removed: 1,
+    next_offset: null,
+  });
+  await diffRead;
+  const contentRead = controller.receive({
+    type: 'read_turn_diff_content',
+    session: 'session',
+    turn: 'turn',
+    file: 0,
+    after: true,
+    offset: 0,
+  });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  expect(peer.requests[3].command.method).toBe('turn_diff_content');
+  peer.query(peer.requests[3], 'turn_diff_content', {
+    bytes: 'large content',
+    total_bytes: 13,
+    next_offset: null,
+  });
+  await contentRead;
+  expect(messages).toContainEqual(
+    expect.objectContaining({ type: 'turn_diff_content', bytes: 'large content' }),
+  );
+});
+it('requires editor confirmation and sends undo as one durable command with an operation identity', async () => {
+  const entry = {
+    seq: 1,
+    id: entryId.parse('entry'),
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'prompt' } },
+    message: null,
+    image: null,
+  };
+  const confirmations: string[] = [];
+  const { peer, controller, messages } = await setup(
+    undefined,
+    async (session, turn) => {
+      confirmations.push(`${session}:${turn}`);
+      return true;
+    },
+    [entry],
+  );
+  const undo = controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command.method).toBe('validate_undo');
+  peer.query(peer.requests[2], 'validate_undo', { files: [] });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  const request = peer.requests[3];
+  expect(request.command.method).toBe('undo_turn');
+  expect(request.operation).toBeDefined();
+  expect(confirmations).toEqual(['session:turn']);
+  peer.reply(request, {
+    UndoCompleted: {
+      session: 'session',
+      report: { files: [{ path: 'a.txt', status: 'restored', error: null }] },
+    },
+  });
+  await undo;
+  expect(messages).toContainEqual({
+    type: 'undo_result',
+    session: 'session',
+    turn: 'turn',
+    report: { files: [{ path: 'a.txt', status: 'restored', error: null }] },
+  });
+});
+it('rechecks workspace authorization after modal confirmation before undo admission', async () => {
+  const entry = {
+    seq: 1,
+    id: entryId.parse('entry'),
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'prompt' } },
+    message: null,
+    image: null,
+  };
+  let approve!: (value: boolean) => void;
+  const { peer, controller, setTrusted } = await setup(
+    undefined,
+    () =>
+      new Promise<boolean>((resolve) => {
+        approve = resolve;
+      }),
+    [entry],
+  );
+  const action = controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'validate_undo', { files: [] });
+  await expect.poll(() => typeof approve).toBe('function');
+  await controller.receive({ type: 'select', session: 'another-session' });
+  await controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: {
+      method: 'prompt',
+      session: 'session',
+      prompt: 'must not dispatch during confirmation',
+    },
+  });
+  expect(peer.requests).toHaveLength(3);
+  expect(controller.snapshot.error).toContain('confirmation');
+  setTrusted(false);
+  approve(true);
+  await action;
+  expect(peer.requests.map((r) => r.command.method)).toEqual(['list', 'attach', 'validate_undo']);
+  expect(controller.snapshot.error).toContain('trust');
+});
+it('canceled editor confirmation never admits an undo operation', async () => {
+  const entry = {
+    seq: 1,
+    id: entryId.parse('entry'),
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'prompt' } },
+    message: null,
+    image: null,
+  };
+  const { peer, controller } = await setup(undefined, async () => false, [entry]);
+  const action = controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'validate_undo', { files: [] });
+  await action;
+  expect(peer.requests.map((r) => r.command.method)).toEqual(['list', 'attach', 'validate_undo']);
+});
+
 it('file picking is explicitly authorized, remains cold and rejects trust changes before posting results', async () => {
   let finish!: (files: import('../src/workbench-input').TextAttachment[]) => void;
   const { peer, controller, messages, setTrusted } = await setup(

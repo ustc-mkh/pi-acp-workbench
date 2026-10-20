@@ -54,6 +54,14 @@ pub enum DomainCommand {
     CommitConfiguration {
         session: SessionId,
     },
+    Manage {
+        session: SessionId,
+        action: super::management::ManagementAction,
+    },
+    UndoTurn {
+        session: SessionId,
+        turn: TurnId,
+    },
     RemoveSession(SessionId),
     Inspect(SessionId),
     Agent {
@@ -93,6 +101,8 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_tokens: Option<u64>,
+        cache_write_tokens: Option<u64>,
     },
     ContextUsage {
         used: u64,

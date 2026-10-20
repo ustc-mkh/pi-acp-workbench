@@ -167,7 +167,9 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default)]
-    pub cached_read_tokens: u64,
+    pub cached_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_write_tokens: Option<u64>,
     #[serde(default)]
     pub total_tokens: Option<u64>,
 }

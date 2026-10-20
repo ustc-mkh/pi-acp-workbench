@@ -13,6 +13,11 @@ const TABLES: &[&str] = &[
     "store_meta",
     "removed_sessions",
     "sessions",
+    "session_metadata",
+    "naming_settings",
+    "model_settings",
+    "usage_facts",
+    "turn_diffs",
     "contents",
     "entries",
     "session_entries",
@@ -116,6 +121,17 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
             "SELECT delivery_id,bot_id,chat,thread,session FROM telegram_turn_receipts LIMIT 0",
         )
         .map_err(|_| StoreError::Invalid("unsupported Telegram turn receipt schema"))?;
+    for statement in [
+        "SELECT session,title,source,attempted FROM session_metadata LIMIT 0",
+        "SELECT policy,model FROM naming_settings WHERE id=1",
+        "SELECT harness,model,hidden,price,default_price,context_window FROM model_settings LIMIT 0",
+        "SELECT id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source FROM usage_facts LIMIT 0",
+    ] {
+        connection.prepare(statement).map_err(|_|StoreError::Invalid("unsupported management schema"))?;
+    }
+    connection
+        .prepare("SELECT session,turn,diff_json FROM turn_diffs LIMIT 0")
+        .map_err(|_| StoreError::Invalid("unsupported turn diff schema"))?;
     connection
         .prepare("SELECT activity_seq FROM sessions LIMIT 0")
         .map_err(|_| StoreError::Invalid("unsupported activity-order schema"))?;

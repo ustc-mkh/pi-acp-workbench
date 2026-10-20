@@ -145,7 +145,7 @@ for (const [file, name] of [
 const allowed = {
   extension: /^src\/workbench-[^/]+\.ts$/,
   browser:
-    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-drafts|workbench-preferences|workbench-attachment-drafts|markdown|diagrams))\.ts$/,
+    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|markdown|diagrams))\.ts$/,
   adapter: /^src\/(?:pi-[^/]+|adapter-[^/]+|atomic-json|native-branch|telemetry)\.ts$/,
 };
 for (const [kind, entry] of [

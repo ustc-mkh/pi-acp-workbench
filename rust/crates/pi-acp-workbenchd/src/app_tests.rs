@@ -23,6 +23,8 @@ mod image_tests;
 mod ingress_tests;
 #[path = "app_load_tests.rs"]
 mod load_tests;
+#[path = "app_management_tests.rs"]
+mod management_tests;
 #[path = "app_pi_sdk_tests.rs"]
 mod pi_sdk_tests;
 #[path = "app_provider_tests.rs"]
@@ -33,6 +35,8 @@ mod query_tests;
 mod registry_tests;
 #[path = "app_replay_tests.rs"]
 mod replay_tests;
+#[path = "app_workspace_review_tests.rs"]
+mod workspace_review_tests;
 fn app() -> (WorkbenchApp, PathBuf) {
     let root = std::env::temp_dir().join(format!("workbench-app-{}", uuid::Uuid::new_v4()));
     (app_at(&root), root)

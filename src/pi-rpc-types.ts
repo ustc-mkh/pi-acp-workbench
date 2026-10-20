@@ -77,4 +77,6 @@ export interface WorkbenchParams {
   entryId?: string;
   hash?: string;
   cursor?: number;
+  setContext?: boolean;
+  contextWindow?: number | null;
 }

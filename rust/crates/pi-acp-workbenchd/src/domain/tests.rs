@@ -360,6 +360,8 @@ fn plan_usage_and_settings_update_domain_state() {
             event: AgentEvent::Usage {
                 input_tokens: 42,
                 output_tokens: 7,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
             },
         },
     )

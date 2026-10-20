@@ -1,5 +1,6 @@
 import { Drafts } from './workbench-drafts';
 import { Preferences } from './workbench-preferences';
+import { ManagementPanel } from './workbench-management';
 import { AttachmentDrafts } from './workbench-attachment-drafts';
 import { composePrompt } from '../src/workbench-input';
 import { createRenderer } from './markdown';
@@ -34,7 +35,10 @@ let state: WorkbenchUiState | undefined,
 const images = new Map<string, { asset: ImageAsset; url: string }>();
 const imageErrors = new Map<string, string>(),
   pendingImages = new Map<number, { image: string; session: string }>();
+const diffContents = new Map<string, { text: string; nextOffset?: number | null }>();
+const turnDiffs = new Map<string, import('../src/workbench-protocol').TurnDiff>();
 let nextUiRequest = 0;
+let titleRefreshTimer: number | undefined;
 let imageBytes = 0,
   rendering = false;
 const saved = vscode.getState?.();
@@ -76,6 +80,7 @@ function button(label: string, click: () => void, disabled = false) {
   node.addEventListener('click', click);
   return node;
 }
+const management = new ManagementPanel(send, schedule);
 const header = element('header'),
   title = element('h1', 'Pi Workbench');
 const harness = element('select');
@@ -100,6 +105,9 @@ header.append(
     });
   }),
   button('Refresh', () => send({ type: 'refresh' })),
+  button('Usage statistics', () => management.openStatistics()),
+  button('Model settings', () => management.openModels()),
+  button('Telegram setup', () => send({ type: 'configure_telegram' })),
   button('Export Markdown', () => {
     if (state?.selected) send({ type: 'export', session: state.selected as SessionView['id'] });
   }),
@@ -198,6 +206,7 @@ root.append(
   sessions,
   status,
   error,
+  management.root,
   settings,
   planPanel,
   transcript,
@@ -231,6 +240,12 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
     unknown.value = '';
     select.append(unknown);
     for (const choice of choices) {
+      if (
+        key === 'model' &&
+        choice.id !== snapshot.catalogue.current_model &&
+        !management.visible(choice.id, snapshot.harness)
+      )
+        continue;
       const option = element('option', choice.name);
       option.value = choice.id;
       select.append(option);
@@ -267,6 +282,29 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
   });
   thoughtLabel.prepend(showThoughts);
   settings.append(thoughtLabel);
+  const autoScroll = element('input');
+  autoScroll.type = 'checkbox';
+  autoScroll.checked = preferences.autoScroll;
+  autoScroll.onchange = () => {
+    preferences.autoScroll = autoScroll.checked;
+    persist();
+  };
+  const scrollLabel = element('label', 'Follow latest output');
+  scrollLabel.prepend(autoScroll);
+  const rows = element('select');
+  rows.setAttribute('aria-label', 'Session list rows');
+  for (let i = 1; i <= 10; i++) {
+    const option = element('option', `${i} session rows`);
+    option.value = String(i);
+    rows.append(option);
+  }
+  rows.value = String(preferences.sessionRows);
+  rows.onchange = () => {
+    preferences.sessionRows = Number(rows.value);
+    persist();
+    schedule();
+  };
+  settings.append(scrollLabel, rows);
   let confirmRemove = false;
   const remove = button(
     'Remove session',
@@ -399,6 +437,135 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       process.className = 'turn-process';
       process.append(element('summary', 'Thoughts and tools'));
       box.append(element('h2', `Turn · ${row.turn}`), process);
+      box.append(
+        button('Review workspace changes', () =>
+          send({ type: 'read_turn_diff', session: snapshot.id, turn: row.turn }),
+        ),
+      );
+      const savedDiff = turnDiffs.get(`${snapshot.id}:${row.turn}`);
+      if (savedDiff) {
+        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, false);
+        summary.append(
+          element(
+            'summary',
+            `${savedDiff.status} · +${savedDiff.added} −${savedDiff.removed} lines`,
+          ),
+        );
+        if (savedDiff.status === 'complete' && savedDiff.files.length)
+          box.append(
+            button(
+              'Undo this turn…',
+              () =>
+                send({
+                  type: 'execute',
+                  session: snapshot.id,
+                  command: { method: 'undo_turn', session: snapshot.id, turn: row.turn },
+                }),
+              busy || snapshot.status !== 'Idle',
+            ),
+          );
+        summary.append(
+          button('View total Diff in editor', () =>
+            send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn }),
+          ),
+        );
+        summary.append(
+          element(
+            'p',
+            'Net workspace snapshots include concurrent edits. Ignored files and external/background processes are outside the guarantee. Undo does not rewind model context.',
+          ),
+        );
+        if (!savedDiff.files.length) summary.append(element('p', 'No captured workspace changes.'));
+        for (const [index, file] of savedDiff.files.entries()) {
+          summary.append(element('h3', `${file.status} · ${file.path}`));
+          if (file.old_mode !== file.new_mode)
+            summary.append(
+              element(
+                'p',
+                `Permissions: ${file.old_mode?.toString(8) ?? 'absent'} → ${file.new_mode?.toString(8) ?? 'absent'}`,
+              ),
+            );
+          summary.append(
+            button('Compare file in editor', () =>
+              send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn, file: index }),
+            ),
+          );
+          if (file.omitted) {
+            summary.append(element('p', file.omitted));
+            for (const after of [false, true])
+              if ((after ? file.after : file.before) === null)
+                summary.append(
+                  button(after ? 'Load after' : 'Load before', () =>
+                    send({
+                      type: 'read_turn_diff_content',
+                      session: snapshot.id,
+                      turn: row.turn,
+                      file: index,
+                      after,
+                      offset: 0,
+                    }),
+                  ),
+                );
+          }
+          for (const after of [false, true]) {
+            const loaded = diffContents.get(`${snapshot.id}:${row.turn}:${index}:${after}`);
+            if (loaded) {
+              const pre = element('pre');
+              pre.textContent = loaded.text.slice(0, 30000).split('\n').slice(0, 400).join('\n');
+              summary.append(pre);
+              if (loaded.text.length > 30000 || loaded.text.split('\n').length > 400)
+                summary.append(
+                  element(
+                    'p',
+                    'Inline preview truncated; open the editor diff for full saved text.',
+                  ),
+                );
+              if (
+                loaded.text.length < 30000 &&
+                loaded.nextOffset !== null &&
+                loaded.nextOffset !== undefined
+              )
+                summary.append(
+                  button('Load next content slice', () =>
+                    send({
+                      type: 'read_turn_diff_content',
+                      session: snapshot.id,
+                      turn: row.turn,
+                      file: index,
+                      after,
+                      offset: loaded.nextOffset!,
+                    }),
+                  ),
+                );
+            }
+          }
+          if (file.before !== null) {
+            summary.append(element('h4', 'Before'));
+            const pre = element('pre');
+            pre.textContent = file.before ?? '';
+            summary.append(pre);
+          }
+          if (file.after !== null) {
+            summary.append(element('h4', 'After'));
+            const pre = element('pre');
+            pre.textContent = file.after ?? '';
+            summary.append(pre);
+          }
+        }
+        if (savedDiff.next_offset !== null)
+          summary.append(
+            button('Next diff page', () =>
+              send({
+                type: 'read_turn_diff',
+                session: snapshot.id,
+                turn: row.turn,
+                offset: savedDiff.next_offset!,
+              }),
+            ),
+          );
+        for (const warning of savedDiff.warnings) summary.append(element('p', warning));
+        box.append(summary);
+      }
       turn = { box, process };
       turns.set(row.turn, turn);
       transcript.append(box);
@@ -430,6 +597,26 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     article.dataset.entry = row.id;
     article.className = row.role.toLowerCase();
     article.append(element('small', `${row.role} · ${row.seq}`));
+    article.append(
+      button('Copy message', () =>
+        send({ type: 'copy_message', session: snapshot.id, entry: row.id }),
+      ),
+    );
+    if (row.role === 'User' && 'Inline' in row.text) {
+      const text = row.text.Inline.text;
+      article.append(
+        button('Use as prompt', () => {
+          const next = prompt.value ? `${prompt.value}\n\n${text}` : text;
+          if (next.length > prompt.maxLength) {
+            error.textContent = 'Combined draft exceeds the prompt budget';
+            return;
+          }
+          prompt.value = next;
+          saveDraft();
+          prompt.focus();
+        }),
+      );
+    }
     const content = element('div');
     if ('Inline' in row.text) {
       content.innerHTML = markdown(row.text.Inline.text);
@@ -533,11 +720,12 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   const restored = [...transcript.querySelectorAll<HTMLElement>('[data-entry]')].find(
     (node) => node.dataset.entry === anchorId,
   );
-  transcript.scrollTop = bottom
-    ? transcript.scrollHeight
-    : restored && anchorOffset !== undefined
-      ? scroll + restored.getBoundingClientRect().top - anchorOffset
-      : scroll;
+  transcript.scrollTop =
+    bottom && preferences.autoScroll
+      ? transcript.scrollHeight
+      : restored && anchorOffset !== undefined
+        ? scroll + restored.getBoundingClientRect().top - anchorOffset
+        : scroll;
 }
 function renderInteractions(snapshot: SessionView) {
   // Preserve partially entered answers across streaming/snapshot refresh. A
@@ -685,7 +873,7 @@ function render() {
     const phase = typeof session.status === 'string' ? session.status : 'Failed';
     const option = element(
       'option',
-      `#${session.created_seq} · ${session.harness} · ${phase} · ${session.id} · ${session.cwd}`,
+      `#${session.created_seq} · ${session.title ?? session.id} · ${session.harness} · ${phase} · ${session.cwd}`,
     );
     option.value = session.id;
     sessions.append(option);
@@ -731,6 +919,8 @@ function render() {
   attach.disabled = !snapshot || !state.trusted;
   cancel.disabled = !snapshot || !state.trusted || snapshot.active_turn === null;
   if (snapshot) {
+    management.setView(snapshot, state.sessions, state.operations);
+    sessions.size = preferences.sessionRows;
     renderSettings(snapshot, busy);
     renderTranscript(snapshot, busy);
     renderInteractions(snapshot);
@@ -764,11 +954,22 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   const raw = event.data;
   if (!raw || typeof raw !== 'object' || !('type' in raw)) return;
   try {
+    if (management.receive(raw)) return;
     if (raw.type === 'state') {
       const message = uiStateMessage.parse(raw);
       if (message.sequence <= sequence) return;
+      const previousTurn = state?.view?.view?.active_turn;
       sequence = message.sequence;
       state = message.state;
+      if (previousTurn && !state.view?.view?.active_turn) {
+        send({ type: 'refresh_names' });
+        if (titleRefreshTimer) window.clearTimeout(titleRefreshTimer);
+        const session = state.selected;
+        titleRefreshTimer = window.setTimeout(() => {
+          if (state && state.selected === session && !state.view?.view?.active_turn)
+            send({ type: 'refresh_names' });
+        }, 16000);
+      }
       for (const [session, previous] of pendingPrompts)
         if (
           state.error ||
@@ -822,6 +1023,67 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       } catch (failure) {
         error.textContent = failure instanceof Error ? failure.message : 'Invalid attachments';
       }
+    } else if (raw.type === 'undo_result' && 'session' in raw && raw.session === state?.selected) {
+      const report = (
+        raw as unknown as {
+          report: { files: { path: string; status: string; error?: string | null }[] };
+        }
+      ).report;
+      const partial = report.files.some(
+        (f) => f.status === 'uncertain' || f.status === 'not_attempted',
+      );
+      error.textContent = partial
+        ? 'Undo partially completed; inspect each file and do not retry automatically.'
+        : `Restored ${report.files.filter((f) => f.status === 'restored').length} files.`;
+      schedule();
+    } else if (raw.type === 'turn_diff' && 'session' in raw && raw.session === state?.selected) {
+      const message = raw as unknown as {
+        session: string;
+        turn: string;
+        offset?: number;
+        diff: import('../src/workbench-protocol').TurnDiff;
+      };
+      if (
+        message.session === state?.selected &&
+        state?.view?.entries.some((row) => row.turn === message.turn)
+      ) {
+        const key = `${message.session}:${message.turn}`,
+          previous = turnDiffs.get(key);
+        turnDiffs.set(
+          key,
+          previous && message.offset
+            ? { ...message.diff, files: [...previous.files, ...message.diff.files] }
+            : message.diff,
+        );
+        schedule();
+      }
+    } else if (
+      raw.type === 'turn_diff_content' &&
+      'session' in raw &&
+      raw.session === state?.selected
+    ) {
+      const m = raw as unknown as {
+        session: string;
+        turn: string;
+        file: number;
+        after: boolean;
+        offset: number;
+        bytes: string;
+        total_bytes: number;
+        next_offset?: number | null;
+      };
+      if (state?.view?.entries.some((row) => row.turn === m.turn)) {
+        const key = `${m.session}:${m.turn}:${m.file}:${m.after}`,
+          previous = diffContents.get(key);
+        if (m.offset > 0 && (!previous || previous.nextOffset !== m.offset)) return;
+        diffContents.set(key, {
+          text: m.offset && previous ? previous.text + m.bytes : m.bytes,
+          nextOffset: m.next_offset,
+        });
+        schedule();
+      }
+    } else if (raw.type === 'turn_diff_error') {
+      error.textContent = 'Workspace diff unavailable';
     } else if (
       raw.type === 'draft' &&
       'text' in raw &&

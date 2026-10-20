@@ -16,6 +16,36 @@ main {
   max-width: 1100px;
   margin: auto;
 }
+#management {
+  border: 1px solid var(--vscode-panel-border, #555);
+  padding: 8px;
+  margin-block: 8px;
+}
+#management section {
+  overflow-x: auto;
+}
+#management label {
+  display: inline-flex;
+  flex-direction: column;
+  margin: 4px;
+}
+#management table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+#management th,
+#management td {
+  padding: 4px 8px;
+  text-align: start;
+  border-bottom: 1px solid var(--vscode-panel-border, #555);
+}
+#management details {
+  margin-block: 6px;
+}
+#management meter {
+  display: block;
+  width: 100%;
+}
 header {
   display: flex;
   align-items: center;

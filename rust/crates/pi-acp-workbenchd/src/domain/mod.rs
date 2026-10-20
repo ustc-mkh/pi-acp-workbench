@@ -5,6 +5,7 @@ pub mod fork;
 pub mod ids;
 pub mod image;
 pub mod interaction;
+pub mod management;
 pub mod operation;
 pub mod plan;
 pub mod query;

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { exportMarkdown } from './workbench-export';
 import { WorkbenchClient, WorkbenchError, type RequestTicket } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
@@ -21,12 +21,18 @@ import {
   type WorkbenchUiState,
 } from './workbench-ui';
 
+const turnDiffCache = new Map<string, import('./workbench-protocol').TurnDiff>();
 export interface WorkbenchPorts {
   post(message: WorkbenchUiMessage): void;
   trusted(): boolean;
   workspace(): string | undefined;
   /** Canonical workspace authorization before any provider/session mutation. */
   authorize(cwd: string): Promise<void>;
+  copyText?(text: string): PromiseLike<void>;
+  configureTelegram?(): Promise<void>;
+  openDiff?(turn: string, files: { path: string; before: string; after: string }[]): Promise<void>;
+  confirmUndo?(session: SessionId, turn: string): Promise<boolean>;
+  validateUndo?(session: SessionId, turn: string): Promise<void>;
   loadSelection?(): unknown;
   saveSelection?(session: SessionId | undefined): PromiseLike<void>;
   loadOperations?(): unknown;
@@ -57,6 +63,7 @@ export class WorkbenchController {
   private selecting = false;
   private exporting = false;
   private attaching = false;
+  private undoConfirming = false;
   private restoredSelection?: SessionId;
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectAttempt = 0;
@@ -93,6 +100,11 @@ export class WorkbenchController {
       },
     });
   }
+  async authorizeForUndo(cwd: string): Promise<void> {
+    if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
+    await this.ports.authorize(cwd);
+    if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
+  }
   get snapshot(): WorkbenchUiState {
     return {
       ...this.state,
@@ -116,7 +128,69 @@ export class WorkbenchController {
     if (this.closed) return;
     try {
       const message = uiCommand.parse(value);
+      if (this.undoConfirming && ['execute', 'create', 'select'].includes(message.type))
+        throw new Error('Finish or cancel the undo confirmation first');
       switch (message.type) {
+        case 'copy_message': {
+          const selected = this.selected;
+          const entry = selected?.view.entries.find((e) => e.id === message.entry);
+          if (!selected || selected.id !== message.session || !entry || !this.ports.copyText)
+            throw new Error('Select a visible message to copy');
+          let text = '';
+          if ('Inline' in entry.text) text = entry.text.Inline.text;
+          else {
+            const ref = entry.text.Archived.content;
+            if (ref.bytes > 1024 * 1024)
+              throw new Error('Message exceeds clipboard budget; use full Markdown export');
+            let offset = 0;
+            const hash = createHash('sha256');
+            for (;;) {
+              const slice = await this.client.call({ method: 'content', ref, offset });
+              if (this.selected !== selected || this.closed) throw new Error('Session changed');
+              const end = offset + Buffer.byteLength(slice.text);
+              if (end > ref.bytes || (slice.next_offset !== null && slice.next_offset !== end))
+                throw new Error('Invalid message content cursor');
+              hash.update(slice.text);
+              text += slice.text;
+              if (slice.total_bytes !== ref.bytes || slice.sha256 !== ref.sha256)
+                throw new Error('Message identity changed');
+              if (slice.next_offset === null) {
+                if (end !== ref.bytes || hash.digest('hex') !== ref.sha256)
+                  throw new Error('Message checksum mismatch');
+                break;
+              }
+              if (slice.next_offset <= offset) throw new Error('Message cursor made no progress');
+              offset = slice.next_offset;
+            }
+          }
+          if (this.selected !== selected || this.closed) throw new Error('Session changed');
+          await this.ports.copyText(text);
+          break;
+        }
+        case 'configure_telegram': {
+          const cwd = this.ports.workspace();
+          if (!cwd || !this.ports.configureTelegram)
+            throw new Error('Open a trusted workspace to configure Telegram');
+          const token = await this.authorize(cwd);
+          this.assertAuthorization(token);
+          await this.ports.configureTelegram();
+          break;
+        }
+        case 'read_management': {
+          try {
+            const data = await this.client.call({ method: 'management', query: message.query });
+            if (!this.closed)
+              this.ports.post({ type: 'management', request_id: message.request_id, data });
+          } catch {
+            if (!this.closed)
+              this.ports.post({
+                type: 'management_error',
+                request_id: message.request_id,
+                error: 'Statistics/settings unavailable',
+              });
+          }
+          break;
+        }
         case 'attach_files': {
           const selected = this.selected;
           const snapshot = selected?.view.view;
@@ -163,6 +237,9 @@ export class WorkbenchController {
           }
           break;
         }
+        case 'refresh_names':
+          await this.refresh();
+          break;
         case 'recover_operations':
           await this.recoverOperations();
           break;
@@ -201,9 +278,17 @@ export class WorkbenchController {
           )
             throw new Error('Session selection changed');
           if (
-            !['prompt', 'cancel', 'answer', 'fork', 'set_model', 'set_mode', 'remove'].includes(
-              message.command.method,
-            )
+            ![
+              'prompt',
+              'cancel',
+              'answer',
+              'fork',
+              'set_model',
+              'set_mode',
+              'remove',
+              'undo_turn',
+              'manage',
+            ].includes(message.command.method)
           )
             throw new Error('Command is not a user mutation');
           const snapshot = selected.view.view;
@@ -237,7 +322,48 @@ export class WorkbenchController {
               throw new Error('Workspace trust changed');
           }
           this.assertAuthorization(token);
+          const undoTurn =
+            message.command.method === 'undo_turn' ? message.command.turn : undefined;
+          if (undoTurn) {
+            if (!selected.view.entries.some((row) => row.turn === undoTurn))
+              throw new Error('Turn is not in confirmed history');
+            if (snapshot.active_turn)
+              throw new Error('Wait for the active task to finish before undo');
+            this.undoConfirming = true;
+            try {
+              await this.client.call({
+                method: 'validate_undo',
+                session: selected.id,
+                turn: undoTurn,
+              });
+              this.assertAuthorization(token);
+              if (!this.ports.confirmUndo || !(await this.ports.confirmUndo(selected.id, undoTurn)))
+                break;
+              this.assertAuthorization(token);
+              if (
+                this.closed ||
+                this.selected !== selected ||
+                !this.ports.trusted() ||
+                selected.view.view?.active_turn
+              )
+                throw new Error(
+                  'Workspace trust, task state, or selection changed during confirmation',
+                );
+              await this.ports.validateUndo?.(selected.id, undoTurn);
+              this.assertAuthorization(token);
+            } finally {
+              this.undoConfirming = false;
+            }
+          }
           const result = await this.execute(message.command);
+          if (message.command.method === 'manage') await this.refresh();
+          if (undoTurn && result && typeof result === 'object' && 'UndoCompleted' in result)
+            this.ports.post({
+              type: 'undo_result',
+              session: selected.id,
+              turn: undoTurn,
+              report: result.UndoCompleted.report,
+            });
           if (message.command.method === 'prompt' && !this.closed) {
             this.ports.post({
               type: 'prompt_accepted',
@@ -284,6 +410,152 @@ export class WorkbenchController {
           if (this.selected?.id !== message.session) throw new Error('Session selection changed');
           if (message.type === 'earlier') await this.selected.earlier();
           else await this.selected.latest();
+          break;
+        }
+        case 'open_turn_diff': {
+          const selected = this.selected;
+          if (
+            !selected ||
+            selected.id !== message.session ||
+            !selected.view.entries.some((row) => row.turn === message.turn)
+          )
+            throw new Error('Turn is not in the confirmed view');
+          if (!this.ports.openDiff) throw new Error('Editor diff is unavailable');
+          const files: { path: string; before: string; after: string }[] = [];
+          let offset = 0;
+          let used = 0;
+          do {
+            const page = await this.client.call({
+              method: 'turn_diff',
+              session: selected.id,
+              turn: message.turn,
+              offset,
+            });
+            for (const [i, file] of page.files.entries()) {
+              const index = offset + i;
+              if (message.file !== undefined && message.file !== index) continue;
+              if (file.omitted && file.omitted !== 'Diff content can be loaded in bounded slices.')
+                continue;
+              const text: string[] = [];
+              for (const after of [false, true]) {
+                let position = 0;
+                let value = '';
+                do {
+                  const slice = await this.client.call({
+                    method: 'turn_diff_content',
+                    session: selected.id,
+                    turn: message.turn,
+                    file: index,
+                    after,
+                    offset: position,
+                  });
+                  used += Buffer.byteLength(slice.bytes);
+                  if (used > 4 * 1024 * 1024) throw new Error('Editor diff exceeds 4 MiB budget');
+                  value += slice.bytes;
+                  if (slice.next_offset == null) break;
+                  if (slice.next_offset <= position) throw new Error('Invalid diff cursor');
+                  position = slice.next_offset;
+                } while (true);
+                text.push(value);
+              }
+              files.push({ path: file.path, before: text[0], after: text[1] });
+            }
+            if (page.next_offset == null) break;
+            if (page.next_offset <= offset || page.next_offset > 5000)
+              throw new Error('Invalid diff page');
+            offset = page.next_offset;
+          } while (true);
+          if (this.selected !== selected || this.closed) break;
+          if (!files.length)
+            throw new Error(
+              'No complete text snapshots available; review partial reasons in the card',
+            );
+          await this.ports.openDiff(message.turn, files);
+          break;
+        }
+        case 'read_turn_diff': {
+          const selected = this.selected;
+          if (
+            !selected ||
+            selected.id !== message.session ||
+            !selected.view.entries.some((row) => row.turn === message.turn)
+          )
+            throw new Error('Turn is not in the confirmed view');
+          try {
+            const diff = await this.client.call({
+              method: 'turn_diff',
+              session: selected.id,
+              turn: message.turn,
+              offset: message.offset,
+            });
+            const key = `${selected.id}:${message.turn}`;
+            const previous = turnDiffCache.get(key);
+            const start = message.offset ?? 0;
+            if (start > 0 && (!previous || previous.files.length !== start))
+              throw new Error('Diff page is out of order');
+            const merged =
+              start > 0 && previous ? { ...diff, files: [...previous.files, ...diff.files] } : diff;
+            turnDiffCache.set(key, merged);
+            while (turnDiffCache.size > 16)
+              turnDiffCache.delete(turnDiffCache.keys().next().value!);
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'turn_diff',
+                session: selected.id,
+                turn: message.turn,
+                offset: message.offset,
+                diff,
+              });
+          } catch {
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'turn_diff_error',
+                session: selected.id,
+                turn: message.turn,
+                error: 'Workspace diff unavailable',
+              });
+          }
+          break;
+        }
+        case 'read_turn_diff_content': {
+          const selected = this.selected;
+          const diff = turnDiffCache.get(`${message.session}:${message.turn}`);
+          if (
+            !selected ||
+            selected.id !== message.session ||
+            !selected.view.entries.some((row) => row.turn === message.turn) ||
+            !diff ||
+            message.file >= diff.files.length
+          )
+            throw new Error('Diff file is not in the confirmed view');
+          try {
+            const content = await this.client.call({
+              method: 'turn_diff_content',
+              session: selected.id,
+              turn: message.turn,
+              file: message.file,
+              after: message.after,
+              offset: message.offset,
+            });
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'turn_diff_content',
+                session: selected.id,
+                turn: message.turn,
+                file: message.file,
+                after: message.after,
+                offset: message.offset,
+                ...content,
+              });
+          } catch {
+            if (this.selected === selected && !this.closed)
+              this.ports.post({
+                type: 'turn_diff_error',
+                session: selected.id,
+                turn: message.turn,
+                error: 'Diff content unavailable',
+              });
+          }
           break;
         }
         case 'read_tools': {

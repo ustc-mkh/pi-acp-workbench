@@ -22,6 +22,14 @@ import { validRecord, validPrice } from './telemetry';
 import { fastConfig } from './pi-fast-config';
 import { refreshPiModels } from './pi-context-config';
 import { generatePiTitle } from './pi-title';
+import { usageCursor, appendedUsage } from './pi-turn-usage';
+type ModelResponse = {
+  models: {
+    model: string;
+    price: { input: number; output: number; cache_read: number; cache_write: number } | null;
+    contextWindow: number | null;
+  }[];
+};
 export function usageRecord(
   id: string,
   sessionId: string,
@@ -76,6 +84,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           inspect: true,
           nativeFork: true,
           title: true,
+          models: true,
           autonomousRuns: true,
         },
       };
@@ -98,7 +107,24 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         if (turn.cancelled) return { stopReason: 'cancelled' };
         // The pinned adapter checks this guard after its own restore await and
         // at startTurn, before clearing cancelRequested or sending to Pi.
-        return await super.prompt(params, () => turn.cancelled);
+        const cursor = await usageCursor((await session.proc.getState()).sessionFile).catch(
+          () => undefined,
+        );
+        const response = await super.prompt(params, () => turn.cancelled);
+        const usage = await appendedUsage(cursor).catch(() => undefined);
+        return usage
+          ? {
+              ...response,
+              usage: {
+                ...usage,
+                totalTokens:
+                  usage.inputTokens +
+                  usage.outputTokens +
+                  usage.cachedReadTokens +
+                  usage.cachedWriteTokens,
+              },
+            }
+          : response;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -129,11 +155,11 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     async extMethod(
       method: string,
       params: WorkbenchParams,
-    ): Promise<Inspection | { sessionId?: string }>;
+    ): Promise<Inspection | { sessionId?: string } | ModelResponse>;
     async extMethod(
       method: string,
       params: WorkbenchParams,
-    ): Promise<Inspection | { sessionId?: string }> {
+    ): Promise<Inspection | { sessionId?: string } | ModelResponse> {
       if (!method.startsWith('_pi_workbench/'))
         throw new Error(`Unsupported extension method: ${method}`);
       const session = this.sessions.get(params.sessionId);
@@ -142,7 +168,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         return {};
       }
       if (!session) throw new Error('Unknown session');
-      if (session.pendingTurn && method !== '_pi_workbench/inspect')
+      if (session.pendingTurn && !['_pi_workbench/inspect', '_pi_workbench/title'].includes(method))
         throw new Error('Wait for the current turn to finish before inspecting or branching.');
       if (method === '_pi_workbench/title') {
         if (
@@ -153,6 +179,46 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         )
           throw new Error('标题参数无效。');
         return generatePiTitle(session, params.model, params.text);
+      }
+      if (method === '_pi_workbench/models') {
+        if (params.setContext) {
+          if (
+            typeof params.model !== 'string' ||
+            params.model.length > 300 ||
+            (params.contextWindow !== null &&
+              (!Number.isSafeInteger(params.contextWindow) ||
+                params.contextWindow! <= 0 ||
+                params.contextWindow! > 100000000))
+          )
+            throw new Error('Invalid context setting');
+          await refreshPiModels(session.proc, {
+            model: params.model,
+            contextWindow: params.contextWindow!,
+          });
+        } else await refreshPiModels(session.proc);
+        await this.publishConfigOptions(session);
+        const available = await session.proc.getAvailableModels();
+        if ((available.models?.length ?? 0) > 500)
+          throw new Error('Model catalogue exceeds budget');
+        return {
+          models: (available.models || [])
+            .filter((m) => m.provider && m.id)
+            .map((m) => ({
+              model: `${m.provider}/${m.id}`,
+              price: validPrice(m.cost)
+                ? {
+                    input: m.cost!.input,
+                    output: m.cost!.output,
+                    cache_read: m.cost!.cacheRead,
+                    cache_write: m.cost!.cacheWrite,
+                  }
+                : null,
+              contextWindow:
+                Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0
+                  ? m.contextWindow!
+                  : null,
+            })),
+        };
       }
       if (method === '_pi_workbench/fork') return this.forkNative(session, params, Process);
       if (method === '_pi_workbench/inspect') return this.inspect(session, params);

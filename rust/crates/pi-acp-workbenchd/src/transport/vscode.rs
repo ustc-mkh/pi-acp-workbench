@@ -81,6 +81,33 @@ pub enum ClientCommand {
     Image {
         image: crate::domain::image::ImageRef,
     },
+    Management {
+        query: crate::domain::management::ManagementQuery,
+    },
+    Manage {
+        session: SessionId,
+        action: crate::domain::management::ManagementAction,
+    },
+    ValidateUndo {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+    },
+    TurnDiff {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        offset: Option<SafeInteger>,
+    },
+    TurnDiffContent {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        file: u32,
+        after: bool,
+        offset: SafeInteger,
+    },
+    UndoTurn {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+    },
     Prompt {
         session: SessionId,
         prompt: Prompt,
@@ -128,9 +155,14 @@ impl ClientCommand {
             | Self::Tools { .. }
             | Self::Content { .. }
             | Self::Image { .. }
+            | Self::Management { .. }
+            | Self::ValidateUndo { .. }
+            | Self::TurnDiff { .. }
+            | Self::TurnDiffContent { .. }
             | Self::Attach { .. }
             | Self::Detach { .. } => 2,
             Self::Cancel { .. }
+            | Self::UndoTurn { .. }
             | Self::CancelFork { .. }
             | Self::Answer { .. }
             | Self::Remove { .. } => 1,
@@ -178,11 +210,42 @@ impl ClientCommand {
                 offset: *offset,
                 length: *length,
             },
+            Self::Management { query } => QueryCommand::Management {
+                query: query.clone(),
+            },
+            Self::ValidateUndo { session, turn } => QueryCommand::ValidateUndo {
+                session: session.clone(),
+                turn: turn.clone(),
+            },
+            Self::TurnDiff {
+                session,
+                turn,
+                offset,
+            } => QueryCommand::TurnDiff {
+                session: session.clone(),
+                turn: turn.clone(),
+                offset: offset.unwrap_or_default().get() as usize,
+            },
+            Self::TurnDiffContent {
+                session,
+                turn,
+                file,
+                after,
+                offset,
+            } => QueryCommand::TurnDiffContent {
+                session: session.clone(),
+                turn: turn.clone(),
+                file: *file as usize,
+                after: *after,
+                offset: *offset,
+            },
             _ => return None,
         })
     }
     fn into_domain(self) -> Option<DomainCommand> {
         Some(match self {
+            Self::Manage { session, action } => DomainCommand::Manage { session, action },
+            Self::UndoTurn { session, turn } => DomainCommand::UndoTurn { session, turn },
             Self::Create { harness, cwd } => DomainCommand::CreateSession { harness, cwd },
             Self::Load { session } => DomainCommand::LoadSession(session),
             Self::Prompt { session, prompt } => DomainCommand::Prompt { session, prompt },

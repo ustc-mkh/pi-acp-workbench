@@ -187,6 +187,10 @@ pub fn transition(
             }
             let turn = TurnId::generate();
             change.next.active_turn = Some(turn.clone());
+            // Keep the last provider-reported summary for reconnect/native
+            // restore. The flag is per-turn evidence: a new fact stays NULL
+            // until this turn actually reports usage, never copied from here.
+            change.next.usage.reported = false;
             change.next.status = SessionStatus::Running;
             change.append.push(entry(
                 turn,
@@ -348,7 +352,12 @@ pub fn transition(
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
+                change.next.usage.reported = true;
+                change.next.usage.cache_read_tokens = cache_read_tokens;
+                change.next.usage.cache_write_tokens = cache_write_tokens;
                 change.next.usage.input_tokens = input_tokens;
                 change.next.usage.output_tokens = output_tokens;
             }

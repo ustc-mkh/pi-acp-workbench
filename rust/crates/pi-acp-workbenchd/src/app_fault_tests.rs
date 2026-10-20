@@ -39,6 +39,7 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             app.core.adapters.lock().await.insert(
                 id.clone(),
                 super::super::AdapterHandle {
+                    _workspace_lease: None,
                     tx,
                     stop,
                     worker_completion: task.clone(),

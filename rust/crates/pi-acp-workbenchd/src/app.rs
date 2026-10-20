@@ -1,3 +1,4 @@
+use crate::workspace_gate::{WorkspaceGate, WorkspaceLease};
 use crate::{
     acp::adapter::{self, AdapterCommand, AdapterContext},
     actor::Runtime,
@@ -26,9 +27,9 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-
 #[path = "app_fork_control.rs"]
 mod fork_control;
+
 #[path = "app_fork.rs"]
 mod forks;
 #[path = "app_ingress.rs"]
@@ -36,6 +37,7 @@ mod ingress;
 use ingress::{IngressHandle, Request};
 
 struct AdapterHandle {
+    _workspace_lease: Option<WorkspaceLease>,
     tx: mpsc::Sender<AdapterCommand>,
     stop: CancellationToken,
     task: OwnedTask,
@@ -94,6 +96,8 @@ struct CommandCore {
     history: SessionStore,
     pending_interactions: usize,
     fork_controls: Arc<fork_control::ForkControls>,
+    reviews: Arc<crate::workspace_reviews::Reviews>,
+    workspace_gate: Arc<WorkspaceGate>,
 }
 impl WorkbenchApp {
     pub fn new(config: Config) -> Result<Self, DomainError> {
@@ -125,10 +129,12 @@ impl WorkbenchApp {
             closed: Arc::new(AtomicBool::new(false)),
             storage_lease: Arc::new(Mutex::new(Some(lease))),
             journal: JournalStore::new(database.clone()),
+            reviews: crate::workspace_reviews::Reviews::new(database.clone()),
             database,
             history,
             pending_interactions: config.limits.pending_interactions,
             fork_controls: Arc::new(fork_control::ForkControls::default()),
+            workspace_gate: Arc::new(WorkspaceGate::default()),
         });
         let ingress = IngressHandle::start(core.clone());
         Ok(Self {
@@ -205,6 +211,32 @@ impl WorkbenchApp {
             reply,
         })?;
         wait.await.map_err(|_| ingress::interrupted())?
+    }
+    pub async fn turn_diff_page(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        offset: usize,
+    ) -> Result<crate::workspace_review::TurnDiff, DomainError> {
+        self.core
+            .database
+            .turn_diff_page(session, turn, offset)
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))
+    }
+    pub async fn turn_diff_content(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        file: usize,
+        after: bool,
+        offset: crate::domain::query::SafeInteger,
+    ) -> Result<crate::workspace_review::DiffContent, DomainError> {
+        self.core
+            .database
+            .turn_diff_content(session, turn, file, after, offset)
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))
     }
     pub(crate) fn database(&self) -> Database {
         self.core.database.clone()
@@ -354,6 +386,23 @@ impl CommandCore {
             Admission::Execute(ticket) => ticket,
             Admission::Replay(result) => return result,
         };
+        if let DomainCommand::Manage { action, .. } = &command {
+            let external = action.external();
+            let result = self
+                .execute_with_operation(command, Some(ticket.clone()))
+                .await;
+            if external || result.is_err() {
+                self.journal.finish(ticket, &result).await?;
+            }
+            return result;
+        }
+        if matches!(command, DomainCommand::UndoTurn { .. }) {
+            let result = self
+                .execute_with_operation(command, Some(ticket.clone()))
+                .await;
+            self.journal.finish(ticket, &result).await?;
+            return result;
+        }
         if matches!(
             command,
             DomainCommand::Prompt { .. }
@@ -431,6 +480,7 @@ impl CommandCore {
             })
             .await?;
             self.stop_session_adapter(session).await?;
+            self.reviews.finish(session, None).await?;
             // The final terminal event and delivery intent are committed only
             // after the provider process group has stopped and been joined.
             return self
@@ -444,6 +494,79 @@ impl CommandCore {
                 )
                 .await?
                 .receipt();
+        }
+        if let DomainCommand::Manage { session, action } = &command {
+            if !action.validate() {
+                return Err(DomainError::Protocol("Invalid management settings".into()));
+            }
+            if !action.external() {
+                return self
+                    .database
+                    .manage(session.clone(), action.clone(), operation)
+                    .await
+                    .map_err(|e| DomainError::Persistence(e.to_string()));
+            }
+            let view = self
+                .database
+                .view(session.clone())
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?;
+            if view.active_turn.is_some() || view.configuration_intent.is_some() {
+                return Err(DomainError::Busy);
+            }
+            let (sender, _) = self.adapter_sender(session.clone()).await?;
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            sender
+                .try_send(AdapterCommand::Models {
+                    action: action.clone(),
+                    reply,
+                })
+                .map_err(|_| DomainError::Backpressure)?;
+            let response = tokio::time::timeout(std::time::Duration::from_secs(20), wait)
+                .await
+                .map_err(|_| DomainError::OperationInterrupted)?
+                .map_err(|_| DomainError::OperationInterrupted)??;
+            self.database
+                .model_defaults(session.clone(), response)
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?;
+            return Ok(CommandReceipt::Accepted {
+                session: session.clone(),
+                revision: view.revision,
+            });
+        }
+        if let DomainCommand::UndoTurn { session, turn } = &command {
+            let view = self
+                .database
+                .view(session.clone())
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?;
+            let diff = self
+                .database
+                .turn_diff(session.clone(), turn.clone())
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?
+                .ok_or_else(|| DomainError::NotFound(session.clone()))?;
+            let root = crate::workspace_review::canonical(std::path::Path::new(view.cwd.as_str()))
+                .map_err(DomainError::Persistence)?;
+            if view.active_turn.is_some() {
+                return Err(DomainError::Busy);
+            }
+            // Idle providers may still produce background writes. Join this
+            // session's provider before acquiring the exclusive workspace permit;
+            // other overlapping providers keep their permits and cause Busy.
+            self.stop_session_adapter(session).await?;
+            let _undo_lease = self.workspace_gate.enter(root.clone(), true)?;
+            let report = tokio::task::spawn_blocking(move || {
+                crate::workspace_undo::undo(&root, &diff, false)
+            })
+            .await
+            .map_err(|_| DomainError::Persistence("undo task interrupted".into()))?
+            .map_err(DomainError::Persistence)?;
+            return Ok(CommandReceipt::UndoCompleted {
+                session: session.clone(),
+                report,
+            });
         }
         if let DomainCommand::RemoveSession(session) = &command {
             // A cold session has no current process owner. A live active owner
@@ -549,6 +672,40 @@ impl CommandCore {
                 return applied;
             }
         }
+        let before_snapshot = if let DomainCommand::Prompt { session, .. } = &command {
+            let events = self
+                .runtime
+                .registry
+                .command(DomainCommand::Inspect(session.clone()))
+                .await?;
+            let view = events
+                .view()
+                .ok_or_else(|| DomainError::NotFound(session.clone()))?;
+            let cwd = view.cwd.clone();
+            let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
+                .map_err(DomainError::Persistence)?;
+            let lease = self.workspace_gate.enter(root.clone(), false)?;
+            let snapshot = tokio::task::spawn_blocking(move || {
+                crate::workspace_review::Snapshot::capture(&root)
+                    .unwrap_or_else(|e| crate::workspace_review::Snapshot::unavailable(root, e))
+            })
+            .await
+            .map_err(|_| DomainError::Persistence("workspace snapshot task failed".into()))?;
+            Some((session.clone(), snapshot, lease))
+        } else {
+            None
+        };
+        let terminal = match &command {
+            DomainCommand::Agent {
+                session,
+                event: AgentEvent::Finished { turn },
+            } => Some((session.clone(), Some(turn.clone()))),
+            DomainCommand::Agent {
+                session,
+                event: AgentEvent::Crashed { .. },
+            } => Some((session.clone(), None)),
+            _ => None,
+        };
         // Side effects use the accepted command and its committed view, not a
         // second event/reducer projection. The owner already published its batch.
         let prompt = match &command {
@@ -566,6 +723,12 @@ impl CommandCore {
             .registry
             .command_with_operation(command, operation)
             .await?;
+        if let (Some((session, before, lease)), Some(turn)) = (
+            before_snapshot,
+            result.view().and_then(|view| view.active_turn.clone()),
+        ) {
+            self.reviews.start(session, turn, before, lease).await;
+        }
         if let Some((session, text)) = prompt {
             if let Some(turn) = result.view().and_then(|view| view.active_turn.clone()) {
                 if let Err(error) = self.dispatch_prompt(session.clone(), turn, text).await {
@@ -579,6 +742,9 @@ impl CommandCore {
                     return Err(error);
                 }
             }
+        }
+        if let Some((session, turn)) = terminal {
+            self.reviews.finish(&session, turn.as_ref()).await?;
         }
         if let Some(session) = answer_session {
             // Forward only the canonical validated response, and only after the
@@ -662,6 +828,7 @@ impl CommandCore {
                 },
             }
         };
+        self.reviews.finish(session, None).await?;
         self.runtime.registry.command(terminal).await?;
         Ok(())
     }
@@ -764,6 +931,9 @@ impl CommandCore {
         if let Some(sender) = sender {
             return Ok((sender, config));
         }
+        let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
+            .map_err(DomainError::Persistence)?;
+        let workspace_lease = self.workspace_gate.enter(root, false)?;
         let (events, updates) = mpsc::channel(32);
         let worker = self
             .supervisor
@@ -798,6 +968,8 @@ impl CommandCore {
                 registry: self.runtime.registry.clone(),
                 lifecycle: stop.clone(),
                 pending_interactions: self.pending_interactions,
+                reviews: Some(self.reviews.clone()),
+                database: Some(self.database.clone()),
                 recovery,
             },
             commands,
@@ -807,6 +979,7 @@ impl CommandCore {
         adapters.insert(
             session,
             AdapterHandle {
+                _workspace_lease: Some(workspace_lease),
                 tx: tx.clone(),
                 stop,
                 task,

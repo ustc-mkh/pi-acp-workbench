@@ -1,7 +1,7 @@
 // Production v3 extension/browser graph + real new daemon. Synthetic ACP; no account/Bot/model.
 import { chromium } from '@playwright/test';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join, extname } from 'node:path';
@@ -67,6 +67,9 @@ const server = createServer(async (req, res) => {
 });
 try {
   await mkdir(join(root, 'home'));
+  execFileSync('git', ['init', '-q', root]);
+  await writeFile(join(root, '.gitignore'), '*\n!review.txt\n');
+  await writeFile(join(root, 'review.txt'), 'before\n');
   await writeFile(join(root, 'fork-gate.release'), 'released');
   await writeFile(
     config,
@@ -76,6 +79,8 @@ try {
           command: process.execPath,
           args: [resolve('test/contract-agent.mjs')],
           env: {
+            WORKBENCH_CONTRACT_MANAGEMENT: '1',
+            WORKBENCH_CONTRACT_WORKSPACE_FILE: join(root, 'review.txt'),
             WORKBENCH_CONTRACT_NATIVE_STATE: join(root, 'native'),
             WORKBENCH_CONTRACT_TRACE: join(root, 'trace'),
             WORKBENCH_CONTRACT_FORK_GATE: join(root, 'fork-gate'),
@@ -123,7 +128,16 @@ try {
       unexpected.push(request.url());
   });
   const client = new WorkbenchClient(join(data, 'workbench.sock'));
+  const editorDiffs = [];
+  let confirmations = 0;
   controller = new WorkbenchController(client, {
+    openDiff: async (turn, files) => {
+      editorDiffs.push({ turn, files });
+    },
+    confirmUndo: async () => {
+      confirmations++;
+      return true;
+    },
     post: (message) => {
       void page.evaluate((value) => window.postMessage(value, '*'), message).catch(() => {});
     },
@@ -302,6 +316,103 @@ try {
   );
   await page.locator('#interactions form').waitFor({ state: 'detached' });
   check('reserved control cancels a live waiting turn and clears its exact pending interaction');
+  await prompt('workspace-write');
+  await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'workspace write completion');
+  const review = page.getByRole('button', { name: 'Review workspace changes', exact: true }).last();
+  await review.click();
+  await page.getByText('complete · +1 −1 lines', { exact: true }).click();
+  await page.getByRole('button', { name: 'View total Diff in editor', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Load before', exact: true }).click();
+  await page.getByRole('button', { name: 'Load after', exact: true }).click();
+  await page.locator('pre').filter({ hasText: 'before' }).waitFor();
+  await page.locator('pre').filter({ hasText: 'after' }).waitFor();
+  await page.getByRole('button', { name: 'Compare file in editor', exact: true }).click();
+  await wait(() => editorDiffs.length === 1, 'single editor port');
+  assert.deepEqual(editorDiffs[0].files, [
+    { path: 'review.txt', before: 'before\n', after: 'after\n' },
+  ]);
+  await page.getByRole('button', { name: 'View total Diff in editor', exact: true }).click();
+  await wait(() => editorDiffs.length === 2, 'total editor port');
+  await page.getByRole('button', { name: 'Undo this turn…', exact: true }).click();
+  await wait(
+    () =>
+      confirmations === 1 &&
+      controller.snapshot.operations.some(
+        (op) => op.method === 'undo_turn' && op.status === 'completed',
+      ),
+    'durable confirmed undo',
+  );
+  assert.equal(await readFile(join(root, 'review.txt'), 'utf8'), 'before\n');
+  check(
+    'S5 Chromium: shell net diff, lazy text slices, single/total editor ports and confirmed durable undo',
+  );
+  const manageClick = async (name) => {
+    const before = controller.snapshot.operations.filter(
+      (op) => op.method === 'manage' && op.status === 'completed',
+    ).length;
+    await page.getByRole('button', { name, exact: true }).click();
+    await wait(
+      () =>
+        controller.snapshot.operations.filter(
+          (op) => op.method === 'manage' && op.status === 'completed',
+        ).length > before,
+      `S6 ${name}`,
+    );
+  };
+  await page.getByRole('button', { name: 'Model settings', exact: true }).first().click();
+  await page
+    .getByRole('textbox', { name: 'Session name', exact: true })
+    .fill('Browser managed name');
+  await manageClick('Save session name');
+  await wait(
+    () =>
+      controller.snapshot.sessions.some(
+        (s) => s.id === branch && s.title === 'Browser managed name',
+      ),
+    'S6 persisted manual name',
+  );
+  await manageClick('Refresh provider models explicitly');
+  const modelCard = page
+    .locator('#management details')
+    .filter({ has: page.locator('summary', { hasText: 'Other' }) });
+  await modelCard.locator('summary').click();
+  await modelCard
+    .getByRole('checkbox', { name: 'Visible in model selector', exact: true })
+    .uncheck();
+  const manageBefore = controller.snapshot.operations.filter(
+    (op) => op.method === 'manage' && op.status === 'completed',
+  ).length;
+  await modelCard.getByRole('button', { name: 'Save visibility only', exact: true }).click();
+  await wait(
+    () =>
+      controller.snapshot.operations.filter(
+        (op) => op.method === 'manage' && op.status === 'completed',
+      ).length > manageBefore,
+    'S6 model visibility',
+  );
+  await page.waitForFunction(
+    () => !document.querySelector('select[aria-label="model"] option[value="other"]'),
+  );
+  await prompt('usage-complete');
+  await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'S6 usage completion');
+  await page.getByRole('button', { name: 'Usage statistics', exact: true }).first().click();
+  await page
+    .getByRole('combobox', { name: 'Usage session filter', exact: true })
+    .selectOption(branch);
+  await page.getByRole('button', { name: 'Apply usage filters', exact: true }).click();
+  await page.getByText('Filtered total', { exact: true }).waitFor();
+  const stats = await client.call({
+    method: 'management',
+    query: { group: 'session', session: branch },
+  });
+  assert(stats.totals.input >= 100);
+  assert.equal(stats.totals.cache_read, 50);
+  assert.equal(stats.totals.cache_write, 5);
+  assert(stats.groups.some((g) => g.label?.includes('Browser managed name')));
+  assert.equal(await page.locator('#management table').count(), 1);
+  check(
+    'S6 Chromium: persistent manual title, explicit provider model refresh, visibility and per-session token/cache statistics',
+  );
   const sourcePage = await client.call({ method: 'history', session: source });
   assert.deepEqual(sourcePage.entries, sourceRows);
   assert.equal(controller.snapshot.selected, branch);

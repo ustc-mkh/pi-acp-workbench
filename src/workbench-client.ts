@@ -288,6 +288,10 @@ export class WorkbenchClient {
           history: 'history',
           tools: 'tools',
           content: 'content',
+          management: 'management',
+          validate_undo: 'validate_undo',
+          turn_diff: 'turn_diff',
+          turn_diff_content: 'turn_diff_content',
           attach: 'attached',
         } as const;
         const method = pending.command.method;

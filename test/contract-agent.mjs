@@ -3,8 +3,9 @@
 // Plain NDJSON JSON-RPC on stdio — intentionally independent of any SDK, so the
 // same binary exercises the wire/daemon contract from either implementation.
 import { createInterface } from 'node:readline';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { NativeForkFixture } from './helpers/native-fork-fixture.mjs';
 
 const trace = (record) => {
@@ -114,7 +115,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: { image: true, embeddedContext: true },
-        _meta: { 'pi-workbench': { version: 1, inspect: true, nativeFork: true } },
+        _meta: {
+          'pi-workbench': {
+            version: 1,
+            inspect: true,
+            nativeFork: true,
+            title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+            models: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+          },
+        },
       },
       authMethods: [],
     });
@@ -203,6 +212,25 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       configOptions[0].currentValue,
       modes.currentModeId,
     );
+    if (text.startsWith('workspace-write') && process.env.WORKBENCH_CONTRACT_WORKSPACE_FILE) {
+      const file = process.env.WORKBENCH_CONTRACT_WORKSPACE_FILE;
+      const deleted = process.env.WORKBENCH_CONTRACT_WORKSPACE_DELETE;
+      const added = process.env.WORKBENCH_CONTRACT_WORKSPACE_ADD;
+      execFileSync('/bin/sh', ['-c', 'printf "after\\n" > "$1"', 'workspace-write', file]);
+      if (deleted) unlinkSync(deleted);
+      if (added) writeFileSync(added, 'added\n');
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'workspace changes applied' },
+      });
+      if (text === 'workspace-write-crash') process.exit(7);
+      if (text === 'workspace-write-wait') {
+        pending = r.id;
+        return;
+      }
+      reply(r.id, { stopReason: 'end_turn' });
+      return;
+    }
     if (text === 'worker-profile') {
       update({
         sessionUpdate: 'agent_message_chunk',
@@ -296,11 +324,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply(r.id, { stopReason: 'end_turn' });
       return;
     }
-    if (text === 'usage-report') {
+    if (text === 'usage-report' || text === 'usage-complete') {
       update({ sessionUpdate: 'usage_update', used: 500, size: 200000 });
       reply(r.id, {
         stopReason: 'end_turn',
-        usage: { inputTokens: 100, outputTokens: 20, cachedReadTokens: 50, totalTokens: 170 },
+        usage: {
+          inputTokens: 100,
+          outputTokens: 20,
+          cachedReadTokens: 50,
+          ...(text === 'usage-complete' ? { cachedWriteTokens: 5 } : {}),
+          totalTokens: 170,
+        },
       });
       return;
     }
@@ -360,6 +394,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       return;
     }
     if (text === 'permission') {
+      if (process.env.WORKBENCH_CONTRACT_WRITE_ON_PERMISSION)
+        execFileSync('/bin/sh', [
+          '-c',
+          'printf "after\\n" > "$1"',
+          'workspace-write',
+          process.env.WORKBENCH_CONTRACT_WRITE_ON_PERMISSION,
+        ]);
       pending = r.id;
       send({
         jsonrpc: '2.0',
@@ -539,6 +580,36 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       });
     }
     reply(r.id, {});
+  } else if (r.method === '_pi_workbench/models') {
+    trace({ method: r.method, params: r.params });
+    if (!process.env.WORKBENCH_CONTRACT_MANAGEMENT) {
+      fail(r.id, 'not negotiated');
+      return;
+    }
+    if (r.params.setContext)
+      process.env.WORKBENCH_CONTRACT_CONTEXT = String(r.params.contextWindow ?? 200000);
+    reply(r.id, {
+      models: ['default', 'other'].map((model) => ({
+        model,
+        contextWindow: Number(process.env.WORKBENCH_CONTRACT_CONTEXT ?? 200000),
+        price: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.5 },
+      })),
+    });
+  } else if (r.method === '_pi_workbench/title') {
+    trace({ method: r.method });
+    const finish = () =>
+      reply(r.id, {
+        title: 'Synthetic short title',
+        records: [{ model: 'default', input: 10, output: 2, cacheRead: 0, cacheWrite: 0 }],
+      });
+    if (process.env.WORKBENCH_CONTRACT_TITLE_GATE) {
+      const timer = setInterval(() => {
+        if (existsSync(process.env.WORKBENCH_CONTRACT_TITLE_GATE)) {
+          clearInterval(timer);
+          finish();
+        }
+      }, 10);
+    } else finish();
   } else if (r.method === '_pi_workbench/inspect') {
     reply(r.id, {
       records: [],

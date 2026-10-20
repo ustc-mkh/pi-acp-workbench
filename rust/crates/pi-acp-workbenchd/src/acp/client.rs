@@ -154,6 +154,64 @@ impl AcpClient {
             .await?;
         Ok(())
     }
+    pub async fn models(
+        &self,
+        native: &NativeSessionId,
+        metadata: &extensions::ProviderMetadata,
+        action: &crate::domain::management::ManagementAction,
+    ) -> Result<crate::domain::management::ProviderModels, DomainError> {
+        if !metadata.supports_models() {
+            return Err(DomainError::UnsupportedFeature("provider does not negotiate model configuration; its ACP catalogue remains available".into()));
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params<'a> {
+            session_id: &'a NativeSessionId,
+            model: Option<&'a str>,
+            context_window: Option<u64>,
+            set_context: bool,
+        }
+        let (model, context_window, set_context) = match action {
+            crate::domain::management::ManagementAction::Context {
+                model,
+                context_window,
+            } => (Some(model.as_str()), *context_window, true),
+            _ => (None, None, false),
+        };
+        self.call(
+            "_pi_workbench/models",
+            Params {
+                session_id: native,
+                model,
+                context_window,
+                set_context,
+            },
+        )
+        .await
+    }
+    pub async fn title(
+        &self,
+        native: &NativeSessionId,
+        model: &str,
+        text: &str,
+    ) -> Result<crate::domain::management::TitleResponse, DomainError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params<'a> {
+            session_id: &'a NativeSessionId,
+            model: &'a str,
+            text: &'a str,
+        }
+        self.call(
+            "_pi_workbench/title",
+            Params {
+                session_id: native,
+                model,
+                text,
+            },
+        )
+        .await
+    }
     pub async fn configure(
         &self,
         native: &NativeSessionId,

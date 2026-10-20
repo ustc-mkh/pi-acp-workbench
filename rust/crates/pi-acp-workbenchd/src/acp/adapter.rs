@@ -15,6 +15,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum AdapterCommand {
+    Models {
+        action: crate::domain::management::ManagementAction,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::domain::management::ProviderModels, DomainError>,
+        >,
+    },
     Ready {
         reply: tokio::sync::oneshot::Sender<Result<(), DomainError>>,
     },
@@ -166,8 +172,11 @@ async fn run_protocol(
             return;
         }
     };
+    let client = std::sync::Arc::new(client);
+    let mut title_tasks = tokio::task::JoinSet::new();
     'adapter: loop {
         let command = tokio::select! {
+            Some(_) = title_tasks.join_next(), if !title_tasks.is_empty() => continue,
             _ = stop.cancelled() => break,
             event = updates.recv() => {
                 let result = match event {
@@ -189,6 +198,28 @@ async fn run_protocol(
             break;
         };
         let (turn, text, config) = match command {
+            AdapterCommand::Models { action, reply } => {
+                let result = async {
+                    let (response, captured) = super::control::pump(
+                        &client,
+                        &mut updates,
+                        &stop,
+                        Some(&native),
+                        client.models(&native, &metadata, &action),
+                    )
+                    .await?;
+                    let patch = captured.finish(
+                        &mut details,
+                        &native,
+                        super::control::ControlPhase::Startup { resuming: true },
+                    )?;
+                    context.publish(AgentEvent::Catalogue(patch)).await?;
+                    Ok(response)
+                }
+                .await;
+                let _ = reply.send(result);
+                continue;
+            }
             AdapterCommand::Ready { reply } => {
                 let _ = reply.send(Ok(()));
                 continue;
@@ -321,6 +352,16 @@ async fn run_protocol(
                 .await;
             break;
         }
+        let title_text: String = text.chars().take(1000).collect();
+        let title_job = if metadata.supports_title() {
+            if let Some(db) = &context.database {
+                db.title_job(context.session.clone()).await.ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut interactions: BTreeMap<InteractionId, InboundRequest> = BTreeMap::new();
         let submitted = std::sync::atomic::AtomicBool::new(false);
         let request = async {
@@ -354,6 +395,7 @@ async fn run_protocol(
                         let _ = reply.send(result);
                         break 'adapter;
                     }
+                    Some(AdapterCommand::Models { reply,.. }) => {let _=reply.send(Err(DomainError::Busy));}
                     Some(AdapterCommand::Ready { reply }) => { let _ = reply.send(Err(DomainError::Busy)); }
                     Some(AdapterCommand::Configure { reply, .. }) => { let _ = reply.send(Err(DomainError::Busy)); }
                     Some(AdapterCommand::ForkPoints { reply, .. }) => { let _ = reply.send(Err(DomainError::Busy)); }
@@ -408,6 +450,8 @@ async fn run_protocol(
                         .publish(AgentEvent::Usage {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
+                            cache_read_tokens: usage.cached_read_tokens,
+                            cache_write_tokens: usage.cached_write_tokens,
                         })
                         .await
                         .is_err()
@@ -422,6 +466,20 @@ async fn run_protocol(
                 {
                     break;
                 }
+                if let (Some(model), Some(db)) = (title_job, context.database.clone()) {
+                    let (client, native, session) =
+                        (client.clone(), native.clone(), context.session.clone());
+                    title_tasks.spawn(async move {
+                        if let Ok(Ok(response)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            client.title(&native, &model, &title_text),
+                        )
+                        .await
+                        {
+                            let _ = db.title_result(session, response).await;
+                        }
+                    });
+                }
             }
             Err(error) => {
                 let _ = context
@@ -433,7 +491,13 @@ async fn run_protocol(
             }
         }
     }
-    client.stop().await;
+    title_tasks.shutdown().await;
+    if let Ok(client) = std::sync::Arc::try_unwrap(client) {
+        client.stop().await;
+    }
+    if let Some(reviews) = &context.reviews {
+        let _ = reviews.finish(&context.session, None).await;
+    }
 }
 
 #[derive(Clone)]
@@ -445,6 +509,8 @@ pub struct AdapterContext {
     pub registry: RegistryHandle,
     pub lifecycle: CancellationToken,
     pub pending_interactions: usize,
+    pub(crate) reviews: Option<std::sync::Arc<crate::workspace_reviews::Reviews>>,
+    pub(crate) database: Option<crate::persistence::database::Database>,
     pub recovery: Option<crate::domain::session::SessionConfig>,
 }
 impl AdapterContext {
@@ -493,6 +559,11 @@ impl AdapterContext {
         // A next prompt must join/replace us, not queue into a dying receiver.
         if matches!(event, AgentEvent::Crashed { .. }) {
             self.lifecycle.cancel();
+        }
+        if let AgentEvent::Finished { turn } = &event {
+            if let Some(reviews) = &self.reviews {
+                reviews.finish(&self.session, Some(turn)).await?;
+            }
         }
         self.registry
             .worker_event(self.session.clone(), self.epoch, event)

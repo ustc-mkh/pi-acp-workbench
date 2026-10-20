@@ -63,6 +63,7 @@ impl Request {
                     DomainCommand::Cancel { .. }
                     | DomainCommand::CancelFork { .. }
                     | DomainCommand::AnswerInteraction { .. }
+                    | DomainCommand::UndoTurn { .. }
                     | DomainCommand::RemoveSession(_),
                 ..
             } => 1,
@@ -87,6 +88,7 @@ impl Request {
             Self::Command {
                 command:
                     DomainCommand::LoadSession(session)
+                    | DomainCommand::UndoTurn { session, .. }
                     | DomainCommand::RemoveSession(session)
                     | DomainCommand::Prompt { session, .. }
                     | DomainCommand::Cancel { session }
@@ -94,6 +96,7 @@ impl Request {
                     | DomainCommand::AnswerInteraction { session, .. }
                     | DomainCommand::Fork { session, .. }
                     | DomainCommand::PrepareFork { session, .. }
+                    | DomainCommand::Manage { session, .. }
                     | DomainCommand::SetModel { session, .. }
                     | DomainCommand::SetMode { session, .. }
                     | DomainCommand::PrepareConfiguration { session, .. }
@@ -388,6 +391,67 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                         .attached(session)
                         .await
                         .map(|attached| R::Attached(Box::new(attached))),
+                    Q::Management { query } => {
+                        return core
+                            .database
+                            .management(query)
+                            .await
+                            .map(R::Management)
+                            .map_err(|e| DomainError::Persistence(e.to_string()));
+                    }
+                    Q::ValidateUndo { session, turn } => {
+                        let view = core
+                            .database
+                            .view(session.clone())
+                            .await
+                            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+                        if view.active_turn.is_some() {
+                            return Err(DomainError::Busy);
+                        }
+                        let diff = core
+                            .database
+                            .turn_diff(session, turn)
+                            .await
+                            .map_err(|e| DomainError::Persistence(e.to_string()))?
+                            .ok_or_else(|| DomainError::Persistence("No captured diff".into()))?;
+                        return tokio::task::spawn_blocking(move || {
+                            crate::workspace_undo::undo(
+                                std::path::Path::new(view.cwd.as_str()),
+                                &diff,
+                                true,
+                            )
+                        })
+                        .await
+                        .map_err(|_| DomainError::Persistence("Undo preflight interrupted".into()))?
+                        .map(R::ValidateUndo)
+                        .map_err(DomainError::Persistence);
+                    }
+                    Q::TurnDiff {
+                        session,
+                        turn,
+                        offset,
+                    } => {
+                        return core
+                            .database
+                            .turn_diff_page(session, turn, offset)
+                            .await
+                            .map(R::TurnDiff)
+                            .map_err(|e| DomainError::Persistence(e.to_string()));
+                    }
+                    Q::TurnDiffContent {
+                        session,
+                        turn,
+                        file,
+                        after,
+                        offset,
+                    } => {
+                        return core
+                            .database
+                            .turn_diff_content(session, turn, file, after, offset)
+                            .await
+                            .map(R::TurnDiffContent)
+                            .map_err(|e| DomainError::Persistence(e.to_string()));
+                    }
                     Q::Image { .. } => {
                         return Err(DomainError::Protocol(
                             "image query uses the image response".into(),

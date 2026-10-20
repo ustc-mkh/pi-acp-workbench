@@ -11,9 +11,17 @@ const host = vi.hoisted(() => ({
   trusted: true,
   provider: undefined as WorkbenchProvider | undefined,
   commands: new Map<string, () => unknown>(),
+  contentProvider: undefined as vscode.TextDocumentContentProvider | undefined,
+  documents: [] as { isDirty: boolean; uri: { scheme: string; fsPath: string } }[],
 }));
 vi.mock('vscode', () => ({
   Uri: {
+    from: (parts: { scheme: string; path: string }) => ({
+      ...parts,
+      toString() {
+        return `${this.scheme}:${this.path}`;
+      },
+    }),
     joinPath: (root: { fsPath: string }, ...parts: string[]) => ({
       fsPath: [root.fsPath, ...parts].join('/'),
       toString() {
@@ -22,6 +30,16 @@ vi.mock('vscode', () => ({
     }),
   },
   workspace: {
+    get textDocuments() {
+      return host.documents;
+    },
+    registerTextDocumentContentProvider: (
+      _scheme: string,
+      provider: vscode.TextDocumentContentProvider,
+    ) => {
+      host.contentProvider = provider;
+      return { dispose() {} };
+    },
     get isTrusted() {
       return host.trusted;
     },
@@ -56,8 +74,10 @@ afterEach(async () => {
   host.provider = undefined;
   host.commands.clear();
   host.trusted = true;
+  host.documents = [];
+  vi.clearAllMocks();
 });
-it('production entry configures only v2 socket, restricts CSP resources and rejects canonical workspace escapes/trust revocation', async () => {
+it('production entry configures only v3 socket, restricts CSP resources and rejects canonical workspace escapes/trust revocation', async () => {
   const peer = await workbenchPeer();
   cleanups.push(() => peer.close());
   const root = await mkdtemp(join(tmpdir(), 'wb-extension-'));
@@ -113,7 +133,7 @@ it('production entry configures only v2 socket, restricts CSP resources and reje
   const creating = host.commands.get('piAcp.newSession')!();
   await expect.poll(() => peer.requests.length).toBe(1);
   expect(peer.requests[0].command).toEqual({ method: 'create', harness: 'Pi', cwd: workspace });
-  const view = { ...emptyView(), cwd: workspace };
+  const view = { ...emptyView(), cwd: workspace, last_entry_seq: 1 };
   peer.reply(peer.requests[0], {
     Created: {
       summary: {
@@ -129,9 +149,114 @@ it('production entry configures only v2 socket, restricts CSP resources and reje
   await expect.poll(() => peer.requests.length).toBe(2);
   peer.query(peer.requests[1], 'attached', {
     view,
-    recent_page: { entries: [], next_cursor: null },
+    recent_page: {
+      entries: [
+        {
+          seq: 1,
+          id: 'entry',
+          turn: 'turn',
+          role: 'User',
+          text: { Inline: { text: 'edit' } },
+          message: null,
+          image: null,
+        },
+      ],
+      next_cursor: null,
+    },
   });
   await creating;
   await expect.poll(() => posted.length).toBeGreaterThan(0);
   expect(provider.controller.snapshot.view?.status).toBe('ready');
+  const opening = provider.controller.receive({
+    type: 'open_turn_diff',
+    session: 'session',
+    turn: 'turn',
+  });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'turn_diff', {
+    status: 'complete',
+    files: ['a.ts', 'b.ts'].map((path) => ({
+      path,
+      status: 'modified',
+      before_hash: 'a'.repeat(64),
+      after_hash: 'b'.repeat(64),
+      before: null,
+      after: null,
+      old_mode: 33188,
+      new_mode: 33188,
+      added: 1,
+      removed: 1,
+      patch: null,
+      omitted: 'Diff content can be loaded in bounded slices.',
+    })),
+    warnings: [],
+    added: 2,
+    removed: 2,
+    next_offset: null,
+  });
+  for (let i = 0; i < 4; i++) {
+    await expect.poll(() => peer.requests.length).toBe(4 + i);
+    peer.query(peer.requests[3 + i], 'turn_diff_content', {
+      bytes: i % 2 ? 'after' : 'before',
+      total_bytes: i % 2 ? 5 : 6,
+      next_offset: null,
+    });
+  }
+  await opening;
+  const api = await import('vscode');
+  expect(api.commands.executeCommand).toHaveBeenCalledWith(
+    '_workbench.openMultiDiffEditor',
+    expect.objectContaining({ resources: expect.any(Array) }),
+  );
+  const calls = vi.mocked(api.commands.executeCommand).mock.calls;
+  const options = calls.at(-1)![1] as {
+    resources: { originalUri: vscode.Uri; modifiedUri: vscode.Uri }[];
+  };
+  expect(
+    host.contentProvider!.provideTextDocumentContent(
+      options.resources[0].originalUri,
+      {} as vscode.CancellationToken,
+    ),
+  ).toBe('before');
+  expect(
+    host.contentProvider!.provideTextDocumentContent(
+      options.resources[0].modifiedUri,
+      {} as vscode.CancellationToken,
+    ),
+  ).toBe('after');
+  expect(options.resources[0].originalUri.scheme).toBe('workbench-diff');
+  expect(() =>
+    host.contentProvider!.provideTextDocumentContent(
+      { toString: () => 'file:/etc/passwd' } as vscode.Uri,
+      {} as vscode.CancellationToken,
+    ),
+  ).toThrow('Snapshot expired');
+  const dirty = { isDirty: true, uri: { scheme: 'file', fsPath: join(workspace, 'unsaved.ts') } };
+  host.documents = [dirty];
+  const blocked = provider.controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(8);
+  peer.query(peer.requests[7], 'validate_undo', { files: [] });
+  await blocked;
+  expect(api.window.showWarningMessage).not.toHaveBeenCalled();
+  expect(provider.controller.snapshot.error).toContain('dirty editor buffers');
+  host.documents = [];
+  vi.mocked(api.window.showWarningMessage).mockImplementationOnce(async () => {
+    host.documents = [dirty];
+    return 'Undo turn' as never;
+  });
+  const changed = provider.controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(9);
+  peer.query(peer.requests[8], 'validate_undo', { files: [] });
+  await changed;
+  expect(api.window.showWarningMessage).toHaveBeenCalledTimes(1);
+  expect(provider.controller.snapshot.error).toContain('dirty editor buffers');
+  expect(peer.requests.some((r) => r.command.method === 'undo_turn')).toBe(false);
 });

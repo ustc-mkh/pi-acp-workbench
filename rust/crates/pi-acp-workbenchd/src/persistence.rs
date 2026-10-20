@@ -19,6 +19,7 @@ pub mod interface;
 pub(crate) mod interface_test_helpers;
 pub mod journal;
 pub mod maintenance;
+mod management;
 mod metrics;
 #[cfg(test)]
 mod mixed_workload_tests;

@@ -20,6 +20,26 @@ CREATE TABLE sessions (
     status_json TEXT NOT NULL CHECK (json_valid(status_json) AND COALESCE(json_extract(status_json, '$') IN ('Idle', 'Running', 'Waiting', 'Cancelling') OR (json_type(status_json) = 'object' AND json_type(status_json, '$.Failed') = 'text'), 0)),
     hot_state_json TEXT NOT NULL CHECK (json_valid(hot_state_json) AND json_type(hot_state_json, '$.transcript') IS NULL)
 ) STRICT;
+CREATE TABLE session_metadata (
+    session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    title TEXT NOT NULL CHECK(length(title)<=320),
+    source TEXT NOT NULL CHECK(source IN ('fallback','manual','model')),
+    attempted INTEGER NOT NULL CHECK(attempted IN (0,1))
+) STRICT;
+CREATE TABLE naming_settings (id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL,model TEXT) STRICT;
+INSERT INTO naming_settings VALUES(1,'follow',NULL);
+CREATE TABLE model_settings (
+    harness TEXT NOT NULL, model TEXT NOT NULL CHECK(length(model)<=300), hidden INTEGER NOT NULL CHECK(hidden IN (0,1)),
+    price TEXT CHECK(price IS NULL OR json_valid(price)), default_price TEXT CHECK(default_price IS NULL OR json_valid(default_price)),context_window INTEGER,
+    PRIMARY KEY(harness,model)
+) STRICT;
+CREATE TABLE usage_facts (
+    id TEXT PRIMARY KEY, session TEXT NOT NULL, session_number INTEGER NOT NULL DEFAULT 0, harness TEXT NOT NULL, model TEXT NOT NULL, kind TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, source TEXT NOT NULL DEFAULT 'missing'
+) STRICT;
+CREATE INDEX usage_date ON usage_facts(occurred_at,session,model);
+CREATE INDEX usage_model ON usage_facts(model,occurred_at);
+CREATE INDEX usage_session ON usage_facts(session,occurred_at);
 CREATE TABLE contents (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),
     kind TEXT NOT NULL CHECK (kind IN ('Text', 'ToolText', 'ToolDiff', 'ToolResource', 'Image')),
@@ -51,6 +71,13 @@ CREATE TABLE tools (
     tool_id TEXT NOT NULL,
     header_json TEXT NOT NULL CHECK (json_valid(header_json) AND COALESCE(json_extract(header_json, '$.status') IN ('Pending', 'InProgress', 'Completed', 'Failed'), 0)),
     PRIMARY KEY (session, turn, tool_id)
+) STRICT;
+CREATE TABLE turn_diffs (
+    session TEXT NOT NULL,
+    turn TEXT NOT NULL,
+    diff_json TEXT NOT NULL CHECK (json_valid(diff_json) AND length(diff_json) <= 33554432),
+    PRIMARY KEY(session,turn),
+    FOREIGN KEY(session) REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
 CREATE TABLE operations (
     operation TEXT PRIMARY KEY,

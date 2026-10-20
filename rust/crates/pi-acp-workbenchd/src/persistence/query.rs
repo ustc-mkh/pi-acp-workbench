@@ -32,6 +32,7 @@ fn parse_harness(value: &str) -> Result<Harness, StoreError> {
 }
 pub(super) fn summary(view: &SessionView, created_seq: SafeInteger) -> SessionSummary {
     SessionSummary {
+        title: None,
         id: view.id.clone(),
         harness: view.harness.clone(),
         cwd: view.cwd.clone(),
@@ -123,6 +124,7 @@ pub(super) fn apply_commit(
     if changed != 1 {
         return Err(StoreError::Conflict);
     }
+    super::management::observe(tx, &old, commit)?;
     let batch = apply_records(tx, commit, old.last_entry_seq)?;
     if let Some(operation) = &commit.operation {
         super::journal::finish_in_transaction(
@@ -474,7 +476,7 @@ fn list_impl(
     let before = cursor
         .as_ref()
         .map_or(MAX_SAFE_INTEGER + 1, |c| c.before_seq.get());
-    let mut statement = db.prepare(&format!("SELECT id,harness,cwd,status_json,revision,created_seq,{order_key} FROM sessions WHERE {order_key} <= ?1 AND {order_key} < ?2 ORDER BY {order_key} DESC,created_seq DESC LIMIT ?3"))?;
+    let mut statement = db.prepare(&format!("SELECT id,harness,cwd,status_json,revision,created_seq,{order_key},(SELECT title FROM session_metadata WHERE session=sessions.id) FROM sessions WHERE {order_key} <= ?1 AND {order_key} < ?2 ORDER BY {order_key} DESC,created_seq DESC LIMIT ?3"))?;
     let mut rows = statement.query(params![max, before as i64, (limit + 1) as i64])?;
     let mut page = ListPage {
         sessions: vec![],
@@ -488,6 +490,7 @@ fn list_impl(
             break;
         }
         let item = SessionSummary {
+            title: row.get(7)?,
             id: SessionId::new(row.get::<_, String>(0)?)
                 .map_err(|_| StoreError::Invalid("invalid summary id"))?,
             harness: parse_harness(&row.get::<_, String>(1)?)?,

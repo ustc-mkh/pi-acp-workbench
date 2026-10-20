@@ -14,14 +14,18 @@ import {
 } from './workbench-schema';
 import {
   clientCommand,
+  managementQuery,
+  managementData,
   imageRef,
   operationId,
   sessionId,
   sessionSummary,
   sessionView,
   entryHeader,
+  entryId,
   toolHeader,
   toolCursor,
+  undoReport,
   turnId,
   historyCursor,
   listCursor,
@@ -37,15 +41,43 @@ import type { WorkbenchSessionView } from './workbench-session';
 
 // Only user-originated commands; no internal event/ACP request or caller-selected operation ID.
 export const uiCommand = tagged('type', {
+  copy_message: object({ type: literal('copy_message'), session: sessionId, entry: entryId }),
+  configure_telegram: object({ type: literal('configure_telegram') }),
+  read_management: object({
+    type: literal('read_management'),
+    query: managementQuery,
+    request_id: uint,
+  }),
   attach_files: object({ type: literal('attach_files'), session: sessionId }),
   export: object({ type: literal('export'), session: sessionId }),
   recover_operations: object({ type: literal('recover_operations') }),
+  refresh_names: object({ type: literal('refresh_names') }),
   ready: object({ type: literal('ready') }),
   refresh: object({ type: literal('refresh'), cursor: optional(listCursor) }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
   execute: object({ type: literal('execute'), session: sessionId, command: clientCommand }),
   cancel_fork: object({ type: literal('cancel_fork'), operation: operationId }),
+  open_turn_diff: object({
+    type: literal('open_turn_diff'),
+    session: sessionId,
+    turn: turnId,
+    file: optional(uint),
+  }),
+  read_turn_diff: object({
+    type: literal('read_turn_diff'),
+    session: sessionId,
+    turn: turnId,
+    offset: optional(uint),
+  }),
+  read_turn_diff_content: object({
+    type: literal('read_turn_diff_content'),
+    session: sessionId,
+    turn: turnId,
+    file: uint,
+    after: boolean,
+    offset: uint,
+  }),
   read_tools: object({
     type: literal('read_tools'),
     session: sessionId,
@@ -88,9 +120,36 @@ export interface WorkbenchUiState {
   trusted: boolean;
 }
 export type WorkbenchUiMessage =
+  | { type: 'management'; request_id: number; data: import('./workbench-protocol').ManagementData }
+  | { type: 'management_error'; request_id: number; error: string }
   | { type: 'state'; sequence: number; state: WorkbenchUiState }
   | { type: 'prompt_accepted'; session: string; text: string }
   | { type: 'attachments'; session: string; files: import('./workbench-input').TextAttachment[] }
+  | {
+      type: 'turn_diff';
+      session: string;
+      turn: string;
+      offset?: number;
+      diff: import('./workbench-protocol').TurnDiff;
+    }
+  | { type: 'turn_diff_error'; session: string; turn: string; error: string }
+  | {
+      type: 'turn_diff_content';
+      session: string;
+      turn: string;
+      file: number;
+      after: boolean;
+      offset: number;
+      bytes: string;
+      total_bytes: number;
+      next_offset?: number | null;
+    }
+  | {
+      type: 'undo_result';
+      session: string;
+      turn: string;
+      report: import('./workbench-protocol').UndoReport;
+    }
   | { type: 'image'; session: string; request_id?: number; asset: ImageAsset }
   | {
       type: 'content';

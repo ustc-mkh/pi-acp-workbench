@@ -97,6 +97,16 @@ try {
       'app::tests::provider_tests::all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_crash_and_native_restart',
     );
     if (interrupted) break;
+    await rust(
+      'management',
+      'app::tests::management_tests::management_prices_stats_missing_usage_filters_and_restart_are_cold_and_durable',
+    );
+    if (interrupted) break;
+    await rust(
+      'isolated-title',
+      'app::tests::management_tests::isolated_title_does_not_block_next_prompt_or_overwrite_manual_name_and_counts_once',
+    );
+    if (interrupted) break;
     await phase(
       'process-loss',
       process.execPath,

@@ -2,7 +2,7 @@
 // or universal provider-process cleanup claim. Production refuses stale socket
 // paths; only this fixture explicitly removes its own dead host's exact inode.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, unlink, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -96,6 +96,10 @@ try {
       home = join(directory, 'home'),
       data = join(directory, 'data');
     await mkdir(home, { recursive: true });
+    execFileSync('git', ['init', '-q', directory]);
+    await writeFile(join(directory, '.gitignore'), '*\n!review.txt\n');
+    const workspaceFile = join(directory, 'review.txt');
+    await writeFile(workspaceFile, 'before\n');
     const trace = join(directory, 'trace.ndjson');
     workerTraces.push(trace);
     const config = join(directory, 'workbench.json');
@@ -108,6 +112,7 @@ try {
             args: [peer, name],
             env: {
               WORKBENCH_CONTRACT_PROVIDER: name,
+              WORKBENCH_CONTRACT_WRITE_ON_PERMISSION: workspaceFile,
               WORKBENCH_CONTRACT_TRACE: trace,
               WORKBENCH_CONTRACT_NATIVE_STATE: join(directory, 'native'),
             },
@@ -145,6 +150,9 @@ try {
     await interaction;
     snapshot = await client.call({ method: 'inspect', session });
     assert.equal(Object.keys(snapshot.pending_interactions).length, 1);
+    assert.equal(await readFile(workspaceFile, 'utf8'), 'after\n');
+    const interruptedTurn = snapshot.active_turn;
+    assert(interruptedTurn);
     const native = snapshot.provider_session;
     assert(native);
     const sessionBeforeKill = sessionRecord(data, session);
@@ -182,6 +190,17 @@ try {
     const cold = await client.call({ method: 'inspect', session });
     assert.equal(cold.provider_session, native);
     assert.equal(Object.keys(cold.pending_interactions).length, 1);
+    const missingDiff = await client.call({ method: 'turn_diff', session, turn: interruptedTurn });
+    assert.equal(
+      missingDiff.status,
+      'unavailable',
+      'host loss cannot fabricate a final workspace snapshot',
+    );
+    assert.equal(
+      await readFile(workspaceFile, 'utf8'),
+      'after\n',
+      'restart must not undo or replay shell effects',
+    );
     assert.deepEqual(
       await readFile(trace),
       traceBeforeKill,

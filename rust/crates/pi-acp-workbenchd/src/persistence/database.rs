@@ -8,6 +8,7 @@ use crate::domain::{
     transition::Transition,
     SessionId,
 };
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::{
     path::Path,
@@ -71,6 +72,55 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StoreError> {
 
 type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
 pub(super) enum StoreRequest {
+    ManagementRead {
+        query: crate::domain::management::ManagementQuery,
+        reply: Reply<crate::domain::management::ManagementData>,
+    },
+    ManagementUpdate {
+        session: SessionId,
+        action: crate::domain::management::ManagementAction,
+        ticket: Option<crate::domain::operation::OperationTicket>,
+        reply: Reply<crate::domain::query::CommandReceipt>,
+    },
+    ModelDefaults {
+        session: SessionId,
+        models: crate::domain::management::ProviderModels,
+        reply: Reply<()>,
+    },
+    TitleJob {
+        session: SessionId,
+        reply: Reply<Option<String>>,
+    },
+    TitleResult {
+        session: SessionId,
+        result: crate::domain::management::TitleResponse,
+        reply: Reply<()>,
+    },
+    TurnDiffSave {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        diff: Box<crate::workspace_review::TurnDiff>,
+        reply: Reply<()>,
+    },
+    TurnDiffGet {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        reply: Reply<Option<crate::workspace_review::TurnDiff>>,
+    },
+    TurnDiffPage {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        offset: usize,
+        reply: Reply<crate::workspace_review::TurnDiff>,
+    },
+    TurnDiffContent {
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        file: usize,
+        after: bool,
+        offset: SafeInteger,
+        reply: Reply<crate::workspace_review::DiffContent>,
+    },
     Attached {
         session: SessionId,
         reply: Reply<crate::domain::query::Attached>,
@@ -240,6 +290,134 @@ struct Inner {
 }
 fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest) {
     match request {
+        StoreRequest::ManagementRead { query, reply } => {
+            let _ = reply.send(super::management::read(connection, &query));
+        }
+        StoreRequest::ManagementUpdate {
+            session,
+            action,
+            ticket,
+            reply,
+        } => {
+            let _ = reply.send(super::management::update(
+                connection,
+                &session,
+                &action,
+                ticket.as_ref(),
+            ));
+        }
+        StoreRequest::ModelDefaults {
+            session,
+            models,
+            reply,
+        } => {
+            let _ = reply.send(super::management::models(connection, &session, &models));
+        }
+        StoreRequest::TitleJob { session, reply } => {
+            let _ = reply.send(super::management::title_job(connection, &session));
+        }
+        StoreRequest::TitleResult {
+            session,
+            result,
+            reply,
+        } => {
+            let _ = reply.send(super::management::title_result(
+                connection, &session, &result,
+            ));
+        }
+        StoreRequest::TurnDiffSave {
+            session,
+            turn,
+            diff,
+            reply,
+        } => {
+            let result = (|| {
+                let encoded = serde_json::to_string(&diff)
+                    .map_err(|_| StoreError::Invalid("turn diff encode failed"))?;
+                if encoded.len() > 32 * 1024 * 1024 {
+                    return Err(StoreError::Invalid("turn diff exceeds archive budget"));
+                }
+                connection.execute("INSERT INTO turn_diffs(session,turn,diff_json) VALUES (?1,?2,?3) ON CONFLICT(session,turn) DO NOTHING", rusqlite::params![session.as_str(),turn.as_str(),encoded])?;
+                Ok(())
+            })();
+            let _ = reply.send(result);
+        }
+        StoreRequest::TurnDiffPage {
+            session,
+            turn,
+            offset,
+            reply,
+        } => {
+            let result = connection
+                .query_row(
+                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
+                    rusqlite::params![session.as_str(), turn.as_str()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StoreError::from)
+                .and_then(|v| {
+                    v.map(|j| {
+                        serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
+                            .map_err(|_| StoreError::Invalid("turn diff corrupt"))
+                    })
+                    .transpose()
+                })
+                .and_then(|d| {
+                    crate::workspace_review::summary(d, offset).map_err(StoreError::Query)
+                });
+            let _ = reply.send(result);
+        }
+        StoreRequest::TurnDiffContent {
+            session,
+            turn,
+            file,
+            after,
+            offset,
+            reply,
+        } => {
+            let result = connection
+                .query_row(
+                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
+                    rusqlite::params![session.as_str(), turn.as_str()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StoreError::from)
+                .and_then(|v| v.ok_or(StoreError::NotFound))
+                .and_then(|j| {
+                    serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
+                        .map_err(|_| StoreError::Invalid("turn diff corrupt"))
+                })
+                .and_then(|d| {
+                    crate::workspace_review::content(&d, file, after, offset.get() as usize)
+                        .map_err(StoreError::Query)
+                });
+            let _ = reply.send(result);
+        }
+        StoreRequest::TurnDiffGet {
+            session,
+            turn,
+            reply,
+        } => {
+            let result = connection
+                .query_row(
+                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
+                    rusqlite::params![session.as_str(), turn.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StoreError::from)
+                .and_then(|value| {
+                    value
+                        .map(|json| {
+                            serde_json::from_str(&json)
+                                .map_err(|_| StoreError::Invalid("turn diff archive is corrupt"))
+                        })
+                        .transpose()
+                });
+            let _ = reply.send(result);
+        }
         StoreRequest::Attached { session, reply } => {
             let result = (|| {
                 let tx = connection.transaction()?;
@@ -392,7 +570,11 @@ struct QueuedRequest {
 impl StoreRequest {
     fn read_only(&self) -> bool {
         match self {
-            Self::Attached { .. }
+            Self::ManagementRead { .. }
+            | Self::TurnDiffGet { .. }
+            | Self::TurnDiffPage { .. }
+            | Self::TurnDiffContent { .. }
+            | Self::Attached { .. }
             | Self::Tools { .. }
             | Self::Tool { .. }
             | Self::View { .. }
@@ -415,6 +597,15 @@ impl StoreRequest {
     }
     fn kind(&self) -> &'static str {
         match self {
+            Self::ManagementRead { .. } => "management_read",
+            Self::ManagementUpdate { .. } => "management_update",
+            Self::ModelDefaults { .. } => "model_defaults",
+            Self::TitleJob { .. } => "title_job",
+            Self::TitleResult { .. } => "title_result",
+            Self::TurnDiffGet { .. } => "turn_diff",
+            Self::TurnDiffPage { .. } => "turn_diff_page",
+            Self::TurnDiffContent { .. } => "turn_diff_content",
+            Self::TurnDiffSave { .. } => "turn_diff_save",
             Self::Attached { .. } => "attach",
             Self::Tools { .. } => "tools",
             Self::Remove { .. } => "remove",
@@ -590,6 +781,131 @@ impl Database {
             content,
             offset,
             length,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn management(
+        &self,
+        query: crate::domain::management::ManagementQuery,
+    ) -> Result<crate::domain::management::ManagementData, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ManagementRead { query, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn manage(
+        &self,
+        session: SessionId,
+        action: crate::domain::management::ManagementAction,
+        ticket: Option<crate::domain::operation::OperationTicket>,
+    ) -> Result<crate::domain::query::CommandReceipt, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ManagementUpdate {
+            session,
+            action,
+            ticket,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn model_defaults(
+        &self,
+        session: SessionId,
+        models: crate::domain::management::ProviderModels,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ModelDefaults {
+            session,
+            models,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn title_job(&self, session: SessionId) -> Result<Option<String>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::TitleJob { session, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn title_result(
+        &self,
+        session: SessionId,
+        result: crate::domain::management::TitleResponse,
+    ) -> Result<(), StoreError> {
+        let (reply, wait) = oneshot::channel();
+        self.enqueue(StoreRequest::TitleResult {
+            session,
+            result,
+            reply,
+        })
+        .await?;
+        wait.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn save_turn_diff(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        diff: crate::workspace_review::TurnDiff,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::TurnDiffSave {
+            session,
+            turn,
+            diff: Box::new(diff),
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn turn_diff_page(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        offset: usize,
+    ) -> Result<crate::workspace_review::TurnDiff, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::TurnDiffPage {
+            session,
+            turn,
+            offset,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn turn_diff_content(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+        file: usize,
+        after: bool,
+        offset: SafeInteger,
+    ) -> Result<crate::workspace_review::DiffContent, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::TurnDiffContent {
+            session,
+            turn,
+            file,
+            after,
+            offset,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn turn_diff(
+        &self,
+        session: SessionId,
+        turn: crate::domain::TurnId,
+    ) -> Result<Option<crate::workspace_review::TurnDiff>, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::TurnDiffGet {
+            session,
+            turn,
             reply,
         })
         .await?;

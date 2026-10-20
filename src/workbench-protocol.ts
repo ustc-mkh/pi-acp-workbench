@@ -174,7 +174,119 @@ export const textBody = variants({
   Archived: object({ content: checked(contentRef, (r) => r.kind === 'Text') }),
 });
 export type TextBody = Infer<typeof textBody>;
+export const turnDiff = object({
+  status: oneOf('complete', 'partial', 'unavailable'),
+  files: array(
+    object({
+      path: string,
+      status: oneOf('added', 'modified', 'deleted'),
+      before_hash: nullable(string),
+      after_hash: nullable(string),
+      before: nullable(string),
+      after: nullable(string),
+      old_mode: nullable(uint),
+      new_mode: nullable(uint),
+      added: uint,
+      removed: uint,
+      patch: nullable(string),
+      omitted: nullable(string),
+    }),
+  ),
+  warnings: array(string),
+  added: uint,
+  removed: uint,
+  next_offset: nullable(uint),
+});
+export const undoReport = object({
+  files: array(object({ path: string, status: string, error: nullable(string) })),
+});
+export type UndoReport = Infer<typeof undoReport>;
+export type TurnDiff = Infer<typeof turnDiff>;
+const money = schema((v) =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : invalid(),
+);
+export const modelPrice = checked(
+  object({ input: money, output: money, cache_read: money, cache_write: money }),
+  (p) => Object.values(p).every((n) => n <= 1000000),
+);
+export const managementAction = tagged('action', {
+  rename: object({
+    action: literal('rename'),
+    title: checked(
+      string,
+      (s) => s.trim().length > 0 && [...s].length <= 80 && !/[\u0000-\u001f\u007f]/.test(s),
+    ),
+  }),
+  model: object({
+    action: literal('model'),
+    model: checked(string, (s) => s.length > 0 && s.length <= 300),
+    hidden: boolean,
+    price: nullable(modelPrice),
+  }),
+  visibility: object({
+    action: literal('visibility'),
+    models: checked(
+      array(string),
+      (a) => a.length > 0 && a.length <= 500 && a.every((s) => s.length > 0 && s.length <= 300),
+    ),
+    hidden: boolean,
+    reset: boolean,
+  }),
+  naming: object({
+    action: literal('naming'),
+    policy: oneOf('off', 'follow', 'model'),
+    model: nullable(checked(string, (s) => s.length > 0 && s.length <= 300)),
+  }),
+  refresh_models: object({ action: literal('refresh_models') }),
+  context: object({
+    action: literal('context'),
+    model: string,
+    context_window: nullable(checked(uint, (n) => n > 0 && n <= 100000000)),
+  }),
+});
+export const managementQuery = object({
+  group: optional(nullable(oneOf('model', 'day', 'week', 'month', 'session'))),
+  from: optional(nullable(uint)),
+  to: optional(nullable(uint)),
+  session: optional(nullable(sessionId)),
+  model: optional(nullable(string)),
+  cursor: optional(nullable(string)),
+});
+const usageGroup = object({
+  label: optional(nullable(string)),
+  key: string,
+  calls: uint,
+  missing: uint,
+  cache_missing: uint,
+  unpriced: uint,
+  input: uint,
+  output: uint,
+  cache_read: uint,
+  cache_write: uint,
+  estimated_usd: money,
+});
+export const managementData = object({
+  models: array(
+    object({
+      harness,
+      model: string,
+      hidden: boolean,
+      price: nullable(modelPrice),
+      default_price: nullable(modelPrice),
+      context_window: nullable(uint),
+    }),
+  ),
+  naming_policy: string,
+  title_model: nullable(string),
+  groups: array(usageGroup),
+  totals: nullable(usageGroup),
+  next_cursor: nullable(string),
+});
+export type ManagementData = Infer<typeof managementData>;
+export type ManagementQuery = Infer<typeof managementQuery>;
+export type ManagementAction = Infer<typeof managementAction>;
 export const sessionSummary = object({
+  title: optional(nullable(string)),
   id: sessionId,
   harness,
   cwd: workspacePath,
@@ -195,6 +307,9 @@ export const sessionView = checked(
     catalogue,
     plan,
     usage: object({
+      reported: optional(boolean),
+      cache_read_tokens: optional(nullable(uint)),
+      cache_write_tokens: optional(nullable(uint)),
       input_tokens: uint,
       output_tokens: uint,
       cost_micros: uint,
@@ -264,6 +379,7 @@ export const commandReceipt = checked(
     Loaded: object({ view: sessionView }),
     Accepted: object({ session: sessionId, revision: uint }),
     Forked: object({ summary: sessionSummary }),
+    UndoCompleted: object({ session: sessionId, report: undoReport }),
     Removed: object({ session: sessionId }),
     ForkCancelRequested: object({ source: sessionId, operation: operationId }),
   }),
@@ -362,6 +478,22 @@ export const queryCommand = checked(
       offset: uint,
       length: optional(nullable(checked(uint, (n) => n > 0 && n <= CONTENT_SLICE_BYTES))),
     }),
+    management: object({ method: literal('management'), query: managementQuery }),
+    validate_undo: object({ method: literal('validate_undo'), session: sessionId, turn: turnId }),
+    turn_diff: object({
+      method: literal('turn_diff'),
+      session: sessionId,
+      turn: turnId,
+      offset: optional(uint),
+    }),
+    turn_diff_content: object({
+      method: literal('turn_diff_content'),
+      session: sessionId,
+      turn: turnId,
+      file: uint,
+      after: boolean,
+      offset: uint,
+    }),
     attach: object({ method: literal('attach'), session: sessionId }),
     image: object({ method: literal('image'), image: imageRef }),
   }),
@@ -382,6 +514,9 @@ export const queryCommand = checked(
         return !v.cursor || (v.cursor.session === v.session && v.cursor.turn === v.turn);
       case 'content':
         return v.offset <= v.ref.bytes;
+      case 'turn_diff':
+      case 'turn_diff_content':
+        return true;
       default:
         return true;
     }
@@ -412,6 +547,8 @@ const mutationCommand = tagged('method', {
   cancel_fork: object({ method: literal('cancel_fork'), ...session, operation: operationId }),
   set_model: object({ method: literal('set_model'), ...session, model: modelId }),
   set_mode: object({ method: literal('set_mode'), ...session, mode: modeId }),
+  manage: object({ method: literal('manage'), session: sessionId, action: managementAction }),
+  undo_turn: object({ method: literal('undo_turn'), session: sessionId, turn: turnId }),
   remove: object({ method: literal('remove'), ...session }),
 });
 const detachCommand = object({ method: literal('detach'), ...session });
@@ -424,6 +561,10 @@ const queryMethods = new Set([
   'content',
   'attach',
   'image',
+  'management',
+  'validate_undo',
+  'turn_diff',
+  'turn_diff_content',
 ]);
 export const clientCommand = schema(
   (value): QueryCommand | Infer<typeof mutationCommand> | Infer<typeof detachCommand> => {
@@ -441,6 +582,13 @@ export const queryResult = tagged('kind', {
   history: object({ kind: literal('history'), value: historyPage }),
   tools: object({ kind: literal('tools'), value: toolPage }),
   content: object({ kind: literal('content'), value: contentSlice }),
+  turn_diff_content: object({
+    kind: literal('turn_diff_content'),
+    value: object({ bytes: string, total_bytes: uint, next_offset: nullable(uint) }),
+  }),
+  management: object({ kind: literal('management'), value: managementData }),
+  validate_undo: object({ kind: literal('validate_undo'), value: undoReport }),
+  turn_diff: object({ kind: literal('turn_diff'), value: turnDiff }),
   attached: object({ kind: literal('attached'), value: attached }),
 });
 export type QueryResult = Infer<typeof queryResult>;
@@ -457,28 +605,36 @@ export const ipcMessage = checked(
   (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
 );
 export type IpcMessage = Infer<typeof ipcMessage>;
-export type CommandResult<C extends ClientCommand> = C extends { method: 'operation' }
-  ? OperationStatus
-  : C extends { method: 'image' }
-    ? ImageAsset
-    : C extends { method: 'list' }
-      ? ListPage
-      : C extends { method: 'inspect' }
-        ? SessionView
-        : C extends { method: 'history' }
-          ? HistoryPage
-          : C extends { method: 'tools' }
-            ? ToolPage
-            : C extends { method: 'content' }
-              ? ContentSlice
-              : C extends { method: 'attach' }
-                ? Attached
-                : C extends { method: 'detach' }
-                  ? SessionId
-                  : CommandReceipt;
+export type CommandResult<C extends ClientCommand> = C extends { method: 'management' }
+  ? ManagementData
+  : C extends { method: 'operation' }
+    ? OperationStatus
+    : C extends { method: 'image' }
+      ? ImageAsset
+      : C extends { method: 'list' }
+        ? ListPage
+        : C extends { method: 'inspect' }
+          ? SessionView
+          : C extends { method: 'history' }
+            ? HistoryPage
+            : C extends { method: 'tools' }
+              ? ToolPage
+              : C extends { method: 'content' }
+                ? ContentSlice
+                : C extends { method: 'undo_turn' }
+                  ? CommandReceipt
+                  : C extends { method: 'turn_diff' }
+                    ? TurnDiff
+                    : C extends { method: 'turn_diff_content' }
+                      ? { bytes: string; total_bytes: number; next_offset?: number | null }
+                      : C extends { method: 'attach' }
+                        ? Attached
+                        : C extends { method: 'detach' }
+                          ? SessionId
+                          : CommandReceipt;
 export function commandPool(command: ClientCommand): 0 | 1 | 2 {
   if (queryMethods.has(command.method) || command.method === 'detach') return 2;
-  if (['cancel', 'cancel_fork', 'answer', 'remove'].includes(command.method)) return 1;
+  if (['cancel', 'cancel_fork', 'answer', 'remove', 'undo_turn'].includes(command.method)) return 1;
   return 0;
 }
 export function durableCommand(command: ClientCommand) {

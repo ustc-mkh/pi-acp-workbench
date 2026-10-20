@@ -21,6 +21,10 @@ pub struct PiWorkbenchCapabilities {
     pub inspect: bool,
     #[serde(default)]
     pub native_fork: bool,
+    #[serde(default)]
+    pub title: bool,
+    #[serde(default)]
+    pub models: bool,
 }
 pub(super) fn deserialize_metadata<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -30,6 +34,16 @@ pub(super) fn deserialize_metadata<'de, D: serde::Deserializer<'de>>(
 impl ProviderMetadata {
     pub fn is_empty(&self) -> bool {
         self.pi_workbench.is_none()
+    }
+    pub fn supports_title(&self) -> bool {
+        self.pi_workbench
+            .as_ref()
+            .is_some_and(|c| c.version == 1 && c.title)
+    }
+    pub fn supports_models(&self) -> bool {
+        self.pi_workbench
+            .as_ref()
+            .is_some_and(|c| c.version == 1 && c.models)
     }
     pub fn supports_inspection(&self) -> bool {
         self.pi_workbench

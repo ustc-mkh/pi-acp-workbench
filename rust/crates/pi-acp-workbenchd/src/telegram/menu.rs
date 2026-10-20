@@ -356,7 +356,7 @@ pub(super) async fn build(
                     "#{} {:?} · {}",
                     session.created_seq.get(),
                     session.harness,
-                    short(session.cwd.as_str())
+                    short(session.title.as_deref().unwrap_or(session.cwd.as_str()))
                 );
                 if context
                     .store
