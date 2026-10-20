@@ -81,12 +81,30 @@ impl JournalStore {
             ticket: OperationTicket {
                 operation,
                 fingerprint: RequestFingerprint::of(&command)?,
+                local: true,
             },
             view: Box::new(crate::domain::query::SessionView::new(harness, cwd)),
             reply,
         })
         .await?;
         result.await.map_err(failure)?
+    }
+    /// No prepare transaction for operations proven to have no remote effects.
+    /// The session lane serializes execution; the writer rechecks identity at
+    /// the atomic state/receipt commit point.
+    pub async fn admit_local(
+        &self,
+        operation: OperationId,
+        command: &DomainCommand,
+    ) -> Result<Admission, DomainError> {
+        if let Some(result) = self.lookup(&operation, command).await? {
+            return Ok(Admission::Replay(result));
+        }
+        Ok(Admission::Execute(OperationTicket {
+            operation,
+            fingerprint: RequestFingerprint::of(command)?,
+            local: true,
+        }))
     }
     pub async fn begin(
         &self,
@@ -98,6 +116,7 @@ impl JournalStore {
             ticket: OperationTicket {
                 operation,
                 fingerprint: RequestFingerprint::of(command)?,
+                local: false,
             },
             reply,
         })
@@ -115,6 +134,7 @@ impl JournalStore {
             ticket: OperationTicket {
                 operation: operation.clone(),
                 fingerprint: RequestFingerprint::of(command)?,
+                local: false,
             },
             reply,
         })
@@ -260,6 +280,13 @@ pub(super) fn finish_in_transaction(
     } else {
         "Failed"
     };
+    if record(db, &ticket.operation)?.is_none() && ticket.local {
+        db.execute(
+            "INSERT INTO operations(operation,fingerprint,status) VALUES (?1,?2,'Started')",
+            params![ticket.operation.as_str(), ticket.fingerprint.0],
+        )
+        .map_err(failure)?;
+    }
     let current =
         record(db, &ticket.operation)?.ok_or_else(|| failure("journal admission missing"))?;
     if current.fingerprint != ticket.fingerprint || current.status != "Started" {
@@ -338,6 +365,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                         let ticket = OperationTicket {
                             operation,
                             fingerprint: stored.fingerprint.clone(),
+                            local: false,
                         };
                         Ok(match replay(&ticket, stored)? {
                             Ok(receipt) => S::Completed { receipt },

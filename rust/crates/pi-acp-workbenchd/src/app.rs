@@ -377,7 +377,24 @@ impl CommandCore {
             }
             return Ok(receipt);
         }
-        let ticket = match self.journal.begin(operation.clone(), &command).await? {
+        // Only paths with no possible remote effect may omit durable prepare.
+        // Warm configure, prompt/answer dispatch, cancel/remove physical stop,
+        // fork/context/topic/undo retain their existing prepare boundary.
+        let local = match &command {
+            DomainCommand::Manage { action, .. } => !action.external(),
+            DomainCommand::SetModel { session, .. } | DomainCommand::SetMode { session, .. } => {
+                !self.adapters.lock().await.contains_key(session)
+            }
+            _ => false,
+        };
+        let admission = if local {
+            self.journal
+                .admit_local(operation.clone(), &command)
+                .await?
+        } else {
+            self.journal.begin(operation.clone(), &command).await?
+        };
+        let ticket = match admission {
             Admission::Execute(ticket) => ticket,
             Admission::Replay(result) => return result,
         };
@@ -516,7 +533,7 @@ impl CommandCore {
                     action: action.clone(),
                     reply,
                 })
-                .map_err(|_| DomainError::Backpressure)?;
+                .map_err(DomainError::mailbox)?;
             let response = tokio::time::timeout(std::time::Duration::from_secs(20), wait)
                 .await
                 .map_err(|_| DomainError::OperationInterrupted)?
@@ -642,7 +659,7 @@ impl CommandCore {
                     let (reply, wait) = tokio::sync::oneshot::channel();
                     sender
                         .try_send(AdapterCommand::Configure { config, reply })
-                        .map_err(|_| DomainError::Backpressure)?;
+                        .map_err(DomainError::mailbox)?;
                     wait.await.map_err(|_| {
                         DomainError::Worker("adapter stopped during configuration".into())
                     })??;
@@ -754,7 +771,7 @@ impl CommandCore {
                 let sent = match sender {
                     Some(sender) => sender
                         .try_send(AdapterCommand::Answer(answer.clone()))
-                        .map_err(|_| DomainError::Backpressure),
+                        .map_err(DomainError::mailbox),
                     None => Err(DomainError::Worker(
                         "answer has no live provider adapter".into(),
                     )),
@@ -847,7 +864,7 @@ impl CommandCore {
         let (reply, wait) = tokio::sync::oneshot::channel();
         sender
             .try_send(AdapterCommand::Ready { reply })
-            .map_err(|_| DomainError::Backpressure)?;
+            .map_err(DomainError::mailbox)?;
         let ready = tokio::time::timeout(std::time::Duration::from_secs(10), wait).await;
         if !matches!(ready, Ok(Ok(Ok(())))) {
             self.stop_session_adapter(&session).await?;
@@ -870,7 +887,7 @@ impl CommandCore {
         let (sender, config) = self.adapter_sender(session).await?;
         sender
             .try_send(AdapterCommand::Prompt { turn, text, config })
-            .map_err(|_| DomainError::Backpressure)
+            .map_err(DomainError::mailbox)
     }
     async fn adapter_sender(
         &self,

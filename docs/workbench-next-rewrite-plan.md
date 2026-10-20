@@ -1,176 +1,246 @@
-# 下一版重构计划
+# Workbench 后续重构设计与实施计划
 
-> **状态：待执行。** 本文件是唯一的后续工作计划，统一管理功能差异、架构收敛、安全尾项和发布验收；不再另设事实表、阶段 checkpoint 或执行流水文档。目标是本版一起完成，不把既有功能差异默认延期。
+> **状态：P0 已实现并完成本地统一门禁，P1–P6 待执行。** 下文审查发现是修复前基线，不代表全部阶段已修复。审查基线：`main@4bf6f32` → `rewrite/full-workbench@3273be5`。目标是简化实现、提高可靠性和性能，同时恢复既有用户流程；不兼容旧 wire、schema 或配置，但不擅自迁移、删除真实数据或部署服务。
 
-## 1. 目标与执行约束
+## 1. 审查结论：保留底座，先修合同，再收敛所有权
 
-优先级：**不丢用户意图、不重复副作用、不破坏工作区 > 主流程体验对齐 > 可维护性 > 峰值吞吐 > 内部兼容性。**
+当前重构方向合理：两个 daemon 合为单宿主；SQLite 替代文件快照/日志协调；冷查询不启动 provider；typed IPC、revision/epoch fence、原生恢复、可靠 Telegram inbox/outbox、物理 join 已有实现和相当多回归测试。**不建议再次整体重写存储、协议或 Telegram 调度器。**
 
-- 使用 `main@4bf6f32` 的使用规范/测试作为体验参考，旧源码只用 `git show` 查阅，不重新接回生产。规范参考与真实界面对照必须区分。
-- 保留单宿主、typed IPC、SQLite 增量提交/固定两 readers 一 writer、冷查询、原生 fork、revision/epoch fence、物理 join 和 Telegram FIFO/八 lane 底座，不再重写已经稳定的模块。
-- 允许破坏性修改 wire/schema/内部边界；同一切换点同步 Rust/TS/fixture/manifest，不保留双协议、双写或长期旧 reader。不自动迁移、清空或修改真实 root/native 历史。
-- 每阶段交付用户入口→持久结果→重开的一条完整流程；先减少主干缺口，不连续多轮只补辅助框架或已交付模块的边缘测试。
-- 一阶段一个有限收尾清单。只有已复现的正确性/安全回归或必要依赖插队；不得用更多测试数量代替阶段进展，也不自行增加无限前置工程。
-- 开发中跑定向检查，主流程集成跑完整门禁，候选发布补生产制品/真实环境/长期负载。同源码配置的有效证据可复用，不为更新文档重复全量构建。
-- 当前行为只写在使用/协议文档；任务状态只更新本文件，原始日志保存在 `.test-results/`，不再向 `docs/` 添加按轮记录。完成阶段压缩为结果和测试入口，不追加聊天式流水。
+但目前还不能认定“更简单且体验基本等价”：相对 main 为 491 个文件、+60,638/-47,370 行（净增 13,268 行，含测试/文档，不能直接当生产复杂度指标）。真正的问题不是文件数，而是一次操作仍跨多个生命周期所有者，且部分功能只完成了 DTO/方法，没有完成用户闭环。
 
-## 2. 本版统一范围
+原计划的主要问题：
 
-已有会话/冷历史/操作恢复、文本附件、模型/mode、Plan、Diff/撤回、统计/命名/导出、Telegram 菜单/排队/历史/推送链路作为回归基线，不重复建设。下表的差异和未完成验证均纳入本版：
+1. 将所有权收敛放在图片、配置和自主轮次之后，会先在分散的生命周期上继续加功能，再重写同一批接口。
+2. “单一 SessionRuntime”没有明确哪些必须统一、哪些应保留边界，容易把多个小模块合成更大的 `app.rs`。
+3. 把不可重复副作用、主流程缺口、视觉细节、通用 GC、平台取证放进同一串阶段，缺少关键路径和有限出口。
+4. “底座稳定”“不重复副作用”等描述过于绝对。外部 API 和多文件撤回不可能由 SQLite 保证 exactly-once；当前还有成功 no-op 未封存 receipt 的反例。
+5. 遗漏斜杠补全、显式打开链接等旧体验；性能门槛也没有区分排队、持久 fence、provider stop 和远端模型耗时。
 
-| 阶段 | 当前缺口或问题                                              | 本版完成目标                                                           |
-| ---- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
-| M1   | 空闲 worker 永久占槽，新会话耗尽容量                        | 有限空闲保留、安全驱逐、可继续原生会话                                 |
-| M2   | 附件拼接为纯文本，不支持图片 prompt                         | 有预算的 typed text/context/image 输入及真实能力降级                   |
-| M3   | thinking/Fast/config options 未贯通                         | UI/领域/ACP/恢复/成功偏好一致                                          |
-| M4   | Pi idle 通知没有独立自主轮次                                | 后台唤醒、授权、停止、审阅、用量与通知完整闭环                         |
-| M5   | delta 各自成为消息，terminal 仅 metadata                    | 连续 Markdown、稳定逻辑消息、实际工具/终端正文                         |
-| M6   | 会话所有权分散，热 owner 无总量淘汰                         | 单一 SessionRuntime、有界热状态、精简命令编排                          |
-| M7   | 全历史筛选/清空缺失，Telegram 缺 Diff 摘要，显示/审阅有差异 | 一起补齐历史管理、手机摘要、列表/Plan细节及安全审阅能力                |
-| M8   | 图片仅签名校验、通用留存回收及复杂 native cut 能力未闭合    | 明确媒体安全、typed reachability、provider cut 合同并完成相应实现/验证 |
-| M9   | admission SLO、长驻 soak、真实环境及 musl 证据缺失          | 完整候选发布验收，不以 synthetic 或短循环替代                          |
+新顺序：**P0 修正确性合同 → P1 收敛生命周期/容量 → P2 输入和设置 → P3 自主轮次 → P4 消息投影和桌面体验 → P5 管理/手机/留存 → P6 发布验证。** 每阶段交付一条用户入口到持久结果、重开的完整流程，不先建设通用框架。
 
-### 必须保留的安全边界
+## 2. 证据与风险排序
 
-这些不是待恢复的功能差异，不以“对齐”为名去除：
+证据标记：**复现**＝本次在隔离实际宿主验证；**静态**＝代码路径明确，但不声称跑过真实 provider；**待验**＝假设或环境验证任务，不当作已确认 bug。
 
-- prompt receipt 表示持久接受，不表示模型成功；未知结果查询原 operation，不换 ID 重发；收据过期保留防重 tombstone。
-- 先 commit 后 publish；本地状态与其 terminal receipt 同事务；外部 configure/fork/撤回/topic 使用 prepare/settle，崩溃显式 uncertain/interrupted，不自动重试。
-- 冷查询不建 worker；observer 取消不撤销已接受操作；fence 后停止并物理 join，再释放容量/lease。
-- 输入只读取显式授权的来源；工具路径、URI、terminal metadata 不授权本地读写、联网或执行；保持 CSP 与 hard limits。
-- 多文件撤回不是文件系统原子事务，不回退模型上下文；外部编辑器/残留后台进程不受宿主 gate 保证，必须明确提示。
-- Telegram 发送仍为 at-least-once；partial/unknown HTTP 可能重复。停止不回滚文件或远端费用。不新增 main 未支持的 Telegram 图片输入或任意 provider fork 承诺。
+以下 Rust 相对路径均在 `rust/crates/pi-acp-workbenchd/src/`。
 
-## 3. 实施阶段与出口
+| 优先级 | 证据      | 发现及定位                                                                                                                                                                                                                                                             | 处理                                                                           |
+| ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| P0     | 复现      | 冷会话以不同 operation ID 连续两次 `set_model` 为同一值，均返回 Accepted/revision 1；第一次 operation 为 completed，第二次却为 uncertain。`actor.rs::commit_command` 对无 change 直接返回；`app.rs::execute_journaled` 对成功设置又不 finish，Started 永久留下         | 所有成功操作（包括 no-op）必须有持久终态；不能靠增加 session revision 掩盖问题 |
+| P0     | 复现      | `max_workers=1`，A 完成后 B 的 prompt Accepted，随后 Failed(`session mailbox is full`)；空闲 A 无法 cancel，删除 A 后 B 手动重试才成功。入口：`scripts/workbench-idle-worker-repro.mjs`；`app.rs::adapters` 保留 handle，`worker.rs::spawn_for` 仅 try-acquire，无回收 | 容量周转与正确错误分类；不能提高上限代替修复                                   |
+| P0/P2  | 静态      | `domain/image.rs` 允许 4 MiB 原始图片，`worker.rs::MAX_FRAME` 仅 2 MiB，base64 后更大；当前输出图片合同也可能在合法上限前被 worker 拒绝，未来图片输入必然受影响                                                                                                        | 先统一端到端字节预算，不只在 UI 增加图片按钮                                   |
+| P1     | 静态      | 生命周期分散于 ingress lane、registry/actor、`CommandCore.adapters`、fork controls、Reviews 和 supervisor。创建成功后还主动 LoadSession 暖 actor；registry 无热 actor 淘汰上限                                                                                         | 统一会话协调所有权，保留协议/存储边界；限制热会话数                            |
+| P1     | 静态      | `acp/adapter.rs` 空闲通知以 `turn=None` 处理，除目录/配置等外不转领域事件；空闲请求直接 Cancel。Pi TS 已声明 autonomousRuns，但宿主未闭环                                                                                                                              | 独立后台轮次，不能把上一轮 turn ID 借给后台输出                                |
+| P1     | 静态      | `src/workbench-input.ts::composePrompt` 将文件拼成纯文本；ACP prompt 固定单个 text block；settings 虽解码 config options，领域只保留 model/mode                                                                                                                        | typed prompt parts、受预算的实际 provider options                              |
+| P1     | 静态      | `webview/workbench-main.ts` 按 entry 建 article，分片各自渲染 Markdown；链接统一 preventDefault。terminal 只存引用；领域保存 available commands，UI 无补全入口                                                                                                         | 共享消息分组规则，稳定 DOM，恢复确认打开链接/补全/正文读取                     |
+| P2     | 静态      | `persistence/database.rs` Diff 页/正文每次取整行 JSON 并解码（存档上限 32 MiB），然后才分页；小响应不等于小查询成本                                                                                                                                                    | 先基准测量；达到瓶颈后再拆文件头/正文，不先重写数据库                          |
+| P2     | 静态/待验 | ingress 的 control reserve 只保证有名额，不保证可越过同 session 的 discovery/configure/fork 长等待；`app_ingress.rs::lane` 仍按 FIFO 串行                                                                                                                              | 明确可中断边界和延迟口径；用 barrier 测试再修改，不宣称所有控制均能抢占        |
+| P2     | 静态      | 通用 archive/operation/delivery GC 未实现；Telegram 只做局部 typed compaction。桌面全历史筛选/共享历史清空缺失；手机 history 每源 scan cap 200，消息可能跨批                                                                                                           | 按真实可达关系及 continuation 修复，不无限扩限或按字符串猜引用                 |
+| P2     | 待验      | 媒体解码预算、provider native cut 边界、长期 RSS/WAL、真实 Webview/provider/Bot/musl                                                                                                                                                                                   | 分清实现缺口与验证缺口，不能用 synthetic 绿灯替代                              |
 
-执行顺序为 M1→M2–M5→M6→M7–M8→M9。M1 与 M4 先统一后台保活/回收语义；接口稳定后可分模块并行，不同时重写 runtime、存储、wire、UI 和 scheduler 才做第一次集成。
+### 本次实际检查
 
-### M1 [ ] worker 容量与空闲回收
+- `npm run check`、`npm run audit:workbench`：通过。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd --lib -- --test-threads=4`：338 passed、2 ignored；忽略项不算通过证据。
+- `npx vitest run test/workbench-{client,protocol,session,controller,browser,reconnect,recovery-races}.test.ts`：7 files / 76 tests 通过。
+- `cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd`：通过；隔离实际 IPC 连续同值设置复现上述 uncertain。回归实现时将该场景固化进现有 replay/contract 测试。
+- worker 故障脚本复现既有失败，不是通过门禁。
+- 未跑完整 `test:rewrite`、Chromium smoke、真实 Extension Host、在线 provider/Bot、长期负载或生产目标制品。本次不是全量逐行审计，也不据此断言没有其它缺陷。
 
-**问题证据：**隔离 `max_workers=1` 下 A 完成后仍占槽，B 获 Accepted 后失败为 `session mailbox is full`；cancel 空闲 A 返回 `no active turn`，删除 A 后显式重试 B 才成功。诊断入口：`node scripts/workbench-idle-worker-repro.mjs`（仅复现当前故障，不是通过门禁）。
+## 3. 目标设计：少一层编排，不是少一层安全
 
-**改动：** `app.rs` adapter map、`worker.rs` supervisor 和会话入口。
+### 3.1 组件职责及唯一所有者
 
-- 区分 starting/running/waiting-interaction/idle/stopping 和最后活动时间，定义总量与有限空闲保留策略，不靠提高 `max_workers`。
-- 容量申请可驱逐安全空闲 provider；先 fence/停止/join，再交出槽位。活跃、授权等待、configure/fork、标题调用未收尾者不驱逐。
-- 保留 native identity 和会话设置，下次显式输入原生 load，不回放旧 prompt。Pi 后台保活必须与 M4 协作，不能仅凭无用户 prompt 判断可终止。
-- 容量不足用真实容量错误，不泛称 mailbox full；已接受任务后续失败不能改成输入未接受，也不能自动重试。
+```text
+VS Code / Telegram
+       │ 授权、身份、输入分类
+       ▼
+有界 host admission ──────────────► QueryService ─► 两个固定 readers
+       │ operation + session route
+       ▼
+SessionCoordinator（每个热会话一个）
+  ├─ SessionView / turn / epoch / pending intent
+  ├─ adapter handle / workspace lease / review 生命周期
+  └─ 短操作提交；长操作以带 fence 的 completion 回来
+       │                         │
+       ▼                         ▼
+WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
+状态 + receipt + delivery     协议状态/请求相关性；进程槽位/物理 join
+```
 
-**出口：**一槽下 A完成→B完成→A继续，无须删会话；并发不超额、活跃/授权/不确定fork不被误驱逐；卡死、取消回收、shutdown均物理join。把诊断转成断言 B 成功的实际进程回归，删掉过期故障脚本。
+- **Coordinator 在现有 actor 上演进**，不额外长期保留另一套 runtime。它拥有领域热态及副作用的生命周期句柄，不拥有 JSON-RPC pending map、媒体正文缓存或 Telegram topic 状态。
+- Registry 仅负责 get-or-load、路由、热会话预算和安全退场；admission 仅负责配额、身份及明确的入口顺序，不再解释第二套领域 phase。
+- Adapter 保留 native protocol/session details、请求/响应配对及内容转换；完成消息携带 session、runtime generation/epoch、turn 或 workflow identity。Coordinator 验证后才提交事实。
+- Supervisor 只负责全局进程预算、启动和 join。**会话是否可驱逐由 Coordinator 判定**，不能由 supervisor 猜测“进程无输出即空闲”。
+- Reviews 的 before/after、gate lease 随 turn/workflow 生命周期；不能留一个与 worker 和 turn 各自推进的无界 session map。
+- 冷 attach/list/history/export/统计不创建 Coordinator 或 worker；create 只写本地事实，不为了“可能下一步发送”永久暖 owner。
+- Telegram inbox 是持久输入队列，outbox 是可靠输出队列；保留现有 topic FIFO/八 delivery lanes，不再增加第二套 sender、持久 workflow engine 或每分片 ledger。
 
-### M2 [ ] typed prompt、附件与图片
+### 3.2 操作提交合同
 
-**改动：** Webview composer/草稿、UI/IPC DTO、领域 Prompt、ACP initialize/prompt、归档/导出。
+| 操作类型                                               | 提交方式                                                                                | 崩溃/重开                                                                |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 纯本地 mutation，如 create、元数据、冷设置、成功 no-op | 去重检查 + 本地变化（可为空）+ terminal receipt 同事务；无变化不发 batch、不增 revision | 原 operation 查询/同参重放得到原终态                                     |
+| prompt/answer                                          | 持久接受与输入/答案、receipt、必要 delivery intent 原子提交；随后 dispatch              | Accepted 不代表模型执行成功；dispatch 失败记任务状态，不把输入改称未接受 |
+| configure、native fork、外部 context、topic effect     | 持久 prepare → 一次远端尝试 → 观察结果 → settle；可用的本地结果和 receipt 同事务        | prepared 只证明可能执行；unknown/uncertain 不自动重发，保留可查询身份    |
+| cancel/remove/undo                                     | 显式 fence/准备 → 物理 join 或受控文件副作用 → 持久结果                                 | stop 不回滚费用/文件；undo 多文件逐项结果，丢回执查原 operation          |
 
-- 建立唯一的 text/context/image parts 合同、显式来源和总输入预算；删除生产中的附件字符串拼接路径，同步 Rust/TS/fixture。
-- 保留 initialize 输入能力，按真实 provider/model 能力展示图片入口与拒绝原因，不伪造支持。
-- 完成粘贴→预览/删除→MIME/尺寸/字节校验→持久接受→ACP image；不可变归档/引用，不把大 base64 放入 view 或无限草稿。
-- operation 指纹覆盖 parts 顺序/身份；失败保留输入，迟到接受不能清掉新草稿；reload只查原ID。
+不将所有操作塞进统一 begin→execute→finish。特别是本地 no-op 不能因为没有 session change 就跳过 receipt；外部副作用又不能因“减少事务”而删除 prepare。清点每种 mutation 的 commit point、dispatch point 和恢复结果后，再删除旧编排路径。
 
-**出口：**支持/不支持图片的synthetic peer、真实Pi图片与Codex/Claude差异；中文/emoji、越界/损坏/超限、切会话、断连/reload及附件更改期间迟到响应。
+### 3.3 容量、回收和控制
 
-### M3 [ ] thinking/Fast/config options
+- **两个独立预算**：provider worker 数、热 Coordinator 数；再限制每会话 mailbox、在途长操作、媒体缓存。历史总量不计入热状态预算。
+- Worker 明确 starting/running/waiting-interaction/idle/stopping，以及 pin 原因、最后活动时间。只有无活跃 turn/交互/config/fork/标题调用等且 provider 允许原生恢复时可回收。
+- 先做压力触发的 idle LRU，再加有限 idle TTL；同一被选中 worker 只能有一次 eviction。标记 draining/fence → stop/join → 释放槽位 → 新启动，期间新输入要么排入有界等待，要么明确拒绝，不能落入已关闭 adapter。
+- Pi 后台运行能力必须有明确 pin/释放合同。没有证据证明“无后台待唤醒工作”时，不把普通 Idle 当作可回收；全被 pin 时给出真实容量原因。不能一边承诺后台唤醒不丢、一边静默杀进程。
+- Coordinator 淘汰还需无 worker、无未结算副作用/accepted write；drain/join 后才能替换，registry generation 防止退场旧完成消息污染新 owner。
+- 长 provider I/O 不占 mailbox 控制入口：登记 intent 后启动受监管有界 job，以 completion 推进。FIFO 仍约束配置/分支/输入等因果顺序；cancel 可打断哪些等待必须逐项规定，不能任意越过 mutation。
 
-**改动：** ACP settings/catalogue、SessionConfig、configure intent/receipt、桌面与Telegram设置。
+### 3.4 消息、输入和预算
 
-- 受预算的 typed provider options，不再只投影 model/mode；只展示真实选项。
-- 复用 prepare→远端调用→观察成功值→settle；只有成功应用的值写默认偏好，已有会话自身设置优先。
-- thinking 与Fast独立；Pi Fast随原生会话/分支恢复，不成为新会话全局默认。Pi context仍为独立显式授权写入。
-- 设置UI局部更新，不因stream delta重建当前交互；过期选项、失败和未知结果清楚可见。
+- 存储 entry 不可变，**显示消息不是 entry**。按 turn、role、可信 provider message ID 和明确边界生成逻辑消息；无 ID 不猜合并，跨 tool/图片/消息边界不乱拼。
+- 桌面、Telegram、导出复用同一套可测试的分组语义（可各自实现投影，不新增跨语言服务）。分页带 continuation/边界信息；不能把一个 provider 消息在下一批当成新消息或截断后伪称完整。
+- Prompt 为有序 text/context/image parts；context 只包含用户明确选取的内容和来源说明，image 用不可变 asset/ref。不将工具路径/URI 当成本地读取许可。
+- **区分 raw bytes、base64 bytes、JSON envelope、UTF-8 字节、JS 字符/UTF-16 单元。** 编码扩张和 JSON 转义必须算入预算，失败必须在持久接受前可预见，或作为明确的已接受后失败事实。
+- IPC 8 MiB、ACP 当前 2 MiB、image raw 4 MiB 需统一设计。选择受限的大媒体帧或合法分块/引用能力，不无上限扩大所有帧；最大合法中文文本、图片、tool output 都经真实 stdio 测试。
+- 图片在输入/归档边界做完整解码、像素/尺寸/帧数/内存预算及必要重编码；signature/hash 验证不是 sanitization。解码不占 writer，不使用任意远程 URL 回退。
 
-**出口：**首任务前选择、双端更改、失败不保存、会话/默认优先级、成功后settle前SIGKILL、reload不重发；真实Pi Fast/thinking及其它provider catalogue逐项验证。
+## 4. 实施阶段与可验证出口
 
-### M4 [ ] Pi 自主后台轮次
+阶段状态以各标题及有限验收结果为准；下列后续阶段仍待执行。实施中只在本文件更新有限状态/结果，日志保存在 `.test-results/`，不新增多份 checkpoint/ledger。
 
-**改动：** `pi-session-runs.ts`、Pi扩展通知、ACP adapter、领域turn及审阅/授权/用量/Telegram。
+### P0 [x] 修正操作及边界合同
 
-- 显式autonomous start/finish协议，由owner分配独立turn/epoch；idle通知不丢弃、不借用上一轮ID。
-- 与用户prompt竞争时明确持久接受顺序；冲突/拒绝的输入保留草稿或持久结果，不吞掉。
-- 接通授权、停止、workspace before/after、用量和可靠通知。可能写工作区时持有gate；后台保活与M1容量/重载规则一致。
-- 崩溃后仅显示committed事实/中断；只读attach不启动或续跑worker。
+**涉及：**`app.rs`、`actor.rs`、`persistence/journal.rs`、transition/store、worker codec、现有 replay/contract 测试。
 
-**出口：**真实Pi后台唤醒→授权→停止/完成→冷历史→显式继续；加用户输入竞争、旧epoch晚到、SIGKILL和回收竞争，不以adapter单测替代。
+1. 固化 no-op 复现：不同 operation 的同值 model/mode，以及所有可能无变化的本地 mutation；返回成功后 status 必须 completed，重开/删除源后仍可查原 receipt，同 ID 异参 conflict。
+2. 为本地 no-op 提供 receipt-only 原子提交，不伪增 revision；审计 mutation 分类，列明需要 prepare 的外部路径。纯本地路径逐步去掉多余 Started 事务，失败和未知结果不混淆。
+3. 统一图片/文本/媒体的端到端预算，修复 ACP 合法 asset 到不了的上限冲突；测试最大合法帧及恰好越界，不只测试小 PNG。
+4. 拆分 worker capacity、mailbox full、closed、provider unsupported 错误；保留 Accepted 后任务失败的语义。
 
-### M5 [ ] 连续消息、工具/终端与交互稳定性
+**P0 实现与验收结果：**
 
-**改动：** transcript显示投影、renderer、tool archive/terminal port、分页与导出。
+- actor 对无 change 的成功命令提交 receipt-only transaction，不改 session revision、不发布 batch。冷 model/mode 与本地 Rename/Model/Visibility/Naming 经只读去重后直接进入状态/receipt 原子提交，不再提前持久化 Started；写入或 receipt 失败同事务回滚。create 保留已有单事务路径。
+- 副作用分类：prompt/answer 保留接受前 prepare 与原子 Accepted，dispatch 在其后；warm configure 保留 Started + configuration intent；cancel/remove 保留 fence/stop/join；native fork/cancel-fork、外部 RefreshModels/Context 和 undo 保留 prepare，不把 unknown 当作可自动重发的本地失败。此轮不重写这些外部编排。
+- ACP 普通 payload 仍限 2 MiB（不含换行）；仅 agent image notification 可使用 `ceil(4 MiB / 3) * 4 + 64 KiB` 有界大帧，且验证 raw/base64 与独立 envelope 预算。IPC 8 MiB 不变；出站超限在 worker mailbox/stdin 前拒绝。覆盖 4 MiB asset 的实际 stdio、raw 恰好越界、2 MiB 文本帧与恰好越界、最大中文/emoji/JSON 转义 prompt；完整图片解码/像素 sanitization 仍待后续阶段，不以本轮 signature 检查冒充。
+- worker capacity、mailbox full、mailbox closed、unsupported feature 分开；回归确认容量失败保留已接受输入和 Completed receipt，失败写入任务状态。不提高 worker 上限，不在 P0 引入 P1 回收。
+- `npm run test:rewrite` 最终全通过：check/audit/build/format/clippy；workspace 宿主 345 passed、2 ignored（另一个 crate 2 passed）；实际 IPC 21 项、Telegram 28 项、SIGKILL/process-loss 3 项、Chromium 13 项；full runner；GNU release artifact/package/smoke。no-op 用例覆盖不同 ID 同值、零 batch/revision、删除源/重启后 replay、异参 conflict；本地提交前重启和 receipt 故障回滚由 SQL 故障用例验证，丢回执/断连与提交后 SIGKILL 由实际宿主验证。
+- 日志：`.test-results/p0/rewrite-final.log`（全量最终门禁）；其中 full runner 的细分日志为 `.test-results/run-EaGWTE/`。首轮失败及修正过程日志保留在同一 P0 目录。未跑真实在线 provider/Bot、Extension Host、musl、两小时 mixed/soak，不据此宣称这些已验收；未部署或操作真实数据。
 
-- 存储entry仍不可变；按可信provider message ID、turn/角色形成显示消息，无ID使用保守边界，不跨工具或消息猜合并。
-- 同消息delta连续Markdown，支持跨片代码块/表格/LaTeX/Mermaid；稳定DOM identity、焦点、选择/复制、滚动锚点、最终回答突出和轮次过程自动折叠。
-- terminal reference接通受预算正文读取/归档；provider确无正文时明确降级，不猜路径读取。
-- 调整“多个delta必须多个article”的测试oracle，保留不可变entry断言；复制/导出以完整逻辑消息为准。
+**出口：**真实宿主定向契约复现从红转绿；commit 前/后丢连接和重启得到同一终态；no-op 零 session batch；超限输入有确定错误且无副作用。此阶段不顺便重写全部 actor。
 
-**出口：**数百分片、多消息/缺ID/分页边界均正确；运行中展开与结束后折叠、切会话/reload、stdout/stderr有界正文；Chromium与真实Webview都验。
+### P1 [ ] 会话生命周期收敛与容量周转
 
-### M6 [ ] 单一会话所有者与有界热状态
+**依赖：**P0 receipt 合同。先引入 Coordinator 生命周期消息/handle 所有权，再迁移既有 prompt/cancel/config/fork/review；每迁移一条就删除对应 `CommandCore` 分支或独立 map，不保留双所有者。
 
-**改动：** `app.rs`、`actor_registry.rs`、`actor.rs`、Reviews、epoch/fork controls及operation/store接口。
+1. 明确各状态、pin、completion fence、控制抢占点；在既有 actor 中收拢句柄和 turn/workflow 生命周期。协议状态仍留 adapter。
+2. 加压力 LRU、有限 TTL、join 后交槽；一槽 A完成→B完成→A原生继续，不删会话、不回放 prompt。无安全 idle 候选时快速给出容量原因，不把新输入无限挂起。
+3. 去掉 create 后 advisory warming，给 Coordinator 总量预算及 drain 淘汰；读取不暖 owner。
+4. provider job completion 不长 await 堵控制 mailbox；对 discovery/config/fork/标题卡住分别注入 barrier，验证 cancel/shutdown 和跨会话公平性。
+5. 保留当前 SQLite WAL、FULL、固定两 readers 一 writer、短快照、有界队列和物理 join；不引入动态连接池、分库或通用任务框架。
 
-- 热view、worker/adapter handle、epoch/turn和短期协调归一个SessionRuntime；registry只路由/创建/淘汰，admission只授权/身份/配额/因果队列，不再解释第二套会话phase。
-- 热owner总量预算与安全淘汰：无worker/活跃turn/pending interaction/config/fork/accepted write才drain退出。create成功不永久暖owner。
-- provider长I/O通过带fence完成消息推进，不长await阻塞mailbox控制入口。
-- 逐命令核验本地mutation状态+terminal receipt同事务，删除剩余begin→execute→finish重复编排/双提交窗口；外部副作用保留真实prepare/settle，不泛化为workflow engine。
-- owner计算一次小型typed change，WriteStore做CAS/原子提交，再更新热态/发布。删除重复回复转换和被替代路径，保留生产故障隔离seam、合法ACP可选字段和native格式处理。
-- SQLite仍用同文件WAL/固定两readers一writer、短快照、有界队列、FULL同步及物理join。先测SQL/反序列化/事务/队列，不能无证据分库或加动态连接池。
+**出口：**将 idle repro 改成断言成功的实际进程回归并接入门禁；并发回收不超额、不双启动；授权/不确定 fork/标题和后台 pin 不误驱逐；旧 epoch/generation 晚到无影响；大量会话反复 create/load/淘汰后 owner/task 数平台化。只测到结构有界时不声称已测无 RSS 泄漏。
 
-**出口：**大量不同会话反复create/load后owner/task/RSS平台化；冷读不建owner/worker；原子receipt、淘汰重载、迟到事件、observer取消、shutdown/lease、fork及双端控制全部回归。无测量不把结构性无界写成已测RSS泄漏。
+### P2 [ ] typed 输入与 provider 设置纵向贯通
 
-### M7 [ ] 历史管理、Diff与显示差异统一补齐
+**依赖：**P1 生命周期接口。Prompt parts 与设置可分两条小变更，分别集成，不一起重写 UI/存储/adapter。
 
-**改动：**历史SQL/keyset和UI、批量管理操作、workspace review/undo、Telegram完成manifest与显示偏好。
+- typed text/context/image：粘贴/选择→预览/删除→验证和预算→不可变归档→持久接受→ACP。operation 指纹覆盖 parts 顺序/身份；历史/复制/导出保留来源和媒体语义，生产删除字符串拼接附件路径。
+- 保留 initialize/model 实际能力，入口展示真实拒绝/降级，不伪造 provider 图片支持。图片不进入 SessionView 或无限草稿；临时未发送 asset 有可识别清理生命周期。
+- config options 用受预算的 typed select（后续实际需要其它类型再加），保留 option ID/category/choices/current value，不用任意 JSON 配置包。Pi thinking/Fast 分开，桌面和 Telegram 同源。
+- configure 只有观察成功值才能 settle 和更新偏好；失败/未知不保存默认。已有会话设置优先；新会话用最近成功 model/thinking；Fast 随 native session/fork 恢复，不成为全局默认。context 仍需独立明确授权。
+- 用 draft generation + 原 operation 身份处理迟到接受；失败保留输入，迟到响应不能清除新草稿。stream delta 不重建正在操作的设置表单。
 
-- 全历史筛选能找到当前页外会话；过滤改变使cursor失效，不只过滤当前100条数组。恢复列表约4/10/16条高度选项，选择/刷新/发送不自动关列表，偏好重开保持。
-- 清空共享历史必须范围预览、二次确认、明确全部任务停止范围；区分会话、归档、pending delivery和native。批量任务有durable identity、进度、中断/部分结果，不循环remove后伪报整体成功，不reset root/递归删native。
-- Telegram完成消息加入已保存净Diff文件/增删行数与partial/unavailable；复用同一事实，不重扫工作区或塞完整补丁。定义审阅保存→完成投递顺序及重启恢复。
-- 补链接文本Diff：只读取/展示链接本身，不跟随目标；保留路径/链接/硬链接防护和partial语义。
-- 对超过当前单次undo 256文件/64KiB路径的完整快照，设计显式选择/分批确认与受预算结果，而非直接扩大单次上限。覆盖原本可审阅修改的安全撤回，不承诺多文件原子性；不完整/冲突快照仍拒绝。
-- Plan固定卡片对齐状态样式、折叠偏好和约五项内部滚动；增量更新不丢展开/焦点。对照main真实界面验证，不将视觉差异默认为已接受。
-- Telegram最近20/每批100条消息在raw-record scan预算下不能静默丢尾；明确continuation/可继续读取与filtered-page推进，维持有界扫描、稳定provider message分组、导出dedup和topic FIFO。
-- 配置向导维持安全的显式user/chat allowlist、私有新文件和目录选择，不恢复first-sender配对或自动安装服务。
+**出口：**支持/不支持图片 peer、最大中文/emoji/图片、损坏/超限、切会话/reload/断连；设置首任务前生效、双端更改、失败不保存、成功 settle 前 SIGKILL 后不重发；分别验证真实 Pi/Codex/Claude 可用项，记录拒绝，不承诺能力全等。
 
-**出口：**页外筛选/迟到页、批量取消/重启/活跃任务/pending引用、手机成功/失败/取消Diff摘要、symlink文本与不跟随、超单批撤回的逐项结果；列表/Plan/原生对话框在真实Extension Host对照。差异默认在本版修复；确有provider或安全限制时用实际证据说明，不暗中降标。
+### P3 [ ] Pi 自主后台轮次闭环
 
-### M8 [ ] 媒体、留存与native能力闭合
+**依赖：**P1 pin/回收合同，P2 设置恢复。
 
-- 图片输入/输出建立完整解码/尺寸/像素/内存预算与必要的安全重编码策略，不把MIME/signature/hash检查称为sanitization；损坏、解码炸弹、超大/多帧输入有确定拒绝或受预算处理。
-- 设计并实现显式typed reachability GC：保护history/archive、pending delivery、operation/去重tombstone、inbox offset/high-water、callback及native外部文件边界。先dry-run/确认，有界批次/崩溃恢复，不按mtime或字符串猜删除，不运行隐式启动清库或在线阻塞VACUUM。
-- Pi native cut覆盖重复文本、tool/media与真实message边界；保持源文件不变、独立identity、继承billing不重复计。无可靠cut证据明确拒绝，不以timestamp、摘要或prompt重播替代。
-- Codex/Claude/Pi分别明确plan、permission、elicitation、usage、cancel及可用native能力，保留typed fixture和实际集成；不支持的私有fork明确显示，不伪造与Pi相同能力。
+- TS Pi bridge 与 ACP adapter 显式 start/finish，Coordinator 分配新 turn/epoch；没有边界证据不能从 idle 文本推断自主轮次。
+- 与用户 prompt 竞争有确定串行点；保持 main 的自主轮次忙时拒绝用户输入并保留草稿，不暗改为 steering/follow-up。
+- 接通授权、停止、独立用量/历史/Telegram 完成通知。当前轮次不重新折叠上一轮最终回答或重复计费。
+- 整轮 workspace before 必须在可能写文件之前采集并持 gate；如果桥接只能事后通知，不承诺完整净 Diff，明确 unavailable/partial。main 的自主轮次本就不保证整轮 workspace 基线，不为“增强”制造错误快照。
+- provider 明确报告后台 pin 的取得/释放；没有该能力时展示有限能力/容量限制，不能靠一次超时认定后台任务不存在。
 
-**出口：**恶意媒体预算、GC误删/引用/重启/lease测试、真实Pi离线SDK/native-file与在线能力分开取证；各provider有明确支持/拒绝矩阵，桌面与手机看到一致事实。
+**出口：**真实 Pi 后台完成→独立唤醒→授权→完成/停止→冷历史→显式继续；用户输入竞争、SIGKILL、旧事件与回收竞争均覆盖。只读 attach 不触发唤醒/续跑。
 
-### M9 [ ] 故障、性能、真实环境与发布验收
+### P4 [ ] 消息投影、终端和桌面交互对齐
 
-#### 故障与完整流程
+**依赖：**P2 内容合同；与 P3 共享独立 turn 边界。
 
-- 实际宿主在commit/receipt/provider dispatch前后SIGKILL，本地状态与receipt原子，外部未知不重发；reload仅查原ID。
-- 两端answer、answer/expiry/cancel、撤销trust、切会话旧页、配置成功settle前崩溃、fork完成adopt未确认、旧worker事件、反复shutdown取消。
-- Telegram offset/分类/接受、HTTP成功ack前崩溃、multipart/429/rebind/源删除；同topic head不越过、独立ready topic不饿死。
-- 用barrier/dispatch trace定位图片revision batch间歇15秒超时；重跑绿不是结案。
+- 增量逻辑消息投影和稳定 DOM identity：同消息连续 Markdown、跨片代码块/表格/LaTeX/Mermaid；复制/导出完整逻辑消息，过程/Thought 默认折叠及轮末折叠保留用户选择。
+- 不以每 delta 全文解析/全 DOM 重建换取正确显示：合并同一渲染帧更新、只更新变化消息，长内容有预算；测 1000 分片时渲染耗时和输入响应，避免累计 O(n²) 工作。
+- 分页继续/截断有清楚提示和读取方式；当前页 200 raw entries 不应让长回答看似只剩尾部。保留 DOM 焦点、文本选择、复制、滚动锚点及设置/授权草稿。
+- terminal 在协商支持的 ACP port 中读取并归档受预算 stdout/stderr/退出状态；不按 terminal metadata 猜路径或执行命令。不支持时明确 metadata-only。
+- 恢复 ACP available commands 斜杠补全，覆盖键盘/IME/空目录；只展示 provider 声明的命令，不能发明内部命令。
+- 链接由显式点击请求宿主确认，展示规范化目的地（含 punycode），只允许约定 scheme、拒绝凭据 URL/command/javascript；可复制替代打开。本地文件链接如恢复，必须重新授权工作区归属，不恢复任意路径读取。
+- 历史列表约 4/10/16 高度、选择/刷新/发送不自动关闭；Plan 固定卡片状态、约五项内部滚动、折叠偏好与长标题。恢复 composer 可用布局/resize，真实窄侧栏核验。
+- 登录入口对齐实际用途：显式确认后按受信 provider profile 打开对应原生登录终端，不执行模型给出的命令、不自动传入凭据；若保留“仅说明”的产品降级需明确确认，不能默认算体验等价。
 
-#### 性能与资源预算
+**出口：**修正“每 delta 多 article”的旧测试 oracle，保留不可变 entries 断言；Chromium 验证流式/分页/键盘/链接，真实 Extension Host 验证剪贴板、滚动、resize/原生对话框与登录入口。Preview demo 等非主流程开发工具可明确退休，不为兼容恢复旧源码。
 
-版本化真实host mixed runner，固定机器/源码/数据集，至少五轮；10k会话、单会话100k entries、1MiB正文分页、4MiB图片、16活跃synthetic sessions、8 delivery lanes、2048 deferred topics，并发历史/媒体/导出和控制。分别报告每请求median/p95/p99/max、排队/SQL/序列化、队列深度、连接/线程、WAL/checkpoint和RSS趋势，不用五个运行均值当请求p95。
+### P5 [ ] 历史管理、审阅、手机与留存收尾
 
-| 指标                                       | 验收门槛                                                                              |
-| ------------------------------------------ | ------------------------------------------------------------------------------------- |
-| loaded会话admission→durable fence/本地提交 | 混合负载p95≤100ms、p99≤250ms；物理stop另计                                            |
-| 普通history/list页                         | p95≤200ms；同机空载对比无解释退化不得超过20%                                          |
-| 公平性                                     | deferred topics不隐藏独立ready topic，普通流量不能耗尽控制/查询保留容量               |
-| 读写隔离                                   | 大读取不再把writer阻塞在纯正文/图片解码后；用A/B证据确认收益                          |
-| 资源                                       | 固定readers/writer、帧/页/缓存预算；热owner/worker有界，内存不随累计历史/投递线性增长 |
-| 持续运行                                   | 600秒快速soak + 至少两小时单宿主混合soak，检查平台值/增长趋势、WAL/checkpoint及泄漏   |
+**依赖：**P1 生命周期、P4 消息边界。拆成以下四个有限交付，不扩成第二次重构。
 
-现有storage-only mixed和每轮独立fixture的快速soak可作诊断/回归，不能替代以上SLO与长期趋势。硬件不满足初始值时先给瓶颈与调整理由，不事后放宽掩盖回归。
+1. **历史查询与清空：**筛选下推 SQL/keyset，cursor 绑定筛选条件，能找到当前 100 条以外的会话。批量清空先预览范围/二次确认，明确是否包括全部 harness、Telegram 活跃任务及 pending deliveries；冻结目标集合和 durable job ID，有界逐批 fence/join/删除，保存进度/部分结果，重启只续未完成本地步骤。不递归删 native、不 reset root；保留 usage/dedup/已接受 delivery 所需引用。
+2. **Diff/撤回：**完成推送复用已存净 Diff 摘要（文件/增删行、partial/unavailable），明确审阅保存先于完成通知，崩溃无快照时不假造。链接只显示链接文本、不跟随目标；普通文本安全撤回仍校验 dirty buffer/路径/硬链接/权限/当前内容。超过 256 文件/64 KiB 路径单次预算时显式选择、逐批确认、逐项结果，不直接放大限制，不承诺多文件原子或上下文回退。Diff 分页整行 JSON 成本先测，必要时迁移为文件头和正文引用，保持一个数据库/一个存档事实。
+3. **手机历史/同步：**raw scan 预算与可见消息目标分离；filtered page 必须推进、跨批同消息有 continuation，不能静默丢尾。保留共享 dedup、通知/静默偏好、immutable export、topic FIFO 和八 lane；完成/失败/取消的摘要均回归。配置向导保留明确 allowlist、私有配置和目录授权，不恢复 first-sender 自动配对/自动安装服务。
+4. **留存与媒体安全：**先定义 typed roots（live history、fork 共享 entries、pending/accepted export、delivery manifest、operations/tombstones、inbox high-water、callbacks），离线 dry-run 给出字节/对象/引用理由；再实现同 lease 下有界事务批次、可重入 GC。先清可证明孤儿/过期非防重数据；operation/delivery 去重身份没有安全压缩合同就保留，不能为磁盘数值删除。native 外部文件不在 GC 删除范围；不隐式启动清库、不在线阻塞 VACUUM。保留数据增长/磁盘不足提示和显式维护入口。
 
-#### 真实环境与制品
+**出口：**页外筛选/旧页迟到、清空中断/重启/活跃任务/pending 引用、手机摘要与消息跨批、symlink 不跟随、超预算撤回及冲突逐项结果、GC 共享引用/导出引用/幂等/防重/崩溃测试。保留一般 GC 的不可压缩身份成本，不虚称无限期固定磁盘。
 
-- 真实Extension Host：单/多文件Diff、dirty buffer、trust/modal、clipboard/图片附件、设置/保存/目录对话框、resize/滚动/折叠。无display明确BLOCKED，不回退mock算通过。
-- 使用专用授权账户/目录/chat与费用预算，分别验真实Pi/Codex/Claude和真实Bot完整流程；离线SDK不替代在线请求。
-- GNU/musl各自生产artifact/IPC/Telegram契约，目标std/工具链先备齐；不用GNU替代musl，不擅自安装系统依赖或读取日常凭据。
-- 删除被替代路径、旧协议/配置别名/测试专用生产API；不重建旧daemon或旧reader，不删安全回归降门槛。
+### P6 [ ] 故障、性能、真实环境和制品验收
 
-候选门禁使用当前 `package.json`：
+#### 6.1 provider 能力与体验矩阵
+
+以 `main@4bf6f32` 使用规范、测试和真实界面为参考。规范存在不等于当前实现可用；没有运行证据标待验。Pi/Codex/Claude 分别记录 prompt/image、model/thinking/Fast、Plan、permission/elicitation、terminal、usage、cancel、load、native fork、自主唤醒的支持或明确拒绝。
+
+Pi native cut 继续要求真实 message 边界证明：重复文本、工具/媒体、独立 identity、源文件不变、继承 billing 不重复计；不靠 timestamp/摘要/prompt 重播猜 cut。不承诺其它 provider 的私有 fork；在线请求、离线 SDK/native-file 测试分别取证。
+
+必须验用户流程：
+
+| 流程         | 结果                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| 桌面对话     | Enter/IME、草稿和附件、运行中切会话/harness、关页任务继续、重开授权/停止、worker 容量周转            |
+| 设置/后台    | 首任务前选择、成功偏好/会话优先、Fast 恢复、独立自主轮次和冲突输入保留                               |
+| 阅读历史     | 全历史列表/筛选/导出、连续 Markdown/复制、正文终端、Plan/折叠/高度/布局偏好、显式链接                |
+| 审阅管理     | 预存脏文件不误算、shell 净变化、失败/取消审阅、dirty buffer 拒绝、安全撤回/部分结果、共享清空        |
+| 统计命名     | 模型/日期/会话、cache/缺失/未定价/覆盖价、标题独立费用/manual-wins，fork/load 不重复计               |
+| 手机独立使用 | 创建→发现/选设置→A/B 排队→授权→stop/interrupt→history/sync/偏好/预览→继续；断网/429/重启不重跑 Agent |
+| 运维恢复     | 冷查不建 worker、单 owner、epoch/receipt 防重、背压/join/lease、容量/磁盘错误可诊断、整组回退        |
+
+没有用户同意，不默认删除上述既有能力；安全/provider 限制则给出明确受限体验，不伪装完成。
+
+#### 6.2 故障窗口
+
+- 实际进程在 commit/receipt/dispatch 前后 SIGKILL；no-op、本地 mutation、configure settle、fork 完成 adopt 前、undo 部分发布分别验证。恢复只查原 operation，不换 ID 重发。
+- 两端 answer、answer/expiry/cancel、trust 撤销、切会话旧页、旧 worker completion、回收与新输入、shutdown 调用取消/重试。
+- Telegram offset/分类/接受、HTTP 成功 ack 前、multipart/429/rebind/源删除；同 topic head 不越过、独立 ready topic 不饥饿。
+- 图片 revision batch 间歇 15 秒超时用 barrier/dispatch trace 定位，重跑绿不是结案。
+- 外部发送 at-least-once、外部未知不自动重试；进程组 join 不等于宿主能控制逃离进程组的后台程序或外部编辑器，保留风险说明。
+
+#### 6.3 性能：先可归因，再优化
+
+保留一个版本化实际 host mixed runner；固定机器、源码、构建配置、数据集、预热/采样时间，至少五轮，同时报告每请求分布而非五个均值的 p95。阶段 P1/P4 就采集基线，不能所有性能工作推到最后。
+
+数据集：10k 会话、单会话 100k entries、1 MiB 正文分页、4 MiB 合法图片、16 活跃 synthetic sessions、8 delivery lanes、2048 deferred topics；并发历史/媒体/导出和控制。用独立空闲会话测设置/准入，活跃会话测 cancel fence，拒绝请求不混进成功延迟。
+
+| 指标                                       | 初始目标/判定                                                                                                           |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| loaded 会话本地接受或 cancel durable fence | mixed p95 ≤100ms、p99 ≤250ms；分别记录 admission queue、owner queue、SQL/commit；workspace 基线、冷启动和物理 stop 单列 |
+| 普通 history/list 页                       | p95 ≤200ms；同机与 P0 基线相比 >20% 退化必须解释；单独测 Diff 整行解码和大媒体 reader 占用                              |
+| UI                                         | 1000 分片连续渲染时输入/选择/复制可用，报告单帧耗时、重绘/Markdown 次数及长任务，不用 DOM 个数当性能证明                |
+| 公平性                                     | 独立 ready topic 不被 deferred topic 隐藏；普通请求不耗尽控制/query reserve；同 session 长等待另外测可中断边界          |
+| 热资源                                     | worker/owner/task/媒体缓存有上限且回落；RSS 不随累计已访问会话线性增长；同时报告连接、线程、队列、WAL/checkpoint        |
+| 长驻                                       | 600 秒快速 soak + 至少两小时同一宿主持续混合负载，检查趋势/平台值；每轮重建 fixture 不能证明长期稳定                    |
+
+以上是待校准目标，不是本次已测结果。达不到时先给瓶颈/硬件/样本证据；不能事后放宽掩盖回归。不为优化引入无依据分库/连接池，也不为“少代码”删去安全限额和恢复状态。
+
+#### 6.4 门禁及发布
+
+开发阶段跑受影响定向测试；阶段集成跑主流程；候选发布跑：
 
 ```sh
 npm run test:rewrite
@@ -178,27 +248,23 @@ npm run test:workbench:startup
 npm run test:workbench:scale
 npm run test:workbench:mixed
 npm run test:workbench:soak -- --duration-seconds 600
-# 真实隔离图形环境
+# 真实隔离图形环境；缺 display 标 BLOCKED
 xvfb-run -a npm run test:extension-host
-# 另补长期混合负载、各目标制品、真实provider/Bot和离线SDK
+# 单独补两小时同宿主 mixed、在线 provider/Bot、离线 SDK、GNU/musl 各目标制品
 ```
 
-`test:rewrite`包含的check/audit/build/format/clippy/workspace/contracts/process-loss/Chromium/full/artifact不机械重复；未覆盖的平台/构建配置/故障窗口单独补。记录源码/构建配置、命令、结果与未跑项；环境缺失不是通过。
+- `test:rewrite` 已包含 check/audit/build/format/clippy/workspace/contracts/process-loss/Chromium/full/artifact，不机械重复同配置证据。静态 audit 是 tripwire，不是运行正确性证明；修改合同要同步 audit/fixtures，不能绕开它。
+- 真实 Extension Host 补单/多文件 Diff、dirty buffer、trust/modal、clipboard/图片、目录/保存/设置/resize；现有 basic smoke 不代表全矩阵。
+- 在线 Pi/Codex/Claude、真实 Bot 使用专用授权账户/目录/chat 和费用预算；不读日常凭据，不自动安装系统依赖。缺环境标 BLOCKED，不用 mock 代替通过。
+- GNU/musl 各自生产 artifact/IPC/Telegram 契约，目标工具链缺失单列。记录源码、构建配置、命令、结果、未跑项。
+- 开发期破坏性 schema/wire 同步 Rust/TS/fixture/manifest；一个切换点只有一套生产 reader，无双写/兼容别名。旧 root 不迁移、不清空，binary/root 一起保留。
 
-**出口：**M1–M8完成，已有用户主流程无回归，故障/资源/平台/真实环境证据齐全；仍只是一套候选版本，不自动部署。
+**出口：**P0–P5 的关键流程与边界修复有证据，能力差异和环境阻塞显式可见；仍只是候选版本，不自动部署。发布依据[切换与回退清单](workbench-cutover.md)另行授权，binary/VSIX/配置/root 整组切换与回退，禁止旧 binary 打开新 schema。
 
-## 4. 总体验收与交付
+## 5. 控制范围与完成定义
 
-| 用户流程           | 必须观察的结果                                                                                        |
-| ------------------ | ----------------------------------------------------------------------------------------------------- |
-| 桌面对话/多会话    | Enter/IME、草稿、运行时切Harness/会话、关页面任务继续、重开授权/停止、容量周转                        |
-| 输入/设置/自主轮次 | 真实能力下typed附件/图片、thinking/Fast恢复、后台独立轮次与冲突输入保留                               |
-| 历史/内容          | 超200条及长归档冷查/筛选/完整导出、连续Markdown、可读终端、Plan/复制/偏好稳定                         |
-| 审阅/管理          | 预存脏文件不误算、shell净变化、失败/取消审阅、安全撤回、批量历史清理；context只显式写                 |
-| 用量/命名          | 模型/日期/会话、cache/缺失/未定价/覆盖价、标题独立费用，fork/load不重复计、manual-wins                |
-| 手机独立使用       | 创建→首任务前选模型→A/B排队→授权→stop/interrupt→history/sync/偏好/预览→继续；断网/429/重启不重跑Agent |
-| 生产与恢复         | 单宿主/唯一会话owner/typed边界无业务raw JSON、冷查询、原生恢复/安全fork、背压/join/lease、整组回退    |
-
-不能以按钮存在、adapter有方法或测试全绿代替以上流程；provider不支持的能力要有明确可验证的拒绝/降级，不得默默吞输入。当前行为分别维护在[VS Code](workbench-vscode.md)、[Telegram](workbench-telegram.md)、[Diff/撤回](turn-diff.md)、[管理](workbench-management.md)和[持久恢复](persistence-recovery.md)。
-
-交付时只更新本计划阶段状态及这些当前说明，不恢复多份验收ledger。发布按[切换与回退清单](workbench-cutover.md)执行：另行授权、旧组合备份验读、新隔离root、binary/VSIX/配置/root整组切换与回退；禁止旧binary打开新schema。体验对齐不保证旧任务跨版本自动续跑，也不代表自动迁移。
+- 不重建旧 daemon、旧 wire、旧 reader；不以兼容为由保留被替代路径。
+- 不做泛型 workflow engine、全量 event sourcing、跨语言 UI 服务、按 delta 持久投递或未经测量的数据库拆分。
+- 每个改动须说明：替代哪条旧路径、减少哪个重复决策点、commit/副作用在哪里、如何冷恢复、资源由谁 join/回收；允许为正确性加少量代码，但必须删除失效编排。
+- 功能差异默认补齐；确需降级要写出实际 provider/安全证据和用户可见提示。不能以“按钮存在”“方法可调用”“测试数量多”结案。
+- 当前行为更新到[VS Code](workbench-vscode.md)、[Telegram](workbench-telegram.md)、[Diff/撤回](turn-diff.md)、[管理](workbench-management.md)、[持久恢复](persistence-recovery.md)；本文件只保留设计、待办和有限验收结果，不追加逐轮聊天记录。

@@ -24,7 +24,7 @@ async fn full_session_mailbox_returns_backpressure_without_waiting() {
 }
 
 #[tokio::test]
-async fn closed_session_mailbox_reports_missing_actor() {
+async fn closed_session_mailbox_reports_closed_not_missing_session() {
     let id = SessionId::generate();
     let (sender, receiver) = mpsc::channel(1);
     drop(receiver);
@@ -37,7 +37,10 @@ async fn closed_session_mailbox_reports_missing_actor() {
         reply,
         &sessions,
     );
-    assert!(matches!(wait.await.unwrap(), Err(DomainError::NotFound(missing)) if missing == id));
+    assert!(matches!(
+        wait.await.unwrap(),
+        Err(DomainError::MailboxClosed)
+    ));
 }
 
 #[tokio::test]

@@ -6,8 +6,14 @@ pub enum DomainError {
     InvalidId(#[from] IdError),
     #[error("session not found: {0}")]
     NotFound(SessionId),
-    #[error("session mailbox is full")]
+    #[error("mailbox is full")]
     Backpressure,
+    #[error("provider worker capacity exhausted")]
+    WorkerCapacity,
+    #[error("mailbox is closed")]
+    MailboxClosed,
+    #[error("ACP frame exceeds byte budget")]
+    FrameTooLarge,
     #[error("session is busy")]
     Busy,
     #[error("no active turn")]
@@ -47,4 +53,12 @@ pub enum DomainError {
     Query(#[from] super::query::QueryError),
     #[error("persistence: {0}")]
     Persistence(String),
+}
+impl DomainError {
+    pub(crate) fn mailbox<T>(error: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => Self::Backpressure,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::MailboxClosed,
+        }
+    }
 }

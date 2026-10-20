@@ -1,4 +1,6 @@
 use super::*;
+#[path = "journal_local_tests.rs"]
+mod local_tests;
 use crate::{
     domain::{Harness, SessionId, WorkspacePath},
     persistence::format::StorageLease,

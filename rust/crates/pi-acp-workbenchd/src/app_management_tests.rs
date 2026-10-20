@@ -270,8 +270,12 @@ async fn failed_local_settings_transaction_never_publishes_without_its_receipt()
         .unwrap();
     drop(sql);
     assert!(matches!(
-        app.command_durable(operation, command).await,
-        Err(crate::domain::error::DomainError::OperationInterrupted)
+        app.core.journal.status(operation.clone()).await.unwrap(),
+        crate::domain::query::OperationStatus::Unknown
+    ));
+    assert!(matches!(
+        app.command_durable(operation, command).await.unwrap(),
+        CommandReceipt::Accepted { .. }
     ));
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();

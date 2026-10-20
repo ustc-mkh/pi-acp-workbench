@@ -296,6 +296,9 @@ pub enum IpcMessage {
 fn error(id: SafeInteger, error: DomainError) -> IpcMessage {
     let code = match error {
         DomainError::Backpressure => "backpressure",
+        DomainError::WorkerCapacity => "worker_capacity",
+        DomainError::MailboxClosed => "mailbox_closed",
+        DomainError::FrameTooLarge => "frame_too_large",
         DomainError::Busy => "busy",
         DomainError::NotFound(_) => "not_found",
         DomainError::Query(query::QueryError::InvalidInput) => "invalid_input",

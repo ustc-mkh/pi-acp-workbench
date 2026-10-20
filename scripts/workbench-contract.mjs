@@ -396,6 +396,51 @@ try {
   await client.call({ method: 'remove', session: independentSession });
   assert.deepEqual((await client.call({ method: 'list' })).sessions, []);
   check('provider release preserves per-session FIFO and original durable receipts');
+  const noOpSession = (await client.call(createCommand)).Created.summary.id;
+  await client.call({ method: 'attach', session: noOpSession });
+  const noOpBatches = [];
+  const collectNoOp = (batch) => {
+    if (batch.session === noOpSession) noOpBatches.push(batch);
+  };
+  client.on('batch', collectNoOp);
+  const noOpReceipts = [];
+  for (const [method, key, value] of [
+    ['set_model', 'model', 'default'],
+    ['set_mode', 'mode', 'high'],
+  ]) {
+    const command = { method, session: noOpSession, [key]: value };
+    await client.call(command);
+    const revision = (await inspect(noOpSession)).revision;
+    noOpBatches.length = 0;
+    for (let index = 0; index < 2; index++) {
+      const operation = `contract-noop-${method}-${index}`;
+      const receipt = await client.call(command, operation);
+      assert.equal((await client.call({ method: 'operation', operation })).status, 'completed');
+      assert.equal((await inspect(noOpSession)).revision, revision);
+      assert.equal(noOpBatches.length, 0);
+      noOpReceipts.push({ operation, command, receipt });
+    }
+  }
+  client.off('batch', collectNoOp);
+  await client.call({ method: 'remove', session: noOpSession });
+  client.close();
+  await stop(daemon);
+  daemon = await start();
+  await open();
+  for (const { operation, command, receipt } of noOpReceipts) {
+    assert.deepEqual(await client.call(command, operation), receipt);
+    assert.equal((await client.call({ method: 'operation', operation })).status, 'completed');
+    await assert.rejects(
+      client.call(
+        { ...command, [command.method === 'set_model' ? 'model' : 'mode']: 'different' },
+        operation,
+      ),
+      /operation_conflict/,
+    );
+  }
+  check(
+    'cold same-value model/mode seal terminal receipts without batches/revisions and replay after removal/restart',
+  );
   client.close();
   await stop(daemon);
   const legacy = join(root, 'legacy');

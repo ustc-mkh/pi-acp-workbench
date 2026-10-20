@@ -36,4 +36,7 @@ impl From<RequestFingerprint> for String {
 pub struct OperationTicket {
     pub(crate) operation: OperationId,
     pub(crate) fingerprint: RequestFingerprint,
+    /// Local-only admission has no durable prepare row; its first write seals
+    /// the result atomically. Never use this for a possible external effect.
+    pub(crate) local: bool,
 }

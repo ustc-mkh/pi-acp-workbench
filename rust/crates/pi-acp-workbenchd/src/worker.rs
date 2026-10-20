@@ -24,6 +24,43 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_FRAME: usize = 2 * 1024 * 1024;
+// Only image notifications may use the larger lane. Raw bytes expand to base64;
+// the remainder covers the UTF-8 JSON envelope, not arbitrary text/tool output.
+const MAX_MEDIA_FRAME: usize = crate::domain::image::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 64 * 1024;
+fn validate_frame(message: &JsonRpcMessage, bytes: usize) -> Result<(), DomainError> {
+    if bytes <= MAX_FRAME {
+        return Ok(());
+    }
+    if bytes > MAX_MEDIA_FRAME {
+        return Err(DomainError::FrameTooLarge);
+    }
+    if let JsonRpcMessage::Notification(notification) = message {
+        if notification.method == "session/update" {
+            let update = &notification.params["update"];
+            if matches!(
+                update["sessionUpdate"].as_str(),
+                Some("agent_message_chunk" | "agent_thought_chunk")
+            ) && update["content"]["type"].as_str() == Some("image")
+            {
+                let data = update["content"]["data"]
+                    .as_str()
+                    .ok_or(DomainError::FrameTooLarge)?;
+                let mime = update["content"]["mimeType"]
+                    .as_str()
+                    .ok_or(DomainError::FrameTooLarge)?;
+                if bytes.saturating_sub(data.len()) <= 64 * 1024 {
+                    crate::domain::image::ImageAsset::from_base64(mime, data)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(DomainError::FrameTooLarge)
+}
+fn validate_outbound(message: &JsonRpcMessage) -> Result<(), DomainError> {
+    let bytes = serde_json::to_vec(message).map_err(|e| DomainError::Protocol(e.to_string()))?;
+    validate_frame(message, bytes.len())
+}
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 fn request_deadline(method: &str, now: Instant) -> Option<Instant> {
     match method {
@@ -77,18 +114,20 @@ impl WorkerHandle {
         self.send(JsonRpcMessage::Notification(notification)).await
     }
     async fn send(&self, message: JsonRpcMessage) -> Result<(), DomainError> {
+        validate_outbound(&message)?;
         let (written, wait) = oneshot::channel();
         self.tx
             .try_send(WorkerCommand::Send { message, written })
-            .map_err(|_| DomainError::Backpressure)?;
+            .map_err(DomainError::mailbox)?;
         wait.await
             .map_err(|_| DomainError::Worker("worker stopped before writing frame".into()))?
     }
     pub async fn request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, DomainError> {
+        validate_outbound(&JsonRpcMessage::Request(request.clone()))?;
         let (reply, wait) = oneshot::channel();
         self.tx
             .try_send(WorkerCommand::Request { request, reply })
-            .map_err(|_| DomainError::Backpressure)?;
+            .map_err(DomainError::mailbox)?;
         wait.await
             .map_err(|_| DomainError::Worker("worker stopped before response".into()))?
     }
@@ -170,7 +209,10 @@ impl WorkerSupervisor {
             .capacity
             .clone()
             .try_acquire_owned()
-            .map_err(|_| DomainError::Backpressure)?;
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => DomainError::WorkerCapacity,
+                tokio::sync::TryAcquireError::Closed => DomainError::MailboxClosed,
+            })?;
         // Registration and the final stopping check are atomic against the
         // shutdown task snapshot. No await or protocol I/O holds this guard.
         let mut tasks = self.tasks.entry()?;
@@ -273,7 +315,7 @@ async fn worker_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let reason = loop {
-        let remaining = MAX_FRAME + 1 - frame.len();
+        let remaining = MAX_MEDIA_FRAME + 2 - frame.len();
         let mut bounded = (&mut reader).take(remaining as u64);
         tokio::select! {
             biased;
@@ -312,7 +354,7 @@ async fn worker_loop(
                     }
                 };
                 let mut bytes = match serde_json::to_vec(&message) {
-                    Ok(bytes) if bytes.len() <= MAX_FRAME => bytes,
+                    Ok(bytes) if validate_frame(&message, bytes.len()).is_ok() => bytes,
                     _ => break "outbound frame exceeds limit".into(),
                 };
                 bytes.push(b'\n');
@@ -331,11 +373,18 @@ async fn worker_loop(
             read = bounded.read_until(b'\n', &mut frame), if staged.is_none() => {
                 match read {
                     Ok(0) => break "eof".into(),
-                    Ok(_) if frame.len() > MAX_FRAME => break "inbound frame exceeds limit".into(),
+                    Ok(_) if frame.len() > MAX_MEDIA_FRAME + 1 => break "inbound frame exceeds limit".into(),
                     Err(error) => break format!("worker output: {error}"),
                     Ok(_) => {}
                 }
-                match serde_json::from_slice::<JsonRpcMessage>(&frame) {
+                let payload = frame.strip_suffix(b"\n").unwrap_or(&frame);
+                let decoded = serde_json::from_slice::<JsonRpcMessage>(payload);
+                if let Ok(message) = &decoded {
+                    if let Err(error) = validate_frame(message, payload.len()) {
+                        break error.to_string();
+                    }
+                }
+                match decoded {
                     Ok(JsonRpcMessage::Response(response)) => {
                         if let Some(request) = pending.remove(&response.id) { let _ = request.reply.send(Ok(response)); }
                     }

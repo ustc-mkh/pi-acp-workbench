@@ -138,7 +138,7 @@ impl RegistryHandle {
 fn registry_send_error<T>(error: mpsc::error::TrySendError<T>) -> DomainError {
     match error {
         mpsc::error::TrySendError::Full(_) => DomainError::Backpressure,
-        mpsc::error::TrySendError::Closed(_) => DomainError::Worker("registry stopped".into()),
+        mpsc::error::TrySendError::Closed(_) => DomainError::MailboxClosed,
     }
 }
 enum RegistryCommand {
@@ -190,7 +190,7 @@ fn enqueue(
         let failure = if matches!(error, mpsc::error::TrySendError::Full(_)) {
             DomainError::Backpressure
         } else {
-            DomainError::NotFound(id.clone())
+            DomainError::MailboxClosed
         };
         error.into_inner().reject(failure);
     }
@@ -266,7 +266,17 @@ async fn commit_command(
         _ => None,
     };
     let Some(mut change) = transition(state, command, &context, now)? else {
-        return Ok(accepted(state));
+        let receipt = CommandReceipt::Accepted {
+            session: state.id.clone(),
+            revision: state.revision,
+        };
+        if let Some(ticket) = operation {
+            store
+                .receipt_only(ticket, receipt.clone())
+                .await
+                .map_err(DomainError::Persistence)?;
+        }
+        return Ok(OwnerReply::Receipt(receipt));
     };
     for intent in &mut change.deliveries {
         if let crate::domain::transition::DeliveryPayload::Input { origin, .. } =

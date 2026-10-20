@@ -452,6 +452,13 @@ struct FaultStore {
     after_write: bool,
 }
 impl SessionPersistence for FaultStore {
+    async fn receipt_only(
+        &self,
+        ticket: crate::domain::operation::OperationTicket,
+        receipt: CommandReceipt,
+    ) -> Result<(), String> {
+        SessionPersistence::receipt_only(&self.history, ticket, receipt).await
+    }
     async fn load(&self, id: &SessionId) -> Result<Option<SessionView>, String> {
         SessionPersistence::load(&self.history, id).await
     }

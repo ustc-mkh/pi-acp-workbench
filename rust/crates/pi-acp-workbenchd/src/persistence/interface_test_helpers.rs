@@ -1,6 +1,18 @@
 //! Test spies keep real bounded SQL queries while overriding selected failures.
 macro_rules! delegate_session_aux {
     () => {
+        async fn receipt_only(
+            &self,
+            ticket: crate::domain::operation::OperationTicket,
+            receipt: crate::domain::query::CommandReceipt,
+        ) -> Result<(), String> {
+            crate::persistence::interface::SessionPersistence::receipt_only(
+                &self.history,
+                ticket,
+                receipt,
+            )
+            .await
+        }
         async fn tool(
             &self,
             session: &crate::domain::SessionId,

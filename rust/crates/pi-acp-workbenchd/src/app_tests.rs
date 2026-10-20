@@ -25,6 +25,8 @@ mod ingress_tests;
 mod load_tests;
 #[path = "app_management_tests.rs"]
 mod management_tests;
+#[path = "app_p0_tests.rs"]
+mod p0_tests;
 #[path = "app_pi_sdk_tests.rs"]
 mod pi_sdk_tests;
 #[path = "app_provider_tests.rs"]

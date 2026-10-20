@@ -47,6 +47,12 @@ pub trait SessionPersistence: Clone + Send + Sync + 'static {
         &self,
         change: Transition,
     ) -> impl Future<Output = Result<CommitBatch, String>> + Send;
+    /// Seal a successful no-op without touching session state or publishing a batch.
+    fn receipt_only(
+        &self,
+        ticket: crate::domain::operation::OperationTicket,
+        receipt: crate::domain::query::CommandReceipt,
+    ) -> impl Future<Output = Result<(), String>> + Send;
     fn remove(
         &self,
         id: &SessionId,
@@ -114,6 +120,16 @@ impl SessionPersistence for super::SessionStore {
     async fn commit(&self, change: Transition) -> Result<CommitBatch, String> {
         self.database()
             .commit(change)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    async fn receipt_only(
+        &self,
+        ticket: crate::domain::operation::OperationTicket,
+        receipt: crate::domain::query::CommandReceipt,
+    ) -> Result<(), String> {
+        super::journal::JournalStore::new(self.database().clone())
+            .finish(ticket, &Ok(receipt))
             .await
             .map_err(|error| error.to_string())
     }

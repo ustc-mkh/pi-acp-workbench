@@ -131,6 +131,26 @@ try {
     const created = await client.call({ method: 'create', harness, cwd: directory });
     const session = created.Created.summary.id;
     await client.call({ method: 'attach', session });
+    const noOpCommand = { method: 'set_model', session, model: 'default' };
+    await client.call(noOpCommand);
+    const noOpRevision = (await client.call({ method: 'inspect', session })).revision;
+    const noOpOperation = `lost-noop-receipt-${name}`;
+    // Deliberately do not install a response observer. Poll the durable commit
+    // instead, then disconnect and later SIGKILL/restart the actual host.
+    client.socket.write(
+      JSON.stringify({ version: 3, id: 999999, command: noOpCommand, operation: noOpOperation }) +
+        '\n',
+    );
+    await until(
+      () => operationRecords(data, noOpOperation)[0]?.status === 'Completed',
+      'no-op receipt commit',
+    );
+    client.close();
+    client = await WorkbenchWire.open(socket);
+    await client.call({ method: 'attach', session });
+    assert.equal((await client.call({ method: 'inspect', session })).revision, noOpRevision);
+    const noOpRows = operationRecords(data, noOpOperation);
+    const noOpReceipt = JSON.parse(noOpRows[0].result.toString('utf8')).Ok;
     let finished = client.waitFor((batch) => turnFinished(batch, session));
     await client.call({ method: 'prompt', session, prompt: 'image-output' }, `image-${name}`);
     await finished;
@@ -187,6 +207,12 @@ try {
     host = launch(config, home);
     await ready(host);
     client = await WorkbenchWire.open(socket);
+    assert.deepEqual(await client.call(noOpCommand, noOpOperation), noOpReceipt);
+    assert.equal(
+      (await client.call({ method: 'operation', operation: noOpOperation })).status,
+      'completed',
+    );
+    assert.deepEqual(operationRecords(data, noOpOperation), noOpRows);
     const cold = await client.call({ method: 'inspect', session });
     assert.equal(cold.provider_session, native);
     assert.equal(Object.keys(cold.pending_interactions).length, 1);

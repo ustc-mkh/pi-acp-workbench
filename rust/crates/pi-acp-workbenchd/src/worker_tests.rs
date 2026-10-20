@@ -1,5 +1,7 @@
 use super::*;
 use serde_json::json;
+#[path = "worker_budget_tests.rs"]
+mod budget_tests;
 
 #[test]
 fn prompt_and_native_fork_do_not_inherit_the_short_control_deadline() {
@@ -200,7 +202,7 @@ async fn capacity_and_epochs_are_global_across_harnesses_and_disabled_provider_n
         supervisor
             .spawn_for(SessionId::generate(), &Harness::Pi, tx)
             .await,
-        Err(DomainError::Backpressure)
+        Err(DomainError::WorkerCapacity)
     ));
     first.stop().await;
     let (tx, _rx4) = mpsc::channel(1);
@@ -317,7 +319,7 @@ async fn capacity_is_released_on_stop_and_epochs_advance() {
         supervisor
             .spawn(SessionId::generate(), events.clone())
             .await,
-        Err(DomainError::Backpressure)
+        Err(DomainError::WorkerCapacity)
     ));
     first.stop().await;
     let second = supervisor
