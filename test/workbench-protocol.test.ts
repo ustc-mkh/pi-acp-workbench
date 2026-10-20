@@ -18,6 +18,7 @@ import {
   queryCommand,
   sessionSummary,
   sessionView,
+  typedPrompt,
   textBody,
   toolHeader,
 } from '../src/workbench-protocol';
@@ -26,6 +27,42 @@ const fixture = () =>
   JSON.parse(readFileSync(new URL('./fixtures/rewrite/ipc-v3.json', import.meta.url), 'utf8'));
 
 describe('IPC v3 fixed contracts (not yet the production transport)', () => {
+  it('bounds typed context identities/scalars and actual provider select catalogues independently', () => {
+    const context = { type: 'context', id: 'selection', name: 'src/a.ts:1', text: 'chosen' };
+    expect(
+      typedPrompt.parse({ parts: [{ type: 'text', text: '中🌏'.repeat(50000) }] }).parts,
+    ).toHaveLength(1);
+    for (const prompt of [
+      'old string',
+      { parts: [{ type: 'text', text: '🌏'.repeat(100001) }] },
+      { parts: [context, context] },
+      { parts: [{ ...context, text: '中'.repeat(21846) }] },
+    ])
+      expect(() => typedPrompt.parse(prompt)).toThrow();
+    const setting = {
+      id: 'thought_level',
+      name: 'Thinking',
+      category: 'thought_level',
+      current_value: 'low',
+      choices: [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+    };
+    const view = fixture().view;
+    expect(
+      sessionView.parse({ ...view, catalogue: { ...view.catalogue, selects: [setting] } }).catalogue
+        .selects,
+    ).toEqual([setting]);
+    for (const selects of [
+      [setting, setting],
+      [{ ...setting, current_value: 'invented' }],
+      Array.from({ length: 33 }, (_, i) => ({ ...setting, id: `setting-${i}` })),
+    ])
+      expect(() =>
+        sessionView.parse({ ...view, catalogue: { ...view.catalogue, selects } }),
+      ).toThrow();
+  });
   it('shares Rust DTO fixture, no history in list/view/receipts and large rows use refs', () => {
     const f = fixture();
     const summary = sessionSummary.parse(f.summary);

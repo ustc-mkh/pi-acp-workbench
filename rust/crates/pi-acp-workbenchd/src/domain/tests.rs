@@ -73,6 +73,8 @@ fn catalogue_patches_preserve_omission_clear_explicit_lists_and_keep_preferences
     let desired = super::ModeId::new("desired").unwrap();
     state.config.mode = Some(desired.clone());
     let initial = CataloguePatch {
+        selects: None,
+        image_input: None,
         models: Some(vec![ModelChoice {
             id: super::ModelId::new("model").unwrap(),
             name: "Model".into(),

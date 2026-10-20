@@ -236,6 +236,7 @@ pub(super) fn adopt(
     branch.origin = Some(plan.origin);
     branch.status = crate::domain::SessionStatus::Idle;
     branch.config = crate::domain::session::SessionConfig {
+        options: Default::default(),
         model: None,
         mode: None,
     };

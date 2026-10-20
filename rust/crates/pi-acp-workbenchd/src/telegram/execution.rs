@@ -82,6 +82,7 @@ async fn domain(
                 | DomainCommand::Cancel { .. }
                 | DomainCommand::SetModel { .. }
                 | DomainCommand::SetMode { .. }
+                | DomainCommand::SetOption { .. }
         ) {
             // Inspect is deliberately cold/read-only. Execution must explicitly
             // establish an actor owner; admission and /status must not do this.
@@ -444,6 +445,20 @@ pub(crate) async fn dispatch(
                 )
                 .await?;
                 format!("Model: {model}")
+            }
+            ControlCommand::SetOption { session, id, value } => {
+                domain(
+                    context,
+                    record,
+                    DomainCommand::SetOption {
+                        session: session.clone(),
+                        id: id.clone(),
+                        value: value.clone(),
+                    },
+                    Some(session),
+                )
+                .await?;
+                format!("Setting {id}: {value}")
             }
             ControlCommand::SetMode { session, mode } => {
                 domain(

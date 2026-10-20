@@ -150,8 +150,17 @@ details {
 a {
   color: var(--vscode-textLink-foreground, #8ab4f8);
 }
+#plan details {
+  max-height: 220px;
+  overflow: auto;
+}
+#plan summary {
+  position: sticky;
+  top: 0;
+  background: var(--vscode-editor-background, #202124);
+}
 #plan {
-  max-height: 24vh;
+  max-height: 26vh;
   overflow: auto;
   background: var(--vscode-editor-background, #202124);
 }
@@ -184,4 +193,55 @@ a {
 #attachments pre {
   max-height: 20vh;
   overflow: auto;
+}
+#workbench {
+  min-width: 0;
+}
+#workbench > select {
+  width: 100%;
+  margin-inline: 0;
+}
+#prompt {
+  min-height: 65px;
+  max-height: 55vh;
+}
+.composer-resize {
+  height: 10px;
+  cursor: ns-resize;
+  touch-action: none;
+  border-top: 2px solid var(--vscode-panel-border, #555);
+}
+.composer-resize:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #8ab4f8);
+}
+.resizing-composer {
+  cursor: ns-resize;
+  user-select: none;
+}
+#commands {
+  max-height: 180px;
+  overflow: auto;
+}
+#commands button {
+  display: block;
+  width: 100%;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+#commands [aria-selected='true'] {
+  outline: 1px solid var(--vscode-focusBorder, #8ab4f8);
+}
+@media (max-width: 360px) {
+  body {
+    padding: 6px;
+  }
+  article {
+    padding: 6px;
+  }
+  header {
+    gap: 2px;
+  }
+  button {
+    margin: 3px;
+  }
 }

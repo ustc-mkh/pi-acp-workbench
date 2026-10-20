@@ -137,6 +137,7 @@ pub fn prepare(
     fork.view.plan = Default::default();
     fork.view.usage = Default::default();
     fork.view.config = SessionConfig {
+        options: Default::default(),
         model: None,
         mode: None,
     };

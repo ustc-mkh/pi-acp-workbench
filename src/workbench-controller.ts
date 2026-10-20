@@ -1,5 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { exportMarkdown } from './workbench-export';
+import { copyLogicalMessage } from './workbench-copy';
+import { externalDestination } from './workbench-messages';
 import { WorkbenchClient, WorkbenchError, type RequestTicket } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
 import {
@@ -28,6 +30,8 @@ export interface WorkbenchPorts {
   /** Canonical workspace authorization before any provider/session mutation. */
   authorize(cwd: string): Promise<void>;
   copyText?(text: string): PromiseLike<void>;
+  openLink?(url: string): Promise<void>;
+  login?(): Promise<void>;
   configureTelegram?(): Promise<void>;
   openDiff?(turn: string, files: { path: string; before: string; after: string }[]): Promise<void>;
   confirmUndo?(session: SessionId, turn: string): Promise<boolean>;
@@ -131,39 +135,31 @@ export class WorkbenchController {
       if (this.undoConfirming && ['execute', 'create', 'select'].includes(message.type))
         throw new Error('Finish or cancel the undo confirmation first');
       switch (message.type) {
+        case 'open_link': {
+          if (!this.ports.trusted() || !this.ports.openLink)
+            throw new Error('Trusted host required');
+          await this.ports.openLink(externalDestination(message.url));
+          break;
+        }
+        case 'login': {
+          if (!this.ports.trusted() || !this.ports.login) throw new Error('Trusted host required');
+          await this.ports.login();
+          break;
+        }
         case 'copy_message': {
           const selected = this.selected;
           const entry = selected?.view.entries.find((e) => e.id === message.entry);
           if (!selected || selected.id !== message.session || !entry || !this.ports.copyText)
             throw new Error('Select a visible message to copy');
-          let text = '';
-          if ('Inline' in entry.text) text = entry.text.Inline.text;
-          else {
-            const ref = entry.text.Archived.content;
-            if (ref.bytes > 1024 * 1024)
-              throw new Error('Message exceeds clipboard budget; use full Markdown export');
-            let offset = 0;
-            const hash = createHash('sha256');
-            for (;;) {
-              const slice = await this.client.call({ method: 'content', ref, offset });
+          const text = await copyLogicalMessage(
+            this.client,
+            selected.id,
+            entry.id,
+            () => {
               if (this.selected !== selected || this.closed) throw new Error('Session changed');
-              const end = offset + Buffer.byteLength(slice.text);
-              if (end > ref.bytes || (slice.next_offset !== null && slice.next_offset !== end))
-                throw new Error('Invalid message content cursor');
-              hash.update(slice.text);
-              text += slice.text;
-              if (slice.total_bytes !== ref.bytes || slice.sha256 !== ref.sha256)
-                throw new Error('Message identity changed');
-              if (slice.next_offset === null) {
-                if (end !== ref.bytes || hash.digest('hex') !== ref.sha256)
-                  throw new Error('Message checksum mismatch');
-                break;
-              }
-              if (slice.next_offset <= offset) throw new Error('Message cursor made no progress');
-              offset = slice.next_offset;
-            }
-          }
-          if (this.selected !== selected || this.closed) throw new Error('Session changed');
+            },
+            !entry.message ? entry : undefined,
+          );
           await this.ports.copyText(text);
           break;
         }
@@ -285,6 +281,8 @@ export class WorkbenchController {
               'fork',
               'set_model',
               'set_mode',
+              'set_option',
+              'discover',
               'remove',
               'undo_turn',
               'manage',
@@ -355,7 +353,17 @@ export class WorkbenchController {
               this.undoConfirming = false;
             }
           }
-          const result = await this.execute(message.command);
+          let promptOperation: import('./workbench-protocol').OperationId | undefined;
+          const result = await this.execute(message.command, (operation) => {
+            promptOperation = operation;
+            if (message.command.method === 'prompt')
+              this.ports.post({
+                type: 'prompt_submitted',
+                session: selected.id,
+                generation: message.generation,
+                operation,
+              });
+          });
           if (message.command.method === 'manage') await this.refresh();
           if (undoTurn && result && typeof result === 'object' && 'UndoCompleted' in result)
             this.ports.post({
@@ -368,7 +376,11 @@ export class WorkbenchController {
             this.ports.post({
               type: 'prompt_accepted',
               session: selected.id,
-              text: message.command.prompt,
+              prompt: message.command.prompt,
+              // Last-mile Pi busy rejection is a turn fact, not an acceptance rollback.
+              pi_after_seq: snapshot.harness === 'Pi' ? snapshot.last_entry_seq : undefined,
+              generation: message.generation,
+              operation: promptOperation!,
             });
           }
           if (
@@ -851,7 +863,10 @@ export class WorkbenchController {
     }
     await this.persistOperations();
   }
-  private async execute(command: ClientCommand) {
+  private async execute(
+    command: ClientCommand,
+    admitted?: (operation: import('./workbench-protocol').OperationId) => void,
+  ) {
     if (!durableCommand(command)) throw new Error('Expected a mutation');
     // Bound both retained receipt display and concurrent long-running workflows.
     if (this.operations.filter((row) => row.status === 'pending').length >= 16)
@@ -863,6 +878,7 @@ export class WorkbenchController {
     if (unresolved.length >= (control ? 64 : 48))
       throw new Error('Resolve uncertain operation receipts before starting more workflows');
     const operation = operationId.parse(randomUUID());
+    admitted?.(operation);
     const row: UiOperation = {
       operation,
       method: command.method,

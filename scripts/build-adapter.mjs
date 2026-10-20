@@ -283,6 +283,16 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
     '    switch (type) {',
     '    if (handlePiRunEvent(this, ev)) return;\n    switch (type) {',
   );
+  source = replaceExactlyOnce(
+    source,
+    '  async publishContextUsage() {',
+    '  async publishContextUsage(workbenchRun) {',
+  );
+  source = replaceExactlyOnce(
+    source,
+    '        if (update) this.emit(update);',
+    '        if (update) this.emit(workbenchRun ? {...update, _meta: {...update._meta, "pi-workbench-live": workbenchRun}} : update);',
+  );
   const settleStart = source.indexOf('  async settleTurn() {');
   const settleEnd = source.indexOf('  emitBashToolCall(params)', settleStart);
   if (settleStart < 0 || settleEnd < settleStart)

@@ -91,6 +91,7 @@ async fn real_pi_sdk_native_fork_restores_prefix_settings_and_receipts() {
     state.view.provider_session = Some(fixture.native.clone());
     state.view.cwd = WorkspacePath::new(fixture.cwd.to_string_lossy()).unwrap();
     state.view.config = crate::domain::session::SessionConfig {
+        options: Default::default(),
         model: Some(fixture.source_model),
         mode: Some(crate::domain::ModeId::new("low").unwrap()),
     };

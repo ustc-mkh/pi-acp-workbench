@@ -58,10 +58,12 @@ async fn rejected_restore_retains_intent_and_never_dispatches_prompt_until_recov
             session: id.clone(),
             intent: crate::domain::session::ConfigurationIntent {
                 requested: crate::domain::session::SessionConfig {
+                    options: Default::default(),
                     model: Some(crate::domain::ModelId::new("other").unwrap()),
                     mode: None,
                 },
                 restore: crate::domain::session::SessionConfig {
+                    options: Default::default(),
                     model: Some(crate::domain::ModelId::new("default").unwrap()),
                     mode: None,
                 },

@@ -1,6 +1,6 @@
 # Workbench 后续重构设计与实施计划
 
-> **状态：P0 已实现并完成本地统一门禁，P1–P6 待执行。** 下文审查发现是修复前基线，不代表全部阶段已修复。审查基线：`main@4bf6f32` → `rewrite/full-workbench@3273be5`。目标是简化实现、提高可靠性和性能，同时恢复既有用户流程；不兼容旧 wire、schema 或配置，但不擅自迁移、删除真实数据或部署服务。
+> **状态：P0 已通过本地统一门禁；P1 核心回归修复、完整验收待 P6；P2 实现及本地统一门禁已完成，真实环境矩阵待 P6；P3 实现及有限本地验收完成，真实环境出口待 P6；P4 实现及有限本地验收完成，真实桌面/原生入口出口待 P6；P5–P6 待执行。** 下文审查发现是修复前基线，不代表全部阶段已修复。审查基线：`main@4bf6f32` → `rewrite/full-workbench@3273be5`。目标是简化实现、提高可靠性和性能，同时恢复既有用户流程；不兼容旧 wire、schema 或配置，但不擅自迁移、删除真实数据或部署服务。
 
 ## 1. 审查结论：保留底座，先修合同，再收敛所有权
 
@@ -156,7 +156,7 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 
 **出口：**将 idle repro 改成断言成功的实际进程回归并接入门禁；并发回收不超额、不双启动；授权/不确定 fork/标题和后台 pin 不误驱逐；旧 epoch/generation 晚到无影响；大量会话反复 create/load/淘汰后 owner/task 数平台化。只测到结构有界时不声称已测无 RSS 泄漏。
 
-### P2 [ ] typed 输入与 provider 设置纵向贯通
+### P2 [x] typed 输入与 provider 设置纵向贯通（实现/本地门禁完成；真实环境出口待 P6）
 
 **依赖：**P1 生命周期接口。Prompt parts 与设置可分两条小变更，分别集成，不一起重写 UI/存储/adapter。
 
@@ -168,7 +168,16 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 
 **出口：**支持/不支持图片 peer、最大中文/emoji/图片、损坏/超限、切会话/reload/断连；设置首任务前生效、双端更改、失败不保存、成功 settle 前 SIGKILL 后不重发；分别验证真实 Pi/Codex/Claude 可用项，记录拒绝，不承诺能力全等。
 
-### P3 [ ] Pi 自主后台轮次闭环
+**P2 当前实现与有限验证范围：**
+
+- 生产 prompt wire 仅接收有序 text/context/image parts，拒绝旧字符串形式；附件不再拼接成一条业务 prompt。文件与编辑器选择保留来源/身份，归档分 part 写入，同事务提交 Accepted 与正确 entry/seq 的有限 input delivery intents；operation 指纹覆盖原始顺序/身份。ACP 支持 embedded context 时使用 resource，否则显式带来源的 text block。
+- 图片选择/粘贴、Blob 预览/删除、每输入一张/每草稿 4 MiB/四个临时图片草稿；未发送图片只驻内存，重开丢弃，不写 SessionView。宿主在 writer 外做完整静态解码（8192 单边、1600 万像素、64 MiB decoder allocation、两个并发 job），拒绝动画/损坏/超限，重编码为最多 4 MiB PNG 后归档/接受。显式 discovery 检查 initialize 的真实图片能力，不支持则拒绝并保留草稿。ACP 仅图片输入 request 有 base64+1 MiB 有界媒体帧，普通 2 MiB 与输出图片 64 KiB envelope 不放大。
+- 保留最多 32 个 typed select、每项最多 500 choices、总 128 KiB，端到端保留 ID/category/current value。桌面显式 Discover 可在首任务前加载真实选项；Thinking/Fast 独立；Telegram `/status` 与 `/setting ID VALUE` 使用同一 catalogue/configure 链。配置 prepare/已知 baseline → 观察成功 → settle；显式 discovery 可恢复悬而未决 baseline，不重发旧 operation。成功 model/thinking 与状态同事务保存到 `provider_preferences`；已有会话优先，Fast 不成为全局默认；context 仍独立授权。缺新表的旧实验 root 明确拒绝，不迁移/清空。
+- 草稿使用原 operation + 单调 generation，提交及编辑/附件变化均推进 generation，迟到接受不能清除新草稿（包括编辑回相同文本）；失败保留输入。未变的设置定义不因输出 delta 重建 DOM/焦点。
+- 新增实际 stdio/宿主测试覆盖有序 context/image、unsupported peer、损坏/像素预算/重编码、最大 4 MiB ACP 图片输入与中文/emoji、首任务前设置、失败不保存/成功偏好/Fast 隔离、重开原 receipt；增加 Chromium 首任务设置/Blob 图片输入和实际三 synthetic profile configure-SIGKILL 不重发。`npm run test:rewrite` 最终通过：check/audit/build/format/clippy、Rust 宿主 351 passed/2 ignored（core 另 2 passed）、IPC 21 项、Telegram 28 项、容量周转、三 synthetic profile 的 configure-SIGKILL/原 operation 不重发、Chromium 15 项、full runner 与 GNU release artifact/package/smoke；忽略项不算通过证据。full runner 的 TypeScript 为 37 files/239 tests，最终 Workbench 定向集为 14 files/108 tests；补充有效 CRC PNG 的 8192/8193 尺寸边界及像素超限，而非用损坏 header 冒充像素预算证明。统一测试修复多 part manifest 的 entry/seq 绑定、失败配置后 discovery 恢复入口、表单缓存漏模型可见性；Telegram 图片等待超时追到已结束用例仍关闭的全局 configure fixture gate，新会话继承成功 model 后会触发该 gate，现显式释放，未放宽超时。日志：`.test-results/p2/rewrite.log`（最终全量）、`.test-results/run-bek7Fa/`（full runner）、`.test-results/p2/workbench-ts-final.log`、`.test-results/p2/image-boundaries-final.log`；首次失败日志保留在同一 P2 目录。源码为 `e7a6ef3` 上的本次工作树，不是已发布版本。
+- 未运行真实在线 Pi/Codex/Claude、真实 Bot、Extension Host 剪贴板/窗口重开或长驻 soak。以上 synthetic/Chromium 证据不替代真实 provider 可用项与 Fast/native fork 恢复验收，仍在 P6 明确取证；未部署、未操作真实数据或日常凭据。
+
+### P3 [x] Pi 自主后台轮次闭环（实现/有限本地验收完成；真实环境出口待 P6）
 
 **依赖：**P1 pin/回收合同，P2 设置恢复。
 
@@ -178,9 +187,14 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 - 整轮 workspace before 必须在可能写文件之前采集并持 gate；如果桥接只能事后通知，不承诺完整净 Diff，明确 unavailable/partial。main 的自主轮次本就不保证整轮 workspace 基线，不为“增强”制造错误快照。
 - provider 明确报告后台 pin 的取得/释放；没有该能力时展示有限能力/容量限制，不能靠一次超时认定后台任务不存在。
 
-**出口：**真实 Pi 后台完成→独立唤醒→授权→完成/停止→冷历史→显式继续；用户输入竞争、SIGKILL、旧事件与回收竞争均覆盖。只读 attach 不触发唤醒/续跑。
+**P3 当前实现与有限验收：**沿用 bridge 的显式 run start/finish 与 live ID，adapter 保留协议身份，actor 原子分配/提交独立 turn，授权与完成复用现有持久链路。忙时拒绝输入；最后一刻 provider 抢占保留 Accepted 输入并追加 rejected marker，不伪称执行，桌面保留匹配 generation 的草稿。按本轮 assistant message_end 累计并在 finish 报告 usage，删除 native-file tail 计费路径，避免后续唤醒串账。控制 RPC 期间显式 live 事件有界保留后处理，不将 load 历史 replay 认成唤醒。自主轮次整轮 Diff 明确 unavailable，worker-lifetime workspace gate 保留。Pi 无可信未来唤醒 pin 释放能力时保守不回收，并提示容量限制；显式停止可 join 空闲 Pi worker，不删除会话。
 
-### P4 [ ] 消息投影、终端和桌面交互对齐
+- 统一检查后修复 UI 消息类型、拒绝提示被 render 覆盖和空闲 stop 的旧测试 oracle。`npm run check`、`npm run audit:workbench`、`npm run build`、Clippy all-targets（warnings denied）通过；Rust 库首轮 352 passed / 1 failed / 2 ignored，修正空闲 stop 断言后重跑受影响宿主集为 67 passed / 1 ignored，新增自主轮次两项补充断言后再次通过。受影响 TS 6 files / 55 tests、adapter seam 2 tests、实际宿主 Chromium 15 项通过。用例覆盖独立两次唤醒、授权、忙时无 revision 变化、最后一刻抢占、迟到/无 run ID 输出隔离、独立用量总计、持久 Turn delivery、unavailable Diff、取消/空闲停止、冷历史重开与显式继续。未机械重跑全库、`test:rewrite` 制品或 soak。日志：`.test-results/p3/{static-build-final,rust,rust-app-final,clippy,ts-final,adapter,browser-host}.log`；首轮失败日志保留在同目录。最终补查修复异步 context stats 在 finish 后被 live fence 丢弃的问题：仅同 run 的占用率允许收尾更新，不接收正文或新增推理用量；新增断言后 P3 两项、领域回归与 Clippy 再次通过，日志 `.test-results/p3/occupancy-final.log`。
+- 没有使用日常凭据或在线 Pi/Bot；未部署、未迁移/删除真实数据。Pi 尚无可信动态 pin 释放证据，本轮交付的是明确的保守 pin/显式 stop 合同，不宣称已验证无后台工作的自动回收。
+
+**出口：**真实 Pi 后台完成→独立唤醒→授权→完成/停止→冷历史→显式继续；用户输入竞争、SIGKILL、旧事件与回收竞争均覆盖。只读 attach 不触发唤醒/续跑。真实在线 Pi/Bot、SIGKILL 与并发回收矩阵仍须 P6 单独取证，不能以 synthetic 本地用例代替。
+
+### P4 [x] 消息投影、终端和桌面交互对齐（实现/有限本地验收完成；真实环境出口待 P6）
 
 **依赖：**P2 内容合同；与 P3 共享独立 turn 边界。
 
@@ -194,6 +208,16 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 - 登录入口对齐实际用途：显式确认后按受信 provider profile 打开对应原生登录终端，不执行模型给出的命令、不自动传入凭据；若保留“仅说明”的产品降级需明确确认，不能默认算体验等价。
 
 **出口：**修正“每 delta 多 article”的旧测试 oracle，保留不可变 entries 断言；Chromium 验证流式/分页/键盘/链接，真实 Extension Host 验证剪贴板、滚动、resize/原生对话框与登录入口。Preview demo 等非主流程开发工具可明确退休，不为兼容恢复旧源码。
+
+**P4 当前实现与有限验收：**
+
+- `workbench-messages.ts` 提供唯一 TS 分组规则和小型增量投影：只追加新 entry，按 provider identity/turn/role/连续 seq 分组，无 ID、图片、序号缺口是硬边界。翻页 prepend/窗口移动以仍可见的不可变 entry 保留消息 key；不改写持久 entries。显示、复制、Markdown 导出共用规则；Telegram TurnStream 使用同一领域谓词，不再将无 ID 的正文悄悄粘连。复制按冷页寻找消息两端并验证归档正文，1 MiB 超限指向完整导出；导出只在磁盘暂存有界页头，正序流式读取归档，跨页不插入破坏代码块的标题。
+- 每帧合并更新，turn/article/Markdown prefix 做就地 DOM reconcile，未变消息不解析或脱离 DOM。活跃 Agent/Thought 的 Markdown prefix 按几何增长更新（128 KiB 上限），其余可见尾部为有界纯文本，结束后完整消息在 256 KiB Markdown 预算内解析；用户消息不走流式截点。复用未变 prefix 的 DOM，避免每帧重新解析相同 HTML。Thought/过程默认及轮末折叠保留显式用户选择。显示窗口为 2000 entries/4 MiB，早页 prepend 保留当前回答；continuation/预算提示及完整复制/导出入口明确，不把最近 200 条伪称完整回答。
+- 斜杠补全只来自当前 catalogue，支持上下键/Tab/Enter/Escape、IME 和空目录。外链只经显式点击到 host 端再次校验，modal 展示规范化/punycode 目的地，提供打开/复制/取消；仅 credential-free HTTP(S)/mailto，不恢复任意本地文件读取。列表提供 4/10/16 行，Plan 内部约五项滚动，composer 使用现成的指针/键盘 resize 并保存高度。登录改为明确确认的受信内置 Pi/Codex/Claude 原生 CLI profile，不接受模型命令或传递凭据。
+- 终端能力的明确边界：当前 ACP 客户端实际声明 `terminal: false`，没有已协商的 terminal output port；UI 直接标明 metadata-only、未捕获 stdout/stderr/退出状态。不从 terminal metadata 猜路径、执行命令或假装有正文。此轮不额外建设第二套命令执行/进程监管器，不宣称已具备原生终端正文能力；真实 peer 能力和桌面原生入口仍需 P6 验证。
+- 集中门禁：check/audit/build 通过；受影响 TS 8 files / 61 tests 通过，UI 收尾后 21 项消息/浏览器单测再次通过；Rust Telegram 79 passed，Clippy all-targets（warnings denied）及宿主构建通过。Chromium 实际宿主主流程及独立显示负载 17 项通过；修正旧 entry/article 与无 ID 粘连 oracle，工具入口按确切 turn 定位而非在宿主 Idle 早于 UI 更新的窗口点上一轮。性能用例也暴露并修复了用户消息错误套用流式截点。未机械重跑全库/制品/soak。
+- Chromium 1000 分片（每帧约 10 个状态更新，最终 2 条逻辑消息）：102 次 render，p95 2.70 ms/max 20.70 ms；9 次 Markdown parse，max 12.20 ms；100 次 input handler p95 0.10 ms/max 0.20 ms，input→下一 rAF p95 19.70 ms/max 31 ms；观测到 8 个 long tasks，max 71 ms（含注入/全状态解码/调度，未归因成纯渲染，也不宣称零长任务）。焦点、未改消息文本选择及跨片代码块验证通过；原生 textarea 编辑会正常清除文档选择，用例分别验证渲染保持选择与重新选择，不要求编辑时违反浏览器行为。这是单机单轮有限基线，不替代 P6 五轮 mixed、真实硬件输入延迟或长期 RSS。
+- 日志：`.test-results/p4/{final,ui-verified,close,rust-close}.log`；前序失败/修正日志保留同目录，性能明细为 `test-results/workbench-browser/p4-render.json`。真实 Extension Host 的 clipboard/滚动/窄侧栏/resize/modal、真实 CLI 登录及在线 provider/Bot 未运行，留待 P6，不以 Chromium host-port mock 冒充原生对话框验收；未部署、未迁移/删除真实数据。
 
 ### P5 [ ] 历史管理、审阅、手机与留存收尾
 

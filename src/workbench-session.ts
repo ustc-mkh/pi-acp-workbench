@@ -145,7 +145,7 @@ export class WorkbenchSession {
         (total, entry) => total + jsonBytes(entry),
         2 + Math.max(0, entries.length - 1),
       );
-      while (entries.length > 200 || bytes > 4 * 1024 * 1024) {
+      while (entries.length > 2000 || bytes > 4 * 1024 * 1024) {
         const removed = entries.shift();
         if (removed) bytes -= jsonBytes(removed) + (entries.length ? 1 : 0);
       }
@@ -230,8 +230,13 @@ export class WorkbenchSession {
       limit: 200,
     });
     if (!this.active || generation !== this.generation || request !== this.historyRequest) return;
+    const entries = [...page.entries, ...this.current.entries];
+    if (entries.length > 2000 || jsonBytes(entries) > 4 * 1024 * 1024)
+      throw new Error(
+        'History display budget reached. Copy a message or export Markdown for complete history.',
+      );
     this.publish({
-      entries: page.entries,
+      entries,
       earlier: page.next_cursor ?? undefined,
       historical: true,
       error: undefined,

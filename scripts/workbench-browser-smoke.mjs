@@ -80,6 +80,7 @@ try {
           args: [resolve('test/contract-agent.mjs')],
           env: {
             WORKBENCH_CONTRACT_MANAGEMENT: '1',
+            WORKBENCH_CONTRACT_TYPED_SETTINGS: '1',
             WORKBENCH_CONTRACT_WORKSPACE_FILE: join(root, 'review.txt'),
             WORKBENCH_CONTRACT_NATIVE_STATE: join(root, 'native'),
             WORKBENCH_CONTRACT_TRACE: join(root, 'trace'),
@@ -128,9 +129,13 @@ try {
       unexpected.push(request.url());
   });
   const client = new WorkbenchClient(join(data, 'workbench.sock'));
-  const editorDiffs = [];
+  const editorDiffs = [],
+    externalLinks = [];
   let confirmations = 0;
   controller = new WorkbenchController(client, {
+    openLink: async (url) => {
+      externalLinks.push(url);
+    },
     openDiff: async (turn, files) => {
       editorDiffs.push({ turn, files });
     },
@@ -200,6 +205,25 @@ try {
       `prompt ${text}`,
     );
   };
+  await page.getByRole('button', { name: 'Discover provider settings', exact: true }).click();
+  await wait(
+    () => controller.snapshot.view?.view?.catalogue.selects?.some((s) => s.id === 'thought_level'),
+    'first-task provider discovery',
+  );
+  assert.equal(controller.snapshot.view.entries.length, 0);
+  await page.getByLabel('Thinking', { exact: true }).selectOption('high');
+  await wait(
+    () => controller.snapshot.view?.view?.config.options?.thought_level === 'high',
+    'observed thinking before first task',
+  );
+  await page.getByLabel('Fast', { exact: true }).selectOption('on');
+  await wait(
+    () => controller.snapshot.view?.view?.config.options?.fast === 'on',
+    'observed independent Fast',
+  );
+  check(
+    'explicit desktop discovery configures actual independent Thinking/Fast before the first task',
+  );
   await prompt('streamed-message');
   await wait(
     () =>
@@ -208,12 +232,12 @@ try {
     'stream completion',
   );
   await page.locator('article').filter({ hasText: '世界' }).waitFor();
-  assert.equal(await page.locator('article').count(), 4);
+  assert.equal(await page.locator('article').count(), 3);
   assert.equal(await page.locator('article.thought').count(), 1);
   const sourceRows = structuredClone(controller.snapshot.view.entries);
   assert.equal(new Set(sourceRows.slice(1).map((row) => row.message)).size, 1);
   check(
-    'live text/thought deltas preserve distinct committed entry IDs and opaque groups in browser state',
+    'logical messages join text fragments while preserving role boundaries and immutable committed entries',
   );
   await page.getByRole('button', { name: 'Fork here', exact: true }).first().click();
   await wait(
@@ -249,11 +273,10 @@ try {
       controller.snapshot.view.view.status === 'Idle',
     'tool completion',
   );
-  await page.locator('.turn-process').last().locator('summary').first().click();
-  await page
-    .getByRole('button', { name: /^Tools for / })
-    .last()
-    .click();
+  const toolTurn = controller.snapshot.view.entries.at(-1).turn;
+  const toolProcess = page.locator(`[data-turn="${toolTurn}"] .turn-process`);
+  await toolProcess.locator('summary').first().click();
+  await toolProcess.getByRole('button', { name: `Tools for ${toolTurn}`, exact: true }).click();
   await wait(() => controller.snapshot.view.tools.length > 0, 'bounded tools query');
   assert(controller.snapshot.view.tools.length > 0);
   check(
@@ -278,6 +301,35 @@ try {
   await page.getByRole('button', { name: 'Remove attachment example.ts', exact: true }).click();
   assert.equal(await page.locator('#attachments pre').count(), 0);
   check('explicit session-scoped attachment selection previews escaped text and supports removal');
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2;
+    canvas.height = 2;
+    canvas.getContext('2d').fillRect(0, 0, 2, 2);
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'selected.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(png, 'base64'),
+  });
+  await page.locator('#attachments img').waitFor();
+  await page.waitForFunction(() => document.querySelector('#attachments img')?.naturalWidth === 2);
+  assert((await page.locator('#attachments img').getAttribute('src')).startsWith('blob:'));
+  await prompt('typed-image-input');
+  await wait(
+    () => controller.snapshot.view?.view?.status === 'Idle',
+    'typed input image completion',
+  );
+  await page.locator('#attachments img').waitFor({ state: 'detached' });
+  assert(
+    controller.snapshot.view.entries.some(
+      (entry) => entry.role === 'User' && entry.image?.mime === 'image/png',
+    ),
+  );
+  check(
+    'selected image previews under production blob-only CSP, is sanitized/archived/accepted, and clears only its submitted draft',
+  );
   await prompt('```mermaid\ngraph TD; A-->B\n```');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'diagram turn completion');
   await page.getByRole('button', { name: 'Render diagrams', exact: true }).first().click();
@@ -426,6 +478,162 @@ try {
   await page.screenshot({ path: join(artifacts, 'workbench-v3.png'), fullPage: true });
   check(
     'source unchanged, no browser external fetch/errors, production extension excludes legacy wire/facade',
+  );
+  // Isolated display workload after the real-host flow; never dispatch prompts.
+  const metrics = await page.evaluate(async (snapshot) => {
+    performance.clearMeasures('workbench.render');
+    performance.clearMeasures('workbench.markdown');
+    const longTasks = [];
+    const observer = new PerformanceObserver((list) =>
+      longTasks.push(...list.getEntries().map((entry) => entry.duration)),
+    );
+    observer.observe({ type: 'longtask', buffered: false });
+    const state = {
+      ...snapshot,
+      selected: snapshot.selected,
+      operations: [],
+      view: {
+        ...snapshot.view,
+        entries: [],
+        tools: [],
+        earlier: undefined,
+        historical: false,
+        view: {
+          ...snapshot.view.view,
+          active_turn: 'perf-turn',
+          status: 'Running',
+          pending_interactions: {},
+          catalogue: {
+            ...snapshot.view.view.catalogue,
+            commands: [
+              { name: 'review', description: 'Review', input_hint: null },
+              { name: 'reset', description: 'Reset', input_hint: null },
+            ],
+          },
+        },
+      },
+    };
+    const rows = [
+      {
+        seq: 1,
+        id: 'perf-user',
+        turn: 'perf-turn',
+        role: 'User',
+        message: null,
+        image: null,
+        text: { Inline: { text: 'Selection stays readable' } },
+      },
+    ];
+    const frame = () =>
+      new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    let sequence = 1000000;
+    const update = () =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'state',
+            sequence: ++sequence,
+            state: { ...state, view: { ...state.view, entries: [...rows] } },
+          },
+        }),
+      );
+    update();
+    await frame();
+    const first = document.querySelector('article');
+    const input = document.querySelector('#prompt');
+    input.focus();
+    const range = document.createRange();
+    range.selectNodeContents(first.querySelector('p'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    const inputTimes = [],
+      inputToFrame = [];
+    for (let i = 0; i < 1000; i++) {
+      rows.push({
+        seq: i + 2,
+        id: `perf-${i}`,
+        turn: 'perf-turn',
+        role: 'Agent',
+        message: 'perf-message',
+        image: null,
+        text: {
+          Inline: {
+            text:
+              i === 0
+                ? '```ts\n'
+                : i === 999
+                  ? '\n```\n\n[External](https://例子.测试/path)'
+                  : `// fragment ${i}\n`,
+          },
+        },
+      });
+      update();
+      if (i % 10 === 9) {
+        await frame();
+        if (
+          document.activeElement !== input ||
+          first !== document.querySelector('article') ||
+          getSelection().toString() !== 'Selection stays readable'
+        )
+          throw new Error(
+            `Streaming lost focus/selection/message identity at ${i}: focus=${document.activeElement === input}, identity=${first === document.querySelector('article')}, selection=${getSelection().toString()}`,
+          );
+        const start = performance.now();
+        input.value = `draft ${i}`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        inputTimes.push(performance.now() - start);
+        await new Promise((done) => requestAnimationFrame(done));
+        inputToFrame.push(performance.now() - start);
+        // Native textarea edits legitimately clear the document selection. Select
+        // again and check it survives the next render, not the unrelated edit.
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      }
+    }
+    state.view.view.active_turn = null;
+    state.view.view.status = 'Idle';
+    update();
+    await frame();
+    observer.disconnect();
+    const distribution = (values) => {
+      values.sort((a, b) => a - b);
+      return {
+        count: values.length,
+        p95: values[Math.floor(values.length * 0.95)] || 0,
+        max: values.at(-1) || 0,
+      };
+    };
+    return {
+      render: distribution(
+        performance.getEntriesByName('workbench.render').map((entry) => entry.duration),
+      ),
+      markdown: distribution(
+        performance.getEntriesByName('workbench.markdown').map((entry) => entry.duration),
+      ),
+      input: distribution(inputTimes),
+      inputToFrame: distribution(inputToFrame),
+      longTasks: distribution(longTasks),
+      messages: document.querySelectorAll('article').length,
+      code: document.querySelector('article.agent code')?.textContent.includes('fragment 998'),
+    };
+  }, controller.snapshot);
+  assert.equal(metrics.messages, 2);
+  assert(metrics.code);
+  assert(metrics.markdown.count <= 16, 'Markdown must not be reparsed for every delta');
+  await page.getByRole('link', { name: 'External', exact: true }).click();
+  await wait(() => externalLinks.length === 1, 'normalized explicit link request');
+  assert.equal(externalLinks[0], 'https://xn--fsqu00a.xn--0zwm56d/path');
+  await page.locator('#prompt').fill('/re');
+  await page.locator('#prompt').press('ArrowDown');
+  await page.locator('#prompt').press('Tab');
+  assert.equal(await page.locator('#prompt').inputValue(), '/reset ');
+  check(
+    'Chromium slash keyboard completion and explicit normalized link host port (native modal remains Extension Host validation)',
+  );
+  console.log('P4 1000-fragment display workload:', JSON.stringify(metrics));
+  await writeFile(join(artifacts, 'p4-render.json'), JSON.stringify(metrics, null, 2));
+  check(
+    '1000 fragments coalesce into stable messages; input/selection remain usable with bounded Markdown parses',
   );
   console.log(
     `${checks} production workbench browser checks passed (synthetic ACP, no real model/Bot)`,

@@ -93,7 +93,11 @@ it('disconnect recovers an unknown prompt receipt and observation without replay
   const sending = controller.receive({
     type: 'execute',
     session: 'session',
-    command: { method: 'prompt', session: 'session', prompt: 'never replay' },
+    command: {
+      method: 'prompt',
+      session: 'session',
+      prompt: { parts: [{ type: 'text', text: 'never replay' }] },
+    },
   });
   await expect.poll(() => peer.requests.length).toBe(2);
   peer.reply(peer.requests[1], { Loaded: { view: emptyView() } });

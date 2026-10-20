@@ -25,6 +25,7 @@ pub(super) struct ControlUpdates {
     config_options: Option<Vec<super::settings::ConfigOption>>,
     commands: Option<Vec<AvailableCommand>>,
     mode: Option<ModeId>,
+    pub(super) live: Vec<WorkerEvent>,
 }
 impl ControlUpdates {
     fn observe_session(
@@ -133,12 +134,23 @@ pub(super) async fn pump<T>(
                         }
                         SessionUpdate::AvailableCommands { available_commands } => { captured.commands = Some(commands(available_commands)); }
                         SessionUpdate::CurrentMode { current_mode_id } => { captured.mode = Some(ModeId::new(current_mode_id)?); }
+                        update @ (SessionUpdate::PiRun(_) | SessionUpdate::PiLive { .. }) => {
+                            if captured.live.len() >= 64 { return Err(DomainError::Backpressure); }
+                            captured.live.push(WorkerEvent::Update(SessionNotification {
+                                session_id: notification.session_id, update,
+                            }));
+                        }
                         _ => {} // persisted domain history, not a newly prompted turn
                     }
                 }
                 Some(WorkerEvent::Request(request)) => {
                     captured.observe_session(request.session(), expected)?;
-                    client.answer(&request, InteractionResponse::Cancel).await?;
+                    if captured.live.is_empty() {
+                        client.answer(&request, InteractionResponse::Cancel).await?;
+                    } else {
+                        if captured.live.len() >= 64 { return Err(DomainError::Backpressure); }
+                        captured.live.push(WorkerEvent::Request(request));
+                    }
                 }
                 Some(WorkerEvent::Closed(reason)) => return Err(DomainError::Worker(reason)),
                 None => return Err(DomainError::Worker("worker event stream closed".into())),

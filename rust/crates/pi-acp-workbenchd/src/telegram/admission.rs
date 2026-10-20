@@ -129,7 +129,8 @@ pub async fn admit_update(
                 | ControlCommand::Discover { .. }
                 | ControlCommand::Remove { .. }
                 | ControlCommand::SetModel { .. }
-                | ControlCommand::SetMode { .. },
+                | ControlCommand::SetMode { .. }
+                | ControlCommand::SetOption { .. },
             ) => {
                 if let Some(snapshot) = snapshot {
                     if authorize_workspace(&snapshot.cwd, &policy.cwd)

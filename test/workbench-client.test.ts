@@ -44,11 +44,19 @@ it('correlates out-of-order replies, live events and resync without a legacy env
   });
   client.observe({ batch: (batch) => events.push(batch), resync: () => resync++ });
   const operation = operationId.parse('stable-operation');
-  const first = client.request({ method: 'prompt', session, prompt: 'hello 世界' }, { operation });
+  const first = client.request(
+    { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'hello 世界' }] } },
+    { operation },
+  );
   const second = client.request(query);
   await expect.poll(() => peer.requests.length).toBe(2);
   expect(peer.requests.map(({ socket: _, ...request }) => request)).toMatchObject([
-    { version: 3, id: first.id, operation, command: { method: 'prompt', prompt: 'hello 世界' } },
+    {
+      version: 3,
+      id: first.id,
+      operation,
+      command: { method: 'prompt', prompt: { parts: [{ type: 'text', text: 'hello 世界' }] } },
+    },
     { version: 3, id: second.id, command: query },
   ]);
   expect(peer.requests[1].operation).toBeUndefined();
@@ -72,16 +80,24 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
   const peer = await fixture(),
     client = peer.client();
   const ordinary = Array.from({ length: 16 }, () =>
-    client.request({ method: 'prompt', session, prompt: 'held' }),
+    client.request({
+      method: 'prompt',
+      session,
+      prompt: { parts: [{ type: 'text', text: 'held' }] },
+    }),
   );
   const control = Array.from({ length: 4 }, () => client.request({ method: 'cancel', session }));
   const queries = Array.from({ length: 4 }, () => client.request(query));
   await expect.poll(() => peer.requests.length).toBe(24);
   for (const command of [
-    { method: 'prompt', session, prompt: 'overflow' },
-    { method: 'cancel', session },
+    {
+      method: 'prompt' as const,
+      session,
+      prompt: { parts: [{ type: 'text' as const, text: 'overflow' }] },
+    },
+    { method: 'cancel' as const, session },
     query,
-  ] as const)
+  ])
     expect(() => client.request(command)).toThrow('pool is full');
   const abandoned = expect(ordinary[0].result).rejects.toMatchObject({
     code: 'abandoned',
@@ -89,14 +105,22 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
   });
   ordinary[0].abandon();
   await abandoned;
-  expect(() => client.request({ method: 'prompt', session, prompt: 'still full' })).toThrow(
-    'pool is full',
-  );
+  expect(() =>
+    client.request({
+      method: 'prompt',
+      session,
+      prompt: { parts: [{ type: 'text', text: 'still full' }] },
+    }),
+  ).toThrow('pool is full');
   peer.reply(peer.requests[0], accepted);
   await expect
     .poll(() => {
       try {
-        const t = client.request({ method: 'prompt', session, prompt: 'replacement' });
+        const t = client.request({
+          method: 'prompt',
+          session,
+          prompt: { parts: [{ type: 'text', text: 'replacement' }] },
+        });
         t.result.catch(() => {});
         return t.id;
       } catch {
@@ -140,7 +164,7 @@ it('observer timeout retains its operation and never emits cancel or retries', a
   const peer = await fixture(),
     client = peer.client();
   const ticket = client.request(
-    { method: 'prompt', session, prompt: 'slow provider' },
+    { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'slow provider' }] } },
     { timeoutMs: 80 },
   );
   const failed = expect(ticket.result).rejects.toMatchObject({

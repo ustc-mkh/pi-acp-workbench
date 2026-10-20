@@ -203,9 +203,11 @@ async fn fully_filtered_pages_do_not_hide_the_unexported_tail_and_later_history_
     assert_eq!(state.sent.len(), before + 1);
     assert_eq!(
         state.sent[before].text,
+        // Missing provider identities are separate logical messages.
         (200..205)
             .map(|n| format!("part-{n:03}"))
-            .collect::<String>()
+            .collect::<Vec<_>>()
+            .join("\n\n")
     );
     drop(state);
     command(&context, 3, "/history all").await;

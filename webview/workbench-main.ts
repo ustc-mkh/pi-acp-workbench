@@ -1,3 +1,6 @@
+import { MessageProjection } from '../src/workbench-messages';
+import { reconcile } from './workbench-dom';
+import { installComposerResize } from './composer-resize';
 import { Drafts } from './workbench-drafts';
 import { Preferences } from './workbench-preferences';
 import { ManagementPanel } from './workbench-management';
@@ -54,6 +57,7 @@ function persist() {
 }
 function disclosure(key: string, fallback = false) {
   const details = element('details');
+  details.dataset.key = key;
   details.open = preferences.open(key, fallback);
   details.addEventListener('toggle', () => {
     if (!details.isConnected || details.open === preferences.open(key, fallback)) return;
@@ -63,6 +67,44 @@ function disclosure(key: string, fallback = false) {
   return details;
 }
 const pendingPrompts = new Map<string, Set<string>>();
+const draftGenerations = new Map<string, number>();
+const promptOperations = new Map<string, { generation: number; operation: string }>();
+const pendingPiDrafts = new Map<string, { generation: number; after: number }>();
+let nextDraftGeneration = 0;
+function clearAcceptedDraft(session: string) {
+  inputImages.delete(session);
+  attachmentDrafts.set(session, []);
+  drafts.set(session, '');
+  if (session === selected) {
+    prompt.value = '';
+    renderAttachments();
+  }
+  persist();
+}
+function settlePiDraft() {
+  if (!selected) return;
+  const pending = pendingPiDrafts.get(selected);
+  if (!pending || !state?.view?.view) return;
+  const turn = state.view.entries.find(
+    (entry) => entry.seq > pending.after && entry.role === 'User',
+  )?.turn;
+  if (!turn) return; // Do not guess across a missing history page.
+  const rows = state.view.entries.filter((entry) => entry.turn === turn);
+  const rejected = rows.some((entry) => entry.message === 'pi-workbench-input-rejected');
+  const observed = rows.some((entry) => entry.role !== 'User');
+  if (!rejected && !observed && state.view.view.active_turn) return;
+  pendingPiDrafts.delete(selected);
+  if (rejected) {
+    error.textContent = 'Pi is working autonomously. Input was not sent; draft preserved.';
+  } else if (pending.generation === (draftGenerations.get(selected) || 0)) {
+    clearAcceptedDraft(selected);
+  }
+}
+function touchDraft(session = selected || '') {
+  if (!draftGenerations.has(session) && draftGenerations.size >= 64)
+    draftGenerations.delete(draftGenerations.keys().next().value!);
+  draftGenerations.set(session, ++nextDraftGeneration);
+}
 function saveDraft() {
   drafts.set(selected || '', prompt.value);
   persist();
@@ -77,7 +119,7 @@ function button(label: string, click: () => void, disabled = false) {
   const node = element('button', label);
   node.type = 'button';
   node.disabled = disabled;
-  node.addEventListener('click', click);
+  node.onclick = click;
   return node;
 }
 const management = new ManagementPanel(send, schedule);
@@ -105,6 +147,7 @@ header.append(
     });
   }),
   button('Refresh', () => send({ type: 'refresh' })),
+  button('Provider login…', () => send({ type: 'login' })),
   button('Usage statistics', () => management.openStatistics()),
   button('Model settings', () => management.openModels()),
   button('Telegram setup', () => send({ type: 'configure_telegram' })),
@@ -136,7 +179,7 @@ const composer = element('form'),
   prompt = element('textarea');
 prompt.id = 'prompt';
 prompt.setAttribute('aria-label', 'Prompt');
-prompt.placeholder = 'Send a text prompt (images as input are not yet supported)';
+prompt.placeholder = 'Send text, explicit context, or one image (PNG/JPEG/WebP; up to 4 MiB)';
 prompt.rows = 4;
 prompt.maxLength = 200000;
 prompt.disabled = true;
@@ -147,19 +190,137 @@ const cancel = button('Cancel turn', () => mutate({ method: 'cancel', session: c
 const attachments = element('section');
 attachments.id = 'attachments';
 attachments.setAttribute('aria-label', 'Explicit file attachments');
+const inputImages = new Map<string, ImageAsset>();
+let imageReading = false;
+async function addInputImage(file: File) {
+  const session = current()?.id;
+  if (!session || imageReading) return;
+  if (
+    !['image/png', 'image/jpeg', 'image/webp'].includes(file.type) ||
+    file.size <= 0 ||
+    file.size > 4 * 1024 * 1024
+  ) {
+    error.textContent = 'Choose a static PNG/JPEG/WebP image up to 4 MiB';
+    return;
+  }
+  if (!inputImages.has(session) && inputImages.size >= 4) {
+    error.textContent =
+      'Remove an unsent image from another session first (four-image draft budget)';
+    return;
+  }
+  imageReading = true;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    if (selected !== session) throw new Error('Session changed while reading image');
+    inputImages.set(session, {
+      format_version: 1,
+      image: {
+        id: crypto.randomUUID() as ImageRef['id'],
+        mime: file.type as ImageRef['mime'],
+        bytes: bytes.length,
+        sha256: [...digest].map((n) => n.toString(16).padStart(2, '0')).join(''),
+      },
+      data: btoa(binary),
+    });
+    touchDraft(session);
+    renderAttachments();
+  } catch (failure) {
+    error.textContent = failure instanceof Error ? failure.message : 'Image unavailable';
+  } finally {
+    imageReading = false;
+  }
+}
+const imagePicker = element('input');
+imagePicker.type = 'file';
+imagePicker.accept = 'image/png,image/jpeg,image/webp';
+imagePicker.hidden = true;
+imagePicker.onchange = () => {
+  const file = imagePicker.files?.[0];
+  if (file) void addInputImage(file);
+  imagePicker.value = '';
+};
+const attachImage = button('Attach image', () => imagePicker.click());
+prompt.addEventListener('paste', (event) => {
+  const file = [...(event.clipboardData?.files || [])].find((f) => f.type.startsWith('image/'));
+  if (file) {
+    event.preventDefault();
+    void addInputImage(file);
+  }
+});
+function composeDraft(session: string, text: string) {
+  const image = inputImages.get(session);
+  const context = attachmentDrafts.get(session);
+  const result =
+    image && !text.trim() && !context.length
+      ? { parts: [] as import('../src/workbench-input').PromptPart[] }
+      : composePrompt(text, context);
+  if (image) result.parts.push({ type: 'image', asset: image });
+  return result;
+}
 const attach = button('Attach files', () => {
   const snapshot = current();
   if (snapshot) send({ type: 'attach_files', session: snapshot.id });
 });
-composer.append(attachments, prompt, attach, submit, cancel);
+const resize = element('div');
+resize.className = 'composer-resize';
+resize.tabIndex = 0;
+resize.setAttribute('role', 'separator');
+resize.setAttribute('aria-label', 'Resize composer');
+resize.setAttribute('aria-orientation', 'horizontal');
+installComposerResize(resize, prompt, preferences.composerHeight, (height) => {
+  preferences.composerHeight = height;
+  persist();
+});
+const completions = element('div');
+completions.id = 'commands';
+completions.setAttribute('role', 'listbox');
+completions.setAttribute('aria-label', 'Provider commands');
+composer.append(
+  attachments,
+  resize,
+  completions,
+  prompt,
+  attach,
+  attachImage,
+  imagePicker,
+  submit,
+  cancel,
+);
+let inputPreviewUrl: string | undefined;
 function renderAttachments() {
+  if (inputPreviewUrl) {
+    URL.revokeObjectURL(inputPreviewUrl);
+    inputPreviewUrl = undefined;
+  }
   attachments.replaceChildren();
+  const image = inputImages.get(selected || '');
+  if (image) {
+    const preview = element('img');
+    preview.alt = 'Unsent image preview';
+    preview.style.maxWidth = '240px';
+    const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
+    inputPreviewUrl = URL.createObjectURL(new Blob([bytes], { type: image.image.mime }));
+    preview.src = inputPreviewUrl;
+    attachments.append(
+      preview,
+      element('p', `${image.image.bytes} bytes · unsent images are discarded on reload`),
+      button('Remove image', () => {
+        inputImages.delete(selected || '');
+        touchDraft();
+        renderAttachments();
+      }),
+    );
+  }
   for (const file of attachmentDrafts.get(selected || '')) {
     const details = disclosure(`${selected}:attachment:${file.id}`);
     details.append(element('summary', `${file.name} · ${file.text.length} characters`));
     details.append(element('pre', file.text));
     details.append(
       button(`Remove attachment ${file.name}`, () => {
+        touchDraft();
         attachmentDrafts.set(
           selected || '',
           attachmentDrafts.get(selected || '').filter((row) => row.id !== file.id),
@@ -171,8 +332,83 @@ function renderAttachments() {
     attachments.append(details);
   }
 }
-prompt.addEventListener('input', saveDraft);
+let commandIndex = 0,
+  composing = false,
+  dismissedCommand = '';
+function commandChoices() {
+  if (
+    composing ||
+    prompt.selectionStart !== prompt.value.length ||
+    !/^\/[^\s]*$/.test(prompt.value) ||
+    dismissedCommand === prompt.value
+  )
+    return [];
+  return (current()?.catalogue.commands || [])
+    .filter((command) => command.name.startsWith(prompt.value.slice(1)))
+    .slice(0, 20);
+}
+function acceptCommand(index: number) {
+  const command = commandChoices()[index];
+  if (!command) return;
+  prompt.value = `/${command.name} `;
+  touchDraft();
+  saveDraft();
+  renderCommands();
+  prompt.focus();
+}
+function renderCommands() {
+  const choices = commandChoices();
+  commandIndex = Math.min(commandIndex, Math.max(0, choices.length - 1));
+  completions.replaceChildren();
+  choices.forEach((command, index) => {
+    const option = button(
+      `/${command.name} — ${command.description}${command.input_hint ? ` (${command.input_hint})` : ''}`,
+      () => acceptCommand(index),
+    );
+    option.setAttribute('role', 'option');
+    option.id = `command-${index}`;
+    option.setAttribute('aria-selected', String(index === commandIndex));
+    completions.append(option);
+  });
+  prompt.setAttribute('aria-expanded', String(choices.length > 0));
+  if (choices.length) prompt.setAttribute('aria-activedescendant', `command-${commandIndex}`);
+  else prompt.removeAttribute('aria-activedescendant');
+}
+prompt.setAttribute('aria-controls', 'commands');
+prompt.setAttribute('aria-autocomplete', 'list');
+prompt.addEventListener('compositionstart', () => {
+  composing = true;
+  renderCommands();
+});
+prompt.addEventListener('compositionend', () => {
+  composing = false;
+  renderCommands();
+});
+prompt.addEventListener('input', () => {
+  dismissedCommand = '';
+  commandIndex = 0;
+  touchDraft();
+  saveDraft();
+  renderCommands();
+});
 prompt.addEventListener('keydown', (event) => {
+  if (event.isComposing || event.keyCode === 229 || composing) return;
+  if (commandChoices().length) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
+      event.preventDefault();
+      if (event.key === 'Escape') dismissedCommand = prompt.value;
+      else if (event.key === 'ArrowDown')
+        commandIndex = (commandIndex + 1) % commandChoices().length;
+      else if (event.key === 'ArrowUp')
+        commandIndex = (commandIndex + commandChoices().length - 1) % commandChoices().length;
+      else {
+        acceptCommand(commandIndex);
+        return;
+      }
+      renderCommands();
+      return;
+    }
+  }
   // Enter used to commit IME composition is not a send gesture.
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
   event.preventDefault();
@@ -182,9 +418,9 @@ composer.addEventListener('submit', (event) => {
   event.preventDefault();
   const snapshot = current();
   if (!snapshot || submit.disabled || pendingPrompts.has(snapshot.id)) return;
-  let text: string;
+  let text: ReturnType<typeof composePrompt>;
   try {
-    text = composePrompt(prompt.value, attachmentDrafts.get(snapshot.id));
+    text = composeDraft(snapshot.id, prompt.value);
   } catch (failure) {
     error.textContent = failure instanceof Error ? failure.message : 'Invalid prompt';
     return;
@@ -194,12 +430,18 @@ composer.addEventListener('submit', (event) => {
     return;
   }
   saveDraft();
+  touchDraft(snapshot.id);
   pendingPrompts.set(
     snapshot.id,
     new Set(state?.operations.map((operation) => operation.operation)),
   );
   submit.disabled = true;
-  mutate({ method: 'prompt', session: snapshot.id, prompt: text });
+  send({
+    type: 'execute',
+    session: snapshot.id,
+    command: { method: 'prompt', session: snapshot.id, prompt: text },
+    generation: draftGenerations.get(snapshot.id) || 0,
+  });
 });
 root.append(
   header,
@@ -226,11 +468,57 @@ function schedule() {
   rendering = true;
   requestAnimationFrame(() => {
     rendering = false;
+    const start = performance.now();
     render();
+    performance.measure('workbench.render', { start });
+    // Keep instrumentation bounded in a long-lived view.
+    if (performance.getEntriesByName('workbench.render').length > 2048)
+      performance.clearMeasures('workbench.render');
   });
 }
 function renderSettings(snapshot: SessionView, busy: boolean) {
+  const definition = JSON.stringify([
+    snapshot.id,
+    snapshot.catalogue,
+    snapshot.catalogue.models.map((choice) => management.visible(choice.id, snapshot.harness)),
+    busy,
+    preferences.showThoughts,
+    preferences.autoScroll,
+    preferences.sessionRows,
+  ]);
+  if (settings.dataset.definition === definition) return;
+  settings.dataset.definition = definition;
   settings.replaceChildren();
+  settings.append(
+    button(
+      'Discover provider settings',
+      () => mutate({ method: 'discover', session: snapshot.id }),
+      busy,
+    ),
+  );
+  for (const setting of snapshot.catalogue.selects || []) {
+    if (
+      setting.category === 'model' ||
+      setting.category === 'mode' ||
+      setting.id === 'model' ||
+      setting.id === 'mode'
+    )
+      continue;
+    const label = element('label', setting.name);
+    const select = element('select');
+    select.setAttribute('aria-label', setting.name);
+    select.disabled = busy;
+    for (const choice of setting.choices) {
+      const option = element('option', choice.name);
+      option.value = choice.value;
+      select.append(option);
+    }
+    select.value = setting.current_value;
+    select.onchange = () =>
+      mutate({ method: 'set_option', session: snapshot.id, id: setting.id, value: select.value });
+    label.append(select);
+    settings.append(label);
+  }
   for (const key of ['model', 'mode'] as const) {
     const choices = key === 'model' ? snapshot.catalogue.models : snapshot.catalogue.modes;
     const select = element('select');
@@ -293,7 +581,7 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
   scrollLabel.prepend(autoScroll);
   const rows = element('select');
   rows.setAttribute('aria-label', 'Session list rows');
-  for (let i = 1; i <= 10; i++) {
+  for (const i of [4, 10, 16]) {
     const option = element('option', `${i} session rows`);
     option.value = String(i);
     rows.append(option);
@@ -393,6 +681,21 @@ function contentNode(ref: ContentRef, session: SessionView['id']) {
   }
   return box;
 }
+const messageProjection = new MessageProjection();
+const markdownCache = new Map<string, { text: string; html: string }>();
+function renderMessageMarkdown(id: string, text: string) {
+  const cached = markdownCache.get(id);
+  if (cached?.text === text) return cached.html;
+  const start = performance.now();
+  const html = markdown(text);
+  performance.measure('workbench.markdown', { start });
+  if (performance.getEntriesByName('workbench.markdown').length > 2048)
+    performance.clearMeasures('workbench.markdown');
+  markdownCache.delete(id);
+  markdownCache.set(id, { text, html });
+  while (markdownCache.size > 16) markdownCache.delete(markdownCache.keys().next().value!);
+  return html;
+}
 function renderTranscript(snapshot: SessionView, busy: boolean) {
   const rows = state?.view?.entries || [];
   const scroll = transcript.scrollTop,
@@ -408,23 +711,27 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       node,
     ]),
   );
-  transcript.replaceChildren();
+  const output = element('section');
   const turns = new Map<string, { box: HTMLElement; process: HTMLDetailsElement }>();
-  transcript.append(
+  output.append(
     button(
-      'Earlier page',
+      'Load earlier (keep current messages)',
       () => send({ type: 'earlier', session: snapshot.id }),
       !state?.view?.earlier,
     ),
   );
-  transcript.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
-  transcript.append(
+  output.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
+  output.append(
     element(
       'small',
-      `${rows.length} confirmed entries · ${state?.view?.historical ? 'historical page' : 'latest page'}`,
+      `${rows.length} confirmed entries · ${state?.view?.historical ? 'history window' : 'latest window'}${state?.view?.earlier ? ' · Earlier content is not loaded; the first message may be a continuation. Load earlier, copy or export for complete messages.' : ''}`,
     ),
   );
-  for (const row of rows) {
+  for (const message of messageProjection.update(rows)) {
+    const row =
+      message.inlineText !== undefined
+        ? { ...message.row, text: { Inline: { text: message.inlineText } } }
+        : message.row;
     let turn = turns.get(row.turn);
     if (!turn) {
       const box = element('section');
@@ -568,14 +875,17 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       }
       turn = { box, process };
       turns.set(row.turn, turn);
-      transcript.append(box);
+      output.append(box);
     }
     if (row.role === 'Thought' && !preferences.showThoughts) continue;
     const definition = JSON.stringify([
-      row,
-      busy,
-      snapshot.status,
-      'Archived' in row.text ? contentPages.get(row.text.Archived.content.id) : null,
+      row.id,
+      message.entries.at(-1)!.id,
+      message.entries.length,
+      row.role !== 'User' && snapshot.active_turn === row.turn,
+      message.entries.flatMap((entry) =>
+        'Archived' in entry.text ? [contentPages.get(entry.text.Archived.content.id)] : [],
+      ),
       row.image
         ? [
             images.get(row.image.id)?.url,
@@ -585,16 +895,19 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
           ]
         : null,
     ]);
-    const previous = previousArticles.get(row.id);
+    const previous = previousArticles.get(message.key);
     if (previous?.dataset.definition === definition) {
-      if (row.role === 'Thought') turn.process.append(previous);
-      else if (row.role === 'User') turn.box.insertBefore(previous, turn.process);
-      else turn.box.append(previous);
+      const placeholder = element('article');
+      placeholder.dataset.entry = message.key;
+      placeholder.dataset.definition = definition;
+      if (row.role === 'Thought') turn.process.append(placeholder);
+      else if (row.role === 'User') turn.box.insertBefore(placeholder, turn.process);
+      else turn.box.append(placeholder);
       continue;
     }
     const article = element('article');
     article.dataset.definition = definition;
-    article.dataset.entry = row.id;
+    article.dataset.entry = message.key;
     article.className = row.role.toLowerCase();
     article.append(element('small', `${row.role} · ${row.seq}`));
     article.append(
@@ -602,7 +915,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         send({ type: 'copy_message', session: snapshot.id, entry: row.id }),
       ),
     );
-    if (row.role === 'User' && 'Inline' in row.text) {
+    if (row.role === 'User' && !row.image && 'Inline' in row.text) {
       const text = row.text.Inline.text;
       article.append(
         button('Use as prompt', () => {
@@ -612,6 +925,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
             return;
           }
           prompt.value = next;
+          touchDraft();
           saveDraft();
           prompt.focus();
         }),
@@ -619,12 +933,41 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     }
     const content = element('div');
     if ('Inline' in row.text) {
-      content.innerHTML = markdown(row.text.Inline.text);
-      content
-        .querySelectorAll('a')
-        .forEach((link) => link.addEventListener('click', (event) => event.preventDefault()));
-      for (const copy of content.querySelectorAll<HTMLButtonElement>('.copy-code'))
-        copy.addEventListener('click', () => {
+      // Streaming text stays cheap and selectable. Parse only geometrically growing
+      // prefixes; the unparsed tail remains visible until the next checkpoint/end.
+      const text = row.text.Inline.text;
+      const active = row.role !== 'User' && snapshot.active_turn === row.turn;
+      const checkpoint = active
+        ? Math.min(128 * 1024, 2 ** Math.floor(Math.log2(Math.max(1, text.length))))
+        : Math.min(text.length, 256 * 1024);
+      const parsed = element('div');
+      parsed.dataset.markdown = 'true';
+      parsed.dataset.definition = `${row.id}:${checkpoint}`;
+      const oldPrefix = previous?.querySelector<HTMLElement>('[data-markdown]');
+      if (oldPrefix?.dataset.definition !== parsed.dataset.definition)
+        parsed.innerHTML = renderMessageMarkdown(row.id, text.slice(0, checkpoint));
+      content.append(parsed);
+      if (checkpoint < text.length)
+        content.append(element('pre', text.slice(checkpoint, checkpoint + 256 * 1024)));
+      if (text.length > checkpoint + 256 * 1024)
+        content.append(
+          element(
+            'p',
+            'Display budget reached. Copy message or export Markdown for complete content.',
+          ),
+        );
+      parsed.querySelectorAll('a').forEach((link) => {
+        link.onclick = (event) => {
+          event.preventDefault();
+          send({
+            type: 'open_link',
+            url: (event.currentTarget as HTMLAnchorElement).getAttribute('href') || '',
+          });
+        };
+      });
+      for (const copy of parsed.querySelectorAll<HTMLButtonElement>('.copy-code'))
+        copy.onclick = (event) => {
+          const copy = event.currentTarget as HTMLButtonElement;
           const text = copy.parentElement?.querySelector('code')?.textContent ?? '';
           void window.navigator.clipboard?.writeText(text).then(
             () => {
@@ -634,31 +977,41 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
               copy.textContent = 'Copy unavailable';
             },
           );
-        });
-      if (content.querySelector('.mermaid-diagram')) {
-        const draw = button('Render diagrams', () => {
-          draw.disabled = true;
-          void renderDiagrams(content).finally(() => {
-            draw.disabled = false;
+        };
+      if (parsed.querySelector('.mermaid-diagram')) {
+        const draw = button('Render diagrams', () => {});
+        draw.onclick = (event) => {
+          const button = event.currentTarget as HTMLButtonElement;
+          button.disabled = true;
+          void renderDiagrams(button.parentElement!).finally(() => {
+            button.disabled = false;
           });
-        });
-        content.prepend(draw);
+        };
+        parsed.prepend(draw);
       }
-    } else content.append(contentNode(row.text.Archived.content, snapshot.id));
+    } else
+      for (const part of message.entries) {
+        if ('Archived' in part.text)
+          content.append(contentNode(part.text.Archived.content, snapshot.id));
+        else content.append(element('pre', part.text.Inline.text));
+      }
     if (row.role === 'Thought') {
       const details = disclosure(`${snapshot.id}:thought:${row.id}`);
       details.append(element('summary', 'Thought'), content);
       article.append(details);
     } else article.append(content);
     if (row.image) article.append(imageNode(row.image, snapshot.id));
-    if (['Agent', 'User'].includes(row.role) && !row.image)
-      article.append(
-        button(
-          'Fork here',
-          () => mutate({ method: 'fork', session: snapshot.id, request: { entry: row.id } }),
-          busy || snapshot.status !== 'Idle',
-        ),
+    if (['Agent', 'User'].includes(row.role) && !row.image) {
+      const fork = button('Fork here', () =>
+        mutate({
+          method: 'fork',
+          session: snapshot.id,
+          request: { entry: message.entries.at(-1)!.id },
+        }),
       );
+      fork.dataset.fork = 'true';
+      article.append(fork);
+    }
     if (row.role === 'Thought') turn.process.append(article);
     else if (row.role === 'User') turn.box.insertBefore(article, turn.process);
     else turn.box.append(article);
@@ -672,7 +1025,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       );
   const cursor = state?.view?.toolCursor;
   if (cursor)
-    transcript.append(
+    output.append(
       button('Next tool page', () =>
         send({ type: 'read_tools', session: snapshot.id, turn: cursor.turn, cursor }),
       ),
@@ -696,12 +1049,16 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         details.append(element('p', `${body.ResourceLink.name}: ${body.ResourceLink.uri}`));
       else if ('TerminalReference' in body)
         details.append(
-          element('p', `Terminal reference: ${body.TerminalReference.id} (display only)`),
+          element(
+            'p',
+            `Terminal ${body.TerminalReference.id}: metadata-only. This ACP client does not negotiate terminal execution/output; no stdout, stderr or exit status was captured.`,
+          ),
         );
       else details.append(element('p', `Unsupported binary: ${body.Unsupported.kind}`));
     }
     turns.get(tool.turn)!.process.append(details);
   }
+  renderCommands();
   const signature = JSON.stringify([snapshot.id, snapshot.plan]);
   if (planPanel.dataset.definition !== signature) {
     planPanel.dataset.definition = signature;
@@ -717,6 +1074,9 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       planPanel.append(plan);
     }
   }
+  reconcile(transcript, output);
+  for (const fork of transcript.querySelectorAll<HTMLButtonElement>('[data-fork]'))
+    fork.disabled = busy || snapshot.status !== 'Idle';
   const restored = [...transcript.querySelectorAll<HTMLElement>('[data-entry]')].find(
     (node) => node.dataset.entry === anchorId,
   );
@@ -912,6 +1272,7 @@ function render() {
     state.error ||
     state.view?.error ||
     (snapshot && typeof snapshot.status === 'object' ? snapshot.status.Failed : '');
+  settlePiDraft();
   status.textContent = `${state.view?.status || 'Select or create a session'}${snapshot ? ` · ${typeof snapshot.status === 'string' ? snapshot.status : 'Failed'} · revision ${snapshot.revision}` : ''}${!state.trusted ? ' · workspace untrusted' : ''}`;
   const busy =
     !snapshot || !state.trusted || state.view?.status !== 'ready' || snapshot.active_turn !== null;
@@ -919,7 +1280,10 @@ function render() {
   submit.textContent = pendingPrompts.has(snapshot?.id || '') ? 'Confirming acceptance…' : 'Send';
   prompt.disabled = !snapshot;
   attach.disabled = !snapshot || !state.trusted;
-  cancel.disabled = !snapshot || !state.trusted || snapshot.active_turn === null;
+  attachImage.disabled = !snapshot || !state.trusted;
+  cancel.disabled =
+    !snapshot || !state.trusted || (snapshot.active_turn === null && snapshot.harness !== 'Pi');
+  cancel.textContent = snapshot?.active_turn ? 'Cancel turn' : 'Stop Pi background worker';
   if (snapshot) {
     management.setView(snapshot, state.sessions, state.operations);
     sessions.size = preferences.sessionRows;
@@ -928,6 +1292,7 @@ function render() {
     renderInteractions(snapshot);
   } else {
     settings.replaceChildren();
+    delete settings.dataset.definition;
     planPanel.replaceChildren();
     delete planPanel.dataset.definition;
     transcript.replaceChildren();
@@ -986,23 +1351,53 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
           pendingPrompts.delete(session);
       schedule();
     } else if (
+      raw.type === 'prompt_submitted' &&
+      'session' in raw &&
+      typeof raw.session === 'string' &&
+      'generation' in raw &&
+      typeof raw.generation === 'number' &&
+      'operation' in raw &&
+      typeof raw.operation === 'string'
+    ) {
+      if (raw.generation === draftGenerations.get(raw.session)) {
+        if (promptOperations.size >= 64)
+          promptOperations.delete(promptOperations.keys().next().value!);
+        promptOperations.set(raw.session, { generation: raw.generation, operation: raw.operation });
+      }
+    } else if (
       raw.type === 'prompt_accepted' &&
       'session' in raw &&
       typeof raw.session === 'string' &&
-      'text' in raw &&
-      typeof raw.text === 'string'
+      'prompt' in raw
     ) {
+      const submitted = promptOperations.get(raw.session);
+      if (
+        !submitted ||
+        !('operation' in raw) ||
+        raw.operation !== submitted.operation ||
+        !('generation' in raw) ||
+        raw.generation !== submitted.generation
+      )
+        return;
       pendingPrompts.delete(raw.session);
+      promptOperations.delete(raw.session);
       const text = raw.session === selected ? prompt.value : drafts.get(raw.session);
       try {
-        if (raw.text === composePrompt(text, attachmentDrafts.get(raw.session))) {
-          attachmentDrafts.set(raw.session, []);
-          drafts.set(raw.session, '');
-          if (raw.session === selected) {
-            prompt.value = '';
-            renderAttachments();
+        if (
+          'generation' in raw &&
+          raw.generation === (draftGenerations.get(raw.session) || 0) &&
+          JSON.stringify(raw.prompt) === JSON.stringify(composeDraft(raw.session, text))
+        ) {
+          if ('pi_after_seq' in raw && typeof raw.pi_after_seq === 'number') {
+            if (pendingPiDrafts.size >= 64)
+              pendingPiDrafts.delete(pendingPiDrafts.keys().next().value!);
+            pendingPiDrafts.set(raw.session, {
+              generation: raw.generation as number,
+              after: raw.pi_after_seq,
+            });
+          } else {
+            clearAcceptedDraft(raw.session);
           }
-          persist();
         }
       } catch {
         /* Changed drafts are never cleared by an older acceptance. */
@@ -1016,6 +1411,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       Array.isArray(raw.files)
     ) {
       try {
+        touchDraft();
         attachmentDrafts.set(selected || '', [
           ...attachmentDrafts.get(selected || ''),
           ...raw.files,
@@ -1090,6 +1486,15 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       }
     } else if (raw.type === 'turn_diff_error') {
       error.textContent = 'Workspace diff unavailable';
+    } else if (raw.type === 'selection_context' && 'file' in raw && selected) {
+      try {
+        attachmentDrafts.set(selected, [...attachmentDrafts.get(selected), raw.file]);
+        touchDraft();
+        persist();
+        renderAttachments();
+      } catch (failure) {
+        error.textContent = failure instanceof Error ? failure.message : 'Invalid selection';
+      }
     } else if (
       raw.type === 'draft' &&
       'text' in raw &&
@@ -1099,6 +1504,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       const next = prompt.value + `${prompt.value ? '\n\n' : ''}${raw.text}`;
       if (next.length <= prompt.maxLength) {
         prompt.value = next;
+        touchDraft();
         saveDraft();
       } else error.textContent = 'Draft is too large; selection was not appended';
       prompt.focus();
@@ -1213,6 +1619,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   }
 });
 window.addEventListener('unload', () => {
+  if (inputPreviewUrl) URL.revokeObjectURL(inputPreviewUrl);
+  inputImages.clear();
   for (const image of images.values()) URL.revokeObjectURL(image.url);
   images.clear();
   contentPages.clear();

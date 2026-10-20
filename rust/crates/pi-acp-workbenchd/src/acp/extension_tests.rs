@@ -181,6 +181,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
             &source,
             &mut details,
             &SessionConfig {
+                options: Default::default(),
                 model: Some(ModelId::new("other").unwrap()),
                 mode: Some(ModeId::new("high").unwrap()),
             },

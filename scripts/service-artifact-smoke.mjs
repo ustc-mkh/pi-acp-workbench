@@ -112,7 +112,11 @@ try {
   const created = await client.call({ method: 'create', harness: 'Pi', cwd: workspace });
   const sessionId = created.Created.summary.id;
   assert(sessionId);
-  const prompt = { method: 'prompt', session: sessionId, prompt: 'artifact-acceptance' };
+  const prompt = {
+    method: 'prompt',
+    session: sessionId,
+    prompt: { parts: [{ type: 'text', text: 'artifact-acceptance' }] },
+  };
   const reply = await client.call(prompt, 'artifact-request');
   let inspected, entries;
   await until(

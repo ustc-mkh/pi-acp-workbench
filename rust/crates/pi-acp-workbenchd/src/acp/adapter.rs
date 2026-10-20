@@ -26,7 +26,7 @@ pub enum AdapterCommand {
     },
     Prompt {
         turn: TurnId,
-        text: String,
+        text: crate::domain::Prompt,
         config: crate::domain::session::SessionConfig,
     },
     Configure {
@@ -83,6 +83,8 @@ async fn run_protocol(
     stop: CancellationToken,
 ) {
     let client = AcpClient::new(worker);
+    let mut runs = RunState::default();
+    let mut background_interactions = BTreeMap::new();
     let expected = context
         .provider_session
         .as_ref()
@@ -106,6 +108,7 @@ async fn run_protocol(
                             loaded.details,
                             initialized.agent_capabilities.metadata,
                             initialized.agent_capabilities.load_session,
+                            initialized.agent_capabilities.prompt_capabilities,
                         ))
                     }
                     None => {
@@ -115,19 +118,36 @@ async fn run_protocol(
                             created.details,
                             initialized.agent_capabilities.metadata,
                             initialized.agent_capabilities.load_session,
+                            initialized.agent_capabilities.prompt_capabilities,
                         ))
                     }
                 }
             })
             .await?;
-        let ((native, mut details, metadata, resumable), captured) = initialized;
-        let patch = captured.finish(
+        let ((native, mut details, metadata, resumable, prompt_capabilities), mut captured) =
+            initialized;
+        runs.enabled = context.session_harness == "Pi"
+            && metadata
+                .pi_workbench
+                .as_ref()
+                .is_some_and(|cap| cap.version == 1 && cap.autonomous_runs == Some(true));
+        runs.drain(
+            &mut captured,
+            &context,
+            &client,
+            &native,
+            &mut details,
+            &mut background_interactions,
+        )
+        .await?;
+        let mut patch = captured.finish(
             &mut details,
             &native,
             super::control::ControlPhase::Startup {
                 resuming: context.provider_session.is_some(),
             },
         )?;
+        patch.image_input = Some(prompt_capabilities.image);
         if context.provider_session.is_none() {
             context
                 .publish(AgentEvent::ProviderSessionAttached {
@@ -137,7 +157,7 @@ async fn run_protocol(
         }
         context.publish(AgentEvent::Catalogue(patch)).await?;
         if let Some(restore) = &context.recovery {
-            let ((), captured) = super::control::pump(
+            let ((), mut captured) = super::control::pump(
                 &client,
                 &mut updates,
                 &stop,
@@ -145,11 +165,22 @@ async fn run_protocol(
                 client.configure(&native, &mut details, restore),
             )
             .await?;
+            runs.drain(
+                &mut captured,
+                &context,
+                &client,
+                &native,
+                &mut details,
+                &mut background_interactions,
+            )
+            .await?;
             let restored = captured.finish(
                 &mut details,
                 &native,
                 super::control::ControlPhase::Configure {
-                    preferences_applied: restore.model.is_some() || restore.mode.is_some(),
+                    preferences_applied: restore.model.is_some()
+                        || restore.mode.is_some()
+                        || !restore.options.is_empty(),
                 },
             )?;
             // Clear the durable marker only with the observed restored settings.
@@ -158,9 +189,9 @@ async fn run_protocol(
                 .publish(AgentEvent::ConfigurationRestored(restored))
                 .await?;
         }
-        Ok::<_, DomainError>((native, details, metadata, resumable))
+        Ok::<_, DomainError>((native, details, metadata, resumable, prompt_capabilities))
     };
-    let (native, mut details, metadata, resumable) = match startup.await {
+    let (native, mut details, metadata, resumable, prompt_capabilities) = match startup.await {
         Ok(result) => result,
         Err(error) => {
             if !stop.is_cancelled() {
@@ -197,8 +228,12 @@ async fn run_protocol(
             _ = stop.cancelled() => break,
             event = updates.recv() => {
                 let result = match event {
-                    Some(WorkerEvent::Update(notification)) => context.notification(&native, &mut details, None, notification).await,
-                    Some(WorkerEvent::Request(request)) if request.session() == &native => client.answer(&request, InteractionResponse::Cancel).await,
+                    Some(WorkerEvent::Update(notification)) => runs.notification(&context, &native, &mut details, None, notification).await,
+                    Some(WorkerEvent::Request(request)) if request.session() == &native => {
+                        if runs.autonomous.is_some() {
+                            context.interaction(&client, &native, request, &mut background_interactions).await
+                        } else { client.answer(&request, InteractionResponse::Cancel).await }
+                    },
                     Some(WorkerEvent::Request(_)) => Err(DomainError::Protocol("request belongs to another native session".into())),
                     Some(WorkerEvent::Closed(reason)) => Err(DomainError::Worker(reason)),
                     None => Err(DomainError::Worker("worker event stream closed".into())),
@@ -214,15 +249,58 @@ async fn run_protocol(
         let Some(command) = command else {
             break;
         };
+        if runs.autonomous.is_some() {
+            match command {
+                AdapterCommand::Answer(answer) => {
+                    if let Some(request) = background_interactions.remove(&answer.interaction) {
+                        if client.answer(&request, answer.response).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                AdapterCommand::Cancel { reply } => {
+                    let result = client.cancel(native.clone()).await;
+                    for request in background_interactions.values() {
+                        let _ = client.answer(request, InteractionResponse::Cancel).await;
+                    }
+                    let _ = reply.send(result);
+                    break;
+                }
+                AdapterCommand::Models { reply, .. } => {
+                    let _ = reply.send(Err(DomainError::Busy));
+                }
+                AdapterCommand::Ready { reply } | AdapterCommand::Configure { reply, .. } => {
+                    let _ = reply.send(Err(DomainError::Busy));
+                }
+                AdapterCommand::ForkPoints { reply, .. } => {
+                    let _ = reply.send(Err(DomainError::Busy));
+                }
+                AdapterCommand::ForkNative { reply, .. } => {
+                    let _ = reply.send(Err(DomainError::Busy));
+                }
+                AdapterCommand::Prompt { .. } => { /* Already fenced by autonomous admission. */ }
+            }
+            continue;
+        }
+        background_interactions.clear();
         let (turn, text, config) = match command {
             AdapterCommand::Models { action, reply } => {
                 let result = async {
-                    let (response, captured) = super::control::pump(
+                    let (response, mut captured) = super::control::pump(
                         &client,
                         &mut updates,
                         &stop,
                         Some(&native),
                         client.models(&native, &metadata, &action),
+                    )
+                    .await?;
+                    runs.drain(
+                        &mut captured,
+                        &context,
+                        &client,
+                        &native,
+                        &mut details,
+                        &mut background_interactions,
                     )
                     .await?;
                     let patch = captured.finish(
@@ -245,14 +323,14 @@ async fn run_protocol(
             AdapterCommand::ForkPoints { reply, cancel } => {
                 let result = async {
                     if cancel.is_cancelled() { return Err(DomainError::ForkCancelled); }
-                    let (points, captured) = tokio::select! {
+                    let (points, mut captured) = tokio::select! {
                         biased;
                         result = super::control::pump(&client, &mut updates, &stop, Some(&native), client.fork_points(&native, &metadata)) => result?,
                         _ = cancel.cancelled() => return Err(DomainError::ForkCancelled),
                     };
+                    runs.drain(&mut captured, &context, &client, &native, &mut details, &mut background_interactions).await?;
                     let patch = captured.finish(
-                        &mut details,
-                        &native,
+                        &mut details, &native,
                         super::control::ControlPhase::Startup { resuming: true },
                     )?;
                     context.publish(AgentEvent::Catalogue(patch)).await?;
@@ -276,11 +354,12 @@ async fn run_protocol(
                         result = super::control::pump(&client, &mut updates, &stop, Some(&native), client.fork_native(&native, &target, &metadata)) => result,
                         _ = cancel.cancelled() => Err(DomainError::NativeForkUncertain),
                     };
-                    let (forked, captured) = response.map_err(|error| match error {
+                    let (forked, mut captured) = response.map_err(|error| match error {
                         DomainError::UnsupportedFeature(_) => error,
                         _ => DomainError::NativeForkUncertain,
                     })?;
                     let publication = async {
+                        runs.drain(&mut captured, &context, &client, &native, &mut details, &mut background_interactions).await?;
                         let patch = captured.finish(
                             &mut details,
                             &native,
@@ -316,7 +395,7 @@ async fn run_protocol(
             }
             AdapterCommand::Configure { config, reply } => {
                 let result = async {
-                    let ((), captured) = super::control::pump(
+                    let ((), mut captured) = super::control::pump(
                         &client,
                         &mut updates,
                         &stop,
@@ -324,11 +403,22 @@ async fn run_protocol(
                         client.configure(&native, &mut details, &config),
                     )
                     .await?;
+                    runs.drain(
+                        &mut captured,
+                        &context,
+                        &client,
+                        &native,
+                        &mut details,
+                        &mut background_interactions,
+                    )
+                    .await?;
                     let patch = captured.finish(
                         &mut details,
                         &native,
                         super::control::ControlPhase::Configure {
-                            preferences_applied: config.model.is_some() || config.mode.is_some(),
+                            preferences_applied: config.model.is_some()
+                                || config.mode.is_some()
+                                || !config.options.is_empty(),
                         },
                     )?;
                     context.publish(AgentEvent::Catalogue(patch)).await
@@ -340,7 +430,7 @@ async fn run_protocol(
             _ => continue,
         };
         let configured = async {
-            let ((), captured) = super::control::pump(
+            let ((), mut captured) = super::control::pump(
                 &client,
                 &mut updates,
                 &stop,
@@ -348,11 +438,22 @@ async fn run_protocol(
                 client.configure(&native, &mut details, &config),
             )
             .await?;
+            runs.drain(
+                &mut captured,
+                &context,
+                &client,
+                &native,
+                &mut details,
+                &mut background_interactions,
+            )
+            .await?;
             let patch = captured.finish(
                 &mut details,
                 &native,
                 super::control::ControlPhase::Configure {
-                    preferences_applied: config.model.is_some() || config.mode.is_some(),
+                    preferences_applied: config.model.is_some()
+                        || config.mode.is_some()
+                        || !config.options.is_empty(),
                 },
             )?;
             context.publish(AgentEvent::Catalogue(patch)).await
@@ -369,7 +470,11 @@ async fn run_protocol(
                 .await;
             break;
         }
-        let title_text: String = text.chars().take(1000).collect();
+        if runs.autonomous.is_some() || runs.rejected.as_ref() == Some(&turn) {
+            continue; // Explicit wake won while configuration was in flight.
+        }
+        runs.live = None;
+        let title_text: String = text.as_str().chars().take(1000).collect();
         let title_job = if metadata.supports_title() {
             if let Some(db) = &context.database {
                 db.title_job(context.session.clone()).await.ok().flatten()
@@ -384,7 +489,7 @@ async fn run_protocol(
         let request = async {
             submitted.store(true, std::sync::atomic::Ordering::Release);
             client
-                .prompt(native.clone(), vec![ContentBlock::text(text)])
+                .prompt(native.clone(), prompt_blocks(&text, &prompt_capabilities)?)
                 .await
         };
         tokio::pin!(request);
@@ -425,27 +530,15 @@ async fn run_protocol(
                 },
                 event = updates.recv() => match event {
                     Some(WorkerEvent::Update(notification)) => {
-                        if let Err(error) = context.notification(&native, &mut details, Some(turn.clone()), notification).await {
+                        if let Err(error) = runs.notification(&context, &native, &mut details, Some(turn.clone()), notification).await {
                             let _ = context.publish(AgentEvent::Crashed { reason: error.to_string() }).await;
                             break 'adapter;
                         }
                     }
                     Some(WorkerEvent::Request(request)) => {
-                        if request.session() != &native || interactions.len() >= context.pending_interactions {
-                            let _ = context.publish(AgentEvent::Crashed { reason: "invalid or excessive inbound interaction".into() }).await;
+                        if let Err(error) = context.interaction(&client, &native, request, &mut interactions).await {
+                            let _ = context.publish(AgentEvent::Crashed { reason: error.to_string() }).await;
                             break 'adapter;
-                        }
-                        if interactions.values().any(|existing| existing.id() == request.id()) { continue; }
-                        let id = InteractionId::generate();
-                        match request.to_domain(id.clone()) {
-                            Ok(interaction) => {
-                                if context.publish(AgentEvent::Interaction(interaction)).await.is_err() { break 'adapter; }
-                                interactions.insert(id, request);
-                            }
-                            Err(_) => {
-                                // Explicitly decline unsupported forms; never silently truncate schemas.
-                                if client.answer(&request, InteractionResponse::Decline).await.is_err() { break 'adapter; }
-                            }
                         }
                     }
                     Some(WorkerEvent::Closed(reason)) => {
@@ -460,6 +553,10 @@ async fn run_protocol(
                 result = &mut request => break result,
             }
         };
+        if runs.rejected.as_ref() == Some(&turn) {
+            background_interactions = interactions;
+            continue;
+        }
         match result {
             Ok(response) => {
                 if let Some(usage) = response.usage {
@@ -526,6 +623,157 @@ async fn run_protocol(
     }
 }
 
+/// Protocol run identities stay here; only explicit starts become domain facts.
+#[derive(Default)]
+struct RunState {
+    enabled: bool,
+    finished: bool,
+    live: Option<crate::domain::ProviderMessageId>,
+    autonomous: Option<TurnId>,
+    rejected: Option<TurnId>,
+}
+impl RunState {
+    async fn drain(
+        &mut self,
+        captured: &mut super::control::ControlUpdates,
+        context: &AdapterContext,
+        client: &AcpClient,
+        native: &super::NativeSessionId,
+        details: &mut super::settings::SessionDetails,
+        interactions: &mut BTreeMap<InteractionId, InboundRequest>,
+    ) -> Result<(), DomainError> {
+        for event in std::mem::take(&mut captured.live) {
+            match event {
+                WorkerEvent::Update(notification) => {
+                    self.notification(context, native, details, None, notification)
+                        .await?
+                }
+                WorkerEvent::Request(request) if self.autonomous.is_some() => {
+                    context
+                        .interaction(client, native, request, interactions)
+                        .await?
+                }
+                WorkerEvent::Request(request) => {
+                    client.answer(&request, InteractionResponse::Cancel).await?
+                }
+                WorkerEvent::Closed(reason) => return Err(DomainError::Worker(reason)),
+            }
+        }
+        Ok(())
+    }
+    async fn notification(
+        &mut self,
+        context: &AdapterContext,
+        native: &super::NativeSessionId,
+        details: &mut super::settings::SessionDetails,
+        prompt: Option<TurnId>,
+        mut notification: super::SessionNotification,
+    ) -> Result<(), DomainError> {
+        if &notification.session_id != native {
+            return Err(DomainError::Protocol(
+                "notification belongs to another native session".into(),
+            ));
+        }
+        if let SessionUpdate::PiRun(run) = notification.update {
+            if !self.enabled {
+                return Ok(());
+            }
+            if run.running {
+                if self.live.as_ref() == Some(&run.id)
+                    && (self.finished || !run.autonomous || self.autonomous.is_some())
+                {
+                    return Ok(());
+                }
+                if run.autonomous {
+                    let view = context
+                        .registry
+                        .command(crate::domain::command::DomainCommand::Inspect(
+                            context.session.clone(),
+                        ))
+                        .await?;
+                    self.rejected = prompt
+                        .clone()
+                        .or_else(|| view.view().and_then(|v| v.active_turn.clone()));
+                    if let Some(reviews) = &context.reviews {
+                        reviews.reject_input(&context.session).await?;
+                    }
+                    let turn = TurnId::generate();
+                    if let Some(database) = &context.database {
+                        database.save_turn_diff(context.session.clone(), turn.clone(), crate::workspace_review::TurnDiff {
+                            status: crate::workspace_review::DiffStatus::Unavailable, files: vec![],
+                            warnings: vec!["Autonomous start is reported after execution began; no whole-run workspace baseline.".into()],
+                            added: 0, removed: 0, next_offset: None,
+                        }).await.map_err(|e| DomainError::Persistence(e.to_string()))?;
+                    }
+                    context
+                        .publish(AgentEvent::AutonomousStarted { turn: turn.clone() })
+                        .await?;
+                    self.autonomous = Some(turn);
+                }
+                self.live = Some(run.id);
+                self.finished = false;
+            } else if self.live.as_ref() == Some(&run.id) && !self.finished {
+                self.finished = true;
+                if self.autonomous.is_some() || prompt.is_some() {
+                    if let Some(usage) = run.usage {
+                        context
+                            .publish(AgentEvent::Usage {
+                                input_tokens: usage.input_tokens,
+                                output_tokens: usage.output_tokens,
+                                cache_read_tokens: usage.cached_read_tokens,
+                                cache_write_tokens: usage.cached_write_tokens,
+                            })
+                            .await?;
+                    }
+                }
+                if let Some(turn) = self.autonomous.take() {
+                    if run.error.is_some() {
+                        context
+                            .publish(AgentEvent::Crashed {
+                                reason: "Pi autonomous run failed (provider details withheld)"
+                                    .into(),
+                            })
+                            .await?;
+                    } else if run.cancelled {
+                        // Provider-confirmed cancellation; no host-side stop is necessary.
+                        context.publish(AgentEvent::Cancelled { turn }).await?;
+                    } else {
+                        context.publish(AgentEvent::Finished { turn }).await?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if let SessionUpdate::PiLive { id, update } = notification.update {
+            if self.live.as_ref() != Some(&id) {
+                return Ok(());
+            }
+            if self.finished {
+                // Stats settle asynchronously after the explicit finish. They
+                // update occupancy only, never append text or inference usage.
+                if let SessionUpdate::Usage { used, size } = *update {
+                    context
+                        .publish(AgentEvent::ContextUsage { used, size })
+                        .await?;
+                }
+                return Ok(());
+            }
+            notification.update = *update;
+        } else if self.autonomous.is_some() {
+            // No run identity means no evidence this belongs to the autonomous run.
+            return Ok(());
+        }
+        context
+            .notification(
+                native,
+                details,
+                self.autonomous.clone().or(prompt),
+                notification,
+            )
+            .await
+    }
+}
+
 #[derive(Clone)]
 pub struct AdapterContext {
     pub session: SessionId,
@@ -552,6 +800,38 @@ impl Drop for TitlePin {
     }
 }
 impl AdapterContext {
+    async fn interaction(
+        &self,
+        client: &AcpClient,
+        native: &super::NativeSessionId,
+        request: InboundRequest,
+        interactions: &mut BTreeMap<InteractionId, InboundRequest>,
+    ) -> Result<(), DomainError> {
+        if request.session() != native || interactions.len() >= self.pending_interactions {
+            return Err(DomainError::Protocol(
+                "invalid or excessive inbound interaction".into(),
+            ));
+        }
+        if interactions
+            .values()
+            .any(|existing| existing.id() == request.id())
+        {
+            return Ok(());
+        }
+        let id = InteractionId::generate();
+        match request.to_domain(id.clone()) {
+            Ok(interaction) => {
+                self.publish(AgentEvent::Interaction(interaction)).await?;
+                interactions.insert(id, request);
+            }
+            Err(_) => {
+                client
+                    .answer(&request, InteractionResponse::Decline)
+                    .await?
+            }
+        }
+        Ok(())
+    }
     async fn notification(
         &self,
         native: &super::NativeSessionId,
@@ -699,4 +979,55 @@ pub fn update_to_agent(
         })),
         _ => None,
     })
+}
+
+fn prompt_blocks(
+    prompt: &crate::domain::Prompt,
+    capabilities: &super::dto::PromptCapabilities,
+) -> Result<Vec<ContentBlock>, DomainError> {
+    use super::content::{EmbeddedResource, KnownContent};
+    use crate::domain::ids::PromptPart;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    prompt
+        .parts()
+        .iter()
+        .map(|part| {
+            Ok(match part {
+                PromptPart::Text { text } => ContentBlock::text(text),
+                PromptPart::Context { id, name, text } => {
+                    if capabilities.embedded_context {
+                        ContentBlock::Known(KnownContent::Resource {
+                            resource: EmbeddedResource::Text {
+                                uri: format!("workbench-context:{id}"),
+                                text: format!(
+                                    "Explicit context: {name}
+
+{text}"
+                                ),
+                                mime_type: Some("text/plain".into()),
+                            },
+                        })
+                    } else {
+                        ContentBlock::text(format!(
+                            "Explicit context [{id}]: {name}
+
+{text}"
+                        ))
+                    }
+                }
+                PromptPart::Image { asset } => {
+                    if !capabilities.image {
+                        return Err(DomainError::Protocol(
+                            "provider does not support image input".into(),
+                        ));
+                    }
+                    ContentBlock::Known(KnownContent::Image {
+                        data: STANDARD.encode(asset.bytes()),
+                        mime_type: asset.image().mime().as_str().into(),
+                        uri: None,
+                    })
+                }
+            })
+        })
+        .collect()
 }

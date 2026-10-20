@@ -318,9 +318,21 @@ fn create_local(
         params![ticket.operation.as_str(), ticket.fingerprint.0],
     )
     .map_err(failure)?;
-    let created = super::query::insert_view(&tx, view).map_err(failure)?;
+    let mut view = view.clone();
+    let saved: Option<String> = tx
+        .query_row(
+            "SELECT config_json FROM provider_preferences WHERE harness=?1",
+            [super::query::harness_name(&view.harness)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failure)?;
+    if let Some(saved) = saved {
+        view.config = serde_json::from_str(&saved).map_err(failure)?;
+    }
+    let created = super::query::insert_view(&tx, &view).map_err(failure)?;
     let receipt = CommandReceipt::Created {
-        summary: super::query::summary(view, created),
+        summary: super::query::summary(&view, created),
     };
     finish_in_transaction(&tx, &ticket, &Ok(receipt.clone()))?;
     tx.commit().map_err(failure)?;

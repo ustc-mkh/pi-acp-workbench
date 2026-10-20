@@ -75,6 +75,20 @@ fn validate_config(view: &SessionView, config: &SessionConfig) -> Result<(), Dom
             "mode is not in provider catalogue".into(),
         ));
     }
+    for (id, value) in &config.options {
+        if !view.catalogue.selects.iter().any(|s| {
+            &s.id == id
+                && s.category.as_deref() != Some("model")
+                && s.category.as_deref() != Some("mode")
+                && s.id != "model"
+                && s.id != "mode"
+                && s.choices.iter().any(|c| &c.value == value)
+        }) {
+            return Err(DomainError::Protocol(
+                "setting is not offered by provider".into(),
+            ));
+        }
+    }
     Ok(())
 }
 fn notice(change: &mut Transition, text: String) -> Result<(), DomainError> {
@@ -119,6 +133,7 @@ pub fn transition(
         | DomainCommand::AnswerInteraction { session, .. }
         | DomainCommand::SetModel { session, .. }
         | DomainCommand::SetMode { session, .. }
+        | DomainCommand::SetOption { session, .. }
         | DomainCommand::PrepareConfiguration { session, .. }
         | DomainCommand::CommitConfiguration { session }
         | DomainCommand::Agent { session, .. } => session,
@@ -141,7 +156,8 @@ pub fn transition(
             AgentEvent::Text { turn, .. }
             | AgentEvent::Image { turn, .. }
             | AgentEvent::Thought { turn, .. }
-            | AgentEvent::Finished { turn } => Some(turn),
+            | AgentEvent::Finished { turn }
+            | AgentEvent::Cancelled { turn } => Some(turn),
             AgentEvent::ToolCall(update) => Some(&update.turn),
             _ => None,
         };
@@ -156,6 +172,8 @@ pub fn transition(
                     | AgentEvent::ProviderSessionAttached { .. }
                     | AgentEvent::ConfigurationRestored(_)
                     | AgentEvent::AvailableCommands(_)
+                    | AgentEvent::AutonomousStarted { .. }
+                    | AgentEvent::ContextUsage { .. }
             )
         {
             return Ok(None);
@@ -192,17 +210,23 @@ pub fn transition(
             // until this turn actually reports usage, never copied from here.
             change.next.usage.reported = false;
             change.next.status = SessionStatus::Running;
-            change.append.push(entry(
-                turn,
-                EntryRole::User,
-                prompt.as_str().to_owned(),
-                None,
-                None,
-            )?);
+            for part in prompt.parts() {
+                let (text, image) = match part {
+                    PromptPart::Text { text } => (text.clone(), None),
+                    PromptPart::Context { id, name, text } => {
+                        (format!("Explicit context [{id}]: {name}\n\n{text}"), None)
+                    }
+                    PromptPart::Image { asset } => (String::new(), Some(asset.clone())),
+                };
+                change
+                    .append
+                    .push(entry(turn.clone(), EntryRole::User, text, None, image)?);
+            }
         }
         DomainCommand::RequestCancel { .. } => {
             if view.active_turn.is_none() {
-                return Err(DomainError::NoActiveTurn);
+                // Still fences the attached worker in the owner; idle Pi may wake.
+                return Ok(None);
             }
             if matches!(view.status, SessionStatus::Cancelling) {
                 return Ok(None);
@@ -210,11 +234,9 @@ pub fn transition(
             change.next.status = SessionStatus::Cancelling;
         }
         DomainCommand::Cancel { .. } => {
-            let turn = change
-                .next
-                .active_turn
-                .take()
-                .ok_or(DomainError::NoActiveTurn)?;
+            let Some(turn) = change.next.active_turn.take() else {
+                return Ok(None); // Receipt-only stop of an idle background worker.
+            };
             change.next.pending_interactions.clear();
             change.next.status = SessionStatus::Idle;
             change.next.revision = next_revision()?;
@@ -248,6 +270,16 @@ pub fn transition(
                     "provider setting has no known recovery baseline".into(),
                 ));
             }
+            if intent
+                .requested
+                .options
+                .keys()
+                .any(|id| !intent.restore.options.contains_key(id))
+            {
+                return Err(DomainError::Protocol(
+                    "provider setting has no recovery baseline".into(),
+                ));
+            }
             change.next.configuration_intent = Some(intent);
         }
         DomainCommand::CommitConfiguration { .. } => {
@@ -263,6 +295,7 @@ pub fn transition(
                 view.catalogue.current_model.as_ref(),
                 view.catalogue.current_mode.as_ref(),
             )?;
+            validate_options(&intent.requested, &view.catalogue.selects)?;
             change.next.config = intent.requested.clone();
             change.next.configuration_intent = None;
         }
@@ -275,6 +308,11 @@ pub fn transition(
             validate_config(view, &config)?;
             change.next.config = config;
         }
+        DomainCommand::SetOption { .. } => {
+            return Err(DomainError::Protocol(
+                "provider setting requires observed configuration".into(),
+            ))
+        }
         DomainCommand::SetMode { mode, .. } => {
             if view.active_turn.is_some() || view.configuration_intent.is_some() {
                 return Err(DomainError::Busy);
@@ -285,6 +323,33 @@ pub fn transition(
             change.next.config = config;
         }
         DomainCommand::Agent { event, .. } => match event {
+            AgentEvent::AutonomousStarted { turn } => {
+                if view.configuration_intent.is_some() {
+                    return Err(DomainError::Busy);
+                }
+                if let Some(rejected) = &view.active_turn {
+                    change.append.push(entry(rejected.clone(), EntryRole::Agent,
+                        "Pi autonomous run won admission; input was not sent. Retry the preserved draft after the run finishes.".into(),
+                        Some(ProviderMessageId::new("pi-workbench-input-rejected")?), None)?);
+                    change.next.pending_interactions.clear();
+                }
+                change.next.active_turn = Some(turn.clone());
+                change.next.usage.reported = false;
+                change.next.plan = Default::default();
+                change.next.status = SessionStatus::Running;
+                change.append.push(entry(
+                    turn, EntryRole::Agent,
+                    "Pi autonomous run. Workspace Diff unavailable: start was reported after execution began. Background wakeups pin this worker until stopped; idle does not prove there is no pending work.".into(),
+                    None, None,
+                )?);
+            }
+            AgentEvent::Cancelled { turn } => {
+                change.next.active_turn = None;
+                change.next.pending_interactions.clear();
+                change.next.status = SessionStatus::Idle;
+                change.next.revision = next_revision()?;
+                notice(&mut change, format!("Turn {turn} cancelled."))?;
+            }
             AgentEvent::ConfigurationRestored(patch) => {
                 let Some(intent) = &view.configuration_intent else {
                     return Ok(None);
@@ -294,6 +359,7 @@ pub fn transition(
                     patch.current_model.as_ref(),
                     patch.current_mode.as_ref(),
                 )?;
+                validate_options(&intent.restore, patch.selects.as_deref().unwrap_or(&[]))?;
                 change.next.catalogue.apply(patch);
                 change.next.configuration_intent = None;
             }
@@ -442,20 +508,43 @@ pub fn transition(
     )
     .map_err(invalid)?;
     change.next.validate().map_err(invalid)?;
-    if let Some(input) = change
+    let inputs: Vec<_> = change
         .append
         .iter()
-        .find(|entry| entry.role == EntryRole::User)
-    {
+        .enumerate()
+        .filter(|(_, entry)| entry.role == EntryRole::User)
+        .map(|(index, entry)| (index, entry.turn.clone(), entry.id.clone()))
+        .collect();
+    for (index, turn, entry) in inputs {
         let payload = DeliveryPayload::Input {
             session: change.next.id.clone(),
-            turn: input.turn.clone(),
-            entry: input.id.clone(),
-            seq: change.next.last_entry_seq,
+            turn: turn.clone(),
+            entry,
+            seq: SafeInteger::new(view.last_entry_seq.get() + index as u64 + 1).map_err(invalid)?,
             origin: None,
         };
-        let id = DeliveryId::new(format!("input-{}", input.turn))?;
+        let id = DeliveryId::new(if index == 0 {
+            format!("input-{turn}")
+        } else {
+            format!("input-{turn}-part-{index}")
+        })?;
         delivery(&mut change, id, payload);
     }
     Ok(Some(change))
+}
+
+fn validate_options(
+    config: &SessionConfig,
+    selects: &[crate::domain::catalogue::SelectSetting],
+) -> Result<(), DomainError> {
+    if config.options.iter().any(|(id, value)| {
+        !selects
+            .iter()
+            .any(|s| &s.id == id && &s.current_value == value)
+    }) {
+        return Err(DomainError::Protocol(
+            "provider did not confirm requested select value".into(),
+        ));
+    }
+    Ok(())
 }

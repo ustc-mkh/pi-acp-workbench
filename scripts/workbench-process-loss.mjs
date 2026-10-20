@@ -112,6 +112,8 @@ try {
             args: [peer, name],
             env: {
               WORKBENCH_CONTRACT_PROVIDER: name,
+              WORKBENCH_CONTRACT_TYPED_SETTINGS: '1',
+              WORKBENCH_CONTRACT_CONFIG_GATE: join(directory, 'configure-gate'),
               WORKBENCH_CONTRACT_WRITE_ON_PERMISSION: workspaceFile,
               WORKBENCH_CONTRACT_TRACE: trace,
               WORKBENCH_CONTRACT_NATIVE_STATE: join(directory, 'native'),
@@ -152,7 +154,10 @@ try {
     const noOpRows = operationRecords(data, noOpOperation);
     const noOpReceipt = JSON.parse(noOpRows[0].result.toString('utf8')).Ok;
     let finished = client.waitFor((batch) => turnFinished(batch, session));
-    await client.call({ method: 'prompt', session, prompt: 'image-output' }, `image-${name}`);
+    await client.call(
+      { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'image-output' }] } },
+      `image-${name}`,
+    );
     await finished;
     let snapshot = await client.call({ method: 'inspect', session });
     const image = (await client.call({ method: 'history', session })).entries.find(
@@ -161,7 +166,11 @@ try {
     assert(image, 'committed image fixture reference');
     const imageAsset = await client.call({ method: 'image', image });
     const operation = `accepted-before-kill-${name}`;
-    const command = { method: 'prompt', session, prompt: 'permission' };
+    const command = {
+      method: 'prompt',
+      session,
+      prompt: { parts: [{ type: 'text', text: 'permission' }] },
+    };
     const interaction = client.waitFor(
       (batch) =>
         batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
@@ -252,7 +261,7 @@ try {
     await client.call({ method: 'attach', session });
     finished = client.waitFor((batch) => turnFinished(batch, session));
     await client.call(
-      { method: 'prompt', session, prompt: 'worker-profile' },
+      { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'worker-profile' }] } },
       `explicit-after-kill-${name}`,
     );
     await finished;
@@ -270,15 +279,83 @@ try {
       1,
     );
     assert(records.some((entry) => entry.method === 'session/load' && entry.sessionId === native));
+    // P2: remote configuration applied, but its reply/settlement is held.
+    // Killing the actual host must retain the original uncertain identity;
+    // cold recovery never resends the setting or saves it as a new default.
+    const settingOperation = `uncertain-thinking-${name}`;
+    const uncertain = client
+      .call({ method: 'set_option', session, id: 'thought_level', value: 'high' }, settingOperation)
+      .then(
+        () => 'unexpected-success',
+        () => 'disconnected',
+      );
+    await until(async () => {
+      try {
+        await lstat(join(directory, 'configure-gate.started'));
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'remote configure barrier');
+    assert((await client.call({ method: 'inspect', session })).configuration_intent);
+    const configureInode = await lstat(socket);
+    host.kill('SIGKILL');
+    await host.done;
+    client.close();
+    client = undefined;
+    assert.equal(await uncertain, 'disconnected');
+    // This deliberately gated fixture peer owns a timer. Explicitly clean only
+    // its verified test process group, never claim arbitrary agent EOF cleanup.
+    const configureWorker = (await traces(trace))
+      .filter((entry) => entry.method === 'boot')
+      .at(-1).pid;
+    const workerEnv = await readFile(`/proc/${configureWorker}/environ`, 'utf8');
+    assert(workerEnv.split('\0').includes(`WORKBENCH_CONTRACT_TRACE=${trace}`));
+    process.kill(-configureWorker, 'SIGKILL');
+    await until(() => exited(configureWorker), 'gated fixture peer cleanup');
+    const configureStale = await lstat(socket);
+    assert(
+      configureStale.isSocket() &&
+        configureStale.ino === configureInode.ino &&
+        configureStale.dev === configureInode.dev,
+    );
+    await unlink(socket);
+    host = launch(config, home);
+    await ready(host);
+    client = await WorkbenchWire.open(socket);
+    const beforeRecovery = await readFile(trace, 'utf8');
+    assert.equal(
+      (await client.call({ method: 'operation', operation: settingOperation })).status,
+      'uncertain',
+    );
+    assert((await client.call({ method: 'inspect', session })).configuration_intent);
+    assert.equal(await readFile(trace, 'utf8'), beforeRecovery);
+    await client.call({ method: 'discover', session });
+    assert.equal((await client.call({ method: 'inspect', session })).configuration_intent, null);
+    assert.equal(
+      (await traces(trace)).filter(
+        (entry) =>
+          entry.method === 'session/set_config_option' &&
+          entry.configId === 'thought_level' &&
+          entry.value === 'high',
+      ).length,
+      1,
+    );
+    const newSession = (await client.call({ method: 'create', harness, cwd: directory })).Created
+      .summary.id;
+    assert.equal(
+      (await client.call({ method: 'inspect', session: newSession })).config.options?.thought_level,
+      undefined,
+    );
     client.close();
     client = undefined;
     await stop(host);
     console.log(
-      `ok   ${harness}: real SIGKILL, stale-socket refusal, explicit fixture cleanup, cold recovery, immutable replay/image and same-native continuation`,
+      `ok   ${harness}: real SIGKILL, stale-socket refusal, explicit fixture cleanup, cold recovery, immutable replay/image, same-native continuation and uncertain configure without resend/default poisoning`,
     );
   }
   console.log(
-    '3 real host process-loss checks passed (synthetic EOF-exiting peers; no live model/Bot, no automatic stale-socket recovery, not soak)',
+    '3 real host process-loss checks passed (synthetic peers; gated setting peers require verified fixture process-group cleanup; no live model/Bot, automatic stale-socket recovery or soak)',
   );
 } finally {
   client?.close();

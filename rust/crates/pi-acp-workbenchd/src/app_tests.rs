@@ -7,6 +7,8 @@ use crate::{
     },
 };
 use std::{path::PathBuf, time::Duration};
+#[path = "app_autonomous_tests.rs"]
+mod autonomous_tests;
 #[path = "app_cancel_tests.rs"]
 mod cancel_tests;
 #[path = "app_config_tests.rs"]
@@ -37,6 +39,8 @@ mod query_tests;
 mod registry_tests;
 #[path = "app_replay_tests.rs"]
 mod replay_tests;
+#[path = "app_typed_input_tests.rs"]
+mod typed_input_tests;
 #[path = "app_workspace_review_tests.rs"]
 mod workspace_review_tests;
 fn app() -> (WorkbenchApp, PathBuf) {

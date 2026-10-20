@@ -20,13 +20,20 @@ interface Session {
     abort(): Promise<void>;
   };
   emit(update: unknown): void;
-  publishContextUsage(): Promise<void>;
+  publishContextUsage(runId?: string): Promise<void>;
   startTurn(turn: Turn): void;
 }
 interface Run {
   id: string;
   autonomous: boolean;
   userStarted?: boolean;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedReadTokens: number;
+    cachedWriteTokens: number;
+  };
+  usageInvalid?: boolean;
 }
 interface State {
   run?: Run;
@@ -54,6 +61,7 @@ function lifecycle(
         autonomous: run.autonomous,
         running,
         cancelled,
+        ...(!running && run.usage && !run.usageInvalid ? { usage: run.usage } : {}),
         ...(error ? { error } : {}),
       },
     },
@@ -97,7 +105,9 @@ export function piRunBusy(session: Session) {
 }
 export function piLiveUpdate(session: Session, update: Record<string, any>) {
   const run = state(session).run;
-  return run ? { ...update, _meta: { ...update._meta, 'pi-workbench-live': run.id } } : update;
+  return run && !update._meta?.['pi-workbench-live']
+    ? { ...update, _meta: { ...update._meta, 'pi-workbench-live': run.id } }
+    : update;
 }
 export function piMessageId(session: Session) {
   return state(session).messageId;
@@ -139,6 +149,27 @@ export function handlePiRunEvent(session: Session, event: Record<string, any>): 
       value.run.userStarted = true;
     if (event.message?.role === 'assistant') value.messageId = randomUUID();
   }
+  if (event.type === 'message_end' && event.message?.role === 'assistant' && value.run) {
+    const run = value.run;
+    const usage = event.message.usage;
+    const total = (run.usage ??= {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedReadTokens: 0,
+      cachedWriteTokens: 0,
+    });
+    for (const [source, target] of [
+      ['input', 'inputTokens'],
+      ['output', 'outputTokens'],
+      ['cacheRead', 'cachedReadTokens'],
+      ['cacheWrite', 'cachedWriteTokens'],
+    ] as const) {
+      const count = usage?.[source];
+      if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(total[target] + count))
+        run.usageInvalid = true;
+      else total[target] += count;
+    }
+  }
   if (
     event.type === 'message_end' &&
     event.message?.role === 'custom' &&
@@ -178,7 +209,7 @@ export async function settlePiRun(session: Session, internalError: (message: str
   value.settling++;
   if (run) lifecycle(session, run, false, error, cancelled);
   try {
-    await session.publishContextUsage();
+    await session.publishContextUsage(run?.id);
     if (error && !cancelled) turn?.reject(internalError(error));
     else turn?.resolve(cancelled ? 'cancelled' : 'end_turn');
   } finally {

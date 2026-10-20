@@ -82,6 +82,26 @@ pub fn status(snapshot: &SessionView) -> String {
             .map(|id| id.as_str())
             .unwrap_or("default")
     );
+    for setting in &snapshot.catalogue.selects {
+        text.push_str(&format!(
+            "\n{} [{}]: {}\n/setting {} VALUE · choices: {}\n",
+            setting.name,
+            setting.id,
+            setting.current_value,
+            setting.id,
+            setting
+                .choices
+                .iter()
+                .map(|c| c.value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    text.push_str(if snapshot.catalogue.image_input {
+        "\nProvider image input: supported (desktop input)\n"
+    } else {
+        "\nProvider image input: unavailable or not discovered\n"
+    });
     if !snapshot.plan.items.is_empty() {
         text.push_str("\nPlan:\n");
         for item in &snapshot.plan.items {

@@ -22,7 +22,6 @@ import { validRecord, validPrice } from './telemetry';
 import { fastConfig } from './pi-fast-config';
 import { refreshPiModels } from './pi-context-config';
 import { generatePiTitle } from './pi-title';
-import { usageCursor, appendedUsage } from './pi-turn-usage';
 type ModelResponse = {
   models: {
     model: string;
@@ -107,24 +106,9 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         if (turn.cancelled) return { stopReason: 'cancelled' };
         // The pinned adapter checks this guard after its own restore await and
         // at startTurn, before clearing cancelRequested or sending to Pi.
-        const cursor = await usageCursor((await session.proc.getState()).sessionFile).catch(
-          () => undefined,
-        );
-        const response = await super.prompt(params, () => turn.cancelled);
-        const usage = await appendedUsage(cursor).catch(() => undefined);
-        return usage
-          ? {
-              ...response,
-              usage: {
-                ...usage,
-                totalTokens:
-                  usage.inputTokens +
-                  usage.outputTokens +
-                  usage.cachedReadTokens +
-                  usage.cachedWriteTokens,
-              },
-            }
-          : response;
+        // Usage is emitted with the explicit run finish. A native-file tail
+        // can already contain a later autonomous wake and must not be billed here.
+        return await super.prompt(params, () => turn.cancelled);
       } catch (error) {
         if (
           error instanceof Error &&

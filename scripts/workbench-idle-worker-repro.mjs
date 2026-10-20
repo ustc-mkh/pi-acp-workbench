@@ -73,7 +73,10 @@ try {
     const text = `worker-slot-${index}`;
     const finished = wire.waitFor((batch) => turnFinished(batch, session));
     const operation = `worker-slot-operation-${index}`;
-    const receipt = await call({ method: 'prompt', session, prompt: text }, operation);
+    const receipt = await call(
+      { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: text }] } },
+      operation,
+    );
     assert(receipt.Accepted, `input ${index} must be accepted exactly once`);
     await finished;
     const state = await call({ method: 'inspect', session });

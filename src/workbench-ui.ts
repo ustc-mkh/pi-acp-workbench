@@ -41,6 +41,8 @@ import type { WorkbenchSessionView } from './workbench-session';
 
 // Only user-originated commands; no internal event/ACP request or caller-selected operation ID.
 export const uiCommand = tagged('type', {
+  open_link: object({ type: literal('open_link'), url: string }),
+  login: object({ type: literal('login') }),
   copy_message: object({ type: literal('copy_message'), session: sessionId, entry: entryId }),
   configure_telegram: object({ type: literal('configure_telegram') }),
   read_management: object({
@@ -56,7 +58,12 @@ export const uiCommand = tagged('type', {
   refresh: object({ type: literal('refresh'), cursor: optional(listCursor) }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
-  execute: object({ type: literal('execute'), session: sessionId, command: clientCommand }),
+  execute: object({
+    type: literal('execute'),
+    session: sessionId,
+    command: clientCommand,
+    generation: optional(uint),
+  }),
   cancel_fork: object({ type: literal('cancel_fork'), operation: operationId }),
   open_turn_diff: object({
     type: literal('open_turn_diff'),
@@ -123,7 +130,15 @@ export type WorkbenchUiMessage =
   | { type: 'management'; request_id: number; data: import('./workbench-protocol').ManagementData }
   | { type: 'management_error'; request_id: number; error: string }
   | { type: 'state'; sequence: number; state: WorkbenchUiState }
-  | { type: 'prompt_accepted'; session: string; text: string }
+  | { type: 'prompt_submitted'; session: string; operation: OperationId; generation?: number }
+  | {
+      type: 'prompt_accepted';
+      session: string;
+      operation: OperationId;
+      prompt: import('./workbench-input').TypedPrompt;
+      generation?: number;
+      pi_after_seq?: number;
+    }
   | { type: 'attachments'; session: string; files: import('./workbench-input').TextAttachment[] }
   | {
       type: 'turn_diff';

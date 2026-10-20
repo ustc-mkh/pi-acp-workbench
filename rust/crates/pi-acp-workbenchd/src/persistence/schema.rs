@@ -16,6 +16,7 @@ const TABLES: &[&str] = &[
     "session_metadata",
     "naming_settings",
     "model_settings",
+    "provider_preferences",
     "usage_facts",
     "turn_diffs",
     "contents",
@@ -124,6 +125,7 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     for statement in [
         "SELECT session,title,source,attempted FROM session_metadata LIMIT 0",
         "SELECT policy,model FROM naming_settings WHERE id=1",
+        "SELECT harness,config_json FROM provider_preferences LIMIT 0",
         "SELECT harness,model,hidden,price,default_price,context_window FROM model_settings LIMIT 0",
         "SELECT id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source FROM usage_facts LIMIT 0",
     ] {

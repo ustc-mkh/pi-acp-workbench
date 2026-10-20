@@ -61,7 +61,7 @@
       },
       {
         "command": "piAcp.login",
-        "title": "Pi Workbench: Provider Login Instructions"
+        "title": "Pi Workbench: Provider Login"
       },
       {
         "command": "piAcp.logs",

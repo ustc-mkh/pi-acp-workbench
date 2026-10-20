@@ -117,6 +117,7 @@ impl SessionView {
             usage: Default::default(),
             configuration_intent: None,
             config: SessionConfig {
+                options: Default::default(),
                 model: None,
                 mode: None,
             },
@@ -137,6 +138,15 @@ impl SessionView {
             if let Some(expiry) = item.expires_at {
                 SafeInteger::new(expiry)?;
             }
+        }
+        super::catalogue::SelectSetting::validate_all(&self.catalogue.selects)
+            .map_err(|_| QueryError::InvalidInput)?;
+        if self.config.options.len() > 32
+            || self.config.options.iter().any(|(id, value)| {
+                id.is_empty() || id.len() > 200 || value.is_empty() || value.len() > 200
+            })
+        {
+            return Err(QueryError::InvalidInput);
         }
         let usage = &self.usage;
         for n in [
@@ -254,6 +264,18 @@ pub struct EntryHeader {
     pub message: Option<ProviderMessageId>,
     pub text: TextBody,
     pub image: Option<ImageRef>,
+}
+impl EntryHeader {
+    /// Same projection contract as desktop/export: identity is never guessed.
+    pub fn continues_message(&self, next: &Self) -> bool {
+        self.message.is_some()
+            && self.message == next.message
+            && self.turn == next.turn
+            && self.role == next.role
+            && self.seq.get().checked_add(1) == Some(next.seq.get())
+            && self.image.is_none()
+            && next.image.is_none()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

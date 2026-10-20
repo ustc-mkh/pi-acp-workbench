@@ -115,6 +115,7 @@ impl RegistryState {
             | DomainCommand::PrepareFork { session, .. }
             | DomainCommand::SetModel { session, .. }
             | DomainCommand::SetMode { session, .. }
+            | DomainCommand::SetOption { session, .. }
             | DomainCommand::PrepareConfiguration { session, .. }
             | DomainCommand::CommitConfiguration { session }
             | DomainCommand::Agent { session, .. } => Some(session),
@@ -307,6 +308,7 @@ impl RegistryState {
                     | DomainCommand::PrepareFork { session, .. }
                     | DomainCommand::SetModel { session, .. }
                     | DomainCommand::SetMode { session, .. }
+                    | DomainCommand::SetOption { session, .. }
                     | DomainCommand::PrepareConfiguration { session, .. }
                     | DomainCommand::CommitConfiguration { session }
                     | DomainCommand::Agent { session, .. } => session.clone(),

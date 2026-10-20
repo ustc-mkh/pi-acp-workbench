@@ -45,9 +45,12 @@ it('rejects oversized, invalid UTF-8 and binary files without partial attachment
 });
 it('composes explicit context within Unicode budgets and preserves attachments across reload', () => {
   const file = { id: 'f', name: 'source.ts', text: '你好' };
-  expect(composePrompt('Review', [file])).toBe(
-    'Review\n\nExplicit file attachment: source.ts\n\n你好',
-  );
+  expect(composePrompt('Review', [file])).toEqual({
+    parts: [
+      { type: 'text', text: 'Review' },
+      { type: 'context', ...file },
+    ],
+  });
   expect(() => composePrompt('x'.repeat(100001), [])).toThrow('budget');
   expect(() =>
     composePrompt(

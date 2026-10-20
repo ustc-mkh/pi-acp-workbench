@@ -92,6 +92,30 @@ async fn inbound_large_non_media_frames_are_rejected_at_the_original_text_limit(
     worker.stop().await;
 }
 
+#[tokio::test]
+async fn maximum_input_image_and_unicode_request_cross_real_stdio_with_bounded_media_envelope() {
+    let supervisor = supervisor("node", vec!["-e".into(), "require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{stopReason:'end_turn',bytes:Buffer.from(r.params.prompt.find(p=>p.type==='image').data,'base64').length}})+'\\n');});".into()]);
+    let (tx, _) = mpsc::channel(1);
+    let worker = supervisor.spawn(SessionId::generate(), tx).await.unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let mut raw = png.into_inner();
+    raw.resize(crate::domain::image::MAX_IMAGE_BYTES, 0);
+    // The input sanitizer strips these trailing bytes; this lower codec test
+    // independently proves that a maximum bounded ACP image request is writable.
+    let request = |data: &[u8]| {
+        crate::acp::JsonRpcRequest::new(crate::acp::RequestId::String("image-budget".into()), "session/prompt", json!({"sessionId":"native","prompt":[{"type":"text","text":"中🌏".repeat(50000)},{"type":"image","mimeType":"image/png","data":STANDARD.encode(data)}]})).unwrap()
+    };
+    let response = worker.request(request(&raw)).await.unwrap();
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["result"]["bytes"], raw.len());
+    raw.push(0);
+    assert!(worker.request(request(&raw)).await.is_err());
+    worker.stop().await;
+}
+
 #[test]
 fn maximum_prompt_unicode_and_json_escaping_fit_the_non_media_lane() {
     for scalar in ['中', '😀', '\u{0001}'] {

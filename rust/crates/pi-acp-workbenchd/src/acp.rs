@@ -60,6 +60,26 @@ pub fn decode_update(raw: Value) -> Result<SessionUpdate, DomainError> {
         .get("sessionUpdate")
         .and_then(Value::as_str)
         .ok_or_else(|| DomainError::Protocol("sessionUpdate missing".into()))?;
+    if name == "session_info_update" {
+        if let Some(run) = update.pointer("/_meta/pi-workbench-run") {
+            return serde_json::from_value(run.clone())
+                .map(SessionUpdate::PiRun)
+                .map_err(|e| DomainError::Protocol(e.to_string()));
+        }
+    }
+    if let Some(id) = update.pointer("/_meta/pi-workbench-live") {
+        let id =
+            serde_json::from_value(id.clone()).map_err(|e| DomainError::Protocol(e.to_string()))?;
+        let mut unwrapped = update.clone();
+        unwrapped["_meta"]
+            .as_object_mut()
+            .expect("metadata object")
+            .remove("pi-workbench-live");
+        return Ok(SessionUpdate::PiLive {
+            id,
+            update: Box::new(decode_update(unwrapped)?),
+        });
+    }
     if !matches!(
         name,
         "agent_message_chunk"

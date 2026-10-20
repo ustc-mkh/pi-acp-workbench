@@ -67,7 +67,21 @@ const status = variants({
   Cancelling: null,
   Failed: string,
 });
-const config = object({ model: nullable(modelId), mode: nullable(modeId) });
+const config = object({
+  model: nullable(modelId),
+  mode: nullable(modeId),
+  options: optional(
+    checked(
+      record(string),
+      (options) =>
+        Object.keys(options).length <= 32 &&
+        Object.entries(options).every(
+          ([id, value]) =>
+            id.length > 0 && byteLength(id) <= 200 && value.length > 0 && byteLength(value) <= 200,
+        ),
+    ),
+  ),
+});
 const choice = object({ id: string, label: string });
 const fieldKind = variants({
   Text: object({ max_length: uint }),
@@ -131,7 +145,82 @@ const imageAsset = object({
 });
 export type ImageAsset = Infer<typeof imageAsset>;
 const forkTarget = object({ entry: providerEntryId, prefix: digest });
+const selectString = (maximum: number) =>
+  checked(string, (s) => s.length > 0 && byteLength(s) <= maximum && !/\p{Cc}/u.test(s));
+const selectSetting = checked(
+  object({
+    id: selectString(200),
+    name: selectString(512),
+    category: nullable(selectString(200)),
+    current_value: selectString(200),
+    choices: checked(
+      array(object({ value: selectString(200), name: selectString(512) })),
+      (choices) =>
+        choices.length > 0 &&
+        choices.length <= 500 &&
+        new Set(choices.map((c) => c.value)).size === choices.length,
+    ),
+  }),
+  (s) => s.choices.some((c) => c.value === s.current_value),
+);
+export const typedPrompt = checked(
+  object({
+    parts: array(
+      tagged('type', {
+        text: object({ type: literal('text'), text: string }),
+        context: object({ type: literal('context'), id: string, name: string, text: string }),
+        image: object({ type: literal('image'), asset: imageAsset }),
+      }),
+    ),
+  }),
+  (p) => {
+    let chars = 0,
+      context = 0,
+      images = 0;
+    const ids = new Set<string>();
+    for (const part of p.parts) {
+      if (part.type === 'image') {
+        images++;
+        continue;
+      }
+      chars += [...part.text].length;
+      if (part.type === 'context') {
+        if (
+          !part.id ||
+          byteLength(part.id) > 200 ||
+          ids.has(part.id) ||
+          !part.name ||
+          byteLength(part.name) > 4096 ||
+          /\p{Cc}/u.test(part.name) ||
+          byteLength(part.text) > 65536
+        )
+          return false;
+        ids.add(part.id);
+        context += [...part.text].length;
+      }
+    }
+    return (
+      p.parts.length > 0 &&
+      p.parts.length <= 10 &&
+      images <= 1 &&
+      ids.size <= 8 &&
+      chars <= 100000 &&
+      context <= 80000 &&
+      (images > 0 || p.parts.some((part) => part.type !== 'image' && /\S/u.test(part.text)))
+    );
+  },
+);
 const catalogue = object({
+  selects: optional(
+    checked(
+      array(selectSetting),
+      (settings) =>
+        settings.length <= 32 &&
+        new Set(settings.map((s) => s.id)).size === settings.length &&
+        jsonBytes(settings) <= 128 * 1024,
+    ),
+  ),
+  image_input: optional(boolean),
   models: array(object({ id: modelId, name: string })),
   modes: array(object({ id: modeId, name: string })),
   commands: array(object({ name: string, description: string, input_hint: nullable(string) })),
@@ -539,14 +628,21 @@ const mutationCommand = tagged('method', {
   prompt: object({
     method: literal('prompt'),
     ...session,
-    prompt: checked(string, (s) => /\S/u.test(s) && [...s].length <= 100_000),
+    prompt: typedPrompt,
   }),
   cancel: object({ method: literal('cancel'), ...session }),
   answer: object({ method: literal('answer'), ...session, answer }),
   fork: object({ method: literal('fork'), ...session, request: object({ entry: entryId }) }),
   cancel_fork: object({ method: literal('cancel_fork'), ...session, operation: operationId }),
+  discover: object({ method: literal('discover'), ...session }),
   set_model: object({ method: literal('set_model'), ...session, model: modelId }),
   set_mode: object({ method: literal('set_mode'), ...session, mode: modeId }),
+  set_option: object({
+    method: literal('set_option'),
+    ...session,
+    id: checked(string, (s) => !!s && byteLength(s) <= 200),
+    value: checked(string, (s) => !!s && byteLength(s) <= 200),
+  }),
   manage: object({ method: literal('manage'), session: sessionId, action: managementAction }),
   undo_turn: object({ method: literal('undo_turn'), session: sessionId, turn: turnId }),
   remove: object({ method: literal('remove'), ...session }),

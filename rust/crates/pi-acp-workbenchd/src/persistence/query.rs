@@ -15,7 +15,7 @@ pub(super) fn next_counter(db: &Connection, name: &str) -> Result<SafeInteger, S
     let value: Option<SafeInteger> = db.query_row("UPDATE store_meta SET value = value + 1 WHERE key = ?1 AND value < 9007199254740991 RETURNING value", [name], |r| r.get(0)).optional()?;
     value.ok_or(StoreError::Invalid("database sequence exhausted"))
 }
-fn harness_name(harness: &Harness) -> &'static str {
+pub(super) fn harness_name(harness: &Harness) -> &'static str {
     match harness {
         Harness::Pi => "Pi",
         Harness::Codex => "Codex",
@@ -126,6 +126,65 @@ pub(super) fn apply_commit(
         return Err(StoreError::Conflict);
     }
     super::management::observe(tx, &old, commit)?;
+    // Only a settled, provider-observed configuration may seed new sessions.
+    let settled = old.configuration_intent.is_some()
+        && commit.next.configuration_intent.is_none()
+        && commit.operation.is_some();
+    let observed_before_task = commit.next.active_turn.is_some()
+        && commit.next.catalogue != old.catalogue
+        && commit.next.configuration_intent.is_none()
+        && commit
+            .next
+            .config
+            .model
+            .as_ref()
+            .is_none_or(|model| commit.next.catalogue.current_model.as_ref() == Some(model))
+        && commit
+            .next
+            .config
+            .mode
+            .as_ref()
+            .is_none_or(|mode| commit.next.catalogue.current_mode.as_ref() == Some(mode))
+        && commit.next.config.options.iter().all(|(id, value)| {
+            commit
+                .next
+                .catalogue
+                .selects
+                .iter()
+                .any(|s| &s.id == id && &s.current_value == value)
+        });
+    if settled || observed_before_task {
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT config_json FROM provider_preferences WHERE harness=?1",
+                [harness_name(&commit.next.harness)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut defaults: crate::domain::session::SessionConfig = match previous {
+            Some(json) => serde_json::from_str(&json)?,
+            None => crate::domain::session::SessionConfig {
+                model: None,
+                mode: None,
+                options: Default::default(),
+            },
+        };
+        if commit.next.config.model.is_some() {
+            defaults.model = commit.next.config.model.clone();
+        }
+        for (id, value) in &commit.next.config.options {
+            if commit
+                .next
+                .catalogue
+                .selects
+                .iter()
+                .any(|s| &s.id == id && s.category.as_deref() == Some("thought_level"))
+            {
+                defaults.options.insert(id.clone(), value.clone());
+            }
+        }
+        tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![harness_name(&commit.next.harness), encode(&defaults)?])?;
+    }
     let batch = apply_records(tx, commit, old.last_entry_seq)?;
     if let Some(operation) = &commit.operation {
         super::journal::finish_in_transaction(

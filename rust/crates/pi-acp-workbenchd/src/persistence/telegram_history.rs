@@ -142,7 +142,12 @@ pub(super) fn reply(
                     None
                 },
                 role,
-                row.get::<_, Option<String>>(5).map_err(failure)?,
+                // An image is a hard boundary, even if the provider reuses its ID.
+                if image {
+                    None
+                } else {
+                    row.get::<_, Option<String>>(5).map_err(failure)?
+                },
             ));
         }
     }
@@ -166,7 +171,8 @@ pub(super) fn reply(
         let can_join = message.is_some()
             && role != "Tool"
             && selected.last().is_some_and(|group| {
-                group.2 == role
+                group.1 == turn
+                    && group.2 == role
                     && group.3 == message
                     && group
                         .0

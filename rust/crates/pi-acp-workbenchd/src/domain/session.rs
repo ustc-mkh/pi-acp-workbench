@@ -18,6 +18,8 @@ pub enum SessionStatus {
 pub struct SessionConfig {
     pub model: Option<ModelId>,
     pub mode: Option<ModeId>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub options: std::collections::BTreeMap<String, String>,
 }
 /// Durable write-ahead record for a provider setting side effect. Until the
 /// desired preference commit succeeds, reload restores this known baseline.

@@ -418,6 +418,7 @@ impl CommandCore {
             | DomainCommand::Fork { session, .. }
             | DomainCommand::SetModel { session, .. }
             | DomainCommand::SetMode { session, .. }
+            | DomainCommand::SetOption { session, .. }
             | DomainCommand::UndoTurn { session, .. } => Some(session.clone()),
             DomainCommand::Manage { session, action } if action.external() => Some(session.clone()),
             _ => None,
@@ -450,6 +451,7 @@ impl CommandCore {
             DomainCommand::Prompt { .. }
                 | DomainCommand::SetModel { .. }
                 | DomainCommand::SetMode { .. }
+                | DomainCommand::SetOption { .. }
                 | DomainCommand::Cancel { .. }
                 | DomainCommand::AnswerInteraction { .. }
                 | DomainCommand::RemoveSession(_)
@@ -480,10 +482,11 @@ impl CommandCore {
     }
     async fn execute_with_operation(
         &self,
-        command: DomainCommand,
+        mut command: DomainCommand,
         operation: Option<crate::domain::operation::OperationTicket>,
     ) -> Result<CommandReceipt, DomainError> {
         let accepts_input = operation.is_some();
+        let mut sanitized_prompt = None;
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainError::Worker("runtime shutting down".into()));
         }
@@ -505,13 +508,69 @@ impl CommandCore {
                 if !self.coordinator.supervisor.is_configured(&snapshot.harness) {
                     return Err(DomainError::ProviderNotConfigured);
                 }
+                if let DomainCommand::Prompt { prompt, .. } = &command {
+                    if prompt
+                        .parts()
+                        .iter()
+                        .any(|p| matches!(p, crate::domain::ids::PromptPart::Image { .. }))
+                    {
+                        let input = prompt.clone();
+                        static IMAGE_INPUT_JOBS: tokio::sync::Semaphore =
+                            tokio::sync::Semaphore::const_new(2);
+                        let permit = IMAGE_INPUT_JOBS
+                            .try_acquire()
+                            .map_err(|_| DomainError::Busy)?;
+                        sanitized_prompt = Some(
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                let parts = input
+                                    .parts()
+                                    .iter()
+                                    .map(|part| match part {
+                                        crate::domain::ids::PromptPart::Image { asset } => {
+                                            Ok(crate::domain::ids::PromptPart::Image {
+                                                asset: asset.sanitize_input()?,
+                                            })
+                                        }
+                                        part => Ok(part.clone()),
+                                    })
+                                    .collect::<Result<Vec<_>, DomainError>>()?;
+                                crate::domain::Prompt::from_parts(parts)
+                                    .map_err(|e| DomainError::Protocol(e.to_string()))
+                            })
+                            .await
+                            .map_err(|_| {
+                                DomainError::Protocol("image validation interrupted".into())
+                            })??,
+                        );
+                        self.discover(session.clone()).await?;
+                        let observed = self
+                            .database
+                            .view(session.clone())
+                            .await
+                            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+                        if !observed.catalogue.image_input {
+                            return Err(DomainError::Protocol(
+                                "provider does not support image input".into(),
+                            ));
+                        }
+                    }
+                }
             }
             _ => {}
+        }
+        if let (Some(sanitized), DomainCommand::Prompt { prompt, .. }) =
+            (sanitized_prompt, &mut command)
+        {
+            *prompt = sanitized;
         }
         if matches!(command, DomainCommand::Fork { .. }) {
             return Err(DomainError::Protocol(
                 "native fork requires durable admission".into(),
             ));
+        }
+        if let DomainCommand::Discover { session } = &command {
+            return self.discover(session.clone()).await;
         }
         if let DomainCommand::CancelFork { session, operation } = &command {
             return self.cancel_fork(session, operation).await;
@@ -635,9 +694,13 @@ impl CommandCore {
                 .await?;
             }
         }
-        if let DomainCommand::SetModel { session, .. } | DomainCommand::SetMode { session, .. } =
-            &command
+        if let DomainCommand::SetModel { session, .. }
+        | DomainCommand::SetMode { session, .. }
+        | DomainCommand::SetOption { session, .. } = &command
         {
+            if matches!(&command, DomainCommand::SetOption { .. }) {
+                self.discover(session.clone()).await?;
+            }
             let events = self
                 .runtime
                 .registry
@@ -653,19 +716,32 @@ impl CommandCore {
             match &command {
                 DomainCommand::SetModel { model, .. } => config.model = Some(model.clone()),
                 DomainCommand::SetMode { mode, .. } => config.mode = Some(mode.clone()),
+                DomainCommand::SetOption { id, value, .. } => {
+                    config.options.insert(id.clone(), value.clone());
+                }
                 _ => unreachable!(),
             }
-            let sender = self
-                .coordinator
-                .adapters
-                .lock()
-                .await
-                .get(session)
-                .map(|adapter| adapter.tx.clone());
+            let sender = if matches!(&command, DomainCommand::SetOption { .. }) {
+                Some(self.adapter_sender(session.clone()).await?.0)
+            } else {
+                self.coordinator
+                    .adapters
+                    .lock()
+                    .await
+                    .get(session)
+                    .map(|adapter| adapter.tx.clone())
+            };
             if let Some(sender) = sender {
                 let intent = crate::domain::session::ConfigurationIntent {
                     requested: config.clone(),
                     restore: crate::domain::session::SessionConfig {
+                        options: snapshot
+                            .catalogue
+                            .selects
+                            .iter()
+                            .filter(|s| config.options.contains_key(&s.id))
+                            .map(|s| (s.id.clone(), s.current_value.clone()))
+                            .collect(),
                         model: snapshot
                             .config
                             .model
@@ -724,6 +800,9 @@ impl CommandCore {
             let view = events
                 .view()
                 .ok_or_else(|| DomainError::NotFound(session.clone()))?;
+            if view.active_turn.is_some() {
+                return Err(DomainError::Busy);
+            }
             let cwd = view.cwd.clone();
             let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
                 .map_err(DomainError::Persistence)?;
@@ -741,9 +820,7 @@ impl CommandCore {
         // Side effects use the accepted command and its committed view, not a
         // second event/reducer projection. The owner already published its batch.
         let prompt = match &command {
-            DomainCommand::Prompt { session, prompt } => {
-                Some((session.clone(), prompt.as_str().to_owned()))
-            }
+            DomainCommand::Prompt { session, prompt } => Some((session.clone(), prompt.clone())),
             _ => None,
         };
         let answer_session = match &command {
@@ -761,8 +838,18 @@ impl CommandCore {
         ) {
             self.coordinator
                 .reviews
-                .start(session, turn, before, lease)
+                .start(session.clone(), turn.clone(), before, lease)
                 .await;
+            // An autonomous start can commit between acceptance and capture
+            // registration. Never retain that rejected input's tentative baseline.
+            let current = self
+                .database
+                .view(session.clone())
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?;
+            if current.active_turn.as_ref() != Some(&turn) {
+                self.coordinator.reviews.reject_input(&session).await?;
+            }
         }
         if let Some((session, text)) = prompt {
             if let Some(turn) = result.view().and_then(|view| view.active_turn.clone()) {
@@ -921,10 +1008,7 @@ impl CommandCore {
             .registry
             .command(DomainCommand::Inspect(session.clone()))
             .await?;
-        if view
-            .view()
-            .is_some_and(|view| view.active_turn.is_some() || view.configuration_intent.is_some())
-        {
+        if view.view().is_some_and(|view| view.active_turn.is_some()) {
             return Err(DomainError::Busy);
         }
         let (sender, _) = self.adapter_sender(session.clone()).await?;
@@ -949,7 +1033,7 @@ impl CommandCore {
         &self,
         session: SessionId,
         turn: crate::domain::TurnId,
-        text: String,
+        text: crate::domain::Prompt,
     ) -> Result<(), DomainError> {
         let (sender, config) = self.adapter_sender(session).await?;
         sender

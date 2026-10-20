@@ -64,6 +64,31 @@ async function setup(
     setTrusted: (value: boolean) => (trusted = value),
   };
 }
+it('copies immutable image identity instead of silently copying an empty image entry', async () => {
+  const image = { id: 'image', mime: 'image/png', bytes: 24, sha256: 'a'.repeat(64) };
+  const copied: string[] = [];
+  const { controller, peer } = await setup(
+    undefined,
+    undefined,
+    [
+      {
+        seq: 1,
+        id: 'entry',
+        turn: 'turn',
+        role: 'User',
+        text: { Inline: { text: '' } },
+        message: null,
+        image,
+      },
+    ],
+    async (text) => {
+      copied.push(text);
+    },
+  );
+  await controller.receive({ type: 'copy_message', session: 'session', entry: 'entry' });
+  expect(copied).toEqual([`[Archived image: image; image/png; 24 bytes; ${image.sha256}]`]);
+  expect(peer.requests).toHaveLength(2);
+});
 it('copies only a confirmed message with exact bounded content cursors and checksum', async () => {
   const text = '你好🌍';
   const ref = {
@@ -281,7 +306,7 @@ it('rechecks workspace authorization after modal confirmation before undo admiss
     command: {
       method: 'prompt',
       session: 'session',
-      prompt: 'must not dispatch during confirmation',
+      prompt: { parts: [{ type: 'text', text: 'must not dispatch during confirmation' }] },
     },
   });
   expect(peer.requests).toHaveLength(3);
@@ -349,7 +374,11 @@ it('selection is cold, typed state reaches the webview, and only user mutation e
   const action = controller.receive({
     type: 'execute',
     session: 'session',
-    command: { method: 'prompt', session: 'session', prompt: 'hello' },
+    command: {
+      method: 'prompt',
+      session: 'session',
+      prompt: { parts: [{ type: 'text', text: 'hello' }] },
+    },
   });
   await expect.poll(() => peer.requests.length).toBe(3);
   expect(peer.requests[2].command.method).toBe('load');
@@ -369,7 +398,14 @@ it('selection is cold, typed state reaches the webview, and only user mutation e
   await expect.poll(() => messages.filter((m) => m.type === 'state').length).toBeGreaterThan(0);
   for (const message of messages)
     if (message.type === 'state') expect(() => uiStateMessage.parse(message)).not.toThrow();
-  expect(messages).toContainEqual({ type: 'prompt_accepted', session: 'session', text: 'hello' });
+  expect(messages).toContainEqual({
+    type: 'prompt_accepted',
+    session: 'session',
+    prompt: { parts: [{ type: 'text', text: 'hello' }] },
+    generation: undefined,
+    operation: expect.any(String),
+    pi_after_seq: 0,
+  });
 });
 it('rejects untrusted, stale-session and arbitrary command/operation injection before side effects', async () => {
   const { peer, controller, setTrusted } = await setup();

@@ -88,7 +88,10 @@ async function inspect(session) {
 }
 async function prompt(session, text, operation) {
   const done = client.waitFor((batch) => turnFinished(batch, session));
-  const receipt = await client.call({ method: 'prompt', session, prompt: text }, operation);
+  const receipt = await client.call(
+    { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: text }] } },
+    operation,
+  );
   const batch = await done;
   return { receipt, batch };
 }
@@ -112,7 +115,10 @@ try {
     session = created.Created.summary.id;
   assert.deepEqual(await client.call(createCommand, 'contract-create'), created);
   await assert.rejects(
-    client.call({ method: 'prompt', session, prompt: 'conflict' }, 'contract-create'),
+    client.call(
+      { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'conflict' }] } },
+      'contract-create',
+    ),
     /operation_conflict/,
   );
   const attached = await client.call({ method: 'attach', session });
@@ -142,7 +148,11 @@ try {
     (batch) =>
       batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
   );
-  await client.call({ method: 'prompt', session, prompt: 'permission' });
+  await client.call({
+    method: 'prompt',
+    session,
+    prompt: { parts: [{ type: 'text', text: 'permission' }] },
+  });
   const interaction = Object.values((await requested).view.pending_interactions)[0];
   const answered = client.waitFor((batch) => turnFinished(batch, session));
   await client.call({
@@ -245,7 +255,10 @@ try {
   assert.equal((await inspect(session)).provider_session, before.provider_session);
   assert.deepEqual(await client.call(createCommand, 'contract-create'), created);
   assert.deepEqual(
-    await client.call({ method: 'prompt', session, prompt: '你好' }, 'contract-prompt-0'),
+    await client.call(
+      { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: '你好' }] } },
+      'contract-prompt-0',
+    ),
     promptReceipts[0],
   );
   assert.equal((await client.call({ method: 'list' })).sessions.length, 1);
@@ -355,7 +368,11 @@ try {
       batch.session === independentSession &&
       Object.keys(batch.view?.pending_interactions || {}).length,
   );
-  await client.call({ method: 'prompt', session: independentSession, prompt: 'permission' });
+  await client.call({
+    method: 'prompt',
+    session: independentSession,
+    prompt: { parts: [{ type: 'text', text: 'permission' }] },
+  });
   const independentInteraction = Object.values(
     (await independentRequested).view.pending_interactions,
   )[0];

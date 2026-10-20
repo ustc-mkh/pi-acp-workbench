@@ -30,6 +30,19 @@ pub struct PiWorkbenchCapabilities {
     #[serde(default)]
     pub autonomous_runs: Option<bool>,
 }
+/// Explicit lifecycle; run identity also fences late live chunks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PiRun {
+    pub id: crate::domain::ProviderMessageId,
+    pub autonomous: bool,
+    pub running: bool,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub usage: Option<super::dto::TokenUsage>,
+}
 pub(super) fn deserialize_metadata<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ProviderMetadata, D::Error> {

@@ -168,7 +168,7 @@ async fn normal_pool_saturation_preserves_query_and_control_reserves_and_fifo_la
         )
         .await
         .unwrap(),
-        Err(DomainError::NoActiveTurn)
+        Ok(CommandReceipt::Accepted { .. })
     ));
     assert!(order.lock().unwrap().is_empty());
     release.send(()).unwrap();

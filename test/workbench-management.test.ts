@@ -1,9 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { mkdtemp, writeFile, appendFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { usageCursor, appendedUsage } from '../src/pi-turn-usage';
 import { telegramConfiguration } from '../src/workbench-setup';
 import { emptyView } from './helpers/workbench-peer';
 import { Preferences } from '../webview/workbench-preferences';
@@ -11,33 +7,6 @@ import { ManagementPanel } from '../webview/workbench-management';
 import type { UiCommand } from '../src/workbench-ui';
 import type { ManagementData } from '../src/workbench-protocol';
 afterEach(() => vi.unstubAllGlobals());
-it('records only appended Pi inference, excluding imported history and rejecting partial/oversize tails', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'usage-tail-'));
-  const path = join(root, 'native.jsonl');
-  try {
-    const entry = (input: number) =>
-      JSON.stringify({
-        type: 'message',
-        message: { role: 'assistant', usage: { input, output: 2, cacheRead: 3, cacheWrite: 4 } },
-      }) + '\n';
-    await writeFile(path, entry(999));
-    const cursor = await usageCursor(path);
-    await appendFile(path, entry(10) + entry(20));
-    expect(await appendedUsage(cursor)).toEqual({
-      inputTokens: 30,
-      outputTokens: 4,
-      cachedReadTokens: 6,
-      cachedWriteTokens: 8,
-    });
-    await appendFile(path, '{"incomplete":');
-    expect(await appendedUsage(cursor)).toBeUndefined();
-    const later = await usageCursor(path);
-    await appendFile(path, 'x'.repeat(4 * 1024 * 1024 + 1));
-    expect(await appendedUsage(later)).toBeUndefined();
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 it('generates only allowlisted Telegram config and never accepts a secret token or implicit first-sender pairing', () => {
   const input = {
     workspace: '/workspace',
@@ -61,11 +30,11 @@ it('generates only allowlisted Telegram config and never accepts a secret token 
     expect(() => telegramConfiguration({ ...input, ...change })).toThrow();
 });
 it('persists bounded rows/follow preferences without accepting malformed values', () => {
-  const p = new Preferences({ preferences: { sessionRows: 5, autoScroll: false } });
-  expect(p.sessionRows).toBe(5);
+  const p = new Preferences({ preferences: { sessionRows: 16, autoScroll: false } });
+  expect(p.sessionRows).toBe(16);
   expect(p.autoScroll).toBe(false);
-  expect(new Preferences(p.snapshot()).sessionRows).toBe(5);
-  expect(new Preferences({ preferences: { sessionRows: 10000 } }).sessionRows).toBe(1);
+  expect(new Preferences(p.snapshot()).sessionRows).toBe(16);
+  expect(new Preferences({ preferences: { sessionRows: 10000 } }).sessionRows).toBe(4);
 });
 it('renders searchable grouped models, four prices, explicit context, titles and paged statistics as actual user actions', () => {
   const dom = new JSDOM('<main></main>');

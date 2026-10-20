@@ -48,7 +48,7 @@ pub(crate) fn automatic_delivered(
     seq: SafeInteger,
     turn: &crate::domain::TurnId,
 ) -> Result<bool, StoreError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_turn_receipts r JOIN delivery_entries de ON de.delivery_id=r.delivery_id WHERE r.delivery_id=(CASE (SELECT role FROM entries WHERE entry_id=?7) WHEN 'User' THEN 'input-' || substr(?1,6) ELSE ?1 END) AND r.bot_id=?2 AND r.chat=?3 AND r.thread=?4 AND r.session=?5 AND de.seq=?6 AND de.entry_id=?7)", rusqlite::params![format!("turn-{turn}"), bot, topic.chat.get(), topic.thread.map_or(0, |thread| thread.get()), session.as_str(), seq, entry.as_str()], |row| row.get(0)).map_err(StoreError::from)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_turn_receipts r JOIN delivery_entries de ON de.delivery_id=r.delivery_id JOIN deliveries d ON d.delivery_id=r.delivery_id WHERE ((json_type(d.payload_json,'$.Input')='object' AND (SELECT role FROM entries WHERE entry_id=?7)='User') OR (r.delivery_id=?1 AND (SELECT role FROM entries WHERE entry_id=?7)<>'User')) AND r.bot_id=?2 AND r.chat=?3 AND r.thread=?4 AND r.session=?5 AND de.seq=?6 AND de.entry_id=?7)", rusqlite::params![format!("turn-{turn}"), bot, topic.chat.get(), topic.thread.map_or(0, |thread| thread.get()), session.as_str(), seq, entry.as_str()], |row| row.get(0)).map_err(StoreError::from)
 }
 #[derive(Clone)]
 pub struct PayloadStore {

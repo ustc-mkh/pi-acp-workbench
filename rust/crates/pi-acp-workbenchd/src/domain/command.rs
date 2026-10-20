@@ -44,6 +44,14 @@ pub enum DomainCommand {
         session: SessionId,
         model: ModelId,
     },
+    Discover {
+        session: SessionId,
+    },
+    SetOption {
+        session: SessionId,
+        id: String,
+        value: String,
+    },
     SetMode {
         session: SessionId,
         mode: ModeId,
@@ -82,6 +90,13 @@ impl DomainCommand {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AgentEvent {
+    /// Explicit provider lifecycle evidence; never inferred from idle output.
+    AutonomousStarted {
+        turn: TurnId,
+    },
+    Cancelled {
+        turn: TurnId,
+    },
     Catalogue(super::catalogue::CataloguePatch),
     ConfigurationRestored(super::catalogue::CataloguePatch),
     AvailableCommands(Vec<super::catalogue::AvailableCommand>),

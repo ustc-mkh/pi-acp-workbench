@@ -51,6 +51,21 @@ async function browser(saved?: unknown) {
     state,
     post,
     document: dom.window.document,
+    accept(session: string, prompt: unknown, piAfter?: number) {
+      const request = [...sent]
+        .reverse()
+        .find((m) => m.type === 'execute' && m.command.method === 'prompt');
+      const generation = request?.type === 'execute' ? request.generation : 0;
+      post({ type: 'prompt_submitted', session, generation, operation: 'prompt-operation' });
+      post({
+        type: 'prompt_accepted',
+        session,
+        prompt,
+        generation,
+        operation: 'prompt-operation',
+        pi_after_seq: piAfter,
+      });
+    },
     update(sequence = 1) {
       post({ type: 'state', sequence, state: this.state });
     },
@@ -361,9 +376,9 @@ it('keeps failed prompt drafts and clears only the matching accepted draft; fork
     .closest('form')!
     .dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
   expect(prompt.value).toBe('hello');
-  b.post({ type: 'prompt_accepted', session: 'other', text: 'hello' });
+  b.accept('other', { parts: [{ type: 'text', text: 'hello' }] });
   expect(prompt.value).toBe('hello');
-  b.post({ type: 'prompt_accepted', session: 'session', text: 'hello' });
+  b.accept('session', { parts: [{ type: 'text', text: 'hello' }] });
   expect(prompt.value).toBe('');
   await expect
     .poll(() =>
@@ -376,6 +391,49 @@ it('keeps failed prompt drafts and clears only the matching accepted draft; fork
     .find((button) => button.textContent === 'Cancel this fork')!
     .click();
   expect(b.sent.at(-1)).toEqual({ type: 'cancel_fork', operation: 'original-fork' });
+});
+
+it('preserves Pi drafts when an autonomous wake rejects an already accepted input', async () => {
+  const b = await browser();
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.disabled).toBe(false);
+  prompt.value = 'keep this input';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  prompt
+    .closest('form')!
+    .dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
+  b.accept('session', { parts: [{ type: 'text', text: 'keep this input' }] }, 0);
+  expect(prompt.value).toBe('keep this input');
+  b.state.view!.view!.active_turn = 'autonomous-turn' as never;
+  b.state.view!.view!.status = 'Running';
+  b.state.view!.view!.revision++;
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('input'),
+        turn: 'user-turn' as never,
+        role: 'User',
+        text: { Inline: { text: 'keep this input' } },
+        message: null,
+        image: null,
+      },
+      {
+        seq: 2,
+        id: entryId.parse('rejection'),
+        turn: 'user-turn' as never,
+        role: 'Agent',
+        text: { Inline: { text: 'input rejected' } },
+        message: 'pi-workbench-input-rejected' as never,
+        image: null,
+      },
+    ],
+  };
+  b.update(2);
+  await expect.poll(() => b.document.body.textContent).toContain('draft preserved');
+  expect(prompt.value).toBe('keep this input');
 });
 
 it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepted', async () => {
@@ -393,11 +451,11 @@ it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepte
   );
   expect(b.sent.at(-1)).toMatchObject({
     type: 'execute',
-    command: { method: 'prompt', prompt: '你好' },
+    command: { method: 'prompt', prompt: { parts: [{ type: 'text', text: '你好' }] } },
   });
   expect(prompt.value).toBe('你好');
   expect(b.saved()).toMatchObject({ drafts: [['session', '你好']] });
-  b.post({ type: 'prompt_accepted', session: 'session', text: '你好' });
+  b.accept('session', { parts: [{ type: 'text', text: '你好' }] });
   expect(b.saved()).toMatchObject({ drafts: [] });
 });
 
@@ -442,15 +500,20 @@ it('previews explicit attachments, isolates sessions and clears only a matching 
     type: 'execute',
     command: {
       method: 'prompt',
-      prompt: 'Review\n\nExplicit file attachment: src/a.ts\n\n<script>safe text</script>',
+      prompt: {
+        parts: [
+          { type: 'text', text: 'Review' },
+          { type: 'context', id: 'f', name: 'src/a.ts', text: '<script>safe text</script>' },
+        ],
+      },
     },
   });
-  b.post({ type: 'prompt_accepted', session: 'session', text: 'Review' });
+  b.accept('session', { parts: [{ type: 'text', text: 'Review' }] });
   expect(prompt.value).toBe('Review');
   expect(b.document.querySelector('#attachments pre')).not.toBeNull();
   if (sent?.type !== 'execute' || sent.command.method !== 'prompt')
     throw new Error('missing prompt');
-  b.post({ type: 'prompt_accepted', session: 'session', text: sent.command.prompt });
+  b.accept('session', sent.command.prompt);
   expect(prompt.value).toBe('');
   expect(b.document.querySelector('#attachments pre')).toBeNull();
   expect(b.saved()).toMatchObject({ attachments: [], drafts: [] });
@@ -514,4 +577,178 @@ it('retains plan DOM, turn expansion and thought preferences across streamed sta
   await expect.poll(() => b.document.querySelectorAll('article.thought').length).toBe(0);
   expect(b.document.querySelectorAll('article.agent')).toHaveLength(1);
   expect(b.saved()).toMatchObject({ preferences: { showThoughts: false } });
+});
+
+it('does not clear an edited-back draft on late acceptance and requires the original operation', async () => {
+  const b = await browser();
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.disabled).toBe(false);
+  prompt.value = 'same';
+  prompt
+    .closest('form')!
+    .dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
+  const request = b.sent.at(-1);
+  if (request?.type !== 'execute' || request.command.method !== 'prompt')
+    throw new Error('missing typed prompt');
+  b.post({
+    type: 'prompt_submitted',
+    session: 'session',
+    operation: 'original',
+    generation: request.generation,
+  });
+  prompt.value = 'changed';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  prompt.value = 'same';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  b.post({
+    type: 'prompt_accepted',
+    session: 'session',
+    operation: 'wrong',
+    generation: request.generation,
+    prompt: request.command.prompt,
+  });
+  expect(prompt.value).toBe('same');
+  b.post({
+    type: 'prompt_accepted',
+    session: 'session',
+    operation: 'original',
+    generation: request.generation,
+    prompt: request.command.prompt,
+  });
+  expect(prompt.value).toBe('same');
+  expect(b.saved()).toMatchObject({ drafts: [['session', 'same']] });
+});
+
+it('groups identified Markdown fragments and preserves message, turn, focus and text selection across deltas', async () => {
+  const b = await browser();
+  const rows = [
+    'Hello **',
+    'world**\n\n```ts\n',
+    'const x = 1;\n```\n\n[site](https://example.com)',
+  ].map((text, i) => ({
+    seq: i + 1,
+    id: entryId.parse(`group-${i}`),
+    turn: 'turn' as never,
+    role: 'Agent' as const,
+    text: { Inline: { text } },
+    message: 'provider-message' as never,
+    image: null,
+  }));
+  b.state.view = { ...b.state.view!, entries: rows };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('article').length).toBe(1);
+  const article = b.document.querySelector('article')!,
+    turn = b.document.querySelector('[data-turn]')!;
+  expect(article.querySelector('strong')?.textContent).toBe('world');
+  expect(article.querySelector('code')?.textContent).toContain('const x = 1;');
+  const copy = [...article.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Copy message',
+  )!;
+  copy.focus();
+  const range = b.document.createRange();
+  range.selectNodeContents(article.querySelector('strong')!);
+  dom!.window.getSelection()!.removeAllRanges();
+  dom!.window.getSelection()!.addRange(range);
+  expect(dom!.window.getSelection()!.toString()).toBe('world');
+  b.state.view!.view!.revision++;
+  b.update(2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(b.document.querySelector('article')).toBe(article);
+  expect(b.document.querySelector('[data-turn]')).toBe(turn);
+  expect(b.document.activeElement).toBe(copy);
+  expect(dom!.window.getSelection()!.toString()).toBe('world');
+  article.querySelector('a')!.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'open_link', url: 'https://example.com' });
+  expect(b.state.view!.entries).toEqual(rows);
+});
+
+it('completes only declared slash commands with keyboard/IME and restores accessible resize', async () => {
+  const b = await browser({ preferences: { composerHeight: 140, sessionRows: 16 } });
+  b.state.view!.view!.catalogue.commands = [
+    { name: 'review', description: 'Review changes', input_hint: 'target' },
+    { name: 'reset', description: 'Reset', input_hint: null },
+  ];
+  b.update();
+  await expect
+    .poll(() => b.document.querySelector<HTMLTextAreaElement>('#prompt')!.disabled)
+    .toBe(false);
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  prompt.value = '/re';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  expect(b.document.querySelectorAll('#commands button')).toHaveLength(2);
+  prompt.dispatchEvent(
+    new dom!.window.KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }),
+  );
+  expect(prompt.value).toBe('/re');
+  prompt.dispatchEvent(
+    new dom!.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+  );
+  prompt.dispatchEvent(
+    new dom!.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }),
+  );
+  expect(prompt.value).toBe('/reset ');
+  expect(b.sent.filter((message) => message.type === 'execute')).toHaveLength(0);
+  const resize = b.document.querySelector('.composer-resize')!;
+  resize.dispatchEvent(
+    new dom!.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+  );
+  expect(prompt.style.height).toBe('156px');
+  expect(b.saved()).toMatchObject({ preferences: { composerHeight: 156, sessionRows: 16 } });
+  b.state.view!.view!.catalogue.commands = [];
+  b.update(2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  prompt.value = '/';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  expect(b.document.querySelectorAll('#commands button')).toHaveLength(0);
+});
+
+it('renders actual separate Thinking/Fast selects and preserves their DOM across unrelated deltas', async () => {
+  const b = await browser();
+  b.state.view!.view!.catalogue.selects = [
+    {
+      id: 'thought_level',
+      name: 'Thinking',
+      category: 'thought_level',
+      current_value: 'low',
+      choices: [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+    },
+    {
+      id: 'fast',
+      name: 'Fast',
+      category: 'other',
+      current_value: 'off',
+      choices: [
+        { value: 'off', name: 'Off' },
+        { value: 'on', name: 'On' },
+      ],
+    },
+  ];
+  b.update();
+  await expect.poll(() => b.document.querySelector('select[aria-label="Thinking"]')).not.toBeNull();
+  const thinking = b.document.querySelector<HTMLSelectElement>('select[aria-label="Thinking"]')!;
+  thinking.focus();
+  thinking.value = 'high';
+  b.state.view!.view!.revision++;
+  b.state.view!.view!.usage.output_tokens++;
+  b.update(2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(b.document.querySelector('select[aria-label="Thinking"]')).toBe(thinking);
+  expect(b.document.activeElement).toBe(thinking);
+  expect(thinking.value).toBe('high');
+  thinking.dispatchEvent(new dom!.window.Event('change'));
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: { method: 'set_option', id: 'thought_level', value: 'high' },
+  });
+  const fast = b.document.querySelector<HTMLSelectElement>('select[aria-label="Fast"]')!;
+  fast.value = 'on';
+  fast.dispatchEvent(new dom!.window.Event('change'));
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: { method: 'set_option', id: 'fast', value: 'on' },
+  });
 });

@@ -37,6 +37,31 @@ const configOptions = [
     ],
   },
 ];
+if (process.env.WORKBENCH_CONTRACT_TYPED_SETTINGS === '1')
+  configOptions.push(
+    {
+      id: 'thought_level',
+      name: 'Thinking',
+      category: 'thought_level',
+      type: 'select',
+      currentValue: 'low',
+      options: [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+    },
+    {
+      id: 'fast',
+      name: 'Fast',
+      category: 'other',
+      type: 'select',
+      currentValue: 'off',
+      options: [
+        { value: 'off', name: 'Off' },
+        { value: 'on', name: 'On' },
+      ],
+    },
+  );
 const modelState = process.env.WORKBENCH_CONTRACT_MODEL_STATE;
 if (modelState && existsSync(modelState))
   configOptions[0].currentValue = readFileSync(modelState, 'utf8');
@@ -72,6 +97,55 @@ const update = (update) => {
   send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update } });
 };
 
+let autonomous;
+let previousAutonomous;
+let wakeTimer;
+function wake() {
+  // Unlabelled idle output is not lifecycle evidence.
+  update({
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'unlabelled idle output' },
+  });
+  const id = randomUUID();
+  autonomous = id;
+  update({
+    sessionUpdate: 'session_info_update',
+    _meta: { 'pi-workbench-run': { id, autonomous: true, running: true } },
+  });
+  if (previousAutonomous)
+    update({
+      sessionUpdate: 'session_info_update',
+      _meta: { 'pi-workbench-run': { id: previousAutonomous, autonomous: true, running: false } },
+    });
+  update({
+    sessionUpdate: 'agent_message_chunk',
+    messageId: `message-${id}`,
+    content: { type: 'text', text: 'autonomous awake' },
+    _meta: { 'pi-workbench-live': id },
+  });
+  send({
+    jsonrpc: '2.0',
+    id: `autonomous-${id}`,
+    method: 'session/request_permission',
+    params: {
+      sessionId,
+      toolCall: { toolCallId: 'background', title: 'Background permission' },
+      options: [{ optionId: 'yes', kind: 'allow_once', name: 'Allow' }],
+    },
+  });
+}
+function armWake() {
+  if (wakeTimer || !process.env.WORKBENCH_CONTRACT_WAKE_GATE) return;
+  let last;
+  wakeTimer = setInterval(() => {
+    const gate = process.env.WORKBENCH_CONTRACT_WAKE_GATE;
+    if (!existsSync(gate)) return;
+    const value = readFileSync(gate, 'utf8');
+    if (value === last || autonomous) return;
+    last = value;
+    wake();
+  }, 10);
+}
 createInterface({ input: process.stdin }).on('line', (line) => {
   let r;
   try {
@@ -87,6 +161,42 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       outcome: r.result?.outcome?.outcome,
       action: r.result?.action,
     });
+    if (autonomous && r.id === `autonomous-${autonomous}`) {
+      const id = autonomous;
+      autonomous = undefined;
+      previousAutonomous = id;
+      const cancelled = r.result?.outcome?.outcome === 'cancelled';
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        messageId: `message-${id}`,
+        content: { type: 'text', text: 'autonomous complete' },
+        _meta: { 'pi-workbench-live': id },
+      });
+      update({
+        sessionUpdate: 'session_info_update',
+        _meta: {
+          'pi-workbench-run': {
+            id,
+            autonomous: true,
+            running: false,
+            cancelled,
+            usage: { inputTokens: 7, outputTokens: 11, cachedReadTokens: 0, cachedWriteTokens: 0 },
+          },
+        },
+      });
+      update({
+        sessionUpdate: 'usage_update',
+        used: 123,
+        size: 1000,
+        _meta: { 'pi-workbench-live': id },
+      });
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'stale autonomous output' },
+        _meta: { 'pi-workbench-live': id },
+      });
+      return;
+    }
     if (permissionBatch.delete(r.id) && pending) {
       batchCancelled ||= r.result?.outcome?.outcome === 'cancelled';
       if (permissionBatch.size === 0) {
@@ -114,7 +224,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       agentInfo: { name: 'contract-agent', title: 'Contract Agent', version: '1' },
       agentCapabilities: {
         loadSession: true,
-        promptCapabilities: { image: true, embeddedContext: true },
+        promptCapabilities: {
+          image: process.env.WORKBENCH_CONTRACT_NO_IMAGE !== '1',
+          embeddedContext: process.env.WORKBENCH_CONTRACT_NO_CONTEXT !== '1',
+        },
         _meta: {
           'pi-workbench': {
             version: 1,
@@ -209,7 +322,26 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       .filter((b) => b.type === 'text')
       .map((b) => b.text)
       .join('\n');
-    trace({ method: r.method, text });
+    trace({
+      method: r.method,
+      text,
+      parts: r.params.prompt.map((part) => ({
+        type: part.type,
+        bytes: part.data?.length,
+        uri: part.resource?.uri,
+        text: part.resource?.text,
+      })),
+    });
+    if (text === 'autonomous-arm') {
+      reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2 } });
+      armWake();
+      return;
+    }
+    if (text === 'autonomous-race') {
+      wake();
+      fail(r.id, 'Agent is streaming; input not sent');
+      return;
+    }
     nativePrompt = r.id;
     nativeFixture?.record(
       sessionId,
@@ -560,7 +692,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     if (config) {
       config.currentValue = r.params.value;
-      if (modelState) writeFileSync(modelState, config.currentValue);
+      if (modelState && config.id === 'model') writeFileSync(modelState, config.currentValue);
       nativeFixture?.configure(sessionId, configOptions[0].currentValue, modes.currentModeId);
     }
     const gate = process.env.WORKBENCH_CONTRACT_CONFIG_GATE;

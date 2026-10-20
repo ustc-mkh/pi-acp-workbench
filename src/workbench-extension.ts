@@ -8,6 +8,7 @@ import { WorkbenchController } from './workbench-controller';
 import { readTextAttachment } from './workbench-attachments';
 import { MAX_ATTACHMENTS } from './workbench-input';
 import { telegramConfiguration } from './workbench-setup';
+import { externalDestination } from './workbench-messages';
 
 function isWithin(root: string, target: string) {
   const part = relative(root, target);
@@ -40,11 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   command('piAcp.attachSelection', () => provider.attachSelection());
   command('piAcp.logs', () => provider.log.show());
-  command('piAcp.login', () =>
-    vscode.window.showInformationMessage(
-      'Provider accounts and worker commands are configured by pi-acp-workbenchd. Use the provider CLI login in a terminal; no credentials are sent through this view.',
-    ),
-  );
+  command('piAcp.login', () => provider.login());
   return { getState: () => provider.controller.snapshot };
 }
 export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -79,6 +76,20 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
         context.workspaceState?.update(operationKey, operations) ?? Promise.resolve(),
       trusted: () => vscode.workspace.isTrusted,
       copyText: (text) => vscode.env.clipboard.writeText(text),
+      login: () => this.login(),
+      openLink: async (destination) => {
+        const url = externalDestination(destination);
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+        const choice = await vscode.window.showInformationMessage(
+          `External destination:\n${url}`,
+          { modal: true },
+          'Open',
+          'Copy link',
+        );
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+        if (choice === 'Copy link') await vscode.env.clipboard.writeText(url);
+        else if (choice === 'Open') await vscode.env.openExternal(vscode.Uri.parse(url));
+      },
       configureTelegram: async () => {
         const trusted = () => {
           if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
@@ -316,6 +327,40 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
       }),
     );
   }
+  async login() {
+    if (!vscode.workspace.isTrusted) throw new Error('Open a trusted workspace first');
+    const profile = await vscode.window.showQuickPick(['Pi', 'Codex', 'Claude'], {
+      title: 'Native provider login (trusted built-in profiles)',
+    });
+    if (!profile) return;
+    const profiles: Record<string, { command: string; args: string[]; instruction: string }> = {
+      Pi: { command: 'pi', args: [], instruction: 'Use /login in the Pi terminal.' },
+      Codex: {
+        command: 'codex',
+        args: ['login'],
+        instruction: 'Follow the native Codex login flow.',
+      },
+      Claude: {
+        command: 'claude',
+        args: ['auth', 'login'],
+        instruction: 'Follow the native Claude login flow.',
+      },
+    };
+    const selected = profiles[profile];
+    if (!selected) return;
+    const choice = await vscode.window.showWarningMessage(
+      `Run ${[selected.command, ...selected.args].join(' ')} in a native terminal? ${selected.instruction} Credentials stay with the provider CLI. Custom daemon worker commands are not used.`,
+      { modal: true },
+      'Open login terminal',
+    );
+    if (choice !== 'Open login terminal' || !vscode.workspace.isTrusted) return;
+    const terminal = vscode.window.createTerminal({
+      name: `${profile} login`,
+      shellPath: selected.command,
+      shellArgs: selected.args,
+    });
+    terminal.show();
+  }
   async newSession() {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!cwd) {
@@ -331,14 +376,21 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) return;
     const text = editor.document.getText(editor.selection);
-    if ([...text].length > 80000) {
+    if (Buffer.byteLength(text, 'utf8') > 65536) {
       await vscode.window.showWarningMessage('Selection is too large for a prompt');
       return;
     }
     await vscode.commands.executeCommand('piAcp.chat.focus');
     // Explicit user selection only. No tool metadata/URI may cause a file read.
     void this.view?.webview
-      .postMessage({ type: 'draft', text: `${editor.document.fileName}\n\n${text}` })
+      .postMessage({
+        type: 'selection_context',
+        file: {
+          id: randomUUID(),
+          name: `${editor.document.fileName}:${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`,
+          text,
+        },
+      })
       .then(undefined, () => {});
   }
   dispose() {

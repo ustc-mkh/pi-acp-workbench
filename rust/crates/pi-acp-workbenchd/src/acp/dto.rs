@@ -181,6 +181,13 @@ pub struct SessionNotification {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "sessionUpdate")]
 pub enum SessionUpdate {
+    #[serde(rename = "pi_workbench_run")]
+    PiRun(super::extensions::PiRun),
+    #[serde(rename = "pi_workbench_live")]
+    PiLive {
+        id: crate::domain::ProviderMessageId,
+        update: Box<SessionUpdate>,
+    },
     #[serde(rename = "agent_message_chunk")]
     AgentMessage {
         content: ContentBlock,

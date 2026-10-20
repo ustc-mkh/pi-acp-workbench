@@ -26,13 +26,32 @@ use tokio_util::sync::CancellationToken;
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 // Only image notifications may use the larger lane. Raw bytes expand to base64;
 // the remainder covers the UTF-8 JSON envelope, not arbitrary text/tool output.
-const MAX_MEDIA_FRAME: usize = crate::domain::image::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 64 * 1024;
+const MAX_MEDIA_FRAME: usize = crate::domain::image::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024 * 1024;
 fn validate_frame(message: &JsonRpcMessage, bytes: usize) -> Result<(), DomainError> {
     if bytes <= MAX_FRAME {
         return Ok(());
     }
     if bytes > MAX_MEDIA_FRAME {
         return Err(DomainError::FrameTooLarge);
+    }
+    if let JsonRpcMessage::Request(request) = message {
+        if request.method == "session/prompt" {
+            if let Some(parts) = request.params["prompt"].as_array() {
+                let images: Vec<_> = parts.iter().filter(|p| p["type"] == "image").collect();
+                if images.len() == 1 {
+                    let data = images[0]["data"]
+                        .as_str()
+                        .ok_or(DomainError::FrameTooLarge)?;
+                    let mime = images[0]["mimeType"]
+                        .as_str()
+                        .ok_or(DomainError::FrameTooLarge)?;
+                    if bytes.saturating_sub(data.len()) <= 1024 * 1024 {
+                        crate::domain::image::ImageAsset::from_base64(mime, data)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
     if let JsonRpcMessage::Notification(notification) = message {
         if notification.method == "session/update" {

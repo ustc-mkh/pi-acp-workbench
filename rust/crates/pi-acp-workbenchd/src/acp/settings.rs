@@ -230,7 +230,40 @@ impl SessionDetails {
             })
             .map(ModeId::new)
             .transpose()?;
+        let selects = self.config_options.as_ref().map(|options| {
+            options
+                .iter()
+                .filter_map(|option| match option {
+                    ConfigOption::Select {
+                        id,
+                        name,
+                        category,
+                        current_value,
+                        options,
+                    } => Some(SelectSetting {
+                        id: id.clone(),
+                        name: name.clone(),
+                        category: category.clone(),
+                        current_value: current_value.clone(),
+                        choices: options
+                            .values()
+                            .iter()
+                            .map(|c| SelectChoice {
+                                value: c.value.clone(),
+                                name: c.name.clone(),
+                            })
+                            .collect(),
+                    }),
+                    ConfigOption::Unknown => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(selects) = &selects {
+            SelectSetting::validate_all(selects)?;
+        }
         Ok(CataloguePatch {
+            selects,
+            image_input: None,
             models,
             modes,
             commands: None,

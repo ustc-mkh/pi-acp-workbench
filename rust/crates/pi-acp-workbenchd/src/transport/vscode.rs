@@ -131,6 +131,14 @@ pub enum ClientCommand {
         session: SessionId,
         model: ModelId,
     },
+    Discover {
+        session: SessionId,
+    },
+    SetOption {
+        session: SessionId,
+        id: String,
+        value: String,
+    },
     SetMode {
         session: SessionId,
         mode: ModeId,
@@ -258,6 +266,10 @@ impl ClientCommand {
                 DomainCommand::CancelFork { session, operation }
             }
             Self::SetModel { session, model } => DomainCommand::SetModel { session, model },
+            Self::Discover { session } => DomainCommand::Discover { session },
+            Self::SetOption { session, id, value } => {
+                DomainCommand::SetOption { session, id, value }
+            }
             Self::SetMode { session, mode } => DomainCommand::SetMode { session, mode },
             Self::Remove { session } => DomainCommand::RemoveSession(session),
             _ => return None,

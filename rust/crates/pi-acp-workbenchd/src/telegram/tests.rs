@@ -43,6 +43,7 @@ fn snapshot() -> crate::domain::query::SessionView {
         usage: Default::default(),
         configuration_intent: None,
         config: SessionConfig {
+            options: Default::default(),
             model: None,
             mode: None,
         },

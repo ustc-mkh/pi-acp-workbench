@@ -28,6 +28,7 @@ CREATE TABLE session_metadata (
 ) STRICT;
 CREATE TABLE naming_settings (id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL,model TEXT) STRICT;
 INSERT INTO naming_settings VALUES(1,'follow',NULL);
+CREATE TABLE provider_preferences (harness TEXT PRIMARY KEY, config_json TEXT NOT NULL) STRICT;
 CREATE TABLE model_settings (
     harness TEXT NOT NULL, model TEXT NOT NULL CHECK(length(model)<=300), hidden INTEGER NOT NULL CHECK(hidden IN (0,1)),
     price TEXT CHECK(price IS NULL OR json_valid(price)), default_price TEXT CHECK(default_price IS NULL OR json_valid(default_price)),context_window INTEGER,

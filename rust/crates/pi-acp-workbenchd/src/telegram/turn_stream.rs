@@ -218,7 +218,7 @@ pub struct TurnStream {
     page: VecDeque<EntryHeader>,
     current: Option<TextCursor>,
     image: Option<ImageRef>,
-    previous_message: Option<ProviderMessageId>,
+    previous_entry: Option<EntryHeader>,
     text_since_image: bool,
     separator: u8,
     fragment: String,
@@ -239,7 +239,7 @@ impl TurnStream {
             page: VecDeque::new(),
             current: None,
             image: None,
-            previous_message: None,
+            previous_entry: None,
             text_since_image: false,
             separator: 0,
             fragment: String::new(),
@@ -360,13 +360,14 @@ impl TurnStream {
                 }
                 if header.image.is_none()
                     && self.text_since_image
-                    && self.previous_message.is_some()
-                    && header.message.is_some()
-                    && self.previous_message != header.message
+                    && !self
+                        .previous_entry
+                        .as_ref()
+                        .is_some_and(|previous| previous.continues_message(&header))
                 {
                     self.separator = 2;
                 }
-                self.previous_message = header.message;
+                self.previous_entry = Some(header.clone());
                 self.current = Some(TextCursor::new(header.text));
                 self.image = header.image;
                 continue;

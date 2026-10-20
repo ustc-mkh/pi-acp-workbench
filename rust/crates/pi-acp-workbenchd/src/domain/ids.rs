@@ -90,9 +90,45 @@ id!(ModelId, |value: &str| value.trim() == value
     && !value.chars().any(char::is_control));
 id!(ModeId, |value: &str| value.trim() == value
     && !value.chars().any(char::is_control));
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Prompt(String);
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PromptPart {
+    Text {
+        text: String,
+    },
+    Context {
+        id: String,
+        name: String,
+        text: String,
+    },
+    Image {
+        asset: super::image::ImageAsset,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PromptWire", into = "PromptWire")]
+pub struct Prompt {
+    parts: Vec<PromptPart>,
+    text: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptWire {
+    parts: Vec<PromptPart>,
+}
+impl TryFrom<PromptWire> for Prompt {
+    type Error = IdError;
+    fn try_from(wire: PromptWire) -> Result<Self, IdError> {
+        Self::from_parts(wire.parts)
+    }
+}
+impl From<Prompt> for PromptWire {
+    fn from(prompt: Prompt) -> Self {
+        Self {
+            parts: prompt.parts,
+        }
+    }
+}
 impl TryFrom<String> for Prompt {
     type Error = IdError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -101,19 +137,67 @@ impl TryFrom<String> for Prompt {
 }
 impl From<Prompt> for String {
     fn from(value: Prompt) -> Self {
-        value.0
+        value.text
     }
 }
 impl Prompt {
     pub fn new(s: impl Into<String>) -> Result<Self, IdError> {
-        let s = s.into();
-        if s.trim().is_empty() || s.chars().count() > 100_000 {
-            Err(IdError)
-        } else {
-            Ok(Self(s))
+        Self::from_parts(vec![PromptPart::Text { text: s.into() }])
+    }
+    pub fn from_parts(parts: Vec<PromptPart>) -> Result<Self, IdError> {
+        if parts.is_empty() || parts.len() > 10 {
+            return Err(IdError);
         }
+        let mut text = Vec::new();
+        let mut chars = 0;
+        let mut context_chars = 0;
+        let mut contexts = std::collections::HashSet::new();
+        let mut images = 0;
+        for part in &parts {
+            match part {
+                PromptPart::Text { text: value } => {
+                    chars += value.chars().count();
+                    text.push(value.clone());
+                }
+                PromptPart::Context {
+                    id,
+                    name,
+                    text: value,
+                } => {
+                    if id.is_empty()
+                        || id.len() > 200
+                        || !contexts.insert(id)
+                        || name.is_empty()
+                        || name.len() > 4096
+                        || name.chars().any(char::is_control)
+                        || value.len() > 64 * 1024
+                    {
+                        return Err(IdError);
+                    }
+                    context_chars += value.chars().count();
+                    chars += value.chars().count();
+                    text.push(format!("Explicit context: {name}\n\n{value}"));
+                }
+                PromptPart::Image { .. } => images += 1,
+            }
+        }
+        if images > 1
+            || contexts.len() > 8
+            || context_chars > 80_000
+            || chars > 100_000
+            || (images == 0 && text.iter().all(|value| value.trim().is_empty()))
+        {
+            return Err(IdError);
+        }
+        Ok(Self {
+            parts,
+            text: text.join("\n\n"),
+        })
+    }
+    pub fn parts(&self) -> &[PromptPart] {
+        &self.parts
     }
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
     }
 }

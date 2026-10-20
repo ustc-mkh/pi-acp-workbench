@@ -2,6 +2,10 @@
 
 本页描述当前单宿主与 SQLite 增量存储，不描述旧 JSON reader、双 daemon 或 native 数据自动迁移。剩余功能差异与验收要求统一见[下一版重构计划](workbench-next-rewrite-plan.md)。
 
+P2：prompt 为有序 text/context/image parts；operation 指纹覆盖原始 parts 身份与顺序。图片输入在 writer 外有界完整解码并重编码为静态 PNG，归档使用清理后的描述符及原 asset ID；每个有限输入 part 都有正确 entry/seq 的不可变 input delivery intent，输入/归档/Accepted 同事务。草稿仅在原 operation + generation 接受且未改变时清除。通用 select 设置持久 prepare/restore，观察确认后才提交偏好；失败/未知不保存，显式 discovery 可恢复旧 baseline，但不重发原操作。`provider_preferences` 与成功观察/settle 同事务，只含最近 model/thinking，Fast 不成为全局默认，新会话读取、已有会话优先。当前 root 必须含该新表，旧实验 root 明确拒绝，禁止隐式迁移/清空。
+
+P3：仅协商过的 Pi workbench v1 显式 start/finish 创建自主 turn；live run ID 与 worker epoch/turn 一起隔离迟到输出。自主 start 与并发输入在 actor commit 处串行化；provider 最后一刻抢占时，已 Accepted 的输入保留并原子写入独立 rejected marker，不冒充已执行，不回滚 receipt。finish 的本轮 assistant usage 更新独立 usage fact；已删除 native-file tail 计费路径，避免上一轮/新唤醒串账。授权、完成/停止通知复用现有持久链；重启只恢复冷历史及原 receipt，不自动续跑。自主 Diff 明确 unavailable，worker 存活期 gate 仍保护 undo；Pi 尚无可信后台 pin 释放证据，idle worker 保守不回收。显式 stop/remove/shutdown 物理 join 后释放容量；不以超时推断无后台工作。
+
 ## Durable ordering
 
 | 组件              | 提交顺序与故障行为                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -22,7 +26,7 @@ Telegram 目录选择沿用上述不可变菜单/typed Control callback，不另
 
 Telegram history 导出事务：核对冻结 inbox action/topic 与当前 binding/canonical cwd，最多扫描200条元数据，选择最多20/100条 eligible entries，既有 outbox intent、`telegram_history_cursors` 与不可变 request receipt 同事务提交。每条导出 identity 来自 bot/topic/session/entry，Acked/Pending 都不重复入队；游标表示可靠入队，而非 HTTP 已成功。回复 enqueue/inbox complete 可重启补齐原收据，不取新的批次。显式导出正文只保留一片64KiB slice/4000 UTF-16 part，复用不可变图片；部分发送与 ack 前崩溃仍可重复。权限/目录暂不可用时保留 Pending/backoff，不丢已计划的历史；恢复范围后原意图可继续，同 topic head 仍是屏障。自动 Turn 完整发送后，ack 与实际 bot/chat/thread/session 收据在同事务提交，复用原 manifest 作为正文/图片证据；mute/范围拒绝等 skip ack 不写成功发送收据。History 预订及发送前均复核，Turn 分页按≤100个显式导出 ID 查询 Acked，双向避免已确认正文重发。全量正文此前已导出时仍投递可靠完成提示。HTTP 成功但 ack 提交失败时，内存恢复缓存携带原话题，不因重绑记成新目的地；进程丢失缓存仍按 at-least-once 重试。新必需表缺失的旧实验 root 明确拒绝，不迁移/reset。
 
-IPC numeric request ID 只关联连接响应；durable operation 才负责跨连接/重启防重。断开、超时和取消 observer 不证明副作用撤销，不自动换 operation 重发。普通 query 不写 journal；image query 禁止 operation，pixels 只在专用 response 返回。当前 UI 已持久化有界未决 handles 并在 reload 后只读查询，不保存命令正文、不重发；Started 查询保守为 uncertain，不暗示实际执行阶段。
+IPC numeric request ID 只关联连接响应；durable operation 才负责跨连接/重启防重。断开、超时和取消 observer 不证明副作用撤销，不自动换 operation 重发。普通 query 不写 journal；image query 禁止 operation，pixels 只在专用 response 返回；typed image prompt 输入允许专用有界 asset part，不进入 SessionView。当前 UI 已持久化有界未决 handles 并在 reload 后只读查询，不保存命令正文、不重发；Started 查询保守为 uncertain，不暗示实际执行阶段。
 
 ## 数据与查询预算
 

@@ -307,7 +307,10 @@ try {
     (batch) =>
       batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
   );
-  await client.call({ method: 'prompt', session, prompt: 'permission' }, 'contract-permission');
+  await client.call(
+    { method: 'prompt', session, prompt: { parts: [{ type: 'text', text: 'permission' }] } },
+    'contract-permission',
+  );
   const requested = Object.keys((await interaction).view.pending_interactions)[0];
   await until(() => sent.some((message) => message.reply_markup), 'permission keyboard');
   const key = sent.find((message) => message.reply_markup).reply_markup.inline_keyboard[0][0]
@@ -423,7 +426,11 @@ try {
     batch.entries.some((entry) => inlineText(entry) === 'bot-env-hidden'),
   );
   finished = client.waitFor((batch) => turnFinished(batch, session));
-  await client.call({ method: 'prompt', session, prompt: 'check-bot-env' });
+  await client.call({
+    method: 'prompt',
+    session,
+    prompt: { parts: [{ type: 'text', text: 'check-bot-env' }] },
+  });
   await envText;
   await finished;
   check('actual ACP child cannot inherit the bot token environment variable');
@@ -539,7 +546,11 @@ try {
     (batch) =>
       batch.session === session && Object.keys(batch.view?.pending_interactions || {}).length,
   );
-  await client.call({ method: 'prompt', session, prompt: 'permission' });
+  await client.call({
+    method: 'prompt',
+    session,
+    prompt: { parts: [{ type: 'text', text: 'permission' }] },
+  });
   await cancelInteraction;
   const cancelled = await client.call({ method: 'cancel', session });
   assert(cancelled.Accepted);
@@ -624,6 +635,11 @@ try {
   check(
     'frozen workspace scope authorizes the original bound topic after external source deletion and restart, without ACP or different bytes',
   );
+  // The fatal-cleanup barrier is finished. New sessions now inherit the last
+  // successfully observed model, so leaving this global synthetic gate closed
+  // would block their first configure (not image delivery). Do not relax the
+  // revision timeout or silently rerun the failing image case.
+  await writeFile(`${configGate}.release`, 'fatal-cleanup barrier finished');
   // Independent topic: preferences are useful before a session even exists.
   // Keep this after the source-removal oracle so its image counts stay independent.
   const preferenceThread = thread + 2;
@@ -687,6 +703,11 @@ try {
     );
   }, 'new session bound to the muted topic');
   await client.call({ method: 'attach', session: preferenceSession });
+  assert.equal(
+    (await client.call({ method: 'inspect', session: preferenceSession })).config.model,
+    'other',
+    'new session inherits the successful setting and needs the released configure barrier',
+  );
   const mutedPromptCount = (await trace()).filter(
     (record) => record.text === 'image-output',
   ).length;
@@ -1580,7 +1601,7 @@ try {
   await client.call({
     method: 'prompt',
     session: flowSession,
-    prompt: 'desktop input mirror',
+    prompt: { parts: [{ type: 'text', text: 'desktop input mirror' }] },
   });
   await until(
     () =>

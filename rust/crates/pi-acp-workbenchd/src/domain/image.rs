@@ -121,7 +121,7 @@ impl ImageRef {
         &self.sha256
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ImageAssetWire", into = "ImageAssetWire")]
 pub struct ImageAsset {
     image: ImageRef,
@@ -164,6 +164,50 @@ impl ImageAsset {
             return Err(invalid());
         }
         Ok(Self { image, data })
+    }
+    /// Input-only full decode under explicit pixel and allocation limits.
+    pub fn sanitize_input(&self) -> Result<Self, DomainError> {
+        use image::ImageDecoder;
+        let format = match self.image.mime {
+            ImageMime::Png => image::ImageFormat::Png,
+            ImageMime::Jpeg => image::ImageFormat::Jpeg,
+            ImageMime::Gif => image::ImageFormat::Gif,
+            ImageMime::Webp => image::ImageFormat::WebP,
+        };
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&self.data), format);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let decoder = reader.into_decoder().map_err(|_| invalid())?;
+        let (width, height) = decoder.dimensions();
+        if width == 0
+            || height == 0
+            || u64::from(width) * u64::from(height) > 16_000_000
+            || decoder.total_bytes() > 64 * 1024 * 1024
+        {
+            return Err(invalid());
+        }
+        // Animated inputs are intentionally rejected; never decode unbounded frames.
+        if matches!(self.image.mime, ImageMime::Gif)
+            || (matches!(self.image.mime, ImageMime::Png)
+                && self.data.windows(4).any(|w| w == b"acTL"))
+            || (matches!(self.image.mime, ImageMime::Webp)
+                && self.data.windows(4).any(|w| w == b"ANIM"))
+        {
+            return Err(invalid());
+        }
+        let decoded = image::DynamicImage::from_decoder(decoder).map_err(|_| invalid())?;
+        // Only decoded raster pixels cross the provider/archive input boundary.
+        // Re-encoding strips trailing data, metadata and unused container chunks.
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        decoded
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|_| invalid())?;
+        let mut clean = Self::new(ImageMime::Png, encoded.into_inner())?;
+        clean.image.id = self.image.id.clone();
+        Ok(clean)
     }
     pub fn image(&self) -> &ImageRef {
         &self.image

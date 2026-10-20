@@ -12,6 +12,7 @@ fn configuration_intent_requires_known_baseline_and_observed_confirmation_before
     let mut state = state();
     let id = state.id.clone();
     let requested = SessionConfig {
+        options: Default::default(),
         model: Some(ModelId::new("other").unwrap()),
         mode: None,
     };

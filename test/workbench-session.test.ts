@@ -60,8 +60,8 @@ it('500 confirmed updates replace hot view and append bounded headers with zero 
   for (let i = 1; i <= 500; i++) send(peer, attaches()[0], batch(i + 5, i));
   await expect.poll(() => view.view.view?.revision).toBe(505);
   expect(view.view.status).toBe('ready');
-  expect(view.view.entries).toHaveLength(200);
-  expect(view.view.entries[0].seq).toBe(301);
+  expect(view.view.entries).toHaveLength(500);
+  expect(view.view.entries[0].seq).toBe(1);
   expect(view.view.entries.at(-1)?.seq).toBe(500);
   expect(peer.requests.map((request) => request.command.method)).toEqual(['attach']);
   expect(peer.requests.every((request) => !request.operation)).toBe(true);
@@ -132,7 +132,7 @@ it('disconnect requires explicit reattachment and stopping does not reconnect fo
   expect(peer.requests).toHaveLength(count);
   expect(peer.sockets.size).toBe(0);
 });
-it('explicit earlier/latest browsing replaces pages while current batches only update the hot view', async () => {
+it('earlier browsing preserves current messages while current batches only update the hot view', async () => {
   const { peer, view, attaches } = await setup(false);
   const snapshot = emptyView(5);
   snapshot.last_entry_seq = 400;
@@ -152,7 +152,7 @@ it('explicit earlier/latest browsing replaces pages while current batches only u
   await earlier;
   send(peer, attaches()[0], batch(6, 401));
   await expect.poll(() => view.view.view?.revision).toBe(6);
-  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1]);
+  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1, 201]);
   expect(view.view.historical).toBe(true);
   const latest = view.latest();
   await expect

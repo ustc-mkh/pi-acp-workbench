@@ -96,6 +96,11 @@ pub enum ControlCommand {
         session: SessionId,
         model: ModelId,
     },
+    SetOption {
+        session: SessionId,
+        id: String,
+        value: String,
+    },
     SetMode {
         session: SessionId,
         mode: ModeId,
@@ -222,6 +227,19 @@ pub fn parse_text(
                 session: session(snapshot)?,
                 model: ModelId::new(args).map_err(invalid)?,
             },
+            "setting" => {
+                let (id, value) = args
+                    .split_once(' ')
+                    .ok_or(RejectionReason::InvalidArguments)?;
+                if id.is_empty() || id.len() > 200 || value.is_empty() || value.len() > 200 {
+                    return Err(RejectionReason::InvalidArguments);
+                }
+                ControlCommand::SetOption {
+                    session: session(snapshot)?,
+                    id: id.into(),
+                    value: value.into(),
+                }
+            }
             "mode" => ControlCommand::SetMode {
                 session: session(snapshot)?,
                 mode: ModeId::new(args).map_err(invalid)?,

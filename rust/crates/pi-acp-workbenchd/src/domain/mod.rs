@@ -30,6 +30,8 @@ mod interaction_tests;
 #[cfg(test)]
 mod metadata_tests;
 #[cfg(test)]
+mod prompt_parts_tests;
+#[cfg(test)]
 mod query_tests;
 #[cfg(test)]
 pub(crate) mod tests;

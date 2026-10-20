@@ -3,6 +3,7 @@ import {
   handlePiRunEvent,
   piRunBusy,
   piMessageId,
+  piLiveUpdate,
   settlePiRun,
   cancelPiRun,
   rejectPiPrompt,
@@ -29,6 +30,32 @@ function fixture() {
     session.emit.mock.calls.map(([update]) => update._meta?.['pi-workbench-run']).filter(Boolean);
   return { session, event, lifecycle };
 }
+it('bills only assistant events from this run, not previous snapshots or a later wake', async () => {
+  const { session, event, lifecycle } = fixture();
+  session.pendingTurn = { resolve: vi.fn(), reject: vi.fn() };
+  event('agent_start');
+  event('message_end', {
+    message: { role: 'assistant', usage: { input: 3, output: 5, cacheRead: 2, cacheWrite: 0 } },
+  });
+  await settlePiRun(session, (message) => new Error(message));
+  event('agent_start');
+  const oldId = lifecycle()[0].id;
+  expect(
+    piLiveUpdate(session, { _meta: { 'pi-workbench-live': oldId } })._meta['pi-workbench-live'],
+  ).toBe(oldId);
+  event('message_end', {
+    message: { role: 'assistant', usage: { input: 7, output: 11, cacheRead: 0, cacheWrite: 0 } },
+  });
+  await settlePiRun(session, (message) => new Error(message));
+  expect(
+    lifecycle()
+      .filter((run) => !run.running)
+      .map((run) => run.usage),
+  ).toEqual([
+    { inputTokens: 3, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 0 },
+    { inputTokens: 7, outputTokens: 11, cachedReadTokens: 0, cachedWriteTokens: 0 },
+  ]);
+});
 it('keeps retries busy until settled, displays custom notices and assigns message ids without partial snapshots', async () => {
   const { session, event, lifecycle } = fixture();
   event('agent_start');

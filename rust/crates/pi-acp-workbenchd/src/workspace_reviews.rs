@@ -33,6 +33,31 @@ impl Reviews {
             .await
             .insert(session, (turn, snapshot, lease));
     }
+    /// A provider wake won prompt admission. Its writes cannot be attributed
+    /// to the rejected input, so discard that tentative baseline, never diff it.
+    pub(crate) async fn reject_input(&self, session: &SessionId) -> Result<(), DomainError> {
+        if let Some((turn, _, _lease)) = self.captures.lock().await.remove(session) {
+            self.database
+                .save_turn_diff(
+                    session.clone(),
+                    turn,
+                    crate::workspace_review::TurnDiff {
+                        status: crate::workspace_review::DiffStatus::Unavailable,
+                        files: vec![],
+                        warnings: vec![
+                            "Input rejected by autonomous run admission; no attributable Diff."
+                                .into(),
+                        ],
+                        added: 0,
+                        removed: 0,
+                        next_offset: None,
+                    },
+                )
+                .await
+                .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        }
+        Ok(())
+    }
     pub(crate) async fn finish(
         &self,
         session: &SessionId,

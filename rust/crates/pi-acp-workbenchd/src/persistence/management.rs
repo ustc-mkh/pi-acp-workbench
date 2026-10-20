@@ -36,6 +36,13 @@ pub(super) fn observe(
             .take(48)
             .collect();
         db.execute("INSERT INTO session_metadata(session,title,source,attempted) VALUES(?1,?2,'fallback',0) ON CONFLICT(session) DO NOTHING",params![view.id.as_str(),if title.trim().is_empty(){"New task"}else{&title}])?;
+    }
+    // A turn exists independently of user entries (Pi may wake autonomously).
+    if let Some(turn) = view
+        .active_turn
+        .as_ref()
+        .filter(|turn| old.active_turn.as_ref() != Some(*turn))
+    {
         let model = view
             .config
             .model
@@ -43,7 +50,7 @@ pub(super) fn observe(
             .or(view.catalogue.current_model.as_ref())
             .map(|m| m.as_str())
             .unwrap_or("unknown");
-        db.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'inference',CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(id) DO NOTHING",params![format!("turn:{}:{}",view.id.as_str(),entry.turn.as_str()),view.id.as_str(),harness(&view.harness),model])?;
+        db.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'inference',CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(id) DO NOTHING",params![format!("turn:{}:{}",view.id.as_str(),turn.as_str()),view.id.as_str(),harness(&view.harness),model])?;
     }
     if view.usage.reported
         && (view.usage.input_tokens != old.usage.input_tokens

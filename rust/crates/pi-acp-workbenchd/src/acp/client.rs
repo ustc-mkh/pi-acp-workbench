@@ -326,6 +326,43 @@ impl AcpClient {
                 ));
             }
         }
+        for (id, value) in &config.options {
+            let observed = details.catalogue_patch()?;
+            let setting = observed
+                .selects
+                .as_ref()
+                .and_then(|s| s.iter().find(|s| &s.id == id))
+                .ok_or_else(|| {
+                    DomainError::Protocol("provider exposes no such select setting".into())
+                })?;
+            if !setting.choices.iter().any(|c| &c.value == value) {
+                return Err(DomainError::Protocol("setting value is not offered".into()));
+            }
+            if &setting.current_value != value {
+                let response: settings::SetConfigResponse = self
+                    .call(
+                        "session/set_config_option",
+                        settings::SetConfigRequest {
+                            session_id: native.clone(),
+                            config_id: id.clone(),
+                            value: value.clone(),
+                        },
+                    )
+                    .await?;
+                details.config_options = Some(response.config_options);
+            }
+            if !details
+                .catalogue_patch()?
+                .selects
+                .unwrap_or_default()
+                .iter()
+                .any(|s| &s.id == id && &s.current_value == value)
+            {
+                return Err(DomainError::Protocol(
+                    "provider did not confirm requested setting".into(),
+                ));
+            }
+        }
         let observed = details.catalogue_patch()?;
         if config
             .model
@@ -459,6 +496,7 @@ mod tests {
             .unwrap();
         let mut details = created.details;
         let config = crate::domain::session::SessionConfig {
+            options: Default::default(),
             model: Some(crate::domain::ModelId::new("other").unwrap()),
             mode: Some(crate::domain::ModeId::new("high").unwrap()),
         };
@@ -469,6 +507,7 @@ mod tests {
         assert_eq!(details.select("model").unwrap().1, "other");
         assert_eq!(details.modes.as_ref().unwrap().current_mode_id, "high");
         let invalid = crate::domain::session::SessionConfig {
+            options: Default::default(),
             model: Some(crate::domain::ModelId::new("not-offered").unwrap()),
             mode: None,
         };

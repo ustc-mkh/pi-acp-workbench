@@ -61,6 +61,8 @@ impl Request {
                 Self::Command {
                     command: DomainCommand::SetModel { .. }
                         | DomainCommand::SetMode { .. }
+                        | DomainCommand::SetOption { .. }
+                        | DomainCommand::Discover { .. }
                         | DomainCommand::Fork { .. },
                     ..
                 }
@@ -118,6 +120,8 @@ impl Request {
                     | DomainCommand::Manage { session, .. }
                     | DomainCommand::SetModel { session, .. }
                     | DomainCommand::SetMode { session, .. }
+                    | DomainCommand::SetOption { session, .. }
+                    | DomainCommand::Discover { session }
                     | DomainCommand::PrepareConfiguration { session, .. }
                     | DomainCommand::CommitConfiguration { session }
                     | DomainCommand::Agent { session, .. },

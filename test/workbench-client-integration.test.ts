@@ -123,7 +123,11 @@ async function turn(client: WorkbenchClient, session: SessionId, prompt: string)
     });
   });
   try {
-    await client.call({ method: 'prompt', session, prompt });
+    await client.call({
+      method: 'prompt',
+      session,
+      prompt: { parts: [{ type: 'text', text: prompt }] },
+    });
     await completed;
     return {
       view: await client.call({ method: 'inspect', session }),
@@ -208,7 +212,11 @@ it('real v3 host streams bounded text/tool/form DTOs into the authoritative Type
   const turnId = output.page.entries.at(-1)!.turn;
   const tools = await client.call({ method: 'tools', session: created.id, turn: turnId });
   expect(tools.tools.length).toBeGreaterThan(0);
-  await client.call({ method: 'prompt', session: created.id, prompt: 'elicitation-text' });
+  await client.call({
+    method: 'prompt',
+    session: created.id,
+    prompt: { parts: [{ type: 'text', text: 'elicitation-text' }] },
+  });
   await expect
     .poll(() => Object.keys(session.view.view?.pending_interactions || {}).length)
     .toBe(1);
