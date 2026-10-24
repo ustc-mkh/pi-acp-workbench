@@ -157,10 +157,13 @@ try {
     },
   });
   await page.exposeFunction('workbenchReceive', (message) => controller.receive(message));
-  await page.goto(origin + '/style.css');
-  await page.setContent(
-    `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-smoke' ${origin}; style-src ${origin} 'unsafe-inline'; font-src ${origin}; img-src blob:; connect-src 'none';"><link rel="stylesheet" href="${origin}/style.css"><link rel="stylesheet" href="${origin}/katex.min.css"></head><body><main id="workbench"></main></body></html>`,
+  // Load a real HTML navigation instead of turning a CSS document into a page.
+  // Chromium may otherwise schedule its default favicon after CSP is replaced.
+  const fixtureHtml = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-smoke' ${origin}; style-src ${origin} 'unsafe-inline'; font-src ${origin}; img-src blob:; connect-src 'none';"><script nonce="smoke">const icon=document.createElement("link");icon.rel="icon";icon.href=URL.createObjectURL(new Blob([Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jvXcAAAAASUVORK5CYII="),c=>c.charCodeAt(0))],{type:"image/png"}));document.head.append(icon);</script><link rel="stylesheet" href="${origin}/style.css"><link rel="stylesheet" href="${origin}/katex.min.css"></head><body><main id="workbench"></main></body></html>`;
+  await page.route(origin + '/fixture', (route) =>
+    route.fulfill({ contentType: 'text/html', body: fixtureHtml }),
   );
+  await page.goto(origin + '/fixture');
   await page.evaluate(() => {
     window.acquireVsCodeApi = () => ({
       postMessage: (message) => void window.workbenchReceive(message),

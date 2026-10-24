@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-## 2.0.1 — 2026-10-24
+## 2.0.2 — 2026-10-24
+
+- 修正 Chromium 验收夹具：直接加载带受控 blob favicon 的 HTML，避免将 CSS 文档替换为页面后迟到的默认 favicon 请求触发 CSP 错误；产品 CSP 与零错误断言保持不变，17 项实际浏览器流程通过。
+- v2.0.1 标签因上述测试夹具问题未生成公开 release；保留原失败标签，不移动历史标签。
 
 - 修复发布审计发现的依赖漏洞：DOMPurify 3.4.17、markdown-it 15.0.3、Zod 4.6.7、rustls-webpki 0.103.16 和 webpki-roots 1.0.10；ACP SDK 保持原版本，实际使用的 Zod v4 路径统一到补丁版并执行回归。
 - v2.0.0 标签的首轮安全审计失败、未产生公开 release；保留该失败记录，本次以新补丁标签发布，不移动历史标签。
@@ -12,6 +15,10 @@
 - 修复 IPC 半帧取消、provider fork 源 worker 保护、空闲 owner 有界回收、旧 epoch 事件隔离、deferred topic 公平调度、大 outbox 读取及长驻 WAL 复用等问题，保留 receipt 防重与未知外部效果不重放语义。
 - P6 原计划 23 项有限验收完成：两平台生产矩阵、真实 Pi/Codex/Bot、原生 VSIX/Trust、故障切点、同机普通读取 P0 对照、五轮 mixed/600 秒 soak 和 GNU 同宿主两小时；范围和历史负例见 `docs/workbench-p6-validation.md`。本 release 标签的制品另由 CI 干净构建并验证，不将本地候选散列冒充发布散列。
 - 明确能力边界：Claude 本次真实在线验收由用户排除；Telegram 入站照片尚未实现，terminal:false 不提供终端正文，Pi stable profile 不提供 Fast。不会将这些能力标为成功通过，也不自动部署或迁移数据。
+
+## 2.0.1 — 2026-10-24（未发布）
+
+- 安全依赖修复与服务回归通过，浏览器 favicon 夹具错误阻止发布；修正后由 2.0.2 发布。
 
 ## 2.0.0 — 2026-10-24（未发布）
 
