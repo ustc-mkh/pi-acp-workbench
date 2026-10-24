@@ -172,6 +172,16 @@ pub(super) enum StoreRequest {
         limit: Option<usize>,
         reply: Reply<ListPage>,
     },
+    HistoryClear {
+        request: super::history_clear::Request,
+        reply: Reply<super::history_clear::Output>,
+    },
+    Search {
+        filter: crate::domain::query::SessionFilter,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+        reply: Reply<ListPage>,
+    },
     ActivityList {
         cursor: Option<ListCursor>,
         limit: Option<usize>,
@@ -439,7 +449,7 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
                         before_seq: attached.recent_page.entries[0].seq,
                     });
                 }
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(attached)
             })();
             let _ = reply.send(result);
@@ -477,7 +487,7 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
             let result = (|| {
                 let tx = connection.transaction()?;
                 let plan = super::fork::prepare(&tx, &view, &request, &candidates)?;
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(plan)
             })();
             let _ = reply.send(result);
@@ -505,6 +515,17 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
             reply,
         } => {
             let _ = reply.send(query::list(connection, cursor, limit));
+        }
+        StoreRequest::HistoryClear { request, reply } => {
+            let _ = reply.send(super::history_clear::execute(connection, request));
+        }
+        StoreRequest::Search {
+            filter,
+            cursor,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(query::search(connection, filter, cursor, limit));
         }
         StoreRequest::ActivityList {
             cursor,
@@ -537,7 +558,7 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
             let result = (|| -> Result<(), StoreError> {
                 let tx = connection.transaction()?;
                 super::content::put_image(&tx, &asset)?;
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(())
             })();
             let _ = reply.send(result);
@@ -583,6 +604,7 @@ impl StoreRequest {
             | Self::Tool { .. }
             | Self::View { .. }
             | Self::List { .. }
+            | Self::Search { .. }
             | Self::History { .. }
             | Self::ContentSlice { .. }
             | Self::Content { .. }
@@ -601,6 +623,7 @@ impl StoreRequest {
     }
     fn kind(&self) -> &'static str {
         match self {
+            Self::HistoryClear { .. } => "history_clear",
             Self::ManagementRead { .. } => "management_read",
             Self::ManagementUpdate { .. } => "management_update",
             Self::ModelDefaults { .. } => "model_defaults",
@@ -620,7 +643,7 @@ impl StoreRequest {
             Self::Create { .. } => "create",
             Self::Commit { .. } => "commit",
             Self::View { .. } => "view",
-            Self::List { .. } | Self::ActivityList { .. } => "list",
+            Self::List { .. } | Self::Search { .. } | Self::ActivityList { .. } => "list",
             Self::History { .. } => "history",
             Self::ContentSlice { .. } => "content_slice",
             Self::Content { .. } => "content",
@@ -693,6 +716,7 @@ impl Database {
                     readers[1].sender.take().unwrap(),
                 ];
                 let _ = started.send(Ok(reader_senders));
+                let mut checkpoint = super::checkpoint::Checkpoint::new(&root);
                 // A reply is an observer, not ownership of an accepted transaction.
                 while let Some(queued) = requests.blocking_recv() {
                     let execution = Instant::now();
@@ -706,6 +730,16 @@ impl Database {
                         execution.elapsed(),
                         queued.depth,
                     );
+                    match checkpoint.poll(&connection, Instant::now()) {
+                        Ok(Some(outcome)) => eprintln!(
+                            "WAL reuse checkpoint: busy={} log_frames={} checkpointed_frames={} elapsed_us={} busy_wait_budget_ms=20",
+                            outcome.busy, outcome.log_frames, outcome.checkpointed_frames, outcome.elapsed.as_micros()
+                        ),
+                        Ok(None) => {},
+                        // A committed request keeps its receipt. Maintenance
+                        // failure is visible and retried at the next interval.
+                        Err(error) => eprintln!("WAL reuse checkpoint failed: {error}"),
+                    }
                 }
                 let mut reader_result = Ok(());
                 for reader in &mut readers {
@@ -1027,6 +1061,31 @@ impl Database {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::View { session, reply }).await?;
         result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub(crate) async fn history_clear(
+        &self,
+        request: super::history_clear::Request,
+    ) -> Result<super::history_clear::Output, StoreError> {
+        let (reply, wait) = oneshot::channel();
+        self.enqueue(StoreRequest::HistoryClear { request, reply })
+            .await?;
+        wait.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn search(
+        &self,
+        filter: crate::domain::query::SessionFilter,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+    ) -> Result<ListPage, StoreError> {
+        let (reply, wait) = oneshot::channel();
+        self.enqueue(StoreRequest::Search {
+            filter,
+            cursor,
+            limit,
+            reply,
+        })
+        .await?;
+        wait.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn list(
         &self,

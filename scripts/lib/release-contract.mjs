@@ -10,6 +10,7 @@ export const releaseContract = Object.freeze({
 export const releaseDocuments = Object.freeze([
   'workbench-release.md',
   'workbench-cutover.md',
+  'workbench-data-migration.md',
   'workbench-vscode.md',
   'workbench-ipc.md',
   'workbench-telegram.md',
@@ -18,6 +19,7 @@ export const releaseDocuments = Object.freeze([
   'workbench-management.md',
   'persistence-recovery.md',
   'workbench-next-rewrite-plan.md',
+  'workbench-p6-validation.md',
 ]);
 export async function verifyReleaseSources() {
   const root = 'rust/crates/pi-acp-workbenchd/src/';

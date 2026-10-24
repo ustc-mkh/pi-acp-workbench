@@ -180,7 +180,17 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
           });
         }
       },
-      confirmUndo: async (_session, turn) => {
+      confirmHistoryClear: async (report) => {
+        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
+        return (
+          (await vscode.window.showWarningMessage(
+            `Clear frozen shared history job ${report.job}? ${report.total} target sessions across the preview's harness/workspace filter; ${report.remaining} pending, ${report.failed} failed. Preview included ${report.active} active tasks and ${report.pending_deliveries} pending deliveries. This batch stops/joins and removes at most 10 sessions, including Telegram tasks. Native files, usage and accepted delivery/dedup references remain. New sessions are not added. Each further batch needs confirmation.`,
+            { modal: true },
+            'Clear next batch',
+          )) === 'Clear next batch'
+        );
+      },
+      confirmUndo: async (_session, turn, files) => {
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
         const view = this.controller.snapshot.view;
         if (!view || !view.view || view.view.active_turn || view.view.id !== _session)
@@ -189,7 +199,7 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
         if (await hasDirtyDocuments(cwd))
           throw new Error('Save or close dirty editor buffers before undo');
         const choice = await vscode.window.showWarningMessage(
-          `Undo workspace changes from turn ${turn}? This does not change chat history or model context. Multi-file undo can partially fail. External editors and residual background processes are not locked; inspect the diff first.`,
+          `Undo ${files ? `${files.length} selected files (${files.join(', ')}) from` : 'workspace changes from'} turn ${turn}? This does not change chat history or model context. Multi-file undo can partially fail. External editors and residual background processes are not locked; inspect the diff first.`,
           { modal: true },
           'Undo turn',
         );

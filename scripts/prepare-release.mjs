@@ -69,7 +69,7 @@ export function validateRelease({
 }
 
 export function releaseNotes(notes) {
-  return `升级时请配套更新 VSIX 和唯一的 pi-acp-workbenchd，并先离线备份数据；不同版本的 socket 客户端不可混用。服务包适用于 Linux x86_64，采用静态 musl；Node.js 22+ 及相应 Agent 命令由操作者另行安装。部署和恢复步骤见 docs/workbench-release.md。\n\n${notes}\n\n### 验证范围\n\n发布准备校验版本/tag、干净源码 provenance、归档与二进制哈希、VSIX 内容和匹配该 musl 产物的 smoke report。具体 CI 契约与回归结果以本标签的工作流日志为准；不以历史浸泡或 GNU 结果替代本次 musl 验证。本次未验证实际 VS Code Extension Host、真实付费模型或真实 Telegram 群组。\n`;
+  return `升级时请配套更新 VSIX 和唯一的 pi-acp-workbenchd，并先离线备份数据；不同版本的 socket 客户端不可混用。服务包适用于 Linux x86_64，采用静态 musl；Node.js 22+ 及相应 Agent 命令由操作者另行安装。本版本为不兼容切换，使用独立新 root；没有自动旧格式导入器。旧 binary/VSIX/配置/root 和 native 文件须保留匹配备份。迁移边界见 docs/workbench-data-migration.md，部署和恢复步骤见 docs/workbench-release.md。\n\n${notes}\n\n### 验证范围\n\n发布准备校验版本/tag、干净源码 provenance、归档与二进制哈希、VSIX 内容和匹配该 musl 产物的 smoke report。具体 CI 契约与回归结果以本标签的工作流日志为准；不以历史浸泡或 GNU 结果替代本次 musl 验证。本标签 CI 不执行真实 VS Code Extension Host、付费模型或 Telegram 群组测试；此前 P6 的真实环境证据及能力限制见 docs/workbench-p6-validation.md，不把历史候选散列当成本标签制品散列。\n`;
 }
 
 export async function prepareRelease() {

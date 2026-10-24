@@ -54,7 +54,7 @@ pub(super) fn create(
     }
     let tx = db.transaction()?;
     let created = insert_view(&tx, view)?;
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(summary(view, created))
 }
 pub(super) fn insert_view(db: &Connection, view: &SessionView) -> Result<SafeInteger, StoreError> {
@@ -92,7 +92,7 @@ pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, 
 pub(super) fn commit(db: &mut Connection, commit: Transition) -> Result<CommitBatch, StoreError> {
     let tx = db.transaction()?;
     let batch = apply_commit(&tx, &commit)?;
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(batch)
 }
 pub(super) fn apply_commit(
@@ -185,6 +185,28 @@ pub(super) fn apply_commit(
         }
         tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![harness_name(&commit.next.harness), encode(&defaults)?])?;
     }
+    if let Some(turn) = old
+        .active_turn
+        .as_ref()
+        .filter(|turn| commit.next.active_turn.as_ref() != Some(*turn))
+    {
+        let outcome = if matches!(
+            commit.next.status,
+            crate::domain::session::SessionStatus::Failed(_)
+        ) {
+            "failed"
+        } else if commit.deliveries.iter().any(|d| {
+            matches!(
+                d.payload,
+                crate::domain::transition::DeliveryPayload::Turn { .. }
+            )
+        }) {
+            "completed"
+        } else {
+            "cancelled"
+        };
+        tx.execute("INSERT INTO turn_outcomes(session,turn,revision,files,outcome,diff_status,added,removed) SELECT ?1,?2,?4,COALESCE(json_array_length(diff_json,'$.files'),0),?3,COALESCE(json_extract(diff_json,'$.status'),'unavailable'),COALESCE(json_extract(diff_json,'$.added'),0),COALESCE(json_extract(diff_json,'$.removed'),0) FROM (SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2 UNION ALL SELECT '{}' WHERE NOT EXISTS(SELECT 1 FROM turn_diffs WHERE session=?1 AND turn=?2) LIMIT 1) WHERE 1 ON CONFLICT(session,turn) DO NOTHING",params![commit.next.id.as_str(),turn.as_str(),outcome,commit.next.revision])?;
+    }
     let batch = apply_records(tx, commit, old.last_entry_seq)?;
     if let Some(operation) = &commit.operation {
         super::journal::finish_in_transaction(
@@ -265,6 +287,22 @@ fn validate_tool_refs(db: &Connection, header: &ToolHeader) -> Result<(), StoreE
 }
 pub(super) fn put_delivery(db: &Connection, intent: &DeliveryIntent) -> Result<(), StoreError> {
     super::delivery::validate_intent(intent)?;
+    match &intent.payload {
+        crate::domain::transition::DeliveryPayload::Image { image } => {
+            db.execute(
+                "INSERT OR IGNORE INTO archive_roots(content_id,reason) SELECT id,'delivery' FROM contents WHERE id=?1",
+                [image.as_str()],
+            )?;
+        }
+        crate::domain::transition::DeliveryPayload::Notice { content }
+        | crate::domain::transition::DeliveryPayload::Menu { content } => {
+            db.execute(
+                "INSERT OR IGNORE INTO archive_roots(content_id,reason) VALUES(?1,'delivery')",
+                [content.id.as_str()],
+            )?;
+        }
+        _ => {}
+    }
     let target = encode(&intent.target)?;
     let payload = encode(&intent.payload)?;
     if let Some((old, _)) = super::delivery::record(db, &intent.id)? {
@@ -413,7 +451,7 @@ pub(super) fn remove(
         )
         .map_err(|error| StoreError::Io(error.to_string()))?;
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(batch)
 }
 
@@ -497,26 +535,43 @@ pub(super) fn list(
     cursor: Option<ListCursor>,
     requested: Option<usize>,
 ) -> Result<ListPage, StoreError> {
-    list_impl(db, cursor, requested, false)
+    list_impl(db, cursor, requested, false, None)
 }
 pub(super) fn activity_list(
     db: &Connection,
     cursor: Option<ListCursor>,
     requested: Option<usize>,
 ) -> Result<ListPage, StoreError> {
-    list_impl(db, cursor, requested, true)
+    list_impl(db, cursor, requested, true, None)
+}
+pub(super) fn search(
+    db: &Connection,
+    filter: SessionFilter,
+    cursor: Option<ListCursor>,
+    requested: Option<usize>,
+) -> Result<ListPage, StoreError> {
+    QueryCommand::Search {
+        filter: filter.clone(),
+        cursor: cursor.clone(),
+        limit: requested,
+    }
+    .validate()?;
+    list_impl(db, cursor, requested, false, Some(filter))
 }
 fn list_impl(
     db: &Connection,
     cursor: Option<ListCursor>,
     requested: Option<usize>,
     activity: bool,
+    filter: Option<SessionFilter>,
 ) -> Result<ListPage, StoreError> {
-    QueryCommand::List {
-        cursor: cursor.clone(),
-        limit: requested,
+    if filter.is_none() {
+        QueryCommand::List {
+            cursor: cursor.clone(),
+            limit: requested,
+        }
+        .validate()?;
     }
-    .validate()?;
     let limit = limit(requested, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT)?;
     let order_key = if activity {
         "activity_seq"
@@ -529,15 +584,26 @@ fn list_impl(
         |r| r.get(0),
     )?;
     let max = match &cursor {
-        Some(c) if c.max_created_seq > high => return Err(QueryError::InvalidInput.into()),
+        Some(c) if c.max_created_seq > high && activity => {
+            return Err(QueryError::InvalidInput.into())
+        }
         Some(c) => c.max_created_seq,
         None => high,
     };
     let before = cursor
         .as_ref()
         .map_or(MAX_SAFE_INTEGER + 1, |c| c.before_seq.get());
-    let mut statement = db.prepare(&format!("SELECT id,harness,cwd,status_json,revision,created_seq,{order_key},(SELECT title FROM session_metadata WHERE session=sessions.id) FROM sessions WHERE {order_key} <= ?1 AND {order_key} < ?2 ORDER BY {order_key} DESC,created_seq DESC LIMIT ?3"))?;
-    let mut rows = statement.query(params![max, before as i64, (limit + 1) as i64])?;
+    let mut statement = db.prepare(&format!("SELECT id,harness,cwd,status_json,revision,created_seq,{order_key},(SELECT title FROM session_metadata WHERE session=sessions.id) FROM sessions WHERE {order_key} <= ?1 AND {order_key} < ?2 AND (?4 IS NULL OR harness=?4) AND (?5='' OR instr(lower(COALESCE((SELECT title FROM session_metadata WHERE session=sessions.id),'')),lower(?5))>0 OR instr(lower(cwd),lower(?5))>0 OR instr(lower(id),lower(?5))>0) ORDER BY {order_key} DESC,created_seq DESC LIMIT ?3"))?;
+    let mut rows = statement.query(params![
+        max,
+        before as i64,
+        (limit + 1) as i64,
+        filter
+            .as_ref()
+            .and_then(|f| f.harness.as_ref())
+            .map(harness_name),
+        filter.as_ref().map_or("", |f| f.text.as_str())
+    ])?;
     let mut page = ListPage {
         sessions: vec![],
         next_cursor: None,
@@ -563,6 +629,7 @@ fn list_impl(
         last_order_seq = row.get(6)?;
         page.sessions.push(item);
         page.next_cursor = Some(ListCursor {
+            filter: filter.clone(),
             version: ProtocolVersion,
             max_created_seq: max,
             before_seq: last_order_seq,
@@ -578,6 +645,7 @@ fn list_impl(
     }
     page.next_cursor = if more {
         Some(ListCursor {
+            filter,
             version: ProtocolVersion,
             max_created_seq: max,
             before_seq: last_order_seq,

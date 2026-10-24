@@ -2,7 +2,7 @@
 import { build } from 'esbuild';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
@@ -175,13 +175,27 @@ try {
         } catch {}
       }
     });
-    child.stderr.resume();
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (text) => {
+      stderr = (stderr + text).slice(-8192);
+    });
+    child.once('error', (error) => {
+      for (const settle of [...pending.values()]) settle({ success: false, error: String(error) });
+    });
+    child.once('close', (code, signal) => {
+      for (const settle of [...pending.values()])
+        settle({ success: false, error: `Pi CLI exited ${code}/${signal}: ${stderr}` });
+    });
     const rpc = (params) =>
       new Promise((resolve, reject) => {
         const id = String(++serial),
           timer = setTimeout(() => {
             pending.delete(id);
-            reject(new Error('RPC timeout'));
+            reject(
+              new Error(
+                `RPC ${params.type} timeout for ${entryId}; Pi CLI ${child.exitCode}/${child.signalCode}: ${stderr}`,
+              ),
+            );
           }, 30000);
         pending.set(id, (res) => {
           clearTimeout(timer);
@@ -331,22 +345,28 @@ try {
         }),
         { flag: 'wx' },
       );
+      const testBinary = process.env.PI_OFFLINE_RUST_TEST_BINARY;
+      if (testBinary) assert(isAbsolute(testBinary), 'offline test binary must be absolute');
+      const testName =
+        'app::tests::pi_sdk_tests::real_pi_sdk_native_fork_restores_prefix_settings_and_receipts';
       const cargo = spawn(
-        'cargo',
-        [
-          'test',
-          '--offline',
-          '--manifest-path',
-          resolve('rust/Cargo.toml'),
-          '-p',
-          'pi-acp-workbenchd',
-          '--lib',
-          'app::tests::pi_sdk_tests::real_pi_sdk_native_fork_restores_prefix_settings_and_receipts',
-          '--',
-          '--ignored',
-          '--exact',
-          '--nocapture',
-        ],
+        testBinary || 'cargo',
+        testBinary
+          ? [testName, '--ignored', '--exact', '--nocapture']
+          : [
+              'test',
+              '--offline',
+              '--manifest-path',
+              resolve('rust/Cargo.toml'),
+              '-p',
+              'pi-acp-workbenchd',
+              '--lib',
+              testName,
+              '--',
+              '--ignored',
+              '--exact',
+              '--nocapture',
+            ],
         {
           cwd: process.cwd(),
           env: { ...process.env, PI_OFFLINE_HOST_FIXTURE: fixture },

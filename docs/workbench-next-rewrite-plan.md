@@ -1,6 +1,4 @@
-# Workbench 后续重构设计与实施计划
-
-> **状态：P0 已通过本地统一门禁；P1 核心回归修复、完整验收待 P6；P2 实现及本地统一门禁已完成，真实环境矩阵待 P6；P3 实现及有限本地验收完成，真实环境出口待 P6；P4 实现及有限本地验收完成，真实桌面/原生入口出口待 P6；P5–P6 待执行。** 下文审查发现是修复前基线，不代表全部阶段已修复。审查基线：`main@4bf6f32` → `rewrite/full-workbench@3273be5`。目标是简化实现、提高可靠性和性能，同时恢复既有用户流程；不兼容旧 wire、schema 或配置，但不擅自迁移、删除真实数据或部署服务。
+> **当前状态：P0–P5 的有限 P6 出口已逐项验证；P6 功能、故障、性能和真实环境矩阵通过，最终制品出口以当前 final-status.json / 制品 review 为准。** 能力限制及 Claude 用户排除见 [P6 最终验收矩阵](workbench-p6-validation.md#最终有限验收矩阵2026-10-23)。下文实现阶段的待验描述和审查发现保留为历史基线，不代表当前仍缺相同证据。未部署、不迁移或删除真实数据。
 
 ## 1. 审查结论：保留底座，先修合同，再收敛所有权
 
@@ -38,14 +36,16 @@
 | P2     | 静态      | 通用 archive/operation/delivery GC 未实现；Telegram 只做局部 typed compaction。桌面全历史筛选/共享历史清空缺失；手机 history 每源 scan cap 200，消息可能跨批                                                                                                           | 按真实可达关系及 continuation 修复，不无限扩限或按字符串猜引用                 |
 | P2     | 待验      | 媒体解码预算、provider native cut 边界、长期 RSS/WAL、真实 Webview/provider/Bot/musl                                                                                                                                                                                   | 分清实现缺口与验证缺口，不能用 synthetic 绿灯替代                              |
 
-### 本次实际检查
+- P5 本轮补齐桌面全历史 SQL 筛选/筛选绑定游标、冻结目标的共享清空预览与最多10项 durable 批次、逐文件最多256项撤回、手机 history 2000 raw scan budget 与可见窗口分离、终态 Turn outcome/diff 摘要、text/delivery archive root 的保守 GC 保护；`cargo check`、`npm run check`、相关 Vitest 5 files / 75 tests 通过。整库 Rust lib 最终结果见下文更新；失败项已修正后重跑。
+- P5 实现阶段未跑 P6 完整发布矩阵；后续 P6 的实际证据和未验项以 [P6 验收记录](workbench-p6-validation.md) 为准。不操作真实数据，不把有限本地测试表述为发布认证。
 
-- `npm run check`、`npm run audit:workbench`：通过。
-- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd --lib -- --test-threads=4`：338 passed、2 ignored；忽略项不算通过证据。
-- `npx vitest run test/workbench-{client,protocol,session,controller,browser,reconnect,recovery-races}.test.ts`：7 files / 76 tests 通过。
-- `cargo build --manifest-path rust/Cargo.toml -p pi-acp-workbenchd`：通过；隔离实际 IPC 连续同值设置复现上述 uncertain。回归实现时将该场景固化进现有 replay/contract 测试。
-- worker 故障脚本复现既有失败，不是通过门禁。
-- 未跑完整 `test:rewrite`、Chromium smoke、真实 Extension Host、在线 provider/Bot、长期负载或生产目标制品。本次不是全量逐行审计，也不据此断言没有其它缺陷。
+### P5 实现阶段检查（历史基线；当前 P6 结果见独立验收记录）
+
+- `cargo fmt --manifest-path rust/Cargo.toml --all -- --check`：通过。
+- `cargo check --manifest-path rust/Cargo.toml -p pi-acp-workbenchd`：通过。
+- `cargo test --manifest-path rust/Cargo.toml -p pi-acp-workbenchd --lib`：355 passed、2 ignored、0 failed；P5 冻结清空/全历史检索测试包含在内。
+- `npm run check`：通过；`npx vitest run test/workbench-client.test.ts test/workbench-protocol.test.ts test/workbench-session.test.ts test/workbench-controller.test.ts test/workbench-browser.test.ts`：5 files / 75 tests 通过。
+- 本次仍未跑完整 `test:rewrite`、Chromium smoke、真实 Extension Host、在线 provider/Bot、长期负载或生产目标制品。本次不是全量逐行审计，也不据此断言没有其它缺陷。
 
 ## 3. 目标设计：少一层编排，不是少一层安全
 
@@ -129,7 +129,7 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 
 **出口：**真实宿主定向契约复现从红转绿；commit 前/后丢连接和重启得到同一终态；no-op 零 session batch；超限输入有确定错误且无副作用。此阶段不顺便重写全部 actor。
 
-### P1 [~] 生命周期与容量周转（核心回归已修复；完整收敛待续）
+### P1 [x] 生命周期与容量周转（最终 P6 owner/epoch/barrier/长驻证据已补齐）
 
 **依赖：**P0 receipt 合同。
 
@@ -219,7 +219,9 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 - Chromium 1000 分片（每帧约 10 个状态更新，最终 2 条逻辑消息）：102 次 render，p95 2.70 ms/max 20.70 ms；9 次 Markdown parse，max 12.20 ms；100 次 input handler p95 0.10 ms/max 0.20 ms，input→下一 rAF p95 19.70 ms/max 31 ms；观测到 8 个 long tasks，max 71 ms（含注入/全状态解码/调度，未归因成纯渲染，也不宣称零长任务）。焦点、未改消息文本选择及跨片代码块验证通过；原生 textarea 编辑会正常清除文档选择，用例分别验证渲染保持选择与重新选择，不要求编辑时违反浏览器行为。这是单机单轮有限基线，不替代 P6 五轮 mixed、真实硬件输入延迟或长期 RSS。
 - 日志：`.test-results/p4/{final,ui-verified,close,rust-close}.log`；前序失败/修正日志保留同目录，性能明细为 `test-results/workbench-browser/p4-render.json`。真实 Extension Host 的 clipboard/滚动/窄侧栏/resize/modal、真实 CLI 登录及在线 provider/Bot 未运行，留待 P6，不以 Chromium host-port mock 冒充原生对话框验收；未部署、未迁移/删除真实数据。
 
-### P5 [ ] 历史管理、审阅、手机与留存收尾
+### P5 [x] 历史管理、审阅、手机与留存收尾（实现/有限本地验收完成；完整出口待 P6）
+
+**当前实现：**已补齐全历史 SQL 筛选及条件绑定 keyset、冻结目标的共享清空 preview/durable 分批进度、显式选择文件的有界撤回、手机历史 raw/visible 预算分离、冻结终态 Diff 摘要。GC 在取得 storage lease 后估算/分批删除没有 entry 引用且没有 archive root 的明确孤儿，每批最多 500 行；保留 usage、delivery/operation 防重身份、high-water、native 文件，以及尚无安全到期合同的文本归档。不是通用 retention 或物理擦除。P5 的有限本地验证见前文；P6 另补终态失败/取消与文件数、pending target 引用、选择撤回等回归，详细结果见 [P6 验收记录](workbench-p6-validation.md)。
 
 **依赖：**P1 生命周期、P4 消息边界。拆成以下四个有限交付，不扩成第二次重构。
 
@@ -230,7 +232,11 @@ WriteStore（一个 writer）     AcpAdapter / WorkerSupervisor
 
 **出口：**页外筛选/旧页迟到、清空中断/重启/活跃任务/pending 引用、手机摘要与消息跨批、symlink 不跟随、超预算撤回及冲突逐项结果、GC 共享引用/导出引用/幂等/防重/崩溃测试。保留一般 GC 的不可压缩身份成本，不虚称无限期固定磁盘。
 
-### P6 [ ] 故障、性能、真实环境和制品验收
+### P6 [x] 故障、性能、真实环境和制品验收（有限计划矩阵；制品终态以独立 review 为准）
+
+当前 GNU `29005517…` / musl `9f2a1c1b…` 的完整两平台门禁、owner cold2000/warm400、五轮 mixed/600 秒、GNU 同 PID 7200.817 秒已核对。后续独立补齐真实 Pi 自主 Form/Plan/native fork、Codex 原生单次编辑授权/Fast/Plan 设置、真实 Telegram 窗口、实际多文件 undo 中途 SIGKILL、expiry/双端竞争、普通 P0 读取对照及成功 fence 的保守 SLO 上界。23 项有限验收证据与支持边界见 [最终矩阵](workbench-p6-validation.md#最终有限验收矩阵2026-10-23)。
+
+各历史失败和实现阶段的待验描述保留，不改写旧批次。最终文档归档/VSIX 的实际安装、解包 smoke、源码补丁和逐项 checksum 门禁必须独立通过，才由当前 `final-status.json` 确认 `p6_complete=true`。Claude 用户排除；不部署或迁移旧 root。以下为原验收合同，不能以测试计数代替逐项证据。
 
 #### 6.1 provider 能力与体验矩阵
 
@@ -288,13 +294,13 @@ npm run test:workbench:scale
 npm run test:workbench:mixed
 npm run test:workbench:soak -- --duration-seconds 600
 # 真实隔离图形环境；缺 display 标 BLOCKED
-xvfb-run -a npm run test:extension-host
+xvfb-run -a npm run test:extension-host:full
 # 单独补两小时同宿主 mixed、在线 provider/Bot、离线 SDK、GNU/musl 各目标制品
 ```
 
 - `test:rewrite` 已包含 check/audit/build/format/clippy/workspace/contracts/process-loss/Chromium/full/artifact，不机械重复同配置证据。静态 audit 是 tripwire，不是运行正确性证明；修改合同要同步 audit/fixtures，不能绕开它。
-- 真实 Extension Host 补单/多文件 Diff、dirty buffer、trust/modal、clipboard/图片、目录/保存/设置/resize；现有 basic smoke 不代表全矩阵。
-- 在线 Pi/Codex/Claude、真实 Bot 使用专用授权账户/目录/chat 和费用预算；不读日常凭据，不自动安装系统依赖。缺环境标 BLOCKED，不用 mock 代替通过。
+- 真实 Extension Host 补单/多文件 Diff、dirty buffer、trust/modal、clipboard/图片、目录/保存/设置/resize；当前安装 VSIX 有 15 项真实原生交互/Reload 和 4 项实际 Trust 撤销/恢复证据，含双端 answer 防重及取消/切会话迟到回答；精确 domain/owner expiry、双端竞争及多文件部分发布 SIGKILL 已补验，范围见最终矩阵，不外推任意排列。
+- 在线 Pi/Codex/Claude、真实 Bot 使用专用授权账户/目录/chat 和费用预算；默认不读日常凭据、不自动安装系统依赖；本次用户已明确授权使用本机既有配置与用户级工具链，Pi/Codex 及限定 Bot 窗口已分别取证，Claude 用户暂缓。缺环境标 BLOCKED，不用 mock 代替通过。
 - GNU/musl 各自生产 artifact/IPC/Telegram 契约，目标工具链缺失单列。记录源码、构建配置、命令、结果、未跑项。
 - 开发期破坏性 schema/wire 同步 Rust/TS/fixture/manifest；一个切换点只有一套生产 reader，无双写/兼容别名。旧 root 不迁移、不清空，binary/root 一起保留。
 
@@ -307,3 +313,7 @@ xvfb-run -a npm run test:extension-host
 - 每个改动须说明：替代哪条旧路径、减少哪个重复决策点、commit/副作用在哪里、如何冷恢复、资源由谁 join/回收；允许为正确性加少量代码，但必须删除失效编排。
 - 功能差异默认补齐；确需降级要写出实际 provider/安全证据和用户可见提示。不能以“按钮存在”“方法可调用”“测试数量多”结案。
 - 当前行为更新到[VS Code](workbench-vscode.md)、[Telegram](workbench-telegram.md)、[Diff/撤回](turn-diff.md)、[管理](workbench-management.md)、[持久恢复](persistence-recovery.md)；本文件只保留设计、待办和有限验收结果，不追加逐轮聊天记录。
+
+### P6 最终出口补充（2026-10-23）
+
+原计划 6.1–6.4 的 23 项有限要求已映射独立 evidence/hash，功能及性能证据通过；最终制品门禁独立核对 GNU/musl 解包 smoke、新 VSIX 真实安装 native15/Trust4、相同 bundle 和源码补丁可重建性后，才由 final-status.json 确认 P6 完成。真实 Pi 自主 Form/Plan 和 Codex 原生单次编辑审批均有实际模型与正常 join 证据。支持边界、Claude 用户排除、历史失败和外部 at-least-once 风险保留，不自动部署。

@@ -170,6 +170,17 @@ pub struct WorkerSupervisor {
     next_epoch: AtomicU64,
 }
 impl WorkerSupervisor {
+    pub(crate) fn record_counts(&self) {
+        if !crate::diagnostics::enabled() {
+            return;
+        }
+        self.tasks
+            .record_counts("worker_tasks_retained", "worker_tasks_unfinished");
+        crate::diagnostics::gauge(
+            "worker_slots_in_use",
+            self.total_slots as usize - self.capacity.available_permits(),
+        );
+    }
     pub fn configured(launches: crate::config::WorkersConfig, max_workers: usize) -> Self {
         Self {
             launches,

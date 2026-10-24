@@ -585,7 +585,7 @@ async fn history_scans_bounded_records_even_when_the_window_is_only_thoughts() {
     assert!(state
         .sent
         .iter()
-        .any(|message| message.text.contains("200 committed records examined")));
+        .any(|message| message.text.contains("405 committed records examined")));
     assert!(state
         .sent
         .iter()

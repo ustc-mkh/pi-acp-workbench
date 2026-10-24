@@ -152,6 +152,67 @@ impl Target {
         self.parent.sync_all().map_err(|e| e.to_string())
     }
 }
+/// Selection never changes the captured fact. Every batch keeps the original
+/// content/path guards, and must fit the existing single-operation budgets.
+pub fn select_files(mut diff: TurnDiff, paths: Option<&[String]>) -> Result<TurnDiff, String> {
+    if let Some(paths) = paths {
+        let selected: HashSet<_> = paths.iter().collect();
+        if paths.is_empty()
+            || selected.len() != paths.len()
+            || paths.len() > review::UNDO_FILES_MAX
+            || paths.iter().map(String::len).sum::<usize>() > review::UNDO_PATH_BYTES_MAX
+            || selected
+                .iter()
+                .any(|path| !diff.files.iter().any(|f| &f.path == *path))
+        {
+            return Err("Select 1–256 distinct captured paths within 64 KiB".into());
+        }
+        diff.files.retain(|file| selected.contains(&file.path));
+    }
+    Ok(diff)
+}
+pub fn undo_selected(
+    root: &Path,
+    diff: TurnDiff,
+    paths: Option<&[String]>,
+    check_only: bool,
+) -> Result<UndoReport, String> {
+    let diff = select_files(diff, paths)?;
+    if paths.is_none() {
+        return undo(root, &diff, check_only);
+    }
+    if diff.status != DiffStatus::Complete
+        || diff
+            .files
+            .iter()
+            .map(|f| {
+                f.before.as_ref().map_or(0, String::len) + f.after.as_ref().map_or(0, String::len)
+            })
+            .sum::<usize>()
+            > review::DETAIL_MAX_BYTES
+    {
+        return Err("Complete snapshot within undo byte budget required".into());
+    }
+    let mut report = UndoReport { files: vec![] };
+    for file in &diff.files {
+        let mut single = diff.clone();
+        single.files = vec![file.clone()];
+        match undo(root, &single, check_only) {
+            Ok(result) if !check_only => report.files.extend(result.files),
+            Ok(_) => report.files.push(UndoFileResult {
+                path: file.path.clone(),
+                status: "ready".into(),
+                error: None,
+            }),
+            Err(error) => report.files.push(UndoFileResult {
+                path: file.path.clone(),
+                status: "conflict".into(),
+                error: Some(error),
+            }),
+        }
+    }
+    Ok(report)
+}
 pub fn undo(root: &Path, diff: &TurnDiff, check_only: bool) -> Result<UndoReport, String> {
     undo_inner(root, diff, check_only, &mut |_| {})
 }
@@ -312,6 +373,49 @@ mod tests {
             .unwrap()
             .success());
         p
+    }
+    #[test]
+    fn selected_batches_reject_bad_targets_and_preserve_unselected_or_conflicting_files() {
+        let root = repo();
+        for name in ["a", "b", "c"] {
+            fs::write(root.join(name), "before").unwrap();
+        }
+        let before = Snapshot::capture(&root).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(root.join(name), "after").unwrap();
+        }
+        let diff = before.diff(&Snapshot::capture(&root).unwrap());
+        for paths in [
+            vec![],
+            vec!["a".into(), "a".into()],
+            vec!["missing".into()],
+            vec!["../escape".into()],
+            vec!["a".into(); 257],
+        ] {
+            assert!(undo_selected(&root, diff.clone(), Some(&paths), false).is_err());
+        }
+        let paths = vec!["a".into(), "b".into()];
+        fs::write(root.join("b"), "external").unwrap();
+        let check = undo_selected(&root, diff.clone(), Some(&paths), true).unwrap();
+        assert_eq!(check.files[0].status, "ready");
+        assert_eq!(check.files[1].status, "conflict");
+        assert_eq!(fs::read_to_string(root.join("a")).unwrap(), "after");
+        let result = undo_selected(&root, diff.clone(), Some(&paths), false).unwrap();
+        assert_eq!(result.files[0].status, "restored");
+        assert_eq!(result.files[1].status, "conflict");
+        assert_eq!(fs::read_to_string(root.join("a")).unwrap(), "before");
+        assert_eq!(fs::read_to_string(root.join("b")).unwrap(), "external");
+        assert_eq!(fs::read_to_string(root.join("c")).unwrap(), "after");
+        // A retry reports the already-restored path as a conflict; never rewrites
+        // an unexpected working copy or applies a second reverse patch.
+        assert_eq!(
+            undo_selected(&root, diff, Some(&["a".into()]), false)
+                .unwrap()
+                .files[0]
+                .status,
+            "conflict"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn refuses_conflict_before_any_restore() {

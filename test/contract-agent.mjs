@@ -14,6 +14,22 @@ const trace = (record) => {
 };
 trace({ method: 'boot', pid: process.pid });
 
+// Test-owned, opt-in crash barrier: EOF after a successful fork response means
+// the host is physically joining the source worker before adopting its branch.
+// Freeze that known parent before the worker exits, so SIGKILL cannot race the
+// adoption commit. No production process ever receives this fixture setting.
+const forkJoinGate = process.env.WORKBENCH_CONTRACT_FORK_JOIN_GATE;
+if (forkJoinGate)
+  process.stdin.on('end', () => {
+    if (!existsSync(`${forkJoinGate}.armed`)) return;
+    process.kill(process.ppid, 'SIGSTOP');
+    writeFileSync(
+      `${forkJoinGate}.started`,
+      JSON.stringify({ host: process.ppid, worker: process.pid }),
+    );
+    setInterval(() => {}, 1000);
+  });
+
 const nativeFixture = process.env.WORKBENCH_CONTRACT_NATIVE_STATE
   ? new NativeForkFixture(process.env.WORKBENCH_CONTRACT_NATIVE_STATE)
   : undefined;
@@ -146,12 +162,38 @@ function armWake() {
     wake();
   }, 10);
 }
-createInterface({ input: process.stdin }).on('line', (line) => {
+createInterface({ input: process.stdin }).on('line', async (line) => {
   let r;
   try {
     r = JSON.parse(line);
   } catch {
     return;
+  }
+  // One shared, test-owned request barrier. Only the first matching worker
+  // claims it; other sessions can start while that RPC remains unanswered.
+  const requestGate = process.env.WORKBENCH_CONTRACT_REQUEST_GATE;
+  if (requestGate && r.method === process.env.WORKBENCH_CONTRACT_REQUEST_METHOD) {
+    let claimed = false;
+    try {
+      writeFileSync(`${requestGate}.claimed`, String(process.pid), { flag: 'wx' });
+      claimed = true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    if (claimed) {
+      const record = { method: r.method, pid: process.pid, id: r.id, at: Date.now() };
+      writeFileSync(`${requestGate}.started`, JSON.stringify(record));
+      trace({ ...record, method: 'fixture/request-held', rpc: r.method });
+      await new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (existsSync(`${requestGate}.release`)) {
+            clearInterval(timer);
+            trace({ method: 'fixture/request-released', rpc: r.method, pid: process.pid });
+            resolve();
+          }
+        }, 5);
+      });
+    }
   }
   // Response to our outgoing permission request.
   if (!r.method) {
@@ -556,46 +598,61 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       return;
     }
     if (['image-output', 'image-malformed', 'history-gated-image'].includes(text)) {
-      const messageId = randomUUID();
-      update({
-        sessionUpdate: 'agent_message_chunk',
-        messageId,
-        content: {
-          type: 'image',
-          mimeType: 'image/png',
-          uri: 'https://example.invalid/never-fetch',
-          data:
-            text !== 'image-malformed'
-              ? 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
-              : 'invalid-base64',
-        },
-      });
-      update({
-        sessionUpdate: 'agent_message_chunk',
-        messageId,
-        content: { type: 'text', text: 'image caption' },
-      });
-      const historyGate = process.env.WORKBENCH_CONTRACT_CONFIG_GATE;
-      if (text === 'history-gated-image' && historyGate) {
-        writeFileSync(`${historyGate}.history-started`, 'started');
-        let moreSent = false;
+      const emitImage = () => {
+        const messageId = randomUUID();
+        trace({ method: 'fixture/image-dispatch', sessionId, at: Date.now() });
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: {
+            type: 'image',
+            mimeType: 'image/png',
+            uri: 'https://example.invalid/never-fetch',
+            data:
+              text !== 'image-malformed'
+                ? 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII='
+                : 'invalid-base64',
+          },
+        });
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text: 'image caption' },
+        });
+        const historyGate = process.env.WORKBENCH_CONTRACT_CONFIG_GATE;
+        if (text === 'history-gated-image' && historyGate) {
+          writeFileSync(`${historyGate}.history-started`, 'started');
+          let moreSent = false;
+          const waiting = setInterval(() => {
+            if (!moreSent && existsSync(`${historyGate}.history-more`)) {
+              moreSent = true;
+              update({
+                sessionUpdate: 'agent_message_chunk',
+                messageId,
+                content: { type: 'text', text: ' preview tail update' },
+              });
+            }
+            if (existsSync(`${historyGate}.history-release`)) {
+              clearInterval(waiting);
+              reply(r.id, { stopReason: 'end_turn' });
+            }
+          }, 5);
+          return;
+        }
+        reply(r.id, { stopReason: 'end_turn' });
+      };
+      const imageGate = process.env.WORKBENCH_CONTRACT_IMAGE_GATE;
+      if (imageGate) {
+        writeFileSync(`${imageGate}.started`, 'started');
         const waiting = setInterval(() => {
-          if (!moreSent && existsSync(`${historyGate}.history-more`)) {
-            moreSent = true;
-            update({
-              sessionUpdate: 'agent_message_chunk',
-              messageId,
-              content: { type: 'text', text: ' preview tail update' },
-            });
-          }
-          if (existsSync(`${historyGate}.history-release`)) {
+          if (existsSync(`${imageGate}.release`)) {
             clearInterval(waiting);
-            reply(r.id, { stopReason: 'end_turn' });
+            unlinkSync(`${imageGate}.release`);
+            unlinkSync(`${imageGate}.started`);
+            emitImage();
           }
         }, 5);
-        return;
-      }
-      reply(r.id, { stopReason: 'end_turn' });
+      } else emitImage();
       return;
     }
     if (text === 'tool-metadata') {
@@ -702,6 +759,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         if (existsSync(`${gate}.release`)) {
           clearInterval(waiting);
           reply(r.id, { configOptions });
+          trace({ method: 'fixture/config-replied', at: Date.now() });
         }
       }, 5);
     } else reply(r.id, { configOptions });

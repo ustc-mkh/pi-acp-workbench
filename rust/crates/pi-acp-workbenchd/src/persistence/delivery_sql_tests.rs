@@ -450,19 +450,25 @@ async fn sql_delivery_missing_revision_schema_is_refused_without_migration() {
 
 #[tokio::test]
 async fn sql_delivery_old_internal_index_is_refused_without_rewrite() {
-    let root = Root::new();
-    let (lease, db) = open(&root.data()).await;
-    db.shutdown().await.unwrap();
-    let file = root.data().join("workbench.sqlite3");
-    let sql = rusqlite::Connection::open(&file).unwrap();
-    sql.execute_batch("DROP INDEX deliveries_topic_order; CREATE INDEX deliveries_topic_order ON deliveries(target_key,order_seq)").unwrap();
-    drop(sql);
-    let before = std::fs::read(&file).unwrap();
-    assert!(matches!(
-        Database::open(root.data(), &lease).await,
-        Err(StoreError::Invalid("unsupported delivery index"))
-    ));
-    assert_eq!(std::fs::read(&file).unwrap(), before);
+    for definition in [
+        "(target_key,order_seq)",
+        "(target_key, status, order_seq)",
+        "(target_key, status, order_seq) WHERE status='Acked'",
+    ] {
+        let root = Root::new();
+        let (lease, db) = open(&root.data()).await;
+        db.shutdown().await.unwrap();
+        let file = root.data().join("workbench.sqlite3");
+        let sql = rusqlite::Connection::open(&file).unwrap();
+        sql.execute_batch(&format!("DROP INDEX deliveries_topic_order; CREATE INDEX deliveries_topic_order ON deliveries{definition}")).unwrap();
+        drop(sql);
+        let before = std::fs::read(&file).unwrap();
+        assert!(matches!(
+            Database::open(root.data(), &lease).await,
+            Err(StoreError::Invalid("unsupported delivery index"))
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
 }
 #[tokio::test]
 async fn sql_delivery_saturates_attempt_and_exhausted_sequence_never_inserts() {

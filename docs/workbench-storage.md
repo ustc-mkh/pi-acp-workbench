@@ -35,11 +35,14 @@ Export copies exact bytes, excludes the lease inode, and creates `EXPORT-MANIFES
 
 Export is a byte-level backup, not a format migration or a guarantee that every stored record is valid. Keep exports private: they contain conversations and may contain user-supplied sensitive content.
 
-## GC: typed Telegram compaction only
+GC supports a read-only preview and a bounded repeatable execution:
 
 ```sh
+./pi-acp-workbenchd storage gc --root /absolute/canonical/data --dry-run
 ./pi-acp-workbenchd storage gc --root /absolute/canonical/data --confirm
 ```
+
+The preview requires the same exclusive lease and reports eligible object/byte counts; it does not compact Telegram records or delete data. Confirmed runs compact typed Telegram state and delete at most 500 orphan `contents` rows in one bounded SQLite transaction. Re-run until `removed_contents` is zero; `orphan_contents`/`orphan_bytes` report the pre-run estimate, not a promise that all candidates were removed in one pass.
 
 GC uses the database executor and one SQLite transaction to compact typed Telegram tables under the storage lease:
 
@@ -54,7 +57,9 @@ Online menu registration separately reclaims at most 128 expired **Control** cal
 
 The JSON summary reports `removed_inbox` and `removed_callbacks`. Missing Telegram records are a no-op; corrupt/unknown database or storage versions fail closed.
 
-**General archive/operation/delivery GC is not implemented.** Format 3 stores session headers, entries, tools, content/images, operation receipts, delivery intents/manifests and Telegram records in `workbench.sqlite3`, with WAL and `synchronous=FULL`. This is incremental relational storage, not a JSON history directory or full replay at startup. The earlier JavaScript filename/string-reference scan is not used: it cannot establish safe reachability. Content/image orphans, receipts, delivery acknowledgement tombstones and admission sequence high-water are retained. No age threshold or filename guess authorizes their deletion. A future implementation requires a validated typed root graph plus crash-safe high-water/dedup retention. Export retains all database/WAL sidecars present while the host is offline; do not omit WAL files from a manual backup.
+The new bounded content pass considers only `contents` rows with no `entries.content_id` or `entries.image_id` root. This relationship is enforced by the schema and immutable entry references; a row with any live entry reference is retained. Entries themselves are never collected because delivery manifests and accepted exports can outlive session history. Operations, deliveries, usage facts, session tombstones, high-water marks, export identities, and native files are not compacted. Pending Telegram state continues to use its existing typed compaction rules. Repeating confirmed GC is safe; each transaction removes no more than 500 content objects.
+
+This is deliberately not a universal retention policy. Preview may include an orphan candidate not removed in the first 500-row batch. No age threshold or filename guess authorizes deletion. A future implementation requires typed references for the remaining roots and safe dedup/high-water retention. Export retains all database/WAL sidecars present while the host is offline; do not omit WAL files from a manual backup.
 
 ## Reset: marker-only roots
 
@@ -65,3 +70,7 @@ The JSON summary reports `removed_inbox` and `removed_callbacks`. Missing Telegr
 Reset refuses any contents besides `storage-format.json` and the persistent `.workbench.lock`. It removes only the format marker, **retaining the directory and stable lock inode**. Removing/replacing that inode while another process has opened it could create two independent leases; reset must never do that. A later normal host start can initialize the now marker-only root safely. A data-bearing or unversioned directory is never reset or migrated.
 
 All tests use isolated temporary roots. Coverage includes cross-process host-compatible lock exclusion, unlocked persistent locks, byte/hash export, canonical overlap, symlink refusal, marker-only reset, corrupted Telegram state, pending callback protection, offset/restart deduplication and compaction failure preservation. This is not live-provider/Bot acceptance, full image decoding or a complete storage retention policy.
+
+The delivery topic/order index is a required Pending-only covering index. Dispatch chooses it explicitly before grouping immutable target heads, so a deep ready backlog avoids a retry-index table scan and temporary grouping; acknowledged dedup records do not contribute index work. Earlier development roots with the full internal index are rejected without rewriting the root. Preserve their binary/root together.
+
+The writer probes WAL reuse at most once per second between accepted requests. A WAL above 16 MiB is checked for logical frame volume; at that logical threshold it attempts RESTART with a 20 ms busy-wait budget, then restores the normal 5000 ms transaction timeout. Busy readers retain their snapshots and committed receipts; retry is deferred to a later probe. Actual I/O is not bounded by the busy-wait budget, and a permanently pinned external reader can still grow the WAL. Reusable physical high-water allocation is not truncated on every probe. Checkpoint outcomes/failures are logged; this is not GC or an online VACUUM.

@@ -48,12 +48,23 @@ pub enum ClientCommand {
     Operation {
         operation: crate::domain::OperationId,
     },
+    PrepareHistoryClear {
+        filter: query::SessionFilter,
+    },
+    ClearHistoryBatch {
+        job: crate::domain::OperationId,
+    },
     Create {
         harness: Harness,
         cwd: WorkspacePath,
     },
     Load {
         session: SessionId,
+    },
+    Search {
+        filter: query::SessionFilter,
+        cursor: Option<query::ListCursor>,
+        limit: Option<usize>,
     },
     List {
         cursor: Option<query::ListCursor>,
@@ -91,6 +102,8 @@ pub enum ClientCommand {
     ValidateUndo {
         session: SessionId,
         turn: crate::domain::TurnId,
+        #[serde(default)]
+        files: Option<Vec<String>>,
     },
     TurnDiff {
         session: SessionId,
@@ -107,6 +120,8 @@ pub enum ClientCommand {
     UndoTurn {
         session: SessionId,
         turn: crate::domain::TurnId,
+        #[serde(default)]
+        files: Option<Vec<String>>,
     },
     Prompt {
         session: SessionId,
@@ -158,6 +173,7 @@ impl ClientCommand {
         match self {
             Self::Operation { .. }
             | Self::List { .. }
+            | Self::Search { .. }
             | Self::Inspect { .. }
             | Self::History { .. }
             | Self::Tools { .. }
@@ -181,6 +197,15 @@ impl ClientCommand {
         Some(match self {
             Self::Operation { operation } => QueryCommand::Operation {
                 operation: operation.clone(),
+            },
+            Self::Search {
+                filter,
+                cursor,
+                limit,
+            } => QueryCommand::Search {
+                filter: filter.clone(),
+                cursor: cursor.clone(),
+                limit: *limit,
             },
             Self::List { cursor, limit } => QueryCommand::List {
                 cursor: cursor.clone(),
@@ -221,9 +246,14 @@ impl ClientCommand {
             Self::Management { query } => QueryCommand::Management {
                 query: query.clone(),
             },
-            Self::ValidateUndo { session, turn } => QueryCommand::ValidateUndo {
+            Self::ValidateUndo {
+                session,
+                turn,
+                files,
+            } => QueryCommand::ValidateUndo {
                 session: session.clone(),
                 turn: turn.clone(),
+                files: files.clone(),
             },
             Self::TurnDiff {
                 session,
@@ -253,7 +283,17 @@ impl ClientCommand {
     fn into_domain(self) -> Option<DomainCommand> {
         Some(match self {
             Self::Manage { session, action } => DomainCommand::Manage { session, action },
-            Self::UndoTurn { session, turn } => DomainCommand::UndoTurn { session, turn },
+            Self::PrepareHistoryClear { filter } => DomainCommand::PrepareHistoryClear { filter },
+            Self::ClearHistoryBatch { job } => DomainCommand::ClearHistoryBatch { job },
+            Self::UndoTurn {
+                session,
+                turn,
+                files,
+            } => DomainCommand::UndoTurn {
+                session,
+                turn,
+                files,
+            },
             Self::Create { harness, cwd } => DomainCommand::CreateSession { harness, cwd },
             Self::Load { session } => DomainCommand::LoadSession(session),
             Self::Prompt { session, prompt } => DomainCommand::Prompt { session, prompt },
@@ -438,12 +478,14 @@ async fn write_message(
 async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     stop: &CancellationToken,
+    frame: &mut Vec<u8>,
+    deadline: &mut Option<tokio::time::Instant>,
 ) -> io::Result<Option<Vec<u8>>> {
-    let mut frame = Vec::new();
+    // The outer select may cancel this future to send a reply or batch. Keep
+    // partial bytes and their original deadline in connection-owned state.
     let mut byte = [0u8; 1];
-    let mut deadline = None;
     loop {
-        let read = if let Some(deadline) = deadline {
+        let read = if let Some(deadline) = *deadline {
             tokio::time::timeout_at(deadline, async {
                 tokio::select! { _ = stop.cancelled() => Ok(0), result = reader.read(&mut byte) => result }
             }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "incomplete IPC frame"))??
@@ -451,13 +493,18 @@ async fn read_frame<R: AsyncRead + Unpin>(
             tokio::select! { _ = stop.cancelled() => return Ok(None), result = reader.read(&mut byte) => result? }
         };
         if read == 0 {
-            return Ok(if frame.is_empty() { None } else { Some(frame) });
+            return Ok(if frame.is_empty() {
+                None
+            } else {
+                Some(std::mem::take(frame))
+            });
         }
         if deadline.is_none() {
-            deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+            *deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
         }
         if byte[0] == b'\n' {
-            return Ok(Some(frame));
+            *deadline = None;
+            return Ok(Some(std::mem::take(frame)));
         }
         frame.push(byte[0]);
         if frame.len() > MAX_FRAME {
@@ -472,6 +519,8 @@ async fn connection(
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = read;
+    let mut frame = Vec::new();
+    let mut frame_deadline = None;
     // Register before any snapshot read. The broadcast itself is the bounded
     // attach buffer; lag is fatal/resync, never silently dropped.
     let mut events = app.subscribe();
@@ -486,7 +535,7 @@ async fn connection(
                 let (id, message) = completed.expect("nonempty observers").map_err(|_| io::Error::other("IPC reply observer failed"))?;
                 pending_ids.remove(&id); message
             },
-            result = read_frame(&mut reader, &stop) => {
+            result = read_frame(&mut reader, &stop, &mut frame, &mut frame_deadline) => {
                 let Some(frame) = result? else { return Ok(()); };
                 let request: IpcRequest = serde_json::from_slice(&frame).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 let id = request.id;

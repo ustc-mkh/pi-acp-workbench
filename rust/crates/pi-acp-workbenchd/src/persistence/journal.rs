@@ -254,7 +254,7 @@ fn begin(db: &mut Connection, ticket: OperationTicket) -> Result<Admission, Doma
         params![ticket.operation.as_str(), ticket.fingerprint.0],
     )
     .map_err(failure)?;
-    tx.commit().map_err(failure)?;
+    crate::diagnostics::sqlite_commit(tx).map_err(failure)?;
     Ok(Admission::Execute(ticket))
 }
 fn finish(
@@ -264,7 +264,7 @@ fn finish(
 ) -> Result<(), DomainError> {
     let tx = db.transaction().map_err(failure)?;
     finish_in_transaction(&tx, &ticket, result)?;
-    tx.commit().map_err(failure)
+    crate::diagnostics::sqlite_commit(tx).map_err(failure)
 }
 pub(super) fn finish_in_transaction(
     db: &Connection,
@@ -335,7 +335,7 @@ fn create_local(
         summary: super::query::summary(&view, created),
     };
     finish_in_transaction(&tx, &ticket, &Ok(receipt.clone()))?;
-    tx.commit().map_err(failure)?;
+    crate::diagnostics::sqlite_commit(tx).map_err(failure)?;
     Ok(receipt)
 }
 #[cfg(test)]
@@ -352,7 +352,7 @@ fn expire(db: &mut Connection, operation: &OperationId) -> Result<(), DomainErro
         [operation.as_str()],
     )
     .map_err(failure)?;
-    tx.commit().map_err(failure)
+    crate::diagnostics::sqlite_commit(tx).map_err(failure)
 }
 pub(super) fn execute(db: &mut Connection, request: Request) {
     // Reply channels observe results; dropping them never cancels accepted work.

@@ -243,3 +243,191 @@ async fn mixed_storage_workload_v1() {
         serde_json::to_string(&report).unwrap()
     );
 }
+
+/// Measure the existing whole-row representation before considering a schema
+/// change. Timings are diagnostics; content, pagination and stage counts are
+/// assertions. Run with the release test binary for release-profile evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit five-run large Diff attribution benchmark"]
+async fn large_diff_reader_workload_v1() {
+    use crate::workspace_review::{DiffStatus, FileDiff, FileStatus, TurnDiff};
+    let root = Root::new();
+    let lease = StorageLease::lock(&root.data()).unwrap();
+    let db = Database::open(root.data(), &lease).await.unwrap();
+    let view = state();
+    let session = view.id.clone();
+    db.create(view).await.unwrap();
+    let turn = TurnId::new("large-diff-turn").unwrap();
+    let diff = TurnDiff {
+        status: DiffStatus::Complete,
+        files: (0..48)
+            .map(|index| FileDiff {
+                path: format!("file-{index:02}.txt"),
+                status: FileStatus::Modified,
+                before_hash: None,
+                after_hash: None,
+                before: Some("b".repeat(320 * 1024)),
+                after: Some("a".repeat(320 * 1024)),
+                old_mode: Some(0o644),
+                new_mode: Some(0o644),
+                added: 1,
+                removed: 1,
+                patch: None,
+                omitted: None,
+            })
+            .collect(),
+        warnings: vec![],
+        added: 48,
+        removed: 48,
+        next_offset: None,
+    };
+    let encoded_bytes = serde_json::to_vec(&diff).unwrap().len();
+    assert!(encoded_bytes > 30 * 1024 * 1024 && encoded_bytes < 32 * 1024 * 1024);
+    db.save_turn_diff(session.clone(), turn.clone(), diff)
+        .await
+        .unwrap();
+    // Real decodable near-budget PNG, rather than a MIME-signature-only BLOB.
+    let mut random = 0x12345678u32;
+    let pixels: Vec<u8> = (0..1180 * 1180 * 3)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random as u8
+        })
+        .collect();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(1180, 1180, pixels).unwrap())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let asset = ImageAsset::new(ImageMime::Png, png.into_inner()).unwrap();
+    assert!(asset.bytes().len() > 3_900_000);
+    let image = asset.image().clone();
+    db.shutdown().await.unwrap();
+    let connection = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+    content::put_image(&connection, &asset).unwrap();
+    drop(connection);
+    let db = Database::open(root.data(), &lease).await.unwrap();
+    let mut latencies: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+    // Isolated stages use the same SELECT/decoder/projector as production,
+    // excluding queueing. SQL timing includes row string materialization.
+    let connection = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+    for _ in 0..16 {
+        let began = Instant::now();
+        let encoded: String = connection
+            .query_row(
+                "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
+                params![session.as_str(), turn.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        latencies
+            .entry("isolated_sql_row")
+            .or_default()
+            .push(began.elapsed().as_secs_f64() * 1000.0);
+        let began = Instant::now();
+        let decoded: TurnDiff = serde_json::from_str(&encoded).unwrap();
+        latencies
+            .entry("isolated_json_decode")
+            .or_default()
+            .push(began.elapsed().as_secs_f64() * 1000.0);
+        let began = Instant::now();
+        let page = crate::workspace_review::summary(Some(decoded), 16).unwrap();
+        assert_eq!(page.files.len(), 16);
+        assert_eq!(page.next_offset, Some(32));
+        assert!(page
+            .files
+            .iter()
+            .all(|file| file.before.is_none() && file.after.is_none()));
+        latencies
+            .entry("isolated_summary_projection")
+            .or_default()
+            .push(began.elapsed().as_secs_f64() * 1000.0);
+    }
+    drop(connection);
+    // Three pages and five slices of one 320 KiB body; only a small response
+    // leaves storage, while the whole 30 MiB row is currently decoded per call.
+    for mixed in [false, true] {
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = if mixed {
+            let db = db.clone();
+            let stop = stop.clone();
+            let image = image.clone();
+            Some(tokio::spawn(async move {
+                let mut timings = Vec::new();
+                while !stop.load(Ordering::Acquire) || timings.len() < 16 {
+                    let began = Instant::now();
+                    assert_eq!(db.image(image.clone()).await.unwrap().image(), &image);
+                    timings.push(began.elapsed().as_secs_f64() * 1000.0);
+                }
+                timings
+            }))
+        } else {
+            None
+        };
+        for round in 0..16 {
+            let began = Instant::now();
+            let offset = (round % 3) * 16;
+            let page = db
+                .turn_diff_page(session.clone(), turn.clone(), offset)
+                .await
+                .unwrap();
+            assert_eq!(page.files.len(), 16);
+            assert_eq!(page.files[0].path, format!("file-{offset:02}.txt"));
+            assert_eq!(page.next_offset, (offset + 16 < 48).then_some(offset + 16));
+            latencies
+                .entry(if mixed {
+                    "mixed_diff_page"
+                } else {
+                    "idle_diff_page"
+                })
+                .or_default()
+                .push(began.elapsed().as_secs_f64() * 1000.0);
+            let began = Instant::now();
+            let offset = (round % 5) * 64 * 1024;
+            let slice = db
+                .turn_diff_content(
+                    session.clone(),
+                    turn.clone(),
+                    0,
+                    true,
+                    SafeInteger::new(offset as u64).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(slice.bytes, "a".repeat(64 * 1024));
+            assert_eq!(slice.total_bytes, 320 * 1024);
+            assert_eq!(
+                slice.next_offset,
+                (offset + 64 * 1024 < 320 * 1024).then_some(offset + 64 * 1024)
+            );
+            latencies
+                .entry(if mixed {
+                    "mixed_diff_content"
+                } else {
+                    "idle_diff_content"
+                })
+                .or_default()
+                .push(began.elapsed().as_secs_f64() * 1000.0);
+        }
+        stop.store(true, Ordering::Release);
+        if let Some(reader) = reader {
+            latencies.insert("mixed_image", reader.await.unwrap());
+        }
+    }
+    let wal_bytes =
+        std::fs::metadata(root.data().join("workbench.sqlite3-wal")).map_or(0, |m| m.len());
+    db.shutdown().await.unwrap();
+    let sample = Sample {
+        version: 1,
+        scope: "isolated SQL materialization / JSON decode / projection plus actual bounded-reader queue-through-response; not host SLO",
+        workload: "48-file 30MiB Diff, 16-file header pages, 64KiB content slices, concurrent decodable near-4MiB PNG",
+        latencies_ms: latencies,
+        storage: db.metrics(),
+        wal_bytes,
+    };
+    println!(
+        "MIXED_WORKLOAD_V1:{}",
+        serde_json::to_string(&sample).unwrap()
+    );
+}

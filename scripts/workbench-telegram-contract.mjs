@@ -328,7 +328,11 @@ try {
     'IPC permission → Telegram UI → typed response; wrong-topic/unauthorized callbacks cannot consume it',
   );
   await until(
-    () => sent.some((message) => message.text === 'Turn completed.'),
+    () =>
+      sent.some(
+        (message) =>
+          message.text.startsWith('Turn completed.') && message.text.includes('Workspace Diff'),
+      ),
     'permission completion delivery',
   );
   rateLimit = true;
@@ -412,6 +416,7 @@ try {
     'text:image-output',
     'image',
     'text:image caption',
+    'text:Turn completed. Workspace Diff partial; +0 / -0 lines; 0 files.',
     `text:${laterNotice}`,
   ]);
   assert.equal((await trace()).filter((record) => record.text === 'image-output').length, 1);
@@ -1370,7 +1375,8 @@ try {
     sent.some(
       (message) =>
         message.message_thread_id === historyThread &&
-        message.text === 'Turn completed. Output already exported in this topic.',
+        message.text.startsWith('Turn completed. Workspace Diff') &&
+        message.text.includes('Output already exported in this topic.'),
     ),
   );
   await stop(daemon);

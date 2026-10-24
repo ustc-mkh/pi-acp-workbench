@@ -53,7 +53,7 @@ fn fixture(topics: usize, backlog: usize) -> Connection {
 }
 fn measured(db: &Connection, limit: usize) -> (Vec<u64>, i32) {
     let mut statement = db.prepare(&dispatch_sql()).unwrap();
-    let mut rows = statement.query(params![1, limit as i64]).unwrap();
+    let mut rows = statement.query(params![1, limit as i64, 0]).unwrap();
     let mut orders = Vec::new();
     while let Some(row) = rows.next().unwrap() {
         orders.push(pending(row).unwrap().order.get());
@@ -89,11 +89,12 @@ fn oracle(db: &Connection, limit: usize) -> Vec<u64> {
             _ => target_key(&record.intent.target),
         };
         if seen.insert(key) {
-            orders.push(record.order.get());
+            orders.push((record.retry_at.get() > 0, record.order.get()));
         }
     }
+    orders.sort_unstable();
     orders.truncate(limit);
-    orders
+    orders.into_iter().map(|(_, order)| order).collect()
 }
 #[test]
 fn dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle() {
@@ -112,7 +113,7 @@ fn dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle() {
             let plan = db
                 .prepare(&format!("EXPLAIN QUERY PLAN {}", dispatch_sql()))
                 .unwrap()
-                .query_map(params![1, 1024], |r| r.get::<_, String>(3))
+                .query_map(params![1, 1024, 0], |r| r.get::<_, String>(3))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
@@ -120,6 +121,19 @@ fn dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle() {
                 !plan.iter().any(|line| line.contains("CORRELATED")),
                 "{plan:?}"
             );
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("deliveries_topic_order")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.contains("deliveries_retry")),
+                "{plan:?}"
+            );
+            // Acked identities remain durable but cannot grow dispatch work.
+            let before = measured(&db, MAX_DELIVERY_WINDOW).1;
+            db.execute("INSERT INTO deliveries(delivery_id,order_seq,revision,target_key,target_json,payload_json,status) SELECT delivery_id || '-copy', order_seq+10000000,revision,target_key,target_json,payload_json,status FROM deliveries WHERE status='Acked'", []).unwrap();
+            assert_eq!(measured(&db, MAX_DELIVERY_WINDOW).1, before);
             assert!(
                 plan.iter()
                     .any(|line| line.contains("SEARCH b") && line.contains("session=?")),
@@ -139,6 +153,61 @@ fn dispatch_delivery_scale_has_no_per_candidate_scan_and_matches_fifo_oracle() {
             eprintln!("dispatch topics={topics} backlog={backlog} vm_steps={steps}");
         }
     }
+}
+
+#[test]
+fn ready_topic_beyond_two_full_deferred_windows_is_visible_without_overtaking() {
+    let db = fixture(2049, 2);
+    let ready_head: i64 = 2048 * 2 + 1;
+    db.execute(
+        "UPDATE deliveries SET next_retry=0 WHERE order_seq=?1",
+        [ready_head],
+    )
+    .unwrap();
+    let snapshot = dispatch_snapshot_at(&db, 1, MAX_DELIVERY_WINDOW, 0).unwrap();
+    assert_eq!(snapshot.heads.len(), MAX_DELIVERY_WINDOW);
+    assert_eq!(snapshot.heads[0].order.get(), ready_head as u64);
+    assert!(snapshot.heads[1..]
+        .iter()
+        .all(|row| row.retry_at.get() == 999));
+    // Every topic also has a ready direct-target successor. They remain hidden
+    // behind their deferred session-target head, including after rebind merge.
+    assert!(snapshot.heads.iter().all(|row| row.order.get() % 2 == 1));
+    db.execute(
+        "UPDATE deliveries SET status='Acked' WHERE order_seq=?1",
+        [ready_head],
+    )
+    .unwrap();
+    let snapshot = dispatch_snapshot_at(&db, 1, 1, 0).unwrap();
+    assert_eq!(snapshot.heads[0].order.get(), (ready_head + 1) as u64);
+    // Once retries become ready, immutable FIFO order wins again; prioritizing
+    // retry timestamps themselves would incorrectly starve older retries.
+    let snapshot = dispatch_snapshot_at(&db, 1, MAX_DELIVERY_WINDOW, 999).unwrap();
+    assert_eq!(snapshot.heads[0].order.get(), 1);
+    assert!(snapshot
+        .heads
+        .windows(2)
+        .all(|pair| pair[0].order < pair[1].order));
+    let future_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    db.execute(
+        "UPDATE deliveries SET next_retry=?1 WHERE status='Pending'",
+        [future_seconds as i64],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE deliveries SET next_retry=0 WHERE order_seq=?1",
+        [ready_head + 1],
+    )
+    .unwrap();
+    assert_eq!(
+        dispatch_snapshot(&db, 1, 1).unwrap().heads[0].order.get(),
+        (ready_head + 1) as u64,
+        "production readiness uses Unix seconds, not milliseconds"
+    );
 }
 #[test]
 fn dispatch_delivery_rebind_merges_direct_target_without_mutating_frozen_target() {

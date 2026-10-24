@@ -40,6 +40,21 @@ pub(crate) struct TaskScope {
 }
 pub(crate) struct SpawnGuard<'a>(MutexGuard<'a, State>);
 impl TaskScope {
+    pub(crate) fn record_counts(&self, retained: &'static str, unfinished: &'static str) {
+        if !crate::diagnostics::enabled() {
+            return;
+        }
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        crate::diagnostics::gauge(retained, state.tasks.len());
+        crate::diagnostics::gauge(
+            unfinished,
+            state
+                .tasks
+                .iter()
+                .filter(|task| !task.is_finished())
+                .count(),
+        );
+    }
     pub fn entry(&self) -> Result<SpawnGuard<'_>, DomainError> {
         let mut state = self
             .state

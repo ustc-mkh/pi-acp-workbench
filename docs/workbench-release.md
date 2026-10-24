@@ -1,6 +1,6 @@
 # Single-host Linux artifact
 
-This guide describes the current source-built artifact, not historical published releases. No repository script installs, enables or restarts a real service. Perform deployment only with operator authorization and a separate backup/recovery policy. Local artifact verification is not proof of live provider/Bot compatibility.
+This guide describes the current source-built artifact, not historical published releases. No repository script installs, enables or restarts a real service. Perform deployment only with operator authorization and a separate backup/recovery policy. Local artifact verification is not proof of live provider/Bot compatibility. See the [P6 validation record and outstanding blockers](workbench-p6-validation.md) for the current evidence boundary.
 
 ## Build and verify locally
 
@@ -13,6 +13,21 @@ npm run test:rewrite
 ```
 
 The unified gate builds the production Rust workspace with `--release --locked`, packages it, and runs the actual `pi-acp-workbenchd` with an isolated synthetic ACP peer. The directory manifest includes target/ELF ABI, binary SHA-256, Rust source hash, git provenance and production/features metadata. A dirty worktree is explicitly recorded, not represented as a clean commit.
+
+P6 diagnostics are separate from that gate:
+
+```sh
+npm run test:workbench:startup
+npm run test:workbench:scale
+npm run test:workbench:mixed
+npm run test:workbench:diff-benchmark
+npm run test:workbench:host-mixed -- --binary "$PWD/service-dist/pi-acp-workbenchd" --dataset full
+npm run test:workbench:soak -- --duration-seconds 600
+# Requires an explicitly available graphical test environment.
+npm run test:extension-host:full
+```
+
+The full dataset uses a stopped, test-owned temporary root for 10k sessions and 100k history entries, then runs actual IPC, a 4 MiB PNG, eight local mock HTTP lanes, 2048 deferred topics and concurrent headless Chromium display work. It never writes fixtures into a running or real root. Per-request timings include capture/physical stop where labelled; they do not provide internal durable-fence spans or live provider certification. The default five runs and raw distributions are retained under `.test-results/`; an interrupted/failed run stays failed. Use `--backlog-seconds 7200` with short samples to retain the two-hour delivery backlog rather than shrinking it with sampling time. The two-hour same-PID run is separately selected with `--runs 1 --duration-seconds 7200`; `--dataset small` retains the smaller IPC diagnostic workload and must be reported as such. Graphical Extension Host, authorized online providers/Bot and each production target still require their own evidence. For installed VSIX acceptance, package the client first and run `WORKBENCH_TEST_BINARY=/absolute/path/to/pi-acp-workbenchd node scripts/workbench-extension-host.mjs --full --vsix /absolute/path/to/candidate.vsix` in the isolated graphical test environment.
 
 Default output:
 
@@ -63,6 +78,6 @@ Maintenance is built into the **same binary**:
   --destination /absolute/existing-parent/new-backup --confirm
 ```
 
-It must obtain the host flock and refuses a leftover socket until independently inspected. Never delete `.workbench.lock` to bypass a lease. Export does not migrate formats; reset accepts only marker-only roots. Current GC compacts only typed Telegram inbox/callback state, not archives, history, journal or outbox high-water/tombstones. Read [storage maintenance](workbench-storage.md) before any mutation.
+It must obtain the host flock and refuses a leftover socket until independently inspected. Never delete `.workbench.lock` to bypass a lease. Export does not migrate formats; reset accepts only marker-only roots. Confirmed GC performs typed Telegram compaction and removes at most 500 unreferenced content rows per pass; `gc --dry-run` reports orphan candidates without mutation. It deliberately retains entries, receipts, delivery identities and high-water marks. Read [storage maintenance](workbench-storage.md) before any mutation.
 
 Upgrade/downgrade requires matching binary/client/storage formats. Incompatible, corrupt or unversioned nonempty roots fail closed; there is no automatic migration or rollback reader. Retain old artifacts and independently validated backups, and use an isolated root to evaluate a replacement. This documentation does not authorize touching real services or user data.

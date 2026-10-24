@@ -319,7 +319,7 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
         .await
         .sent
         .iter()
-        .any(|message| message.text == "Turn completed."));
+        .any(|message| message.text.starts_with("Turn completed.")));
     api.0
         .lock()
         .await
@@ -471,7 +471,12 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
     assert_eq!(state.media[0].message_thread_id, topic.thread);
     assert_eq!(
         &state.sequence[2..],
-        ["image", "text:image caption", "text:later notice"]
+        [
+            "image",
+            "text:image caption",
+            "text:Turn completed. Workspace Diff partial; +0 / -0 lines; 0 files.",
+            "text:later notice"
+        ]
     );
     drop(state);
     assert!(second

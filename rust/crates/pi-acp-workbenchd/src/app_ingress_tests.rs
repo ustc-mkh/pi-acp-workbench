@@ -346,3 +346,82 @@ async fn owned_task_panic_is_fatal_and_cleanup_retains_lease_until_host_shutdown
     reopened.payloads.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+#[tokio::test]
+async fn settings_after_failed_worker_commit_cold_preferences_and_resume_without_stale_mailbox() {
+    let (app, root) = app();
+    let id = create(&app).await;
+    let mut events = app.subscribe();
+    prompt(&app, &id, "ready").await;
+    wait_finished(&mut events).await;
+    let native = inspect(&app, &id).await.provider_session;
+    prompt(&app, &id, "crash").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let closed = app
+                .core
+                .coordinator
+                .adapters
+                .lock()
+                .await
+                .get(&id)
+                .is_some_and(|handle| handle.tx.is_closed());
+            if closed && matches!(inspect(&app, &id).await.status, SessionStatus::Failed(_)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    for command in [
+        DomainCommand::SetModel {
+            session: id.clone(),
+            model: crate::domain::ModelId::new("other").unwrap(),
+        },
+        DomainCommand::SetMode {
+            session: id.clone(),
+            mode: crate::domain::ModeId::new("high").unwrap(),
+        },
+    ] {
+        let operation = crate::domain::OperationId::generate();
+        let first = app
+            .command_durable(operation.clone(), command.clone())
+            .await
+            .unwrap();
+        let replay = app.command_durable(operation, command).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
+    }
+    let state = inspect(&app, &id).await;
+    assert_eq!(state.config.model.as_ref().unwrap().as_str(), "other");
+    assert_eq!(state.config.mode.as_ref().unwrap().as_str(), "high");
+    assert!(state.configuration_intent.is_none());
+    assert!(app
+        .core
+        .coordinator
+        .adapters
+        .lock()
+        .await
+        .get(&id)
+        .unwrap()
+        .tx
+        .is_closed());
+    let mut resumed = app.subscribe();
+    prompt(&app, &id, "after configuration recovery").await;
+    wait_finished(&mut resumed).await;
+    let state = inspect(&app, &id).await;
+    assert_eq!(state.provider_session, native);
+    assert_eq!(
+        state.catalogue.current_model.as_ref().unwrap().as_str(),
+        "other"
+    );
+    assert_eq!(
+        state.catalogue.current_mode.as_ref().unwrap().as_str(),
+        "high"
+    );
+    app.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}

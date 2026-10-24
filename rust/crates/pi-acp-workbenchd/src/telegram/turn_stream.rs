@@ -125,12 +125,13 @@ impl HistoryStream {
         let first_seq = entries.first().map(|(_, seq)| *seq).unwrap_or_default();
         let prefix = (!items.is_empty()).then(|| {
             format!(
-                "History · session {session} · #{} · {:?}",
+                "History · session {session} · #{} · {:?} · bounded message segment through #{} (may continue across batches; /history all resumes without discarding the tail)",
                 first_seq.get(),
                 first
                     .as_ref()
                     .map(|(role, _)| role)
-                    .unwrap_or(&EntryRole::Agent)
+                    .unwrap_or(&EntryRole::Agent),
+                entries.last().map_or(first_seq, |(_, seq)| *seq).get()
             )
         });
         Ok(Self {
@@ -210,6 +211,8 @@ impl HistoryStream {
 pub struct TurnStream {
     history_scope: Option<(i64, crate::domain::SessionId)>,
     history_skipped: bool,
+    completion: Option<String>,
+    completion_emitted: bool,
     delivery: DeliveryId,
     turn: TurnId,
     topic: TopicKey,
@@ -231,6 +234,8 @@ impl TurnStream {
         Self {
             history_scope: None,
             history_skipped: false,
+            completion: None,
+            completion_emitted: false,
             delivery,
             turn,
             topic,
@@ -311,6 +316,9 @@ impl TurnStream {
             if self.page.is_empty() && self.more {
                 let page = payloads.delivery_page(&self.delivery, self.after).await?;
                 self.more = page.next_seq.is_some();
+                if page.completion.is_some() {
+                    self.completion = page.completion;
+                }
                 if let Some(next) = page.next_seq {
                     if next <= self.after || page.entries.is_empty() {
                         return Err(DomainError::Persistence(
@@ -372,11 +380,24 @@ impl TurnStream {
                 self.image = header.image;
                 continue;
             }
-            self.finished = true;
             if !self.fragment.is_empty() {
                 return Ok(Some(self.flush()));
             }
-            if !self.emitted {
+            if let Some(mut summary) = self.completion.take() {
+                if self.history_skipped && !self.emitted {
+                    summary.push_str(" Output already exported in this topic.");
+                }
+                self.completion_emitted = true;
+                return Ok(Some(DeliveryPart::Message(SendMessage {
+                    chat_id: self.topic.chat,
+                    message_thread_id: self.topic.thread,
+                    text: summary,
+                    disable_notification: false,
+                    reply_markup: None,
+                })));
+            }
+            self.finished = true;
+            if !self.emitted && !self.completion_emitted {
                 self.fragment = if self.history_skipped {
                     "Turn completed. Output already exported in this topic."
                 } else {

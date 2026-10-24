@@ -130,6 +130,58 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
     fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
+async fn gc_dry_run_is_read_only_and_confirmed_gc_removes_only_orphan_content() {
+    let root = std::env::temp_dir().join(format!("workbench-gc-roots-{}", uuid::Uuid::new_v4()));
+    let lease = StorageLease::lock(&root).unwrap();
+    let database = Database::open(root.clone(), &lease).await.unwrap();
+    database.shutdown().await.unwrap();
+    drop(lease);
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    for index in 0..501 {
+        let id = format!("orphan-{index:04}");
+        sql.execute("INSERT INTO contents(id,kind,sha256,bytes,data,image_ref_json) VALUES(?1,'Text',?2,1,x'61',NULL)", rusqlite::params![id, "0".repeat(64)]).unwrap();
+    }
+    drop(sql);
+    let mut dry = args("gc", &root);
+    dry.retain(|arg| arg != "--confirm");
+    dry.push("--dry-run".into());
+    run(&dry).await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let count: u32 = sql
+        .query_row(
+            "SELECT count(*) FROM contents WHERE id LIKE 'orphan-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 501, "dry-run must not compact even Telegram state");
+    drop(sql);
+    run(&args("gc", &root)).await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let count: u32 = sql
+        .query_row(
+            "SELECT count(*) FROM contents WHERE id LIKE 'orphan-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "one confirmed pass is limited to 500 objects");
+    drop(sql);
+    run(&args("gc", &root)).await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let count: u32 = sql
+        .query_row(
+            "SELECT count(*) FROM contents WHERE id LIKE 'orphan-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(sql);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn reset_retains_lock_inode_so_waiting_hosts_cannot_obtain_a_second_lease() {
     use std::os::unix::fs::MetadataExt;
     let root = root();

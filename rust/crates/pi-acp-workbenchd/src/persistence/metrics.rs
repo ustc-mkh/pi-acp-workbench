@@ -1,11 +1,15 @@
 //! Fixed-space storage telemetry. No identities, SQL, paths, text or tokens.
 //! Execution includes SQL, serialization and validation until finer spans are
 //! added; it must not be presented as pure SQL time.
+pub use crate::diagnostics::Histogram;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub struct RequestMetrics {
+    pub enqueue_histogram: Histogram,
+    pub queue_histogram: Histogram,
+    pub execution_histogram: Histogram,
     pub accepted_requests: u64,
     pub requests: u64,
     pub enqueue_wait_ns: u64,
@@ -37,6 +41,9 @@ impl Metrics {
         let mut map = self.0.lock().expect("storage metrics lock poisoned");
         let metric = map.entry(kind).or_default();
         metric.requests = metric.requests.saturating_add(1);
+        metric.enqueue_histogram.record(enqueue);
+        metric.queue_histogram.record(queue);
+        metric.execution_histogram.record(execution);
         metric.enqueue_wait_ns = metric.enqueue_wait_ns.saturating_add(ns(enqueue));
         metric.queue_wait_ns = metric.queue_wait_ns.saturating_add(ns(queue));
         metric.execution_ns = metric.execution_ns.saturating_add(ns(execution));

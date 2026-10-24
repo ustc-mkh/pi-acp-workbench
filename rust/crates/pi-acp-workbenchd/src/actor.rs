@@ -9,7 +9,13 @@ use crate::{
     },
     persistence::interface::SessionPersistence,
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Internal owner result. Only CommandReceipt crosses the mutation wire or
@@ -60,16 +66,33 @@ pub struct RegistryHandle {
 }
 impl RegistryHandle {
     pub async fn command(&self, command: DomainCommand) -> Result<OwnerReply, DomainError> {
-        self.command_with_operation(command, None).await
+        self.submit(command, None, false).await
     }
     pub(crate) async fn command_with_operation(
         &self,
         command: DomainCommand,
         operation: Option<crate::domain::operation::OperationTicket>,
     ) -> Result<OwnerReply, DomainError> {
+        self.submit(command, operation, true).await
+    }
+    /// Only the application admission layer may reload an evicted owner.
+    pub(crate) async fn command_admitted(
+        &self,
+        command: DomainCommand,
+    ) -> Result<OwnerReply, DomainError> {
+        self.command_with_operation(command, None).await
+    }
+    async fn submit(
+        &self,
+        command: DomainCommand,
+        operation: Option<crate::domain::operation::OperationTicket>,
+        admitted: bool,
+    ) -> Result<OwnerReply, DomainError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .try_send(RegistryCommand::Command {
+                admitted,
+                queued: crate::diagnostics::Stamp::now(),
                 command,
                 operation,
                 reply,
@@ -102,6 +125,7 @@ impl RegistryHandle {
         let (reply, wait) = oneshot::channel();
         self.tx
             .try_send(RegistryCommand::Worker {
+                queued: crate::diagnostics::Stamp::now(),
                 session,
                 epoch,
                 event,
@@ -110,6 +134,30 @@ impl RegistryHandle {
             .map_err(registry_send_error)?;
         wait.await
             .map_err(|_| DomainError::Worker("session actor closed".into()))?
+    }
+    #[cfg(test)]
+    async fn cache_stats(&self) -> (usize, usize, usize) {
+        let (reply, wait) = oneshot::channel();
+        self.tx
+            .send(RegistryCommand::CacheStats(reply))
+            .await
+            .unwrap_or_else(|_| panic!("registry closed"));
+        wait.await.unwrap()
+    }
+    pub(crate) async fn worker_stopped(&self, session: SessionId, epoch: u64) {
+        let (reply, wait) = oneshot::channel();
+        if self
+            .tx
+            .send(RegistryCommand::WorkerStopped {
+                session,
+                epoch,
+                reply,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = wait.await;
+        }
     }
     #[cfg(test)]
     pub async fn shutdown(&self) {
@@ -142,12 +190,22 @@ fn registry_send_error<T>(error: mpsc::error::TrySendError<T>) -> DomainError {
     }
 }
 enum RegistryCommand {
+    #[cfg(test)]
+    CacheStats(oneshot::Sender<(usize, usize, usize)>),
+    WorkerStopped {
+        session: SessionId,
+        epoch: u64,
+        reply: Reply,
+    },
     Command {
+        admitted: bool,
+        queued: crate::diagnostics::Stamp,
         command: DomainCommand,
         operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply,
     },
     Worker {
+        queued: crate::diagnostics::Stamp,
         session: SessionId,
         epoch: u64,
         event: Option<AgentEvent>,
@@ -165,28 +223,40 @@ fn forward(
     operation: Option<crate::domain::operation::OperationTicket>,
     id: &SessionId,
     reply: Reply,
-    sessions: &BTreeMap<SessionId, mpsc::Sender<SessionCommand>>,
+    sessions: &BTreeMap<SessionId, mpsc::Sender<OwnerEnvelope>>,
+    activities: &BTreeMap<SessionId, Arc<OwnerActivity>>,
 ) {
     enqueue(
         SessionCommand::Command {
+            queued: crate::diagnostics::Stamp::now(),
             command,
             operation,
             reply,
         },
         id,
         sessions,
+        activities,
     );
 }
 fn enqueue(
     message: SessionCommand,
     id: &SessionId,
-    sessions: &BTreeMap<SessionId, mpsc::Sender<SessionCommand>>,
+    sessions: &BTreeMap<SessionId, mpsc::Sender<OwnerEnvelope>>,
+    activities: &BTreeMap<SessionId, Arc<OwnerActivity>>,
 ) {
     let Some(sender) = sessions.get(id) else {
         message.reject(DomainError::NotFound(id.clone()));
         return;
     };
-    if let Err(error) = sender.try_send(message) {
+    let in_flight = activities.get(id).map(|activity| {
+        activity.pending.fetch_add(1, Ordering::AcqRel);
+        activity.touch();
+        InFlight(activity.clone())
+    });
+    if let Err(error) = sender.try_send(OwnerEnvelope {
+        request: message,
+        in_flight,
+    }) {
         let failure = if matches!(error, mpsc::error::TrySendError::Full(_)) {
             DomainError::Backpressure
         } else {
@@ -195,13 +265,60 @@ fn enqueue(
         error.into_inner().reject(failure);
     }
 }
+#[derive(Default)]
+struct OwnerActivity {
+    pending: AtomicUsize,
+    idle: AtomicBool,
+    touched: AtomicU64,
+}
+impl OwnerActivity {
+    fn touch(&self) {
+        static CLOCK: AtomicU64 = AtomicU64::new(1);
+        self.touched
+            .store(CLOCK.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+struct InFlight(Arc<OwnerActivity>);
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct OwnerEnvelope {
+    request: SessionCommand,
+    in_flight: Option<InFlight>,
+}
+impl OwnerEnvelope {
+    fn untracked(request: SessionCommand) -> Self {
+        Self {
+            request,
+            in_flight: None,
+        }
+    }
+    fn reject(self, error: DomainError) {
+        self.request.reject(error);
+    }
+}
+fn cacheable(state: &SessionView, epoch: Option<u64>) -> bool {
+    epoch.is_none()
+        && matches!(state.status, SessionStatus::Idle | SessionStatus::Failed(_))
+        && state.active_turn.is_none()
+        && state.pending_interactions.is_empty()
+        && state.configuration_intent.is_none()
+}
 enum SessionCommand {
+    WorkerStopped {
+        epoch: u64,
+        reply: Reply,
+    },
     Command {
+        queued: crate::diagnostics::Stamp,
         command: DomainCommand,
         operation: Option<crate::domain::operation::OperationTicket>,
         reply: Reply,
     },
     Worker {
+        queued: crate::diagnostics::Stamp,
         epoch: u64,
         event: Option<AgentEvent>,
         reply: Reply,
@@ -210,7 +327,10 @@ enum SessionCommand {
 }
 impl SessionCommand {
     fn reject(self, error: DomainError) {
-        if let Self::Command { reply, .. } | Self::Worker { reply, .. } = self {
+        if let Self::Command { reply, .. }
+        | Self::Worker { reply, .. }
+        | Self::WorkerStopped { reply, .. } = self
+        {
             let _ = reply.send(Err(error));
         }
     }
@@ -236,6 +356,15 @@ async fn commit_command(
 ) -> Result<OwnerReply, DomainError> {
     // Read only the requested tool header, and only after scope/turn fencing.
     // No old body is materialized by either this read or a status-only patch.
+    let _local_fence = match &command {
+        DomainCommand::Prompt { .. } => {
+            Some(crate::diagnostics::Span::new("owner_prompt_durable_fence"))
+        }
+        DomainCommand::RequestCancel { .. } => {
+            Some(crate::diagnostics::Span::new("owner_cancel_durable_fence"))
+        }
+        _ => None,
+    };
     let old_tool = match &command {
         DomainCommand::Agent {
             session,
@@ -287,6 +416,7 @@ async fn commit_command(
     }
     change.operation = operation;
     let next = change.next.clone();
+    let _commit_span = crate::diagnostics::Span::new("owner_store_commit");
     let batch = store
         .commit(change)
         .await
@@ -301,42 +431,82 @@ async fn commit_command(
 }
 async fn session_loop(
     mut state: SessionView,
-    mut rx: mpsc::Receiver<SessionCommand>,
+    mut rx: mpsc::Receiver<OwnerEnvelope>,
     store: impl SessionPersistence,
     events: broadcast::Sender<CommitBatch>,
 ) {
     let mut worker_epoch = None;
-    while let Some(message) = rx.recv().await {
+    // Cancellation fences events immediately; physical attachment stays pinned until join.
+    let mut attached_epoch = None;
+    while let Some(envelope) = rx.recv().await {
+        let OwnerEnvelope {
+            request: message,
+            in_flight,
+        } = envelope;
+        // Pending includes this execution until the final idle snapshot is published.
+        macro_rules! snapshot {
+            () => {
+                if let Some(guard) = &in_flight {
+                    guard
+                        .0
+                        .idle
+                        .store(cacheable(&state, attached_epoch), Ordering::Release);
+                }
+            };
+        }
+
         let (command, reply, operation) = match message {
+            SessionCommand::WorkerStopped { epoch, reply } => {
+                if worker_epoch == Some(epoch) {
+                    worker_epoch = None;
+                }
+                if attached_epoch == Some(epoch) {
+                    attached_epoch = None;
+                }
+                snapshot!();
+                let _ = reply.send(Ok(accepted(&state)));
+                continue;
+            }
             SessionCommand::Command {
+                queued,
                 command,
                 operation,
                 reply,
-            } => (command, reply, operation),
+            } => {
+                queued.finish("owner_queue");
+                (command, reply, operation)
+            }
             SessionCommand::Worker {
+                queued,
                 epoch,
                 event: None,
                 reply,
             } => {
+                queued.finish("owner_queue");
                 let result = if matches!(state.status, SessionStatus::Cancelling)
                     || epoch == 0
-                    || worker_epoch.is_some_and(|current| epoch < current)
+                    || attached_epoch.is_some_and(|current| epoch < current)
                 {
                     Err(DomainError::Worker("obsolete worker attachment".into()))
                 } else {
                     worker_epoch = Some(epoch);
+                    attached_epoch = Some(epoch);
                     Ok(accepted(&state))
                 };
                 let _ = reply.send(result);
+                snapshot!();
                 continue;
             }
             SessionCommand::Worker {
+                queued,
                 epoch,
                 event: Some(event),
                 reply,
             } => {
+                queued.finish("owner_queue");
                 if worker_epoch != Some(epoch) {
                     let _ = reply.send(Ok(accepted(&state)));
+                    snapshot!();
                     continue;
                 }
                 (
@@ -375,12 +545,14 @@ async fn session_loop(
                 .map(|plan| OwnerReply::ForkPrepared(Box::new(plan)))
                 .map_err(DomainError::Persistence);
             let _ = reply.send(result);
+            snapshot!();
             continue;
         }
         if matches!(command, DomainCommand::Inspect(_)) {
             let _ = reply.send(Ok(OwnerReply::Receipt(CommandReceipt::Loaded {
                 view: Box::new(state.clone()),
             })));
+            snapshot!();
             continue;
         }
         let invalidate_worker = matches!(
@@ -396,6 +568,7 @@ async fn session_loop(
         if result.is_ok() && invalidate_worker {
             worker_epoch = None;
         }
+        snapshot!();
         let _ = reply.send(result);
     }
 }

@@ -84,6 +84,11 @@ impl SessionPersistence for Store {
         &self,
         change: crate::domain::transition::Transition,
     ) -> Result<crate::domain::query::CommitBatch, String> {
+        assert_ne!(
+            self.mode.load(Ordering::Acquire),
+            8,
+            "fixture owner task panic"
+        );
         if change.next.active_turn.is_some() {
             self.gate(5).await;
         } else if matches!(change.next.status, SessionStatus::Idle)
@@ -116,6 +121,8 @@ fn submit(
         .registry
         .tx
         .try_send(RegistryCommand::Command {
+            admitted: false,
+            queued: crate::diagnostics::Stamp::now(),
             command,
             operation: None,
             reply,
@@ -232,6 +239,8 @@ async fn pending_load_lane_is_bounded_and_caller_disconnect_does_not_skip_accept
             .registry
             .tx
             .send(RegistryCommand::Command {
+                admitted: false,
+                queued: crate::diagnostics::Stamp::now(),
                 operation: None,
                 command: DomainCommand::SetModel {
                     session: cold_id.clone(),
@@ -248,6 +257,8 @@ async fn pending_load_lane_is_bounded_and_caller_disconnect_does_not_skip_accept
         .registry
         .tx
         .send(RegistryCommand::Command {
+            admitted: false,
+            queued: crate::diagnostics::Stamp::now(),
             operation: None,
             command: DomainCommand::SetMode {
                 session: cold_id.clone(),
@@ -411,5 +422,217 @@ async fn removal_io_owner_outside_map_is_still_joined_after_root_abort() {
     assert!(shutdown.await.is_err());
     removed.await.unwrap().unwrap();
     assert!(store.history.database().view(id.clone()).await.is_err());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+async fn churn_cold(runtime: &Runtime, count: usize) {
+    for _ in 0..count {
+        let id = id(runtime).await;
+        runtime
+            .registry
+            .command(DomainCommand::LoadSession(id))
+            .await
+            .unwrap();
+    }
+}
+#[tokio::test]
+async fn cold_owner_cache_is_bounded_and_evicted_mutation_rehydrates_without_replay() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    churn_cold(&runtime, 200).await;
+    let (owners, tasks, pending) = runtime.registry.cache_stats().await;
+    assert!(
+        owners <= 64 && tasks <= 65 && pending == 0,
+        "{owners} {tasks} {pending}"
+    );
+    // This mutation deliberately has no immediately preceding LoadSession.
+    let before = store.loads.load(Ordering::Acquire);
+    runtime
+        .registry
+        .command_admitted(prompt(&first))
+        .await
+        .unwrap();
+    assert!(store.loads.load(Ordering::Acquire) > before);
+    let view = runtime
+        .registry
+        .command(DomainCommand::Inspect(first))
+        .await
+        .unwrap();
+    assert!(view.view().unwrap().active_turn.is_some());
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+#[tokio::test]
+async fn queued_and_executing_owner_commit_survives_cache_pressure() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    store.mode.store(5, Ordering::Release);
+    let command = submit(&runtime, prompt(&first));
+    store.entered(1).await;
+    let started = {
+        let registry = runtime.registry.clone();
+        let first = first.clone();
+        tokio::spawn(async move { registry.worker_started(first, 7).await })
+    };
+    churn_cold(&runtime, 200).await;
+    assert!(runtime.registry.cache_stats().await.2 >= 1);
+    store.release(1);
+    command.await.unwrap().unwrap();
+    started.await.unwrap().unwrap();
+    let view = runtime
+        .registry
+        .command(DomainCommand::Inspect(first))
+        .await
+        .unwrap();
+    assert!(view.view().unwrap().active_turn.is_some());
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+#[tokio::test]
+async fn worker_owner_remains_pinned_until_matching_physical_join_notification() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    runtime
+        .registry
+        .worker_started(first.clone(), 7)
+        .await
+        .unwrap();
+    runtime
+        .registry
+        .worker_started(first.clone(), 8)
+        .await
+        .unwrap();
+    runtime
+        .registry
+        .command(DomainCommand::RequestCancel {
+            session: first.clone(),
+        })
+        .await
+        .unwrap();
+    runtime.registry.worker_stopped(first.clone(), 7).await; // An old join must not unpin epoch 8.
+    churn_cold(&runtime, 100).await;
+    let before = store.loads.load(Ordering::Acquire);
+    runtime
+        .registry
+        .command(DomainCommand::LoadSession(first.clone()))
+        .await
+        .unwrap();
+    assert_eq!(store.loads.load(Ordering::Acquire), before);
+    runtime.registry.worker_stopped(first.clone(), 8).await;
+    churn_cold(&runtime, 100).await;
+    let before = store.loads.load(Ordering::Acquire);
+    // Atomically rehydrate-and-attach a newly starting worker after cache eviction.
+    runtime
+        .registry
+        .worker_started(first.clone(), 9)
+        .await
+        .unwrap();
+    assert!(store.loads.load(Ordering::Acquire) > before);
+    let (owners, tasks, _) = runtime.registry.cache_stats().await;
+    assert!(owners <= 64 && tasks <= 65);
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_configuration_owner_is_not_evicted_by_cold_cache_pressure() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    let config = crate::domain::session::SessionConfig {
+        model: None,
+        mode: None,
+        options: Default::default(),
+    };
+    runtime
+        .registry
+        .command(DomainCommand::PrepareConfiguration {
+            session: first.clone(),
+            intent: crate::domain::session::ConfigurationIntent {
+                requested: config.clone(),
+                restore: config,
+            },
+        })
+        .await
+        .unwrap();
+    churn_cold(&runtime, 200).await;
+    let before = store.loads.load(Ordering::Acquire);
+    let view = runtime
+        .registry
+        .command(DomainCommand::LoadSession(first))
+        .await
+        .unwrap();
+    assert!(view.view().unwrap().configuration_intent.is_some());
+    assert_eq!(store.loads.load(Ordering::Acquire), before);
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+#[tokio::test]
+async fn starting_worker_joins_existing_cold_load_lane_without_duplicate_owner() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    churn_cold(&runtime, 200).await;
+    let before = store.loads.load(Ordering::Acquire);
+    store.mode.store(3, Ordering::Release);
+    let loaded = submit(&runtime, DomainCommand::LoadSession(first.clone()));
+    store.entered(1).await;
+    let started = {
+        let registry = runtime.registry.clone();
+        let first = first.clone();
+        tokio::spawn(async move { registry.worker_started(first, 10).await })
+    };
+    // A routing query guarantees the start request gets a scheduling opportunity;
+    // both orders (queued before IO completion or arriving after it) must preserve one owner.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while runtime.registry.cache_stats().await.2 == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    store.release(1);
+    loaded.await.unwrap().unwrap();
+    started.await.unwrap().unwrap();
+    assert_eq!(store.loads.load(Ordering::Acquire), before + 1);
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+#[tokio::test]
+async fn owner_task_panic_is_isolated_and_requires_explicit_reload_for_unadmitted_commands() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 128);
+    let first = id(&runtime).await;
+    let second = id(&runtime).await;
+    store.mode.store(8, Ordering::Release);
+    assert!(runtime.registry.command(prompt(&first)).await.is_err());
+    store.mode.store(0, Ordering::Release);
+    runtime
+        .registry
+        .command(DomainCommand::Inspect(second))
+        .await
+        .unwrap();
+    assert!(matches!(
+        runtime.registry.command(prompt(&first)).await,
+        Err(DomainError::NotFound(_))
+    ));
+    runtime
+        .registry
+        .command(DomainCommand::LoadSession(first.clone()))
+        .await
+        .unwrap();
+    assert!(store
+        .history
+        .database()
+        .view(first.clone())
+        .await
+        .unwrap()
+        .active_turn
+        .is_none());
+    runtime.registry.command(prompt(&first)).await.unwrap();
+    runtime.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

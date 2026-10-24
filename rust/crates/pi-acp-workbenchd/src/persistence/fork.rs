@@ -258,7 +258,7 @@ pub(super) fn adopt(
         "UPDATE sessions SET last_entry_seq=?2,hot_state_json=?3 WHERE id=?1",
         params![branch.id.as_str(), branch.last_entry_seq, encode(&branch)?],
     )?;
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     let summary = query::summary(&branch, created);
     Ok((branch, summary))
 }

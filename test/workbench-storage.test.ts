@@ -148,7 +148,15 @@ it('GC preserves SQL archives, raw operation receipts and delivery tombstones; c
   expect((await run('gc', '--root', source)).code).not.toBe(0);
   const result = await run('gc', '--root', source, '--confirm');
   expect(result.code, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({ removed_inbox: 0, removed_callbacks: 0 });
+  expect(JSON.parse(result.stdout)).toEqual({
+    removed_inbox: 0,
+    removed_callbacks: 0,
+    dry_run: false,
+    orphan_contents: 0,
+    orphan_bytes: 0,
+    removed_contents: 0,
+    batch_limit: 500,
+  });
   expect(retainedRows(source)).toEqual(retained);
   await writeFile(join(source, 'workbench.sqlite3'), 'not a SQLite database');
   expect((await run('gc', '--root', source, '--confirm')).code).not.toBe(0);

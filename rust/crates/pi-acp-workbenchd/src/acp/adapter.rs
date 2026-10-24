@@ -878,9 +878,16 @@ impl AdapterContext {
         if matches!(event, AgentEvent::Crashed { .. }) {
             self.lifecycle.cancel();
         }
-        if let AgentEvent::Finished { turn } = &event {
+        if matches!(
+            event,
+            AgentEvent::Finished { .. } | AgentEvent::Cancelled { .. } | AgentEvent::Crashed { .. }
+        ) {
             if let Some(reviews) = &self.reviews {
-                reviews.finish(&self.session, Some(turn)).await?;
+                let expected = match &event {
+                    AgentEvent::Finished { turn } | AgentEvent::Cancelled { turn } => Some(turn),
+                    _ => None,
+                };
+                reviews.finish(&self.session, expected).await?;
             }
         }
         self.registry

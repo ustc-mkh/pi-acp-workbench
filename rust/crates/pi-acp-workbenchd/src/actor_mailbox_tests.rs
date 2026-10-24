@@ -6,7 +6,7 @@ async fn full_session_mailbox_returns_backpressure_without_waiting() {
     let (sender, _receiver) = mpsc::channel(1);
     let (done, _wait) = oneshot::channel();
     sender
-        .try_send(SessionCommand::Shutdown(done))
+        .try_send(OwnerEnvelope::untracked(SessionCommand::Shutdown(done)))
         .unwrap_or_else(|_| panic!("empty mailbox"));
     let sessions = BTreeMap::from([(id.clone(), sender)]);
     let (reply, wait) = oneshot::channel();
@@ -16,6 +16,7 @@ async fn full_session_mailbox_returns_backpressure_without_waiting() {
         &id,
         reply,
         &sessions,
+        &BTreeMap::new(),
     );
     assert!(matches!(
         wait.await.unwrap(),
@@ -36,6 +37,7 @@ async fn closed_session_mailbox_reports_closed_not_missing_session() {
         &id,
         reply,
         &sessions,
+        &BTreeMap::new(),
     );
     assert!(matches!(
         wait.await.unwrap(),

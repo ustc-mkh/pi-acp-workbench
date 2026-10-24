@@ -108,9 +108,9 @@ pub(super) fn reply(
         return Err(failure("history cursor beyond source"));
     }
     let sql = if all {
-        "SELECT se.seq,se.entry_id,e.role,e.image_id IS NOT NULL,e.turn,e.message FROM session_entries se JOIN entries e ON e.entry_id=se.entry_id WHERE se.session=?1 AND se.seq>?2 AND se.seq<=?3 ORDER BY se.seq LIMIT 200"
+        "SELECT se.seq,se.entry_id,e.role,e.image_id IS NOT NULL,e.turn,e.message FROM session_entries se JOIN entries e ON e.entry_id=se.entry_id WHERE se.session=?1 AND se.seq>?2 AND se.seq<=?3 ORDER BY se.seq LIMIT 2000"
     } else {
-        "SELECT se.seq,se.entry_id,e.role,e.image_id IS NOT NULL,e.turn,e.message FROM session_entries se JOIN entries e ON e.entry_id=se.entry_id WHERE se.session=?1 AND se.seq>?2 AND se.seq<=?3 ORDER BY se.seq DESC LIMIT 200"
+        "SELECT se.seq,se.entry_id,e.role,e.image_id IS NOT NULL,e.turn,e.message FROM session_entries se JOIN entries e ON e.entry_id=se.entry_id WHERE se.session=?1 AND se.seq>?2 AND se.seq<=?3 ORDER BY se.seq DESC LIMIT 2000"
     };
     let mut statement = db.prepare(sql).map_err(failure)?;
     let mut rows = statement
@@ -171,7 +171,8 @@ pub(super) fn reply(
         let can_join = message.is_some()
             && role != "Tool"
             && selected.last().is_some_and(|group| {
-                group.1 == turn
+                group.0.len() < 200
+                    && group.1 == turn
                     && group.2 == role
                     && group.3 == message
                     && group
@@ -261,9 +262,9 @@ pub(super) fn reply(
         }
         db.execute("INSERT INTO telegram_history_cursors(bot_id,chat,thread,session,last_seq) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(bot_id,chat,thread,session) DO UPDATE SET last_seq=excluded.last_seq", params![bot, topic.chat.get(), topic.thread.map_or(0, |t| t.get()), session.as_str(), through]).map_err(failure)?;
     }
-    let text = format!("History export · session {session}\n{queued} new entries queued; {} eligible entries in this batch, {scanned} committed records examined (scan cap 200).\n{}\nUser/Agent text and images, plus tool images; no Thoughts or raw tool text. Entries already planned by explicit history are not queued again; completed automatic pushes in this same topic are also skipped. Full archived bodies stream in bounded parts. Transport remains at least once: partial/uncertain sends may repeat.", selected.len(), if all {
-        if through < view.last_entry_seq { "More history remains. Repeat /history all to continue (up to 100 eligible entries per request)." } else { "Reached the committed history end for this request. Repeat /history all after new entries arrive." }
-    } else { "Recent window: at most 20 eligible entries within the latest 200 committed records. /history all starts/resumes chronological batches from the beginning." });
+    let text = format!("History export · session {session}\n{queued} new entries queued; {} eligible entries in this batch, {scanned} committed records examined (raw scan budget 2000; visible-message target is independent).\n{}\nUser/Agent text and images, plus tool images; no Thoughts or raw tool text. Entries already planned by explicit history are not queued again; completed automatic pushes in this same topic are also skipped. Full archived bodies stream in bounded parts. Transport remains at least once: partial/uncertain sends may repeat.", selected.len(), if all {
+        if through < view.last_entry_seq { "More history remains. Repeat /history all to continue (up to 100 visible message segments per request). A scan-boundary segment may continue in the next batch; no text is discarded." } else { "Reached the committed history end for this request. Repeat /history all after new entries arrive." }
+    } else { "Recent window: at most 20 visible message segments within the latest 2000 committed records. A segment at a scan boundary may continue in another batch; it is not claimed to be a complete message. /history all starts/resumes chronological batches from the beginning." });
     let receipt = NoticeContent {
         id: receipt_id,
         text: json(&Receipt { text: text.clone() })?,

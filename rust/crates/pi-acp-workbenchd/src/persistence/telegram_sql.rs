@@ -564,7 +564,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
     let result = (|| {
         let tx = db.transaction().map_err(failure)?;
         let output = execute_action(&tx, request.action, request.max_pending)?;
-        tx.commit().map_err(failure)?;
+        crate::diagnostics::sqlite_commit(tx).map_err(failure)?;
         Ok(output)
     })();
     let _ = request.reply.send(result);

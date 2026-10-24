@@ -37,6 +37,118 @@ async fn manage(app: &WorkbenchApp, session: &SessionId, action: ManagementActio
     .unwrap();
 }
 #[tokio::test]
+async fn history_search_cursor_is_filter_bound_and_clear_jobs_resume_in_bounded_batches() {
+    use crate::domain::query::{QueryCommand, QueryResult, SessionFilter};
+    let root = std::env::temp_dir().join(format!("clear-history-{}", uuid::Uuid::new_v4()));
+    let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);
+    let app = app_at_with_env(&root, env);
+    let first = create(&app).await;
+    let _second = create(&app).await;
+    for _ in 0..10 {
+        let _ = create(&app).await;
+    }
+    let filter = SessionFilter {
+        text: "__definitely_not_present__".into(),
+        harness: None,
+    };
+    let page = app
+        .query(QueryCommand::Search {
+            filter: filter.clone(),
+            cursor: None,
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(page, QueryResult::List(ref p) if p.sessions.is_empty() && p.next_cursor.is_none())
+    );
+    let filter = SessionFilter {
+        text: String::new(),
+        harness: None,
+    };
+    let page = app
+        .query(QueryCommand::Search {
+            filter: filter.clone(),
+            cursor: None,
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    let cursor = match page {
+        QueryResult::List(p) => p.next_cursor.unwrap(),
+        _ => panic!("search"),
+    };
+    assert_eq!(cursor.filter.as_ref(), Some(&filter));
+    assert!(app
+        .query(QueryCommand::Search {
+            filter: SessionFilter {
+                text: "Pi".into(),
+                harness: None
+            },
+            cursor: Some(cursor),
+            limit: Some(1)
+        })
+        .await
+        .is_err());
+    app.delivery_store()
+        .enqueue(crate::domain::transition::DeliveryIntent {
+            id: crate::domain::DeliveryId::generate(),
+            revision: crate::domain::query::SafeInteger::new(1).unwrap(),
+            target: crate::domain::transition::DeliveryTarget::Session {
+                session: first.clone(),
+                cwd: crate::domain::WorkspacePath::new(root.to_string_lossy()).unwrap(),
+            },
+            payload: crate::domain::transition::DeliveryPayload::Image {
+                image: crate::domain::ImageId::generate(),
+            },
+        })
+        .await
+        .unwrap();
+    let operation = OperationId::generate();
+    let preview = app
+        .command_durable(
+            operation.clone(),
+            DomainCommand::PrepareHistoryClear { filter },
+        )
+        .await
+        .unwrap();
+    let job = match preview {
+        CommandReceipt::HistoryClear { report } => {
+            assert!(report.preview);
+            assert_eq!(report.total, 12);
+            assert_eq!(report.pending_deliveries, 1);
+            report.job
+        }
+        _ => panic!("preview"),
+    };
+    let batch = app
+        .command_durable(
+            OperationId::generate(),
+            DomainCommand::ClearHistoryBatch { job: job.clone() },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&batch, CommandReceipt::HistoryClear { report } if !report.preview && report.remaining == 2),
+        "batch receipt: {batch:?}"
+    );
+    let next = app
+        .command_durable(
+            OperationId::generate(),
+            DomainCommand::ClearHistoryBatch { job },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(next, CommandReceipt::HistoryClear { report } if report.remaining == 0));
+    assert!(matches!(
+        app.command(DomainCommand::Inspect(first)).await,
+        Err(crate::domain::error::DomainError::NotFound(_))
+    ));
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn management_prices_stats_missing_usage_filters_and_restart_are_cold_and_durable() {
     let root = std::env::temp_dir().join(format!("management-{}", uuid::Uuid::new_v4()));
     let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);

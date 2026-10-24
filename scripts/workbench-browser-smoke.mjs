@@ -10,6 +10,7 @@ import { build } from 'esbuild';
 import assert from 'node:assert/strict';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+import { measureRenderWorkload } from './lib/workbench-render-workload.mjs';
 
 const { values } = parseArgs({ options: { binary: { type: 'string' } } });
 const binary = resolveWorkbenchBinary(values.binary);
@@ -171,7 +172,7 @@ try {
     while (!condition()) {
       if (Date.now() > end)
         throw new Error(
-          `Timeout: ${label}; state=${JSON.stringify(controller.snapshot)}; daemon=${output}`,
+          `Timeout: ${label}; state=${JSON.stringify(controller.snapshot)}; browserErrors=${JSON.stringify(errors)}; daemon=${output}`,
         );
       await new Promise((done) => setTimeout(done, 20));
     }
@@ -480,143 +481,7 @@ try {
     'source unchanged, no browser external fetch/errors, production extension excludes legacy wire/facade',
   );
   // Isolated display workload after the real-host flow; never dispatch prompts.
-  const metrics = await page.evaluate(async (snapshot) => {
-    performance.clearMeasures('workbench.render');
-    performance.clearMeasures('workbench.markdown');
-    const longTasks = [];
-    const observer = new PerformanceObserver((list) =>
-      longTasks.push(...list.getEntries().map((entry) => entry.duration)),
-    );
-    observer.observe({ type: 'longtask', buffered: false });
-    const state = {
-      ...snapshot,
-      selected: snapshot.selected,
-      operations: [],
-      view: {
-        ...snapshot.view,
-        entries: [],
-        tools: [],
-        earlier: undefined,
-        historical: false,
-        view: {
-          ...snapshot.view.view,
-          active_turn: 'perf-turn',
-          status: 'Running',
-          pending_interactions: {},
-          catalogue: {
-            ...snapshot.view.view.catalogue,
-            commands: [
-              { name: 'review', description: 'Review', input_hint: null },
-              { name: 'reset', description: 'Reset', input_hint: null },
-            ],
-          },
-        },
-      },
-    };
-    const rows = [
-      {
-        seq: 1,
-        id: 'perf-user',
-        turn: 'perf-turn',
-        role: 'User',
-        message: null,
-        image: null,
-        text: { Inline: { text: 'Selection stays readable' } },
-      },
-    ];
-    const frame = () =>
-      new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-    let sequence = 1000000;
-    const update = () =>
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          data: {
-            type: 'state',
-            sequence: ++sequence,
-            state: { ...state, view: { ...state.view, entries: [...rows] } },
-          },
-        }),
-      );
-    update();
-    await frame();
-    const first = document.querySelector('article');
-    const input = document.querySelector('#prompt');
-    input.focus();
-    const range = document.createRange();
-    range.selectNodeContents(first.querySelector('p'));
-    getSelection().removeAllRanges();
-    getSelection().addRange(range);
-    const inputTimes = [],
-      inputToFrame = [];
-    for (let i = 0; i < 1000; i++) {
-      rows.push({
-        seq: i + 2,
-        id: `perf-${i}`,
-        turn: 'perf-turn',
-        role: 'Agent',
-        message: 'perf-message',
-        image: null,
-        text: {
-          Inline: {
-            text:
-              i === 0
-                ? '```ts\n'
-                : i === 999
-                  ? '\n```\n\n[External](https://例子.测试/path)'
-                  : `// fragment ${i}\n`,
-          },
-        },
-      });
-      update();
-      if (i % 10 === 9) {
-        await frame();
-        if (
-          document.activeElement !== input ||
-          first !== document.querySelector('article') ||
-          getSelection().toString() !== 'Selection stays readable'
-        )
-          throw new Error(
-            `Streaming lost focus/selection/message identity at ${i}: focus=${document.activeElement === input}, identity=${first === document.querySelector('article')}, selection=${getSelection().toString()}`,
-          );
-        const start = performance.now();
-        input.value = `draft ${i}`;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        inputTimes.push(performance.now() - start);
-        await new Promise((done) => requestAnimationFrame(done));
-        inputToFrame.push(performance.now() - start);
-        // Native textarea edits legitimately clear the document selection. Select
-        // again and check it survives the next render, not the unrelated edit.
-        getSelection().removeAllRanges();
-        getSelection().addRange(range);
-      }
-    }
-    state.view.view.active_turn = null;
-    state.view.view.status = 'Idle';
-    update();
-    await frame();
-    observer.disconnect();
-    const distribution = (values) => {
-      values.sort((a, b) => a - b);
-      return {
-        count: values.length,
-        p95: values[Math.floor(values.length * 0.95)] || 0,
-        max: values.at(-1) || 0,
-      };
-    };
-    return {
-      render: distribution(
-        performance.getEntriesByName('workbench.render').map((entry) => entry.duration),
-      ),
-      markdown: distribution(
-        performance.getEntriesByName('workbench.markdown').map((entry) => entry.duration),
-      ),
-      input: distribution(inputTimes),
-      inputToFrame: distribution(inputToFrame),
-      longTasks: distribution(longTasks),
-      messages: document.querySelectorAll('article').length,
-      code: document.querySelector('article.agent code')?.textContent.includes('fragment 998'),
-    };
-  }, controller.snapshot);
+  const metrics = await measureRenderWorkload(page, controller.snapshot);
   assert.equal(metrics.messages, 2);
   assert(metrics.code);
   assert(metrics.markdown.count <= 16, 'Markdown must not be reparsed for every delta');

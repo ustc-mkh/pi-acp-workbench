@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        println!("pi-acp-workbenchd {}\nUsage: pi-acp-workbenchd [--config PATH]\nSingle-process ACP runtime with external IPC at STORAGE_ROOT/workbench.sock.\nOffline maintenance: pi-acp-workbenchd storage export|reset|gc --root ABSOLUTE [--destination ABSOLUTE] --confirm\nIncompatible storage is rejected; back up and clean old data explicitly offline.", env!("CARGO_PKG_VERSION"));
+        println!("pi-acp-workbenchd {}\nUsage: pi-acp-workbenchd [--config PATH]\nSingle-process ACP runtime with external IPC at STORAGE_ROOT/workbench.sock.\nOffline maintenance: storage export --root ABSOLUTE --destination ABSOLUTE --confirm | reset --root ABSOLUTE --confirm | gc --root ABSOLUTE (--dry-run | --confirm)\nIncompatible storage is rejected; back up and clean old data explicitly offline.", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.get(1).is_some_and(|arg| arg == "--version") {
@@ -128,6 +128,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Ok(()),
     };
     let runtime_result = app.shutdown_checked().await;
+    // An adapter can close admission before its supervised join completes.
+    // In that race the primary select observes ingress closure first. Preserve
+    // every joined failure in diagnostics instead of hiding the root cause
+    // behind "runtime ingress exited unexpectedly".
+    if let Err(error) = &external_result {
+        eprintln!("external IPC shutdown failed: {error}");
+    }
+    if let Err(error) = &telegram_result {
+        eprintln!("Telegram shutdown failed: {error}");
+    }
+    if let Err(error) = &runtime_result {
+        eprintln!("runtime shutdown failed: {error}");
+    }
     outcome?;
     external_result?;
     telegram_result?;

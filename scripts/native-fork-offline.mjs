@@ -2,7 +2,7 @@
 // Never inherit account credentials/configuration or send a model request.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink, copyFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -78,6 +78,57 @@ try {
     CARGO_HOME: cargoHome,
     CARGO_TARGET_DIR: join(root, 'rust-target'),
   };
+  // Compilation is a separate phase, not part of the CLI/native-operation
+  // deadline. Freeze the actual test executable before starting any SDK peer.
+  // A loaded machine must not misreport a fresh Rust build as an RPC timeout.
+  const compileStart = performance.now();
+  child = spawn(
+    'cargo',
+    [
+      'test',
+      '--offline',
+      '--locked',
+      '--manifest-path',
+      resolve('rust/Cargo.toml'),
+      '-p',
+      'pi-acp-workbenchd',
+      '--lib',
+      '--no-run',
+      '--message-format=json',
+    ],
+    {
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  let compilerOutput = '',
+    compilerErrors = '';
+  child.stdout.on('data', (chunk) => {
+    compilerOutput += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    compilerErrors = (compilerErrors + chunk).slice(-65536);
+  });
+  const compiled = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  assert.deepEqual(compiled, { code: 0, signal: null }, compilerErrors);
+  const artifact = compilerOutput
+    .split('\n')
+    .filter(Boolean)
+    .map(JSON.parse)
+    .find(
+      (item) =>
+        item.reason === 'compiler-artifact' && item.executable && item.target.kind.includes('lib'),
+    );
+  assert(artifact?.executable, 'offline Rust test executable missing');
+  env.PI_OFFLINE_RUST_TEST_BINARY = join(root, 'workbench-sdk-tests');
+  await copyFile(artifact.executable, env.PI_OFFLINE_RUST_TEST_BINARY);
+  console.log(
+    JSON.stringify({ offlineCompileMs: performance.now() - compileStart, sdkProcessesStarted: 0 }),
+  );
   // Prove the assertion hook is active before using it as negative evidence.
   const probe = spawn(
     process.execPath,

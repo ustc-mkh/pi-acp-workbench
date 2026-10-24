@@ -29,6 +29,8 @@ import {
   turnId,
   historyCursor,
   listCursor,
+  sessionFilter,
+  historyClearReport,
   contentRef,
   type ContentRef,
   type ContentSlice,
@@ -55,7 +57,13 @@ export const uiCommand = tagged('type', {
   recover_operations: object({ type: literal('recover_operations') }),
   refresh_names: object({ type: literal('refresh_names') }),
   ready: object({ type: literal('ready') }),
-  refresh: object({ type: literal('refresh'), cursor: optional(listCursor) }),
+  refresh: object({
+    type: literal('refresh'),
+    cursor: optional(listCursor),
+    filter: optional(sessionFilter),
+  }),
+  prepare_history_clear: object({ type: literal('prepare_history_clear'), filter: sessionFilter }),
+  clear_history_batch: object({ type: literal('clear_history_batch'), job: operationId }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
   execute: object({
@@ -115,6 +123,7 @@ export interface UiOperation {
   status: 'pending' | 'completed' | 'failed' | 'uncertain';
   code?: string;
   error?: string;
+  historyClear?: import('./workbench-protocol').HistoryClearReport;
 }
 export interface WorkbenchUiState {
   sessions: SessionSummary[];
@@ -191,6 +200,7 @@ export const uiOperation = object({
   status: variants({ pending: null, completed: null, failed: null, uncertain: null }),
   code: optional(string),
   error: optional(string),
+  historyClear: optional(historyClearReport),
 });
 export const uiState = object({
   sessions: array(sessionSummary),

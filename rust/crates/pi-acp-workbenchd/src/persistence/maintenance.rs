@@ -18,14 +18,14 @@ mod tests;
 #[path = "maintenance_wal_tests.rs"]
 mod wal_tests;
 
-const USAGE: &str = "Usage: pi-acp-workbenchd storage export|reset|gc --root ABSOLUTE [--destination ABSOLUTE] --confirm";
+const USAGE: &str = "Usage: pi-acp-workbenchd storage export --root ABSOLUTE --destination ABSOLUTE --confirm | reset --root ABSOLUTE --confirm | gc --root ABSOLUTE (--dry-run | --confirm)";
 
 pub async fn run(args: &[String]) -> io::Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");
     if !matches!(command, "export" | "reset" | "gc") {
         return Err(io::Error::other(USAGE));
     }
-    let (mut root, mut destination, mut confirmed) = (None, None, false);
+    let (mut root, mut destination, mut confirmed, mut dry_run) = (None, None, false, false);
     let mut args = args[1..].iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -34,11 +34,14 @@ pub async fn run(args: &[String]) -> io::Result<()> {
                 destination = args.next().map(PathBuf::from)
             }
             "--confirm" if !confirmed => confirmed = true,
+            "--dry-run" if command == "gc" && !dry_run => dry_run = true,
             _ => return Err(io::Error::other(USAGE)),
         }
     }
-    if !confirmed {
-        return Err(io::Error::other("explicit --confirm is required"));
+    if !confirmed && !(command == "gc" && dry_run) {
+        return Err(io::Error::other(
+            "explicit --confirm is required (except gc --dry-run)",
+        ));
     }
     let root = root.ok_or_else(|| io::Error::other(USAGE))?;
     if !root.is_absolute() || root.parent().is_none() || fs::canonicalize(&root)? != root {
@@ -80,8 +83,7 @@ pub async fn run(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         "gc" => {
-            // Only completed inbox / unreferenced expired callbacks are compacted.
-            let (inbox, callbacks) = if root.join("workbench.sqlite3").exists() {
+            let (inbox, callbacks) = if !dry_run && root.join("workbench.sqlite3").exists() {
                 let database = Database::open(root.clone(), &lease)
                     .await
                     .map_err(io::Error::other)?;
@@ -100,7 +102,50 @@ pub async fn run(args: &[String]) -> io::Result<()> {
             } else {
                 (0, 0)
             };
-            println!("{{\"removed_inbox\":{inbox},\"removed_callbacks\":{callbacks}}}");
+            // The offline lease excludes the host. Contents are immutable and
+            // have explicit entry and archive roots. Text/receipt identities
+            // without an expiry contract stay pinned rather than being guessed orphaned.
+            // Do not infer reachability for entries, deliveries, receipts, or
+            // operations; their dedup/recovery identity is intentionally kept.
+            let (orphan_contents, orphan_bytes, removed_contents) = if root
+                .join("workbench.sqlite3")
+                .exists()
+            {
+                let flags = if dry_run {
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                } else {
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                } | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+                let mut connection =
+                    rusqlite::Connection::open_with_flags(root.join("workbench.sqlite3"), flags)
+                        .map_err(io::Error::other)?;
+                connection
+                    .pragma_update(None, "foreign_keys", "ON")
+                    .map_err(io::Error::other)?;
+                let tx = connection.transaction().map_err(io::Error::other)?;
+                let counts: (i64, i64) = tx.query_row(
+                    "SELECT count(*), COALESCE(sum(bytes),0) FROM contents c WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.content_id=c.id OR e.image_id=c.id) AND NOT EXISTS (SELECT 1 FROM archive_roots r WHERE r.content_id=c.id)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).map_err(io::Error::other)?;
+                let removed = if dry_run {
+                    0
+                } else {
+                    tx.execute(
+                        "DELETE FROM contents WHERE id IN (SELECT c.id FROM contents c WHERE NOT EXISTS (SELECT 1 FROM entries e WHERE e.content_id=c.id OR e.image_id=c.id) AND NOT EXISTS (SELECT 1 FROM archive_roots r WHERE r.content_id=c.id) ORDER BY c.id LIMIT 500)",
+                        [],
+                    ).map_err(io::Error::other)?
+                };
+                crate::diagnostics::sqlite_commit(tx).map_err(io::Error::other)?;
+                (
+                    u64::try_from(counts.0).map_err(io::Error::other)?,
+                    u64::try_from(counts.1).map_err(io::Error::other)?,
+                    removed,
+                )
+            } else {
+                (0, 0, 0)
+            };
+            println!("{{\"removed_inbox\":{inbox},\"removed_callbacks\":{callbacks},\"orphan_contents\":{orphan_contents},\"orphan_bytes\":{orphan_bytes},\"removed_contents\":{removed_contents},\"batch_limit\":500,\"dry_run\":{dry_run}}}");
             Ok(())
         }
         _ => unreachable!(),

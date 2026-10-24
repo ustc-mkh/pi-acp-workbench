@@ -37,6 +37,9 @@ mod ingress;
 use ingress::{IngressHandle, Request};
 
 struct AdapterHandle {
+    registry: crate::actor::RegistryHandle,
+    session: SessionId,
+    epoch: u64,
     _workspace_lease: Option<WorkspaceLease>,
     tx: mpsc::Sender<AdapterCommand>,
     stop: CancellationToken,
@@ -75,6 +78,7 @@ impl AdapterHandle {
         self.stop.cancel();
         self.task.join().await;
         self.worker_completion.join().await;
+        self.registry.worker_stopped(self.session, self.epoch).await;
     }
 }
 #[derive(Clone)]
@@ -125,6 +129,7 @@ struct CommandCore {
     history: SessionStore,
     pending_interactions: usize,
     workspace_gate: Arc<WorkspaceGate>,
+    history_clear_admission: Arc<tokio::sync::Semaphore>,
 }
 impl WorkbenchApp {
     pub fn new(config: Config) -> Result<Self, DomainError> {
@@ -157,6 +162,7 @@ impl WorkbenchApp {
             history,
             pending_interactions: config.limits.pending_interactions,
             workspace_gate: Arc::new(WorkspaceGate::default()),
+            history_clear_admission: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let ingress = IngressHandle::start(core.clone());
         Ok(Self {
@@ -319,12 +325,103 @@ impl WorkbenchApp {
         let operation =
             operation.or_else(|| (!command.is_query()).then(crate::domain::OperationId::generate));
         let (reply, wait) = tokio::sync::oneshot::channel();
-        self.ingress.submit(Request::Command {
-            operation,
+        if matches!(
             command,
-            reply,
-        })?;
+            DomainCommand::PrepareHistoryClear { .. } | DomainCommand::ClearHistoryBatch { .. }
+        ) {
+            if self.core.closed.load(Ordering::Acquire) {
+                return Err(ingress::stopping());
+            }
+            let permit = self
+                .core
+                .history_clear_admission
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| DomainError::Backpressure)?;
+            let app = self.clone();
+            self.core.coordinator.tasks.spawn(async move {
+                let _permit = permit;
+                let result = app
+                    .clear_history(operation.expect("mutation identity"), command)
+                    .await;
+                let _ = reply.send(result);
+            })?;
+        } else {
+            self.ingress.submit(Request::Command {
+                operation,
+                command,
+                reply,
+            })?;
+        }
         Ok(CommandTicket { wait })
+    }
+    async fn clear_history(
+        &self,
+        operation: crate::domain::OperationId,
+        command: DomainCommand,
+    ) -> Result<CommandReceipt, DomainError> {
+        use crate::persistence::history_clear::{Output, Request as C};
+        let admission = self.core.journal.admit_local(operation, &command).await?;
+        let ticket = match admission {
+            Admission::Replay(result) => return result,
+            Admission::Execute(ticket) => ticket,
+        };
+        let request = match command {
+            DomainCommand::PrepareHistoryClear { filter } => C::Prepare { filter, ticket },
+            DomainCommand::ClearHistoryBatch { job } => {
+                let targets = match self
+                    .core
+                    .database
+                    .history_clear(C::Next { job: job.clone() })
+                    .await
+                    .map_err(|e| DomainError::Persistence(e.to_string()))?
+                {
+                    Output::Targets(ids) => ids,
+                    _ => unreachable!(),
+                };
+                for session in targets {
+                    if self.core.closed.load(Ordering::Acquire) {
+                        return Err(ingress::stopping());
+                    }
+                    // Stable child identity closes the delete/progress crash window.
+                    use sha2::{Digest, Sha256};
+                    let id = crate::domain::OperationId::new(format!(
+                        "clear-{:x}",
+                        Sha256::digest(format!("{}:{}", job.as_str(), session.as_str()))
+                    ))
+                    .map_err(|e| DomainError::Protocol(e.to_string()))?;
+                    let result = self
+                        .enqueue_command(Some(id), DomainCommand::RemoveSession(session.clone()))?
+                        .wait()
+                        .await;
+                    let error = match result {
+                        Ok(_) | Err(DomainError::NotFound(_)) => None,
+                        Err(e) => Some(e.to_string()),
+                    };
+                    self.core
+                        .database
+                        .history_clear(C::Result {
+                            job: job.clone(),
+                            session,
+                            error,
+                        })
+                        .await
+                        .map_err(|e| DomainError::Persistence(e.to_string()))?;
+                }
+                C::Settle { job, ticket }
+            }
+            _ => unreachable!(),
+        };
+        match self
+            .core
+            .database
+            .history_clear(request)
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))?
+        {
+            Output::Receipt(receipt) => Ok(receipt),
+            _ => unreachable!(),
+        }
     }
     /// Completes on any ingress-supervisor exit, including unexpected failures.
     pub async fn wait_closed(&self) -> Result<(), DomainError> {
@@ -351,6 +448,7 @@ impl WorkbenchApp {
             .shutdown()
             .await
             .map_err(|error| DomainError::Persistence(error.to_string()));
+        crate::diagnostics::emit(self.core.database.metrics());
         // Main stops the transport adapters before this call. Keep the lease
         // across an unexpected ingress exit until the host finishes that cleanup.
         self.core.storage_lease.lock().await.take();
@@ -426,7 +524,7 @@ impl CommandCore {
         if let Some(session) = owner_session {
             self.runtime
                 .registry
-                .command(DomainCommand::LoadSession(session))
+                .command_admitted(DomainCommand::LoadSession(session))
                 .await?;
         }
         if let DomainCommand::Manage { action, .. } = &command {
@@ -500,7 +598,7 @@ impl CommandCore {
                 let events = self
                     .runtime
                     .registry
-                    .command(DomainCommand::Inspect(session.clone()))
+                    .command_admitted(DomainCommand::Inspect(session.clone()))
                     .await?;
                 let Some(snapshot) = events.view() else {
                     return Err(DomainError::NotFound(session.clone()));
@@ -636,7 +734,12 @@ impl CommandCore {
                 revision: view.revision,
             });
         }
-        if let DomainCommand::UndoTurn { session, turn } = &command {
+        if let DomainCommand::UndoTurn {
+            session,
+            turn,
+            files,
+        } = &command
+        {
             let view = self
                 .database
                 .view(session.clone())
@@ -648,6 +751,10 @@ impl CommandCore {
                 .await
                 .map_err(|e| DomainError::Persistence(e.to_string()))?
                 .ok_or_else(|| DomainError::NotFound(session.clone()))?;
+            let files = files.clone();
+            // Validate selection before stopping a provider.
+            crate::workspace_undo::select_files(diff.clone(), files.as_deref())
+                .map_err(DomainError::Persistence)?;
             let root = crate::workspace_review::canonical(std::path::Path::new(view.cwd.as_str()))
                 .map_err(DomainError::Persistence)?;
             if view.active_turn.is_some() {
@@ -659,7 +766,7 @@ impl CommandCore {
             self.stop_session_adapter(session).await?;
             let _undo_lease = self.workspace_gate.enter(root.clone(), true)?;
             let report = tokio::task::spawn_blocking(move || {
-                crate::workspace_undo::undo(&root, &diff, false)
+                crate::workspace_undo::undo_selected(&root, diff, files.as_deref(), false)
             })
             .await
             .map_err(|_| DomainError::Persistence("undo task interrupted".into()))?
@@ -704,7 +811,7 @@ impl CommandCore {
             let events = self
                 .runtime
                 .registry
-                .command(DomainCommand::Inspect(session.clone()))
+                .command_admitted(DomainCommand::Inspect(session.clone()))
                 .await?;
             let Some(snapshot) = events.view() else {
                 return Err(DomainError::NotFound(session.clone()));
@@ -729,6 +836,14 @@ impl CommandCore {
                     .lock()
                     .await
                     .get(session)
+                    // Failed workers leave a joined/closed handle until the
+                    // next launch. Treat it as cold for local preferences;
+                    // sending Configure to it can only return MailboxClosed.
+                    .filter(|adapter| {
+                        !adapter.stop.is_cancelled()
+                            && !adapter.task.is_finished()
+                            && !adapter.tx.is_closed()
+                    })
                     .map(|adapter| adapter.tx.clone())
             };
             if let Some(sender) = sender {
@@ -795,7 +910,7 @@ impl CommandCore {
             let events = self
                 .runtime
                 .registry
-                .command(DomainCommand::Inspect(session.clone()))
+                .command_admitted(DomainCommand::Inspect(session.clone()))
                 .await?;
             let view = events
                 .view()
@@ -934,6 +1049,13 @@ impl CommandCore {
             {
                 continue;
             }
+            // Fork work does not mark the source as an active turn. Its
+            // admission lease protects inspection, remote mutation and adopt
+            // even while the stored session still looks idle. Recheck after
+            // the database await; admission/map locks serialize worker starts.
+            if self.coordinator.forks.owns_session(&id) {
+                continue;
+            }
             let handle = adapters.remove(&id).expect("candidate is still registered");
             // Fence map ownership before requesting physical termination. The
             // admission lock prevents a concurrent session start from replacing it.
@@ -957,7 +1079,11 @@ impl CommandCore {
         Ok(())
     }
     async fn commit(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
-        self.runtime.registry.command(command).await?.receipt()
+        self.runtime
+            .registry
+            .command_admitted(command)
+            .await?
+            .receipt()
     }
     async fn fail_adapter(
         &self,
@@ -973,7 +1099,7 @@ impl CommandCore {
         let _ = self
             .runtime
             .registry
-            .command(DomainCommand::RequestCancel {
+            .command_admitted(DomainCommand::RequestCancel {
                 session: session.clone(),
             })
             .await;
@@ -995,18 +1121,18 @@ impl CommandCore {
             }
         };
         self.coordinator.reviews.finish(session, None).await?;
-        self.runtime.registry.command(terminal).await?;
+        self.runtime.registry.command_admitted(terminal).await?;
         Ok(())
     }
     async fn discover(&self, session: SessionId) -> Result<CommandReceipt, DomainError> {
         self.runtime
             .registry
-            .command(DomainCommand::LoadSession(session.clone()))
+            .command_admitted(DomainCommand::LoadSession(session.clone()))
             .await?;
         let view = self
             .runtime
             .registry
-            .command(DomainCommand::Inspect(session.clone()))
+            .command_admitted(DomainCommand::Inspect(session.clone()))
             .await?;
         if view.view().is_some_and(|view| view.active_turn.is_some()) {
             return Err(DomainError::Busy);
@@ -1025,7 +1151,7 @@ impl CommandCore {
         }
         self.runtime
             .registry
-            .command(DomainCommand::Inspect(session))
+            .command_admitted(DomainCommand::Inspect(session))
             .await?
             .receipt()
     }
@@ -1071,7 +1197,7 @@ impl CommandCore {
         let snapshot = self
             .runtime
             .registry
-            .command(DomainCommand::Inspect(session.clone()))
+            .command_admitted(DomainCommand::Inspect(session.clone()))
             .await?;
         let (harness, cwd, provider_session, config, recovery) = match snapshot.view() {
             Some(snapshot) => (
@@ -1161,8 +1287,11 @@ impl CommandCore {
             stop.clone(),
         ))?;
         adapters.insert(
-            session,
+            session.clone(),
             AdapterHandle {
+                registry: self.runtime.registry.clone(),
+                session: session.clone(),
+                epoch,
                 _workspace_lease: Some(workspace_lease),
                 tx: tx.clone(),
                 stop,

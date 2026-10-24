@@ -198,14 +198,30 @@ fn pending(row: &Row<'_>) -> Result<PendingDelivery, StoreError> {
     })
 }
 // Reduce the pending backlog to immutable target heads before resolving the
-// current binding. No correlated scan per candidate and no JSON binding input.
+// current binding. The Pending-only covering index avoids both the retry-index
+// table scan/temp grouping and growing Acked tombstones. No correlated scan
+// per candidate and no JSON binding input.
 fn dispatch_sql() -> String {
-    format!("WITH target_heads AS MATERIALIZED (SELECT target_key, MIN(order_seq) AS head FROM deliveries WHERE status='Pending' GROUP BY target_key), topic_heads AS (SELECT MIN(h.head) AS head FROM target_heads h LEFT JOIN telegram_bindings b ON b.bot_id=?1 AND substr(h.target_key,1,8)='session:' AND b.session=substr(h.target_key,9) GROUP BY CASE WHEN b.session IS NULL THEN h.target_key ELSE 'telegram:' || b.bot_id || ':' || b.chat || ':' || b.thread END) SELECT {COLUMNS} FROM topic_heads h JOIN deliveries d ON d.order_seq=h.head ORDER BY d.order_seq LIMIT ?2")
+    format!("WITH target_heads AS MATERIALIZED (SELECT target_key, MIN(order_seq) AS head FROM deliveries INDEXED BY deliveries_topic_order WHERE status='Pending' GROUP BY target_key), topic_heads AS (SELECT MIN(h.head) AS head FROM target_heads h LEFT JOIN telegram_bindings b ON b.bot_id=?1 AND substr(h.target_key,1,8)='session:' AND b.session=substr(h.target_key,9) GROUP BY CASE WHEN b.session IS NULL THEN h.target_key ELSE 'telegram:' || b.bot_id || ':' || b.chat || ':' || b.thread END) SELECT {COLUMNS} FROM topic_heads h JOIN deliveries d ON d.order_seq=h.head ORDER BY (d.next_retry > ?3), d.order_seq LIMIT ?2")
 }
 pub(super) fn dispatch_snapshot(
     db: &Connection,
     bot: i64,
     limit: usize,
+) -> Result<DispatchSnapshot, StoreError> {
+    // Delivery retry_at uses Unix seconds, matching the Telegram scheduler.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(crate::domain::query::MAX_SAFE_INTEGER);
+    dispatch_snapshot_at(db, bot, limit, now)
+}
+fn dispatch_snapshot_at(
+    db: &Connection,
+    bot: i64,
+    limit: usize,
+    now: u64,
 ) -> Result<DispatchSnapshot, StoreError> {
     if !(0..=MAX_SAFE_INTEGER as i64).contains(&bot) || limit == 0 || limit > MAX_DELIVERY_WINDOW {
         return Err(StoreError::Invalid("invalid dispatch window or bot"));
@@ -227,7 +243,10 @@ pub(super) fn dispatch_snapshot(
         bindings.insert(topic, session);
     }
     let mut statement = db.prepare(&dispatch_sql())?;
-    let mut rows = statement.query(params![bot, limit as i64])?;
+    // Choose the immutable head BEFORE prioritizing readiness. Filtering
+    // deferred rows before grouping would let their own successors overtake.
+    // Ready topics must not disappear behind a full window of deferred heads.
+    let mut rows = statement.query(params![bot, limit as i64, now as i64])?;
     let mut heads = Vec::new();
     while let Some(row) = rows.next()? {
         heads.push(pending(row)?);
@@ -349,7 +368,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             let result = (|| {
                 let tx = db.transaction()?;
                 let snapshot = dispatch_snapshot(&tx, bot, limit)?;
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(snapshot)
             })();
             let _ = reply.send(result);
@@ -358,7 +377,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             let result = (|| -> Result<(), StoreError> {
                 let tx = db.transaction()?;
                 query::put_delivery(&tx, &intent)?;
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(())
             })();
             let _ = reply.send(result);
@@ -403,7 +422,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                         [id.as_str()],
                     )?;
                 }
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(())
             })();
             let _ = reply.send(result);
@@ -425,7 +444,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                     };
                     tx.execute("UPDATE deliveries SET attempt=min(attempt+1,4294967295),next_retry=?2,last_failure=?3 WHERE delivery_id=?1", params![id.as_str(), retry_at, failure])?;
                 }
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(())
             })();
             let _ = reply.send(result);

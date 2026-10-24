@@ -138,6 +138,10 @@ async fn frozen_turn_stream_matches_legacy_oracle_across_pages_unicode_images_an
     );
     if expected.is_empty() {
         expected.push("text:Turn completed.".into());
+    } else {
+        expected.push(
+            "text:Turn completed. Workspace Diff unavailable; +0 / -0 lines; 0 files.".into(),
+        );
     }
     let mut stream = TurnStream::new(delivery, turn, topic);
     let mut actual = vec![];

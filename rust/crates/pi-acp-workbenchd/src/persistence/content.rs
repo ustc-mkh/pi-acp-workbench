@@ -43,7 +43,14 @@ pub(super) fn put_text(db: &Connection, value: &NewContent) -> Result<(), StoreE
         value.content.sha256.as_str(),
         value.text.as_bytes(),
         None,
-    )
+    )?;
+    // Text can also be a durable notice/interaction/receipt or tool body.
+    // Until each dedup identity has a safe expiry contract, retain it explicitly.
+    db.execute(
+        "INSERT OR IGNORE INTO archive_roots(content_id,reason) VALUES(?1,'text_archive')",
+        [value.content.id.as_str()],
+    )?;
+    Ok(())
 }
 fn put(
     db: &Connection,

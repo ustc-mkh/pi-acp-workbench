@@ -32,6 +32,19 @@ impl Drop for ForkLease {
     }
 }
 impl ForkControls {
+    pub(super) fn owns_session(&self, session: &SessionId) -> bool {
+        self.active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|((source, _), control)| {
+                source == session
+                    && control
+                        .upgrade()
+                        .is_some_and(|control| control.leases.load(Ordering::Acquire) != 0)
+            })
+    }
+
     pub(super) fn register(
         &self,
         session: &SessionId,

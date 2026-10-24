@@ -2,6 +2,7 @@ pub mod acp;
 pub mod actor;
 pub mod app;
 pub mod config;
+mod diagnostics;
 pub mod domain;
 pub mod persistence;
 mod task_scope;

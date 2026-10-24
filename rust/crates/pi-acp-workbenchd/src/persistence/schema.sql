@@ -5,6 +5,20 @@ CREATE TABLE store_meta (
     value INTEGER NOT NULL CHECK (value BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 INSERT INTO store_meta VALUES ('created_seq', 0), ('delivery_seq', 0), ('activity_seq', 0);
+CREATE TABLE history_clear_jobs (
+    job TEXT PRIMARY KEY,
+    filter_json TEXT NOT NULL,
+    active INTEGER NOT NULL,
+    pending_deliveries INTEGER NOT NULL
+) STRICT;
+CREATE TABLE history_clear_targets (
+    job TEXT NOT NULL REFERENCES history_clear_jobs(job),
+    session TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','removed','failed')),
+    error TEXT,
+    PRIMARY KEY(job,session)
+) STRICT;
+CREATE INDEX history_clear_pending ON history_clear_targets(job,state,session);
 CREATE TABLE removed_sessions (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),
     revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991)
@@ -50,6 +64,11 @@ CREATE TABLE contents (
     image_ref_json TEXT CHECK (image_ref_json IS NULL OR (json_valid(image_ref_json) AND length(image_ref_json) <= 1024)),
     CHECK ((kind = 'Image' AND image_ref_json IS NOT NULL) OR (kind != 'Image' AND image_ref_json IS NULL))
 ) STRICT;
+CREATE TABLE archive_roots (
+    content_id TEXT NOT NULL REFERENCES contents(id),
+    reason TEXT NOT NULL CHECK(reason IN ('text_archive','delivery')),
+    PRIMARY KEY(content_id,reason)
+) STRICT;
 CREATE TABLE entries (
     entry_id TEXT PRIMARY KEY CHECK (length(entry_id) BETWEEN 1 AND 200),
     turn TEXT NOT NULL CHECK (length(turn) BETWEEN 1 AND 200),
@@ -79,6 +98,18 @@ CREATE TABLE turn_diffs (
     diff_json TEXT NOT NULL CHECK (json_valid(diff_json) AND length(diff_json) <= 33554432),
     PRIMARY KEY(session,turn),
     FOREIGN KEY(session) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE turn_outcomes (
+    session TEXT NOT NULL,
+    turn TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    files INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('completed','cancelled','failed')),
+    diff_status TEXT NOT NULL CHECK(diff_status IN ('complete','partial','unavailable')),
+    added INTEGER NOT NULL,
+    removed INTEGER NOT NULL,
+    PRIMARY KEY(session,turn),
+    UNIQUE(session,revision)
 ) STRICT;
 CREATE TABLE operations (
     operation TEXT PRIMARY KEY,
@@ -120,7 +151,7 @@ CREATE TABLE telegram_turn_receipts (
     session TEXT NOT NULL
 ) STRICT;
 CREATE INDEX deliveries_retry ON deliveries(status, next_retry);
-CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq);
+CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq) WHERE status='Pending';
 CREATE TABLE telegram_meta (
     bot_id INTEGER PRIMARY KEY CHECK (bot_id >= 0),
     offset INTEGER NOT NULL CHECK (offset BETWEEN 0 AND 9007199254740991),

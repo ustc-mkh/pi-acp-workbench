@@ -157,6 +157,7 @@ impl Request {
     }
 }
 struct Envelope {
+    queued: crate::diagnostics::Stamp,
     request: Request,
     permit: OwnedSemaphorePermit,
     stop: CancellationToken,
@@ -257,6 +258,7 @@ impl IngressHandle {
         };
         self.tx
             .try_send(Envelope {
+                queued: crate::diagnostics::Stamp::now(),
                 request,
                 permit,
                 stop: CancellationToken::new(),
@@ -322,11 +324,13 @@ impl IngressHandle {
 
 async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId> {
     let Envelope {
+        queued,
         request,
         permit,
         stop,
         fork_lease,
     } = envelope;
+    queued.finish("admission_queue");
     let lane = request.lane();
     match request {
         #[cfg(test)]
@@ -388,6 +392,15 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                     Q::Operation { operation } => {
                         return core.journal.status(operation).await.map(R::Operation);
                     }
+                    Q::Search {
+                        filter,
+                        cursor,
+                        limit,
+                    } => core
+                        .database
+                        .search(filter, cursor, limit)
+                        .await
+                        .map(R::List),
                     Q::List { cursor, limit } => {
                         core.database.list(cursor, limit).await.map(R::List)
                     }
@@ -437,7 +450,11 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                             .map(R::Management)
                             .map_err(|e| DomainError::Persistence(e.to_string()));
                     }
-                    Q::ValidateUndo { session, turn } => {
+                    Q::ValidateUndo {
+                        session,
+                        turn,
+                        files,
+                    } => {
                         let view = core
                             .database
                             .view(session.clone())
@@ -453,9 +470,10 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                             .map_err(|e| DomainError::Persistence(e.to_string()))?
                             .ok_or_else(|| DomainError::Persistence("No captured diff".into()))?;
                         return tokio::task::spawn_blocking(move || {
-                            crate::workspace_undo::undo(
+                            crate::workspace_undo::undo_selected(
                                 std::path::Path::new(view.cwd.as_str()),
-                                &diff,
+                                diff,
+                                files.as_deref(),
                                 true,
                             )
                         })
@@ -551,6 +569,18 @@ async fn run(
     let mut running: HashMap<SessionId, (CancellationToken, bool)> = HashMap::new();
     let mut failure = None;
     loop {
+        if crate::diagnostics::enabled() {
+            crate::diagnostics::gauge("ingress_tasks", tasks.len());
+            crate::diagnostics::gauge("ingress_queue", rx.len());
+            crate::diagnostics::gauge(
+                "ingress_lane_queue",
+                lanes.values().map(VecDeque::len).sum(),
+            );
+            core.coordinator
+                .tasks
+                .record_counts("adapter_tasks_retained", "adapter_tasks_unfinished");
+            core.coordinator.supervisor.record_counts();
+        }
         tokio::select! {
             biased;
             _ = stop.cancelled() => break,
@@ -623,6 +653,13 @@ async fn run(
     core.coordinator.tasks.close_and_join().await;
     core.runtime.workers_stopped();
     let actors = drain_commands(&core, &mut tasks).await;
+    for label in ["ingress_tasks", "ingress_queue", "ingress_lane_queue"] {
+        crate::diagnostics::gauge(label, 0);
+    }
+    core.coordinator
+        .tasks
+        .record_counts("adapter_tasks_retained", "adapter_tasks_unfinished");
+    core.coordinator.supervisor.record_counts();
     if let Some(error) = failure {
         return Err(error);
     }

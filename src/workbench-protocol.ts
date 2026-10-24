@@ -462,8 +462,19 @@ export const toolHeader = checked(
   (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
 );
 export type ToolHeader = Infer<typeof toolHeader>;
+export const historyClearReport = object({
+  job: operationId,
+  total: uint,
+  remaining: uint,
+  failed: uint,
+  active: uint,
+  pending_deliveries: uint,
+  preview: boolean,
+});
+export type HistoryClearReport = Infer<typeof historyClearReport>;
 export const commandReceipt = checked(
   variants({
+    HistoryClear: object({ report: historyClearReport }),
     Created: object({ summary: sessionSummary }),
     Loaded: object({ view: sessionView }),
     Accepted: object({ session: sessionId, revision: uint }),
@@ -499,7 +510,22 @@ export const commitBatch = checked(
 );
 export type CommitBatch = Infer<typeof commitBatch>;
 export const queryError = oneOf('InvalidInput', 'UnsupportedVersion', 'TooLarge');
-export const listCursor = object({ version: literal(3), max_created_seq: uint, before_seq: uint });
+export const sessionFilter = object({
+  text: checked(
+    string,
+    (s) =>
+      byteLength(s) <= 300 &&
+      !Array.from(s).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127),
+  ),
+  harness: nullable(harness),
+});
+export type SessionFilter = Infer<typeof sessionFilter>;
+export const listCursor = object({
+  version: literal(3),
+  max_created_seq: uint,
+  before_seq: uint,
+  filter: optional(sessionFilter),
+});
 export const historyCursor = object({
   version: literal(3),
   session: sessionId,
@@ -542,6 +568,12 @@ const historyLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_HI
 export const queryCommand = checked(
   tagged('method', {
     operation: object({ method: literal('operation'), operation: operationId }),
+    search: object({
+      method: literal('search'),
+      filter: sessionFilter,
+      cursor: optional(nullable(listCursor)),
+      limit: listLimit,
+    }),
     list: object({
       method: literal('list'),
       cursor: optional(nullable(listCursor)),
@@ -568,7 +600,20 @@ export const queryCommand = checked(
       length: optional(nullable(checked(uint, (n) => n > 0 && n <= CONTENT_SLICE_BYTES))),
     }),
     management: object({ method: literal('management'), query: managementQuery }),
-    validate_undo: object({ method: literal('validate_undo'), session: sessionId, turn: turnId }),
+    validate_undo: object({
+      method: literal('validate_undo'),
+      session: sessionId,
+      turn: turnId,
+      files: optional(
+        nullable(
+          checked(
+            array(checked(string, (s) => byteLength(s) <= 1024)),
+            (v) =>
+              v.length > 0 && v.length <= 256 && v.reduce((n, s) => n + byteLength(s), 0) <= 65536,
+          ),
+        ),
+      ),
+    }),
     turn_diff: object({
       method: literal('turn_diff'),
       session: sessionId,
@@ -644,7 +689,25 @@ const mutationCommand = tagged('method', {
     value: checked(string, (s) => !!s && byteLength(s) <= 200),
   }),
   manage: object({ method: literal('manage'), session: sessionId, action: managementAction }),
-  undo_turn: object({ method: literal('undo_turn'), session: sessionId, turn: turnId }),
+  prepare_history_clear: object({
+    method: literal('prepare_history_clear'),
+    filter: sessionFilter,
+  }),
+  clear_history_batch: object({ method: literal('clear_history_batch'), job: operationId }),
+  undo_turn: object({
+    method: literal('undo_turn'),
+    session: sessionId,
+    turn: turnId,
+    files: optional(
+      nullable(
+        checked(
+          array(checked(string, (s) => byteLength(s) <= 1024)),
+          (v) =>
+            v.length > 0 && v.length <= 256 && v.reduce((n, s) => n + byteLength(s), 0) <= 65536,
+        ),
+      ),
+    ),
+  }),
   remove: object({ method: literal('remove'), ...session }),
 });
 const detachCommand = object({ method: literal('detach'), ...session });
@@ -658,6 +721,7 @@ const queryMethods = new Set([
   'attach',
   'image',
   'management',
+  'search',
   'validate_undo',
   'turn_diff',
   'turn_diff_content',
@@ -701,33 +765,35 @@ export const ipcMessage = checked(
   (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
 );
 export type IpcMessage = Infer<typeof ipcMessage>;
-export type CommandResult<C extends ClientCommand> = C extends { method: 'management' }
-  ? ManagementData
-  : C extends { method: 'operation' }
-    ? OperationStatus
-    : C extends { method: 'image' }
-      ? ImageAsset
-      : C extends { method: 'list' }
-        ? ListPage
-        : C extends { method: 'inspect' }
-          ? SessionView
-          : C extends { method: 'history' }
-            ? HistoryPage
-            : C extends { method: 'tools' }
-              ? ToolPage
-              : C extends { method: 'content' }
-                ? ContentSlice
-                : C extends { method: 'undo_turn' }
-                  ? CommandReceipt
-                  : C extends { method: 'turn_diff' }
-                    ? TurnDiff
-                    : C extends { method: 'turn_diff_content' }
-                      ? { bytes: string; total_bytes: number; next_offset?: number | null }
-                      : C extends { method: 'attach' }
-                        ? Attached
-                        : C extends { method: 'detach' }
-                          ? SessionId
-                          : CommandReceipt;
+export type CommandResult<C extends ClientCommand> = C extends { method: 'validate_undo' }
+  ? UndoReport
+  : C extends { method: 'management' }
+    ? ManagementData
+    : C extends { method: 'operation' }
+      ? OperationStatus
+      : C extends { method: 'image' }
+        ? ImageAsset
+        : C extends { method: 'list' | 'search' }
+          ? ListPage
+          : C extends { method: 'inspect' }
+            ? SessionView
+            : C extends { method: 'history' }
+              ? HistoryPage
+              : C extends { method: 'tools' }
+                ? ToolPage
+                : C extends { method: 'content' }
+                  ? ContentSlice
+                  : C extends { method: 'undo_turn' }
+                    ? CommandReceipt
+                    : C extends { method: 'turn_diff' }
+                      ? TurnDiff
+                      : C extends { method: 'turn_diff_content' }
+                        ? { bytes: string; total_bytes: number; next_offset?: number | null }
+                        : C extends { method: 'attach' }
+                          ? Attached
+                          : C extends { method: 'detach' }
+                            ? SessionId
+                            : CommandReceipt;
 export function commandPool(command: ClientCommand): 0 | 1 | 2 {
   if (queryMethods.has(command.method) || command.method === 'detach') return 2;
   if (['cancel', 'cancel_fork', 'answer', 'remove', 'undo_turn'].includes(command.method)) return 1;

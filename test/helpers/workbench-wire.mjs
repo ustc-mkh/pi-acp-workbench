@@ -9,7 +9,9 @@ export class WorkbenchWire extends EventEmitter {
     this.nextId = 0;
     this.pending = new Map();
     this.requests = [];
-    createInterface({ input: socket }).on('line', (line) => {
+    const lines = createInterface({ input: socket });
+    lines.on('error', (error) => this.fail(error));
+    lines.on('line', (line) => {
       const message = JSON.parse(line);
       if (message.type === 'batch') return this.emit('batch', message.batch);
       if (message.type === 'resync_required') return this.emit('resync');

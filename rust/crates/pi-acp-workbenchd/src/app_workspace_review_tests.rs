@@ -156,7 +156,8 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
     assert!(matches!(
         app.command(DomainCommand::UndoTurn {
             session: session.clone(),
-            turn: turn.clone()
+            turn: turn.clone(),
+            files: None
         })
         .await,
         Err(crate::domain::error::DomainError::Busy)
@@ -188,6 +189,7 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
             DomainCommand::UndoTurn {
                 session: session.clone(),
                 turn: turn.clone(),
+                files: None,
             },
         )
         .await
@@ -203,7 +205,8 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
                 operation,
                 DomainCommand::UndoTurn {
                     session: session.clone(),
-                    turn: turn.clone()
+                    turn: turn.clone(),
+                    files: None
                 }
             )
             .await
@@ -269,7 +272,11 @@ async fn undo_receipt_loss_stays_uncertain_and_never_replays_after_restart() {
     let sql = rusqlite::Connection::open(storage.join("workbench.sqlite3")).unwrap();
     sql.execute_batch("CREATE TRIGGER fail_undo_settlement BEFORE UPDATE ON operations BEGIN SELECT RAISE(FAIL, 'settlement unavailable'); END;").unwrap();
     let operation = crate::domain::OperationId::generate();
-    let command = DomainCommand::UndoTurn { session, turn };
+    let command = DomainCommand::UndoTurn {
+        session,
+        turn,
+        files: None,
+    };
     assert!(app
         .command_durable(operation.clone(), command.clone())
         .await
@@ -409,7 +416,8 @@ async fn shell_changes_are_captured_after_cancel_and_provider_crash() {
             restarted
                 .query(QueryCommand::ValidateUndo {
                     session: session.clone(),
-                    turn: turn.clone()
+                    turn: turn.clone(),
+                    files: None
                 })
                 .await
                 .unwrap(),
@@ -417,6 +425,46 @@ async fn shell_changes_are_captured_after_cancel_and_provider_crash() {
         ));
         assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
         assert_eq!(fs::read_to_string(&file).unwrap(), "after\n");
+        let revision = match restarted
+            .query(QueryCommand::Inspect {
+                session: session.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            QueryResult::View(view) => view.revision,
+            _ => panic!("view"),
+        };
+        let summary = restarted
+            .delivery_payloads()
+            .completion(session.clone(), revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            summary.contains(if action.ends_with("wait") {
+                "Turn cancelled."
+            } else {
+                "Turn failed."
+            }),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Workspace Diff complete") && summary.contains("1 files"),
+            "{summary}"
+        );
+        restarted
+            .command(DomainCommand::RemoveSession(session.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            restarted
+                .delivery_payloads()
+                .completion(session, revision)
+                .await
+                .unwrap(),
+            Some(summary)
+        );
         restarted.shutdown_checked().await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }

@@ -66,6 +66,7 @@ pub(super) enum Payload {
 pub struct DeliveryPage {
     pub entries: Vec<EntryHeader>,
     pub next_seq: Option<SafeInteger>,
+    pub completion: Option<String>,
 }
 
 pub(super) enum Request {
@@ -88,6 +89,11 @@ pub(super) enum Request {
     HistoryDelivered {
         ids: Vec<crate::domain::DeliveryId>,
         reply: Reply<Vec<bool>>,
+    },
+    Completion {
+        session: crate::domain::SessionId,
+        revision: SafeInteger,
+        reply: Reply<Option<String>>,
     },
     DeliveryPage {
         id: crate::domain::DeliveryId,
@@ -256,6 +262,20 @@ impl PayloadStore {
             .await
             .map_err(failure)
     }
+    pub(crate) async fn completion(
+        &self,
+        session: crate::domain::SessionId,
+        revision: SafeInteger,
+    ) -> Result<Option<String>, DomainError> {
+        let (reply, wait) = oneshot::channel();
+        self.submit(Request::Completion {
+            session,
+            revision,
+            reply,
+        })
+        .await?;
+        wait.await.map_err(failure)?.map_err(failure)
+    }
     pub async fn put_notice(&self, notice: &NoticeContent) -> Result<(), DomainError> {
         self.put(Payload::Notice(notice.clone())).await
     }
@@ -314,6 +334,14 @@ fn failure(error: impl std::fmt::Display) -> DomainError {
 // Hashing the typed identity keeps all valid 200-byte IDs representable after
 // namespacing. Scope is part of the key, so notice/interaction/entry IDs cannot
 // alias one another. These are database keys, never filesystem paths.
+fn completion(
+    db: &Connection,
+    session: &crate::domain::SessionId,
+    turn: Option<&crate::domain::TurnId>,
+    revision: Option<SafeInteger>,
+) -> Result<Option<String>, StoreError> {
+    db.query_row("SELECT 'Turn ' || outcome || '. Workspace Diff ' || diff_status || '; +' || added || ' / -' || removed || ' lines; ' || files || ' files.' FROM turn_outcomes WHERE session=?1 AND ((?2 IS NOT NULL AND turn=?2) OR (?3 IS NOT NULL AND revision=?3))", rusqlite::params![session.as_str(),turn.map(|t|t.as_str()),revision], |r| r.get(0)).optional().map_err(Into::into)
+}
 fn delivery_page(
     db: &Connection,
     id: &crate::domain::DeliveryId,
@@ -322,6 +350,7 @@ fn delivery_page(
     let (record, _) = super::delivery::record(db, id)?.ok_or(StoreError::NotFound)?;
     let crate::domain::transition::DeliveryPayload::Turn {
         turn,
+        session,
         first_seq,
         last_seq,
         ..
@@ -332,6 +361,7 @@ fn delivery_page(
     let mut page = DeliveryPage {
         entries: Vec::new(),
         next_seq: None,
+        completion: completion(db, &session, Some(&turn), None)?,
     };
     let mut statement = db.prepare("SELECT de.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes<=16384 THEN c.data ELSE NULL END FROM delivery_entries de JOIN entries e ON e.entry_id=de.entry_id JOIN contents c ON c.id=e.content_id WHERE de.delivery_id=?1 AND de.seq>?2 ORDER BY de.seq LIMIT 101")?;
     let mut rows = statement.query(rusqlite::params![id.as_str(), after])?;
@@ -494,7 +524,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             let result = (|| -> Result<(), StoreError> {
                 let tx = db.transaction()?;
                 put(&tx, *payload)?;
-                tx.commit()?;
+                crate::diagnostics::sqlite_commit(tx)?;
                 Ok(())
             })();
             let _ = reply.send(result);
@@ -552,6 +582,13 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                     .collect()
             })();
             let _ = reply.send(result);
+        }
+        Request::Completion {
+            session,
+            revision,
+            reply,
+        } => {
+            let _ = reply.send(completion(db, &session, None, Some(revision)));
         }
         Request::DeliveryPage { id, after, reply } => {
             let _ = reply.send(delivery_page(db, &id, after));

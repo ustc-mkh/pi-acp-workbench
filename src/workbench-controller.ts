@@ -34,7 +34,8 @@ export interface WorkbenchPorts {
   login?(): Promise<void>;
   configureTelegram?(): Promise<void>;
   openDiff?(turn: string, files: { path: string; before: string; after: string }[]): Promise<void>;
-  confirmUndo?(session: SessionId, turn: string): Promise<boolean>;
+  confirmUndo?(session: SessionId, turn: string, files?: string[]): Promise<boolean>;
+  confirmHistoryClear?(report: import('./workbench-protocol').HistoryClearReport): Promise<boolean>;
   validateUndo?(session: SessionId, turn: string): Promise<void>;
   loadSelection?(): unknown;
   saveSelection?(session: SessionId | undefined): PromiseLike<void>;
@@ -52,6 +53,7 @@ export class WorkbenchController {
   private sequence = 0;
   private listRequest = 0;
   private listCursor?: ListCursor;
+  private listFilter?: import('./workbench-protocol').SessionFilter;
   private listFlight?: Promise<void>;
   private authorizationGeneration = 0;
   private uiRequest = 0;
@@ -233,6 +235,30 @@ export class WorkbenchController {
           }
           break;
         }
+        case 'prepare_history_clear': {
+          const cwd = this.ports.workspace();
+          if (!cwd) throw new Error('Open a trusted workspace first');
+          const token = await this.authorize(cwd);
+          this.assertAuthorization(token);
+          await this.execute({ method: 'prepare_history_clear', filter: message.filter });
+          break;
+        }
+        case 'clear_history_batch': {
+          const report = [...this.operations]
+            .reverse()
+            .find((op) => op.historyClear?.job === message.job)?.historyClear;
+          if (!report) throw new Error('Recover the original preview receipt before continuing');
+          const cwd = this.ports.workspace();
+          if (!cwd) throw new Error('Open a trusted workspace first');
+          const token = await this.authorize(cwd);
+          if (!this.ports.confirmHistoryClear || !(await this.ports.confirmHistoryClear(report)))
+            break;
+          this.assertAuthorization(token);
+          await this.execute({ method: 'clear_history_batch', job: message.job });
+          await this.refresh();
+          await this.selected?.refresh();
+          break;
+        }
         case 'refresh_names':
           await this.refresh();
           break;
@@ -242,6 +268,10 @@ export class WorkbenchController {
         case 'ready':
         case 'refresh':
           await this.recoverOperations();
+          if (message.type === 'refresh' && message.filter) {
+            this.listFilter = message.filter;
+            this.invalidateList();
+          }
           await this.refresh(message.type === 'refresh' ? message.cursor : undefined);
           if (message.type === 'ready' && !this.selected && this.restoredSelection) {
             const session = this.restoredSelection;
@@ -333,9 +363,19 @@ export class WorkbenchController {
                 method: 'validate_undo',
                 session: selected.id,
                 turn: undoTurn,
+                files: message.command.method === 'undo_turn' ? message.command.files : undefined,
               });
               this.assertAuthorization(token);
-              if (!this.ports.confirmUndo || !(await this.ports.confirmUndo(selected.id, undoTurn)))
+              if (
+                !this.ports.confirmUndo ||
+                !(await this.ports.confirmUndo(
+                  selected.id,
+                  undoTurn,
+                  message.command.method === 'undo_turn'
+                    ? (message.command.files ?? undefined)
+                    : undefined,
+                ))
+              )
                 break;
               this.assertAuthorization(token);
               if (
@@ -758,6 +798,7 @@ export class WorkbenchController {
   }
   private invalidateList() {
     this.listRequest++;
+    this.listFlight = undefined;
     this.listCursor = undefined;
     this.state.sessionsCursor = undefined;
   }
@@ -768,11 +809,15 @@ export class WorkbenchController {
       .slice(0, 100);
   }
   refresh(cursor?: ListCursor): Promise<void> {
-    if (this.listFlight) return this.listFlight;
+    // A changed filter invalidates the old page immediately; its late reply
+    // cannot replace the new result. Identical in-flight requests still share.
+    if (this.listFlight && cursor === this.listCursor) return this.listFlight;
     const request = ++this.listRequest;
     this.listCursor = cursor;
     const task = (async () => {
-      const events = await this.client.call({ method: 'list', cursor: this.listCursor });
+      const events = this.listFilter
+        ? await this.client.call({ method: 'search', filter: this.listFilter, cursor })
+        : await this.client.call({ method: 'list', cursor });
       if (!this.closed && request === this.listRequest) {
         this.state.sessions = events.sessions;
         this.state.sessionsCursor = events.next_cursor ?? undefined;
@@ -849,6 +894,8 @@ export class WorkbenchController {
           : result.status === 'failed' || result.status === 'expired'
             ? 'failed'
             : 'uncertain';
+      if (result.status === 'completed' && 'HistoryClear' in result.receipt)
+        row.historyClear = result.receipt.HistoryClear.report;
       row.code = result.status;
       row.error =
         result.status === 'failed'
@@ -904,6 +951,8 @@ export class WorkbenchController {
       this.workflows.set(operation, { command, ticket });
       const result = await ticket.result;
       row.status = 'completed';
+      if (result && typeof result === 'object' && 'HistoryClear' in result)
+        row.historyClear = result.HistoryClear.report;
       return result;
     } catch (error) {
       row.status =

@@ -47,6 +47,9 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             app.core.coordinator.adapters.lock().await.insert(
                 id.clone(),
                 super::super::AdapterHandle {
+                    registry: app.runtime.registry.clone(),
+                    session: id.clone(),
+                    epoch: 1,
                     _workspace_lease: None,
                     tx,
                     stop,

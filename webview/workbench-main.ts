@@ -132,11 +132,10 @@ for (const name of ['Pi', 'Codex', 'Claude']) {
   option.value = name;
   harness.append(option);
 }
-header.append(
-  title,
-  harness,
-  button('New session', () => {
-    if (!state?.workspace) return;
+const newSession = button(
+  'New session',
+  () => {
+    if (!state?.trusted || !state.workspace) return;
     send({
       type: 'create',
       command: {
@@ -145,7 +144,13 @@ header.append(
         cwd: state.workspace,
       },
     });
-  }),
+  },
+  true,
+);
+header.append(
+  title,
+  harness,
+  newSession,
   button('Refresh', () => send({ type: 'refresh' })),
   button('Provider login…', () => send({ type: 'login' })),
   button('Usage statistics', () => management.openStatistics()),
@@ -155,6 +160,38 @@ header.append(
     if (state?.selected) send({ type: 'export', session: state.selected as SessionView['id'] });
   }),
 );
+const historySearch = element('input');
+historySearch.type = 'search';
+historySearch.placeholder = 'Search all saved sessions (title, directory, ID)';
+historySearch.setAttribute('aria-label', 'Search all sessions');
+historySearch.maxLength = 300;
+const historyHarness = element('select');
+historyHarness.setAttribute('aria-label', 'History harness filter');
+for (const value of ['', 'Pi', 'Codex', 'Claude']) {
+  const option = element('option', value || 'All harnesses');
+  option.value = value;
+  historyHarness.append(option);
+}
+const historyFilter = (): import('../src/workbench-protocol').SessionFilter => ({
+  text: historySearch.value.trim(),
+  harness: (historyHarness.value ||
+    null) as import('../src/workbench-protocol').SessionFilter['harness'],
+});
+const historyControls = element('section');
+historyControls.append(
+  historySearch,
+  historyHarness,
+  button('Search history', () => send({ type: 'refresh', filter: historyFilter() })),
+  button('Preview shared history clear…', () =>
+    send({ type: 'prepare_history_clear', filter: historyFilter() }),
+  ),
+);
+historySearch.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.isComposing)
+    send({ type: 'refresh', filter: historyFilter() });
+});
+const clearProgress = element('section');
+const undoSelections = new Map<string, Set<string>>();
 const sessions = element('select');
 sessions.setAttribute('aria-label', 'Session');
 sessions.addEventListener('change', () => {
@@ -445,6 +482,8 @@ composer.addEventListener('submit', (event) => {
 });
 root.append(
   header,
+  historyControls,
+  clearProgress,
   sessions,
   status,
   error,
@@ -758,7 +797,14 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
             `${savedDiff.status} · +${savedDiff.added} −${savedDiff.removed} lines`,
           ),
         );
-        if (savedDiff.status === 'complete' && savedDiff.files.length)
+        if (
+          savedDiff.status === 'complete' &&
+          savedDiff.files.length &&
+          savedDiff.next_offset === null &&
+          savedDiff.files.length <= 256 &&
+          savedDiff.files.reduce((n, file) => n + new TextEncoder().encode(file.path).length, 0) <=
+            65536
+        )
           box.append(
             button(
               'Undo this turn…',
@@ -783,8 +829,61 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
           ),
         );
         if (!savedDiff.files.length) summary.append(element('p', 'No captured workspace changes.'));
+        const selectionKey = `${snapshot.id}:${row.turn}`;
+        const selectedPaths = undoSelections.get(selectionKey) || new Set<string>();
+        undoSelections.set(selectionKey, selectedPaths);
+        while (undoSelections.size > 16) undoSelections.delete(undoSelections.keys().next().value!);
+        if (savedDiff.status === 'complete') {
+          summary.append(
+            element(
+              'p',
+              'For large reviews, explicitly select up to 256 files / 64 KiB paths per batch. Each batch needs confirmation; conflicts have per-file results. Load further pages to select other files.',
+            ),
+          );
+          summary.append(
+            button(
+              'Undo selected files…',
+              () => {
+                if (selectedPaths.size)
+                  send({
+                    type: 'execute',
+                    session: snapshot.id,
+                    command: {
+                      method: 'undo_turn',
+                      session: snapshot.id,
+                      turn: row.turn,
+                      files: [...selectedPaths],
+                    },
+                  });
+              },
+              busy || snapshot.status !== 'Idle',
+            ),
+          );
+        }
         for (const [index, file] of savedDiff.files.entries()) {
           summary.append(element('h3', `${file.status} · ${file.path}`));
+          if (savedDiff.status === 'complete') {
+            const choice = element('input');
+            choice.type = 'checkbox';
+            choice.checked = selectedPaths.has(file.path);
+            choice.setAttribute('aria-label', `Select for undo: ${file.path}`);
+            choice.addEventListener('change', () => {
+              if (choice.checked) {
+                const bytes = [...selectedPaths, file.path].reduce(
+                  (n, path) => n + new TextEncoder().encode(path).length,
+                  0,
+                );
+                if (selectedPaths.size >= 256 || bytes > 65536) {
+                  choice.checked = false;
+                  error.textContent =
+                    'Undo batch limit: 256 files / 64 KiB paths. Confirm this batch before selecting more.';
+                  return;
+                }
+                selectedPaths.add(file.path);
+              } else selectedPaths.delete(file.path);
+            });
+            summary.append(choice);
+          }
           if (file.old_mode !== file.new_mode)
             summary.append(
               element(
@@ -1230,6 +1329,24 @@ function render() {
     delete planPanel.dataset.definition;
     transcript.scrollTop = 0;
   }
+  clearProgress.replaceChildren();
+  const jobs = new Map<string, import('../src/workbench-protocol').HistoryClearReport>();
+  for (const op of state.operations)
+    if (op.historyClear) jobs.set(op.historyClear.job, op.historyClear);
+  for (const report of jobs.values()) {
+    clearProgress.append(
+      element(
+        'p',
+        `Shared clear job ${report.job}: ${report.total} frozen targets, ${report.remaining} pending, ${report.failed} failed; preview included ${report.active} active tasks and ${report.pending_deliveries} pending deliveries. Includes Telegram and all matching harnesses/directories; native files, usage and delivery/dedup identities are retained.`,
+      ),
+    );
+    if (report.remaining)
+      clearProgress.append(
+        button(report.preview ? 'Confirm first clear batch…' : 'Confirm next clear batch…', () =>
+          send({ type: 'clear_history_batch', job: report.job }),
+        ),
+      );
+  }
   sessions.replaceChildren(element('option', 'Select session'));
   for (const session of state.sessions) {
     const phase = typeof session.status === 'string' ? session.status : 'Failed';
@@ -1273,6 +1390,8 @@ function render() {
     state.view?.error ||
     (snapshot && typeof snapshot.status === 'object' ? snapshot.status.Failed : '');
   settlePiDraft();
+  newSession.disabled = !state.trusted || !state.workspace;
+  harness.disabled = newSession.disabled;
   status.textContent = `${state.view?.status || 'Select or create a session'}${snapshot ? ` · ${typeof snapshot.status === 'string' ? snapshot.status : 'Failed'} · revision ${snapshot.revision}` : ''}${!state.trusted ? ' · workspace untrusted' : ''}`;
   const busy =
     !snapshot || !state.trusted || state.view?.status !== 'ready' || snapshot.active_turn !== null;

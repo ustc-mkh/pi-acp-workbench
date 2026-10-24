@@ -1,39 +1,38 @@
 import type * as acp from '@agentclientprotocol/sdk';
 
-/** Private ACP metadata; option IDs remain standard, fixed permission choices. */
-export const INPUT_META = 'pi-workbench-input';
+/** Text input must use elicitation: a permission choice cannot carry its value. */
 export async function handleExtensionInput(
   session: {
     sessionId: string;
-    conn: Pick<acp.AgentSideConnection, 'requestPermission'>;
+    // pi-acp pins SDK 0.26, whose standard form request API has this name.
+    conn: {
+      unstable_createElicitation(
+        request: acp.CreateElicitationRequest,
+      ): Promise<acp.CreateElicitationResponse>;
+    };
     proc: { sendExtensionUiResponse(response: Record<string, unknown>): Promise<void> };
   },
   ev: Record<string, unknown>,
   id: string,
 ) {
-  const response = await session.conn.requestPermission({
+  const title = typeof ev.title === 'string' ? ev.title : 'Pi 提问';
+  const placeholder = typeof ev.placeholder === 'string' ? ev.placeholder : '';
+  const response = await session.conn.unstable_createElicitation({
     sessionId: session.sessionId,
-    _meta: { [INPUT_META]: true },
-    toolCall: {
-      toolCallId: `pi-ui-${id}`,
-      title: typeof ev.title === 'string' ? ev.title : 'Pi 提问',
-      kind: 'other',
-      status: 'pending',
-      rawInput: {
-        method: ev.method,
-        placeholder: ev.placeholder,
-        prefill: ev.prefill,
-      },
+    mode: 'form',
+    message: placeholder ? `${title}\n${placeholder}` : title,
+    requestedSchema: {
+      type: 'object',
+      properties: { value: { type: 'string', title, maxLength: 10000 } },
+      required: ['value'],
     },
-    options: [{ optionId: 'submit', name: '提交回答', kind: 'allow_once' }],
   });
-  const data = response._meta?.[INPUT_META] as { value?: unknown } | undefined;
+  const content = 'content' in response ? response.content : undefined;
+  const value =
+    content && typeof content === 'object' ? (content as { value?: unknown }).value : undefined;
   await session.proc.sendExtensionUiResponse(
-    response.outcome.outcome === 'selected' &&
-      response.outcome.optionId === 'submit' &&
-      typeof data?.value === 'string' &&
-      data.value.length <= 10000
-      ? { id, value: data.value }
+    response.action === 'accept' && typeof value === 'string' && value.length <= 10000
+      ? { id, value }
       : { id, cancelled: true },
   );
 }

@@ -143,7 +143,7 @@ pub(super) fn update(
         super::journal::finish_in_transaction(&tx, ticket, &Ok(receipt.clone()))
             .map_err(|e| StoreError::Io(e.to_string()))?;
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(receipt)
 }
 pub(super) fn models(
@@ -175,7 +175,7 @@ pub(super) fn models(
     if count > 1500 {
         return Err(StoreError::Invalid("model settings budget exceeded"));
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(())
 }
 pub(super) fn title_job(
@@ -204,7 +204,7 @@ pub(super) fn title_job(
             .unwrap_or("unknown");
         tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,'missing_title') ON CONFLICT(id) DO NOTHING",params![format!("title:{}:0",session.as_str()),session.as_str(),harness(&view.harness),selected])?;
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(if changed == 1 && policy != "off" {
         Some(if policy == "model" {
             model.unwrap_or_default()
@@ -241,7 +241,7 @@ pub(super) fn title_result(
         }
         tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,?5,?6,?7,?8,'pi_title') ON CONFLICT(id) DO UPDATE SET model=excluded.model,input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,source=excluded.source",params![format!("title:{}:{i}",session.as_str()),session.as_str(),harness(&view.harness),r.model,r.input as i64,r.output as i64,r.cache_read as i64,r.cache_write as i64])?;
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(())
 }
 fn group(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageGroup> {
@@ -345,6 +345,6 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             data.next_cursor = data.groups.last().map(|g| g.key.clone());
         }
     }
-    tx.commit()?;
+    crate::diagnostics::sqlite_commit(tx)?;
     Ok(data)
 }

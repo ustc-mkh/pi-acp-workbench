@@ -12,6 +12,8 @@ const checks = [
   ['npm', ['run', 'test:contract:workbench:telegram']],
   ['npm', ['run', 'test:workbench:capacity']],
   ['npm', ['run', 'test:workbench:process-loss']],
+  ['npm', ['run', 'test:workbench:image-race']],
+  ['npm', ['run', 'test:workbench:provider-barriers']],
   ['npm', ['run', 'test:browser']],
   ['npm', ['run', 'test:full']],
   ['node', ['scripts/build-services.mjs']],

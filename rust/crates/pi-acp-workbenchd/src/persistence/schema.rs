@@ -1,6 +1,6 @@
 //! Connection creation and schema initialization run only on the DB OS thread.
 use super::{database::StoreError, format};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{
     fs::{self, OpenOptions},
     os::unix::fs::OpenOptionsExt,
@@ -10,6 +10,10 @@ use std::{
 
 const SCHEMA: &str = include_str!("schema.sql");
 const TABLES: &[&str] = &[
+    "turn_outcomes",
+    "history_clear_jobs",
+    "history_clear_targets",
+    "archive_roots",
     "store_meta",
     "removed_sessions",
     "sessions",
@@ -91,7 +95,7 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     if version == 0 {
         let tx = connection.transaction()?;
         tx.execute_batch(SCHEMA)?;
-        tx.commit()?;
+        crate::diagnostics::sqlite_commit(tx)?;
     }
     let journal: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
     let synchronous: u32 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
@@ -161,7 +165,16 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
         .prepare("PRAGMA index_info(deliveries_topic_order)")?
         .query_map([], |row| row.get::<_, String>(2))?
         .collect::<Result<Vec<_>, _>>()?;
-    if delivery_index != ["target_key", "status", "order_seq"] {
+    let delivery_index_sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND name='deliveries_topic_order'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if delivery_index != ["target_key", "status", "order_seq"]
+        || delivery_index_sql.as_deref() != Some("CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq) WHERE status='Pending'")
+    {
         return Err(StoreError::Invalid("unsupported delivery index"));
     }
     connection

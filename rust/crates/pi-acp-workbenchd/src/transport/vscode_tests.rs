@@ -3,6 +3,56 @@ use crate::config::{
     Config, LimitsConfig, SessionsConfig, StorageConfig, WorkerConfig, WorkersConfig,
 };
 
+#[tokio::test]
+async fn partial_frame_and_deadline_survive_reply_or_batch_select_cancellation() {
+    use tokio::io::AsyncWriteExt;
+    let (mut writer, mut reader) = tokio::io::duplex(256);
+    let stop = CancellationToken::new();
+    let mut frame = Vec::new();
+    let mut deadline = None;
+    writer.write_all(b"{\"version\":3,").await.unwrap();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame(&mut reader, &stop, &mut frame, &mut deadline)
+    )
+    .await
+    .is_err());
+    assert_eq!(frame, b"{\"version\":3,");
+    let original = deadline.unwrap();
+    writer.write_all(b"\"id\":1}\nnext\n").await.unwrap();
+    assert_eq!(
+        read_frame(&mut reader, &stop, &mut frame, &mut deadline)
+            .await
+            .unwrap()
+            .unwrap(),
+        b"{\"version\":3,\"id\":1}"
+    );
+    assert!(deadline.is_none());
+    assert_eq!(
+        read_frame(&mut reader, &stop, &mut frame, &mut deadline)
+            .await
+            .unwrap()
+            .unwrap(),
+        b"next"
+    );
+    writer.write_all(b"partial").await.unwrap();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame(&mut reader, &stop, &mut frame, &mut deadline)
+    )
+    .await
+    .is_err());
+    assert!(deadline.unwrap() >= original);
+    let retained = deadline;
+    assert!(tokio::time::timeout(
+        Duration::from_millis(10),
+        read_frame(&mut reader, &stop, &mut frame, &mut deadline)
+    )
+    .await
+    .is_err());
+    assert_eq!(deadline, retained);
+}
+
 fn app(root: &Path) -> WorkbenchApp {
     app_with_env(root, Default::default())
 }

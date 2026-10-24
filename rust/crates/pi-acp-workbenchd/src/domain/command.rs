@@ -6,6 +6,12 @@ pub enum DomainCommand {
         harness: Harness,
         cwd: WorkspacePath,
     },
+    PrepareHistoryClear {
+        filter: super::query::SessionFilter,
+    },
+    ClearHistoryBatch {
+        job: OperationId,
+    },
     LoadSession(SessionId),
     #[cfg(test)]
     ListSessions,
@@ -70,6 +76,8 @@ pub enum DomainCommand {
     UndoTurn {
         session: SessionId,
         turn: TurnId,
+        #[serde(default)]
+        files: Option<Vec<String>>,
     },
     RemoveSession(SessionId),
     Inspect(SessionId),

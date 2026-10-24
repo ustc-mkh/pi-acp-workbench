@@ -183,7 +183,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
                 Some(state)
             }
         };
-        tx.commit().map_err(failure)?;
+        crate::diagnostics::sqlite_commit(tx).map_err(failure)?;
         Ok(result)
     })();
     let _ = reply.send(result);

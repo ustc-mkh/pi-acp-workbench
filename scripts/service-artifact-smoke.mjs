@@ -175,7 +175,15 @@ try {
   }
   const compacted = execute('pi-acp-workbenchd', ['storage', 'gc', '--root', data, '--confirm']);
   assert.equal(await compacted.done, 0, compacted.errors);
-  assert.deepEqual(JSON.parse(compacted.output), { removed_inbox: 0, removed_callbacks: 0 });
+  assert.deepEqual(JSON.parse(compacted.output), {
+    removed_inbox: 0,
+    removed_callbacks: 0,
+    orphan_contents: 0,
+    orphan_bytes: 0,
+    removed_contents: 0,
+    batch_limit: 500,
+    dry_run: false,
+  });
   check(
     `${manifest.target}: same-binary offline maintenance, live lease exclusion and byte/hash export`,
   );

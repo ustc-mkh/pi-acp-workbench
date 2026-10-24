@@ -5,6 +5,17 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 
 import { cpus, release, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { parseArgs } from 'node:util';
+
+const { values: options } = parseArgs({
+  options: {
+    workload: { type: 'string', default: 'storage' },
+    release: { type: 'boolean', default: false },
+  },
+});
+assert(['storage', 'diff'].includes(options.workload));
+const testCase =
+  options.workload === 'diff' ? 'large_diff_reader_workload_v1' : 'mixed_storage_workload_v1';
 
 const directory = resolve('.test-results', `mixed-v1-${randomUUID()}`);
 mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -19,6 +30,7 @@ const built = spawnSync(
     '-p',
     'pi-acp-workbenchd',
     '--lib',
+    ...(options.release ? ['--release'] : []),
     '--no-run',
     '--message-format=json',
   ],
@@ -61,6 +73,8 @@ const report = {
     node: process.version,
   },
   binary_sha256: createHash('sha256').update(readFileSync(executable)).digest('hex'),
+  build_configuration: options.release ? 'release' : 'debug',
+  test_case: testCase,
   budgets: {
     admission_control_p95_ms: 100,
     admission_control_p99_ms: 250,
@@ -84,7 +98,7 @@ for (let run = 0; run < 5; run++) {
       '-o',
       metric,
       executable,
-      'persistence::mixed_workload_tests::mixed_storage_workload_v1',
+      `persistence::mixed_workload_tests::${testCase}`,
       '--ignored',
       '--exact',
       '--nocapture',
@@ -113,6 +127,7 @@ for (let run = 0; run < 5; run++) {
     peak_rss_kib,
     wal_bytes: sample.wal_bytes,
     workload: sample.workload,
+    request_samples_ms: sample.latencies_ms,
     request_ms: distributions,
     storage: sample.storage,
   });

@@ -284,6 +284,7 @@ export class WorkbenchClient {
         const kinds = {
           operation: 'operation',
           list: 'list',
+          search: 'list',
           inspect: 'view',
           history: 'history',
           tools: 'tools',

@@ -64,10 +64,15 @@ async function host(forkGate = false) {
     }
   });
   async function start() {
-    const child = spawn(resolve('rust/target/debug/pi-acp-workbenchd'), ['--config', file], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { PATH: globalThis.process.env.PATH, HOME: join(root, 'home'), LANG: 'C.UTF-8' },
-    });
+    const child = spawn(
+      globalThis.process.env.WORKBENCH_TEST_BINARY ??
+        resolve('rust/target/debug/pi-acp-workbenchd'),
+      ['--config', file],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { PATH: globalThis.process.env.PATH, HOME: join(root, 'home'), LANG: 'C.UTF-8' },
+      },
+    );
     process = child;
     done = new Promise((resolve, reject) => {
       child.once('error', reject);

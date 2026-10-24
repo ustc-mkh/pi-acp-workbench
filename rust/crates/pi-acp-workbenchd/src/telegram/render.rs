@@ -221,7 +221,16 @@ pub async fn render(
             Ok(parts)
         }
         DeliveryPayload::Notice { content } => {
-            Ok(text_parts(topic, &payloads.content(content).await?))
+            let mut text = payloads.content(content).await?;
+            if let crate::domain::transition::DeliveryTarget::Session { session, .. } =
+                &event.target
+            {
+                if let Some(summary) = payloads.completion(session.clone(), event.revision).await? {
+                    text.push_str("\n\n");
+                    text.push_str(&summary);
+                }
+            }
+            Ok(text_parts(topic, &text))
         }
         DeliveryPayload::Menu { content } => {
             let menu = super::menu::Menu::decode(&payloads.content(content).await?)?;

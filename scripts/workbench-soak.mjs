@@ -9,7 +9,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
 const { values } = parseArgs({
-  options: { 'duration-seconds': { type: 'string', default: '600' } },
+  options: {
+    'duration-seconds': { type: 'string', default: '600' },
+    binary: { type: 'string' },
+  },
 });
 const duration = Number(values['duration-seconds']);
 assert(
@@ -49,7 +52,7 @@ assert(artifact?.executable);
 const tests = join(directory, 'soak-tests'),
   binary = join(directory, 'pi-acp-workbenchd');
 await copyFile(artifact.executable, tests);
-await copyFile(resolveWorkbenchBinary(), binary);
+await copyFile(resolveWorkbenchBinary(values.binary), binary);
 await chmod(tests, 0o700);
 await chmod(binary, 0o700);
 let interrupted = false;
@@ -81,6 +84,7 @@ async function phase(name, command, args, expected) {
     (await readFile(file, 'utf8')).includes(expected),
     `required tests were not executed: ${file}`,
   );
+  return file;
 }
 const rust = (name, test) =>
   phase(name, tests, [test, '--exact'], 'test result: ok. 1 passed; 0 failed;');
@@ -107,12 +111,37 @@ try {
       'app::tests::management_tests::isolated_title_does_not_block_next_prompt_or_overwrite_manual_name_and_counts_once',
     );
     if (interrupted) break;
-    await phase(
+    const lossLog = await phase(
       'process-loss',
       process.execPath,
       ['scripts/workbench-process-loss.mjs', '--binary', binary],
-      '3 real host process-loss checks passed',
+      '3 provider profiles / 11 process-loss windows passed:',
     );
+    const evidence = (await readFile(lossLog, 'utf8')).match(
+      /11 process-loss windows passed: (.+) \(synthetic peers;/,
+    )?.[1];
+    assert(evidence?.startsWith(resolve('.test-results', 'process-loss-v2-')));
+    const loss = JSON.parse(await readFile(join(evidence, 'report.json'), 'utf8'));
+    assert.equal(loss.version, 2);
+    assert.equal(loss.passed, true);
+    assert.equal(loss.windows.length, 11);
+    assert.equal(
+      loss.binary_sha256,
+      createHash('sha256')
+        .update(await readFile(binary))
+        .digest('hex'),
+    );
+    assert(
+      loss.windows.some(
+        (window) => window.window === 'remote-fork-returned-source-join-before-adoption',
+      ),
+    );
+    assert(
+      loss.windows.some(
+        (window) => window.window === 'HTTP-success-client-frozen-before-local-ack',
+      ),
+    );
+    phases.at(-1).evidence = evidence;
     rounds++;
     console.log(
       `soak round ${rounds} joined; elapsed ${((Date.now() - began) / 1000).toFixed(1)}s; logs ${directory}`,

@@ -1,4 +1,5 @@
 pub const FORMAT_VERSION: u32 = 3;
+mod checkpoint;
 mod content;
 pub mod database;
 pub mod delivery;
@@ -6,6 +7,7 @@ pub mod delivery;
 mod delivery_sql_tests;
 mod fork;
 pub mod format;
+pub(crate) mod history_clear;
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod history_tests;

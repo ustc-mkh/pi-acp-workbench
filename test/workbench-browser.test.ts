@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { createHash } from 'node:crypto';
 import { emptyView } from './helpers/workbench-peer';
-import { entryId, imageRef } from '../src/workbench-protocol';
+import { entryId, imageRef, operationId } from '../src/workbench-protocol';
 import type { UiCommand, WorkbenchUiState } from '../src/workbench-ui';
 let dom: JSDOM | undefined;
 afterEach(() => {
@@ -71,6 +71,76 @@ async function browser(saved?: unknown) {
     },
   };
 }
+it('disables session creation until initial authorized workspace state arrives and again after trust revocation', async () => {
+  const b = await browser();
+  const create = [...b.document.querySelectorAll('button')].find(
+    (button) => button.textContent === 'New session',
+  )!;
+  expect(create.disabled).toBe(true);
+  create.click();
+  expect(b.sent).toEqual([{ type: 'ready' }]);
+  b.update();
+  await expect.poll(() => create.disabled).toBe(false);
+  create.click();
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'create',
+    command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+  });
+  b.state.trusted = false;
+  b.update(2);
+  await expect.poll(() => create.disabled).toBe(true);
+  const count = b.sent.length;
+  create.click();
+  expect(b.sent).toHaveLength(count);
+});
+it('searches whole history and resumes only the latest frozen clear preview without auto-deleting', async () => {
+  const b = await browser();
+  b.update();
+  const search = b.document.querySelector<HTMLInputElement>('[aria-label="Search all sessions"]')!;
+  search.value = ' old session ';
+  b.document.querySelector<HTMLSelectElement>('[aria-label="History harness filter"]')!.value =
+    'Pi';
+  search.dispatchEvent(new dom!.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  expect(b.sent.at(-1)).toEqual({
+    type: 'refresh',
+    filter: { text: 'old session', harness: 'Pi' },
+  });
+  const report = {
+    job: operationId.parse('clear-job'),
+    total: 12,
+    remaining: 12,
+    failed: 0,
+    active: 2,
+    pending_deliveries: 3,
+    preview: true,
+  };
+  b.state.operations = [
+    {
+      operation: operationId.parse('preview'),
+      method: 'prepare_history_clear',
+      status: 'completed',
+      historyClear: report,
+    },
+    {
+      operation: operationId.parse('batch'),
+      method: 'clear_history_batch',
+      status: 'completed',
+      historyClear: { ...report, remaining: 2, preview: false },
+    },
+  ];
+  const before = b.sent.length;
+  b.update(2);
+  await expect.poll(() => b.document.body.textContent).toContain('2 pending');
+  expect(b.document.body.textContent).toContain('3 pending deliveries');
+  expect(b.sent).toHaveLength(before);
+  const next = [...b.document.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Confirm next clear batch…',
+  )!;
+  expect(next).toBeDefined();
+  expect(b.document.body.textContent).not.toContain('Confirm first clear batch');
+  next.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'clear_history_batch', job: 'clear-job' });
+});
 it('keeps a restored selection visible outside the current session page without triggering a mutation', async () => {
   const b = await browser();
   b.state.sessions = [];

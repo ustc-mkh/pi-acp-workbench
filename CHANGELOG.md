@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 2.0.0 — 2026-10-24
+
+- **不兼容升级**：重写为唯一 `pi-acp-workbenchd` 单宿主，统一 SQLite 持久化、IPC v3、会话/worker 生命周期和 Telegram 调度。旧 binary、VSIX、配置与 root 必须成组保留；没有自动旧格式导入器，新版使用独立空 root。升级前阅读 `docs/workbench-data-migration.md` 和切换/回退清单，不直接打开或清空旧业务数据。
+- 完成 typed 文本/上下文/图片输入、provider 设置与恢复、Pi 自主轮次及标准 Form 交互、Plan 投影、安全 native fork、usage/标题、全历史管理、Diff 与显式撤回、Telegram 独立手机流程。
+- 修复 IPC 半帧取消、provider fork 源 worker 保护、空闲 owner 有界回收、旧 epoch 事件隔离、deferred topic 公平调度、大 outbox 读取及长驻 WAL 复用等问题，保留 receipt 防重与未知外部效果不重放语义。
+- P6 原计划 23 项有限验收完成：两平台生产矩阵、真实 Pi/Codex/Bot、原生 VSIX/Trust、故障切点、同机普通读取 P0 对照、五轮 mixed/600 秒 soak 和 GNU 同宿主两小时；范围和历史负例见 `docs/workbench-p6-validation.md`。本 release 标签的制品另由 CI 干净构建并验证，不将本地候选散列冒充发布散列。
+- 明确能力边界：Claude 本次真实在线验收由用户排除；Telegram 入站照片尚未实现，terminal:false 不提供终端正文，Pi stable profile 不提供 Fast。不会将这些能力标为成功通过，也不自动部署或迁移数据。
+
 ## 1.0.0 — 2026-10-15
 
 - 首个稳定大版本：支持 Pi、Codex、Claude ACP harness，跨会话历史与共享 session daemon，后台自主轮次与安全取消、权限交互、todo / 扩展输入、模型与用量统计、图片及流式 Markdown 渲染。

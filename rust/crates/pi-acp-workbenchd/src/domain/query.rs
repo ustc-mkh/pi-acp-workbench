@@ -348,7 +348,21 @@ impl ToolHeader {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HistoryClearReport {
+    pub job: OperationId,
+    pub total: usize,
+    pub remaining: usize,
+    pub failed: usize,
+    pub active: usize,
+    pub pending_deliveries: usize,
+    pub preview: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum CommandReceipt {
+    HistoryClear {
+        report: HistoryClearReport,
+    },
     Created {
         summary: SessionSummary,
     },
@@ -477,9 +491,22 @@ impl From<ProtocolVersion> for u32 {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFilter {
+    pub text: String,
+    pub harness: Option<Harness>,
+}
+impl SessionFilter {
+    pub fn valid(&self) -> bool {
+        self.text.len() <= 300 && !self.text.chars().any(char::is_control)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListCursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<SessionFilter>,
     pub version: ProtocolVersion,
     pub max_created_seq: SafeInteger,
     pub before_seq: SafeInteger,
@@ -579,6 +606,11 @@ pub enum QueryCommand {
     Operation {
         operation: super::OperationId,
     },
+    Search {
+        filter: SessionFilter,
+        cursor: Option<ListCursor>,
+        limit: Option<usize>,
+    },
     List {
         cursor: Option<ListCursor>,
         limit: Option<usize>,
@@ -614,6 +646,8 @@ pub enum QueryCommand {
     ValidateUndo {
         session: SessionId,
         turn: crate::domain::TurnId,
+        #[serde(default)]
+        files: Option<Vec<String>>,
     },
     TurnDiff {
         session: SessionId,
@@ -645,7 +679,30 @@ impl QueryCommand {
             | Self::ValidateUndo { .. }
             | Self::TurnDiff { .. }
             | Self::TurnDiffContent { .. } => {}
+            Self::Search {
+                filter,
+                cursor,
+                limit: n,
+            } => {
+                if !filter.valid()
+                    || cursor
+                        .as_ref()
+                        .is_some_and(|c| c.filter.as_ref() != Some(filter))
+                {
+                    return Err(QueryError::InvalidInput);
+                }
+                limit(*n, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT)?;
+                if cursor
+                    .as_ref()
+                    .is_some_and(|c| c.before_seq > c.max_created_seq || c.before_seq.get() == 0)
+                {
+                    return Err(QueryError::InvalidInput);
+                }
+            }
             Self::List { cursor, limit: n } => {
+                if cursor.as_ref().is_some_and(|c| c.filter.is_some()) {
+                    return Err(QueryError::InvalidInput);
+                }
                 limit(*n, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT)?;
                 if cursor
                     .as_ref()

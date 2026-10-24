@@ -18,7 +18,7 @@ impl CommandCore {
         let inspected = self
             .runtime
             .registry
-            .command(DomainCommand::Inspect(session.clone()))
+            .command_admitted(DomainCommand::Inspect(session.clone()))
             .await?;
         let Some(snapshot) = inspected.view() else {
             return Err(DomainError::NotFound(session.clone()));
@@ -63,7 +63,7 @@ impl CommandCore {
             let prepared = self
                 .runtime
                 .registry
-                .command(DomainCommand::PrepareFork {
+                .command_admitted(DomainCommand::PrepareFork {
                     session: session.clone(),
                     request: request.clone(),
                     candidates,

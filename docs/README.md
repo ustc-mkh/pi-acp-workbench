@@ -20,3 +20,5 @@
 | [更新历史](../CHANGELOG.md)                         | 版本变更，不是当前功能或验收承诺                         |
 
 以当前 `package.json`、Rust/TS typed boundary 和示例配置为准。旧实现及历史文档可从 Git 历史查阅，不在当前文档树保留重复计划，也不通过旧命令启动当前源码。
+
+旧数据升级、历史保留与离线转换器边界见[旧数据迁移](workbench-data-migration.md)。
