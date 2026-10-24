@@ -279,7 +279,12 @@ try {
   );
   const toolTurn = controller.snapshot.view.entries.at(-1).turn;
   const toolProcess = page.locator(`[data-turn="${toolTurn}"] .turn-process`);
-  await toolProcess.locator('summary').first().click();
+  await toolProcess.waitFor();
+  await page.getByRole('button', { name: 'Stop Pi background worker', exact: true }).waitFor();
+  // A turn first rendered while active is already expanded. Clicking its summary
+  // unconditionally closes it, so observe the disclosure before opening it.
+  if (!(await toolProcess.evaluate((node) => node.open)))
+    await toolProcess.locator('summary').first().click();
   await toolProcess.getByRole('button', { name: `Tools for ${toolTurn}`, exact: true }).click();
   await wait(() => controller.snapshot.view.tools.length > 0, 'bounded tools query');
   assert(controller.snapshot.view.tools.length > 0);
