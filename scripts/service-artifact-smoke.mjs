@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
@@ -209,7 +209,8 @@ try {
   assert.notEqual(malformed.exitCode, 0);
   assert(!malformed.errors.includes('https://'));
   check(`${manifest.target}: invalid startup fails closed without credentials or remote URL`);
-  if (values.report)
+  if (values.report) {
+    await mkdir(dirname(resolve(values.report)), { recursive: true });
     await writeFile(
       values.report,
       JSON.stringify(
@@ -225,6 +226,7 @@ try {
         2,
       ) + '\n',
     );
+  }
   console.log('PASS production artifact smoke');
 } finally {
   client?.close();
