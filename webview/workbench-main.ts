@@ -290,11 +290,15 @@ const workingLabel = element('span');
 working.append(workingIcon, workingLabel);
 transcript.append(messages, working);
 function requestAutomaticDiff(session: string, turn: string) {
+  const snapshot = state?.view?.view;
+  const entry = state?.view?.entries.find((row) => row.turn === turn);
   const key = `${session}:${turn}`;
   if (
+    !snapshot ||
     session !== state?.selected ||
-    !state.view?.entries.some((row) => row.turn === turn) ||
-    turn === state.view.view?.active_turn ||
+    session !== snapshot.id ||
+    !entry ||
+    turn === snapshot.active_turn ||
     turnDiffs.has(key) ||
     attemptedDiffs.has(key) ||
     diffReads.size >= 2
@@ -303,7 +307,7 @@ function requestAutomaticDiff(session: string, turn: string) {
   attemptedDiffs.add(key);
   diffReads.add(key);
   while (attemptedDiffs.size > 64) attemptedDiffs.delete(attemptedDiffs.keys().next().value!);
-  send({ type: 'read_turn_diff', session, turn, automatic: true });
+  send({ type: 'read_turn_diff', session: snapshot.id, turn: entry.turn, automatic: true });
 }
 const diffObserver =
   typeof window.IntersectionObserver === 'function'
