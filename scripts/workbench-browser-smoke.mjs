@@ -265,7 +265,7 @@ try {
     'stream completion',
   );
   await page.locator('article').filter({ hasText: '世界' }).waitFor();
-  assert.equal(await page.locator('article').count(), 3);
+  assert.equal(await page.locator('article[data-entry]').count(), 3);
   assert.equal(await page.locator('article.thought').count(), 1);
   const sourceRows = structuredClone(controller.snapshot.view.entries);
   assert.equal(new Set(sourceRows.slice(1).map((row) => row.message)).size, 1);
