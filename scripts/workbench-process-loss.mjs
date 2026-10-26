@@ -192,7 +192,11 @@ async function deliveryAckWindow() {
       report.delivery_http.methods.push(method);
       let result;
       if (method === 'getMe') result = { id: 999, is_bot: true, username: 'crash_fixture' };
-      else if (method === 'getUpdates') {
+      else if (method === 'getChat') {
+        assert.equal(body.chat_id, -100);
+        // This cut tests an existing explicit delivery, not forum discovery.
+        result = { id: -100, type: 'supergroup', is_forum: false };
+      } else if (method === 'getUpdates') {
         await delay(50);
         result = [];
       } else if (method === 'sendMessage') {
@@ -557,7 +561,8 @@ try {
       .summary.id;
     assert.equal(
       (await client.call({ method: 'inspect', session: newSession })).config.options?.thought_level,
-      undefined,
+      'low',
+      'new sessions inherit the last accepted user-task default, never the uncertain high setting',
     );
     report.windows.push({
       provider: harness,
