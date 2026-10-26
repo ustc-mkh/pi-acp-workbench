@@ -198,6 +198,7 @@ h1 {
   min-width: 0;
 }
 .user {
+  position: relative;
   background: var(--input);
   padding: 12px 14px;
   border: 1px solid var(--border);
@@ -1924,14 +1925,14 @@ body {
 .turn:focus-within > .turn-review-action {
   opacity: 1;
 }
-.message-reuse {
+.message.user .message-reuse {
   position: absolute;
   right: 8px;
   bottom: 8px;
   opacity: 0;
 }
-.message:hover .message-reuse,
-.message:focus-within .message-reuse {
+.message.user:hover .message-reuse,
+.message.user:focus-within .message-reuse {
   opacity: 1;
 }
 #session-options {

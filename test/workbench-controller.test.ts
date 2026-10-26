@@ -29,6 +29,7 @@ async function setup(
   confirmUndo?: (session: string, turn: string) => Promise<boolean>,
   entries: unknown[] = [],
   copyText?: (text: string) => PromiseLike<void>,
+  archiveText?: string,
 ) {
   const peer = await workbenchPeer();
   peers.push(peer);
@@ -55,6 +56,16 @@ async function setup(
   const selecting = controller.receive({ type: 'select', session: 'session' });
   await expect.poll(() => peer.requests.length).toBe(2);
   peer.query(peer.requests[1], 'attached', attached(5, entries));
+  if (archiveText !== undefined) {
+    await expect.poll(() => peer.requests.length).toBe(3);
+    expect(peer.requests[2].command).toMatchObject({ method: 'content', offset: 0 });
+    peer.query(peer.requests[2], 'content', {
+      text: archiveText,
+      total_bytes: Buffer.byteLength(archiveText),
+      sha256: createHash('sha256').update(archiveText).digest('hex'),
+      next_offset: null,
+    });
+  }
   await selecting;
   return {
     peer,
@@ -107,19 +118,27 @@ it('copies only a confirmed message with exact bounded content cursors and check
     image: null,
   };
   const copied: string[] = [];
-  const { peer, controller } = await setup(undefined, undefined, [entry], async (text) => {
-    copied.push(text);
-  });
+  const { peer, controller } = await setup(
+    undefined,
+    undefined,
+    [entry],
+    async (text) => {
+      copied.push(text);
+    },
+    text,
+  );
+  expect(controller.snapshot.view?.resolvedText).toEqual({ body: text });
+  const baseline = peer.requests.length;
   let action = controller.receive({ type: 'copy_message', session: 'session', entry: 'entry' });
-  await expect.poll(() => peer.requests.length).toBe(3);
-  peer.query(peer.requests[2], 'content', {
+  await expect.poll(() => peer.requests.length).toBe(baseline + 1);
+  peer.query(peer.requests[baseline], 'content', {
     text: '你好',
     sha256: ref.sha256,
     total_bytes: ref.bytes,
     next_offset: 6,
   });
-  await expect.poll(() => peer.requests.length).toBe(4);
-  peer.query(peer.requests[3], 'content', {
+  await expect.poll(() => peer.requests.length).toBe(baseline + 2);
+  peer.query(peer.requests[baseline + 1], 'content', {
     text: '🌍',
     sha256: ref.sha256,
     total_bytes: ref.bytes,
@@ -128,8 +147,8 @@ it('copies only a confirmed message with exact bounded content cursors and check
   await action;
   expect(copied).toEqual([text]);
   action = controller.receive({ type: 'copy_message', session: 'session', entry: 'entry' });
-  await expect.poll(() => peer.requests.length).toBe(5);
-  peer.query(peer.requests[4], 'content', {
+  await expect.poll(() => peer.requests.length).toBe(baseline + 3);
+  peer.query(peer.requests[baseline + 2], 'content', {
     text: '你好',
     sha256: ref.sha256,
     total_bytes: ref.bytes,

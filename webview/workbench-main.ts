@@ -279,6 +279,7 @@ const status = element('p'),
   planPanel = element('section'),
   transcript = element('main');
 let previewActive = false;
+let jumpToLatest = false;
 const messages = element('div');
 messages.id = 'messages';
 const working = element('div');
@@ -750,6 +751,13 @@ const classic = buildClassicShell({
   composer,
   advanced,
   historyOpen: preferences.historyOpen,
+  onLatest: () => {
+    const snapshot = current();
+    if (snapshot && state?.view?.historical) {
+      jumpToLatest = true;
+      send({ type: 'latest', session: snapshot.id });
+    }
+  },
   onHistoryChange: (open) => {
     preferences.historyOpen = open;
     if (open) send({ type: 'refresh_names' });
@@ -1067,13 +1075,11 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   if (state?.view?.earlier)
     output.append(
       button(
-        'Load earlier (keep current messages)',
+        '加载更早消息（20 轮）',
         () => send({ type: 'earlier', session: snapshot.id }),
         !state?.view?.earlier,
       ),
     );
-  if (state?.view?.historical)
-    output.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
   output.append(
     element(
       'small',
@@ -1087,9 +1093,24 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       lastAnswers.set(message.row.turn, message.key);
   const folded = new Set<string>();
   for (const message of projected) {
+    const completeText =
+      message.inlineText ??
+      (message.entries.every(
+        (entry) =>
+          'Inline' in entry.text ||
+          state?.view?.resolvedText?.[entry.text.Archived.content.id] !== undefined,
+      )
+        ? message.entries
+            .map((entry) =>
+              'Inline' in entry.text
+                ? entry.text.Inline.text
+                : state!.view!.resolvedText![entry.text.Archived.content.id],
+            )
+            .join('')
+        : undefined);
     const row =
-      message.inlineText !== undefined
-        ? { ...message.row, text: { Inline: { text: message.inlineText } } }
+      completeText !== undefined
+        ? { ...message.row, text: { Inline: { text: completeText } } }
         : message.row;
     const inActivity =
       row.role === 'Thought' ||
@@ -1109,7 +1130,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       process.append(element('summary', '思考与工具调用'));
       box.append(process);
       const savedDiff = turnDiffs.get(`${snapshot.id}:${row.turn}`);
-      if (savedDiff && (savedDiff.files.length || savedDiff.status !== 'complete')) {
+      if (savedDiff && snapshot.active_turn !== row.turn) {
         const diffBox = element('article');
         diffBox.className = 'message turn-diff';
         diffBox.dataset.turnReview = 'true';
@@ -1382,7 +1403,12 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       message.entries.length,
       row.role !== 'User' && snapshot.active_turn === row.turn,
       message.entries.flatMap((entry) =>
-        'Archived' in entry.text ? [contentPages.get(entry.text.Archived.content.id)] : [],
+        'Archived' in entry.text
+          ? [
+              contentPages.get(entry.text.Archived.content.id),
+              state?.view?.resolvedText?.[entry.text.Archived.content.id]?.length,
+            ]
+          : [],
       ),
       row.image
         ? [
@@ -1440,7 +1466,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       const active = row.role !== 'User' && snapshot.active_turn === row.turn;
       const checkpoint = active
         ? Math.min(128 * 1024, 2 ** Math.floor(Math.log2(Math.max(1, text.length))))
-        : Math.min(text.length, 256 * 1024);
+        : Math.min(text.length, 2 * 1024 * 1024);
       const parsed = element('div');
       parsed.dataset.markdown = 'true';
       parsed.className = 'markdown';
@@ -1524,8 +1550,11 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     if (diff) turn.box.append(diff);
   }
   const visibleTurns = new Set(rows.map((row) => row.turn));
-  // Browsers read near the viewport, including older turns when scrolled to.
-  // Non-layout renderers use a bounded recent window as a fallback.
+  // Always prioritize the latest settled result, even with scroll-follow off
+  // or before IntersectionObserver reports the new layout. Older turns remain
+  // viewport-lazy (a recent window in non-layout renderers).
+  const latestFinished = [...rows].reverse().find((row) => row.turn !== snapshot.active_turn);
+  if (latestFinished) requestAutomaticDiff(snapshot.id, latestFinished.turn);
   if (!diffObserver)
     for (const turn of [...visibleTurns].slice(-16)) requestAutomaticDiff(snapshot.id, turn);
   for (const turn of visibleTurns) {
@@ -1635,11 +1664,14 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     (node) => node.dataset.entry === anchorId,
   );
   transcript.scrollTop =
-    bottom && preferences.autoScroll
+    (bottom && preferences.autoScroll) ||
+    (jumpToLatest && !state?.view?.historical && state?.view?.status === 'ready')
       ? transcript.scrollHeight
       : restored && anchorOffset !== undefined
         ? scroll + restored.getBoundingClientRect().top - anchorOffset
         : scroll;
+  if (jumpToLatest && !state?.view?.historical && state?.view?.status === 'ready')
+    jumpToLatest = false;
 }
 function renderInteractions(snapshot: SessionView) {
   // Preserve partially entered answers across streaming/snapshot refresh. A
@@ -1783,6 +1815,7 @@ function renderInteractions(snapshot: SessionView) {
 function render() {
   if (!state) return;
   if (selected !== state.selected) {
+    jumpToLatest = false;
     saveDraft();
     selected = state.selected;
     prompt.value = drafts.get(selected || '');
@@ -2009,6 +2042,7 @@ function render() {
     retentionDays: summary?.retention_days,
     entries: state.view?.entries.length || 0,
     preview: previewActive && !snapshot,
+    historical: state.view?.historical,
     hasActivity: Boolean(
       state.view?.entries.some((row) => row.role === 'Thought') ||
         hasIntermediateAnswers(state.view?.entries || [], snapshot?.active_turn) ||

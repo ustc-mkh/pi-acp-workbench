@@ -10,8 +10,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetModules();
 });
-async function browser(saved?: unknown) {
+async function browser(saved?: unknown, silentIntersectionObserver = false) {
   dom = new JSDOM('<main id="workbench"></main>', { pretendToBeVisual: true });
+  if (silentIntersectionObserver)
+    Object.defineProperty(dom.window, 'IntersectionObserver', {
+      value: class {
+        observe() {}
+        disconnect() {}
+      },
+    });
   const sent: UiCommand[] = [];
   vi.stubGlobal('window', dom.window);
   vi.stubGlobal('document', dom.window.document);
@@ -192,7 +199,7 @@ it('bounds review caches and ignores duplicate diff pages across session changes
   for (let i = 0; i < 18; i++)
     b.post({ type: 'turn_diff', session: 'session', turn: `turn-${i}`, diff });
   await new Promise((resolve) => setTimeout(resolve, 40));
-  expect(b.document.querySelectorAll('[data-turn-review]')).toHaveLength(0); // No empty diff cards.
+  expect(b.document.querySelectorAll('[data-turn-review]')).toHaveLength(16); // Includes explicit zero-change results within the cache budget.
   expect(b.sent.filter((m) => m.type === 'read_turn_diff').length).toBeLessThanOrEqual(4);
   const file = {
     path: 'only-once.txt',
@@ -1315,4 +1322,130 @@ it('disables unadvertised Fast and thinking settings and restores the confirmed 
   b.update(3);
   await expect.poll(() => range.value).toBe('0');
   expect(b.document.querySelector('.model-thinking-label')!.textContent).toBe('低');
+});
+
+it('reads the newly finished turn without an intersection callback and displays a zero-change result', async () => {
+  const b = await browser(undefined, true);
+  const view = b.state.view!;
+  b.state.view = {
+    ...view,
+    view: { ...view.view!, status: 'Running', active_turn: 'live' as never },
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('input'),
+        turn: 'live' as never,
+        role: 'User',
+        message: null,
+        image: null,
+        text: { Inline: { text: 'hello' } },
+      },
+    ],
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('.message.user').length).toBe(1);
+  expect(b.sent.some((m) => m.type === 'read_turn_diff')).toBe(false);
+  b.state.view = {
+    ...b.state.view!,
+    view: { ...b.state.view!.view!, status: 'Idle', active_turn: null },
+    entries: [
+      ...b.state.view!.entries,
+      {
+        seq: 2,
+        id: entryId.parse('answer'),
+        turn: 'live' as never,
+        role: 'Agent',
+        message: null,
+        image: null,
+        text: { Inline: { text: 'done' } },
+      },
+    ],
+  };
+  b.update(2);
+  await expect
+    .poll(() => b.sent.some((m) => m.type === 'read_turn_diff' && m.turn === 'live' && m.automatic))
+    .toBe(true);
+  expect(b.document.querySelectorAll('.assistant .message-reuse')).toHaveLength(0);
+  const reuse = b.document.querySelector<HTMLButtonElement>('.user .message-reuse')!;
+  expect(reuse.textContent).toBe('重用');
+  reuse.click();
+  expect(b.document.querySelector<HTMLTextAreaElement>('#prompt')!.value).toBe('hello');
+  b.post({
+    type: 'turn_diff',
+    session: 'session',
+    turn: 'live',
+    diff: { status: 'complete', files: [], added: 0, removed: 0, warnings: [], next_offset: null },
+  });
+  await expect
+    .poll(() => b.document.querySelector('.turn-diff-header')?.textContent)
+    .toContain('本轮修改 · 0 个文件');
+  expect(b.document.querySelector('.turn-diff-files')?.textContent).toContain(
+    '本轮未检测到文件净变化',
+  );
+  expect(b.document.querySelector('.undo-turn')).toBeNull();
+});
+
+it('renders a whole archived formula and exposes only the arrow for returning to latest turns', async () => {
+  const b = await browser();
+  const text = '\\frac{a}{b} = x^2';
+  const ref = {
+    id: 'math-content',
+    kind: 'Text',
+    bytes: Buffer.byteLength(text),
+    sha256: createHash('sha256').update(text).digest('hex'),
+  };
+  b.state.view = {
+    ...b.state.view!,
+    historical: true,
+    earlier: { version: 3, session: 'session' as never, max_entry_seq: 4, before_seq: 1 },
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('begin'),
+        turn: 'math' as never,
+        role: 'Agent',
+        message: 'math-message' as never,
+        image: null,
+        text: { Inline: { text: '$$\n' } },
+      },
+      {
+        seq: 2,
+        id: entryId.parse('middle'),
+        turn: 'math' as never,
+        role: 'Agent',
+        message: 'math-message' as never,
+        image: null,
+        text: { Archived: { content: ref as never } },
+      },
+      {
+        seq: 3,
+        id: entryId.parse('end'),
+        turn: 'math' as never,
+        role: 'Agent',
+        message: 'math-message' as never,
+        image: null,
+        text: { Inline: { text: '\n$$\n完整结尾' } },
+      },
+    ],
+    resolvedText: { 'math-content': text },
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('.assistant .katex').length).toBe(1);
+  expect(b.document.querySelectorAll('.assistant .katex .mfrac')).toHaveLength(1);
+  expect(b.document.querySelector('.assistant')?.textContent).toContain('完整结尾');
+  expect(b.document.querySelectorAll('.assistant')).toHaveLength(1);
+  expect(
+    [...b.document.querySelectorAll('button')].some(
+      (n) => n.textContent === '加载更早消息（20 轮）',
+    ),
+  ).toBe(true);
+  expect(
+    [...b.document.querySelectorAll('button')].filter(
+      (n) => n.getAttribute('aria-label') === '回到最新消息',
+    ),
+  ).toHaveLength(1);
+  const arrow = b.document.querySelector<HTMLButtonElement>('#bottom')!;
+  expect(arrow.hidden).toBe(false);
+  arrow.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'latest', session: 'session' });
 });

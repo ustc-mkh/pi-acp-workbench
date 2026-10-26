@@ -39,7 +39,7 @@ export class ManagementPanel {
   private search = '';
   private modelDrafts = new Map<string, { value: string; checked: boolean }[]>();
   private focusSearch = false;
-  private extraOpen = { models: false, statistics: false };
+  private statisticsFiltersOpen = false;
   private expanded = new Set<string>();
   constructor(
     private send: (m: UiCommand) => void,
@@ -162,9 +162,10 @@ export class ManagementPanel {
       else this.expanded.delete(card.dataset.provider!);
     }
     while (this.expanded.size > 128) this.expanded.delete(this.expanded.values().next().value!);
-    const previousExtra = this.body.querySelector<HTMLDetailsElement>('.additional-settings');
-    if (previousExtra?.dataset.mode)
-      this.extraOpen[previousExtra.dataset.mode as 'models' | 'statistics'] = previousExtra.open;
+    const previousExtra = this.body.querySelector<HTMLDetailsElement>(
+      '.additional-settings[data-mode="statistics"]',
+    );
+    if (previousExtra) this.statisticsFiltersOpen = previousExtra.open;
     this.body.replaceChildren();
     this.root.insertBefore(this.status, this.body);
     this.status.className = 'stats-caption';
@@ -176,58 +177,6 @@ export class ManagementPanel {
       this.statistics();
       return;
     }
-    const summary = this.sessions.find((s) => s.id === this.view!.id);
-    const title = el('input');
-    title.value = summary?.title ?? '';
-    title.maxLength = 80;
-    title.setAttribute('aria-label', 'Session name');
-    const extra = el('details');
-    extra.className = 'additional-settings';
-    extra.dataset.mode = 'models';
-    extra.open = this.extraOpen.models;
-    extra.append(el('summary', '会话命名与其他设置'));
-    extra.append(
-      field(`会话 #${summary?.created_seq ?? '?'} 名称`, title),
-      button('Save session name', () => this.mutate({ action: 'rename', title: title.value })),
-    );
-    const naming = el('select');
-    naming.setAttribute('aria-label', 'Automatic title policy');
-    for (const [value, name] of [
-      ['follow', '跟随当前 Pi 模型'],
-      ['off', '关闭（仅使用输入摘要）'],
-      ['model', '指定 Pi 模型'],
-    ]) {
-      const option = el('option', name);
-      option.value = value;
-      naming.append(option);
-    }
-    naming.value = this.data?.naming_policy ?? 'follow';
-    const titleModel = el('input');
-    titleModel.value = this.data?.title_model ?? '';
-    titleModel.placeholder = 'provider/model';
-    titleModel.setAttribute('aria-label', '命名模型');
-    extra.append(
-      field('自动命名', naming),
-      field('命名模型', titleModel),
-      button('保存命名设置', () =>
-        this.mutate({
-          action: 'naming',
-          policy: naming.value as 'off' | 'follow' | 'model',
-          model: titleModel.value || null,
-        }),
-      ),
-      el(
-        'p',
-        'Pi 在首个任务后单独生成标题，最多等待 15 秒，用量单独记录。其他 Agent 使用本地输入摘要，已有名称不会覆盖。',
-      ),
-    );
-    extra.append(
-      button('刷新模型目录', () => this.mutate({ action: 'refresh_models' })),
-      el(
-        'p',
-        '刷新目录或调整上下文可能启动空闲 Agent，需要已信任的工作区。不支持的设置会明确提示。',
-      ),
-    );
     const titleSettings = el('label');
     titleSettings.className = 'title-model-setting';
     const titleChoice = el('select');
@@ -477,7 +426,7 @@ export class ManagementPanel {
       `${this.view.catalogue.models.length} / ${this.view.catalogue.models.length} 个模型`,
     );
     count.className = 'stats-caption';
-    this.body.append(search, count, list, extra);
+    this.body.append(search, count, list);
     render();
     if (this.focusSearch) {
       this.focusSearch = false;
@@ -584,7 +533,7 @@ export class ManagementPanel {
     const advanced = el('details');
     advanced.className = 'additional-settings';
     advanced.dataset.mode = 'statistics';
-    advanced.open = this.extraOpen.statistics;
+    advanced.open = this.statisticsFiltersOpen;
     advanced.append(el('summary', '更多筛选'), group, model, session);
     const apply = filters.querySelector<HTMLButtonElement>('button')!;
     advanced.append(apply);

@@ -46,6 +46,7 @@ export function buildClassicShell(options: {
   advanced: HTMLElement;
   historyOpen: boolean;
   onHistoryChange(open: boolean): void;
+  onLatest?(): void;
 }) {
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string) => {
     const node = document.createElement(tag);
@@ -120,17 +121,20 @@ export function buildClassicShell(options: {
   bottom.setAttribute('aria-label', '回到最新消息');
   bottom.title = '回到最新消息';
   bottom.hidden = true;
+  let historical = false;
   bottom.onclick = () => {
+    if (historical) options.onLatest?.();
     options.transcript.scrollTop = options.transcript.scrollHeight;
     updateBottom();
   };
   const updateBottom = () => {
     bottom.hidden =
-      !options.transcript.children.length ||
-      options.transcript.scrollHeight -
-        options.transcript.scrollTop -
-        options.transcript.clientHeight <
-        80;
+      !historical &&
+      (!options.transcript.children.length ||
+        options.transcript.scrollHeight -
+          options.transcript.scrollTop -
+          options.transcript.clientHeight <
+          80);
   };
   options.transcript.addEventListener('scroll', updateBottom, { passive: true });
   area.append(bottom);
@@ -193,7 +197,9 @@ export function buildClassicShell(options: {
       entries: number;
       hasActivity: boolean;
       preview?: boolean;
+      historical?: boolean;
     }) {
+      historical = !!view.historical;
       const glyph = view.harness === 'Pi' ? 'π' : view.harness === 'Codex' ? '>_' : 'C';
       logo.textContent = glyph;
       hero.textContent = glyph;

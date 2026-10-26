@@ -99,6 +99,19 @@ it('renders searchable grouped models, four prices, explicit context, titles and
     [...dom.window.document.querySelectorAll('button')]
       .find((n) => (n.getAttribute('aria-label') || n.textContent) === name)!
       .click();
+  expect(dom.window.document.querySelector('.additional-settings')).toBeNull();
+  expect(dom.window.document.body.textContent).not.toContain('会话命名与其他设置');
+  expect(dom.window.document.querySelector('[aria-label="Session name"]')).toBeNull();
+  expect(dom.window.document.querySelector('[aria-label="Automatic title policy"]')).toBeNull();
+  const titleChoice =
+    dom.window.document.querySelector<HTMLSelectElement>('[aria-label="会话名压缩模型"]')!;
+  titleChoice.value = 'vendor/model';
+  titleChoice.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  expect(sent.at(-1)).toMatchObject({
+    command: { action: { action: 'naming', policy: 'model', model: 'vendor/model' } },
+  });
+  click('刷新模型配置');
+  expect(sent.at(-1)).toMatchObject({ command: { action: { action: 'refresh_models' } } });
   click('应用上下文设置');
   expect(sent.at(-1)).toMatchObject({
     type: 'execute',

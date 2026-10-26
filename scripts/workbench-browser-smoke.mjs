@@ -200,19 +200,18 @@ try {
         [...document.querySelectorAll('button')].some((button) => button.id === 'send'),
       controller.snapshot.selected,
     );
-    const previous =
+    const acceptedInputs = () =>
       controller.snapshot.view?.entries.filter(
-        (row) => row.role === 'User' && row.text.Inline?.text === text,
+        (row) =>
+          row.role === 'User' &&
+          ('Inline' in row.text
+            ? row.text.Inline.text
+            : controller.snapshot.view.resolvedText?.[row.text.Archived.content.id]) === text,
       ).length || 0;
+    const previous = acceptedInputs();
     await page.locator('#prompt').fill(text);
     await page.getByRole('button', { name: '发送消息', exact: true }).click();
-    await wait(
-      () =>
-        (controller.snapshot.view?.entries.filter(
-          (row) => row.role === 'User' && row.text.Inline?.text === text,
-        ).length || 0) > previous,
-      `prompt ${text}`,
-    );
+    await wait(() => acceptedInputs() > previous, `prompt ${text.slice(0, 80)}`);
     await page.waitForFunction(() => document.querySelector('#prompt').value === '');
   };
   await wait(
@@ -412,10 +411,36 @@ try {
   );
   await page.locator('#interactions form').waitFor({ state: 'detached' });
   check('reserved control cancels a live waiting turn and clears its exact pending interaction');
+  await page.locator('#messages').evaluate((node) => {
+    node.parentElement.scrollTop = 0;
+  });
   await prompt('workspace-write');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'workspace write completion');
   const workspaceReviewTurn = controller.snapshot.view.entries.at(-1).turn;
   const workspaceTurnBox = page.locator(`section.turn[data-turn="${workspaceReviewTurn}"]`);
+  await workspaceTurnBox.locator('.turn-diff-header').waitFor();
+  const userMessage = workspaceTurnBox.locator('.message.user').first();
+  await userMessage.scrollIntoViewIfNeeded();
+  await userMessage.hover();
+  const reuse = userMessage.locator('.message-reuse');
+  const userBounds = await userMessage.boundingBox(),
+    reuseBounds = await reuse.boundingBox();
+  assert(userBounds && reuseBounds);
+  assert(
+    reuseBounds.x >= userBounds.x &&
+      reuseBounds.x + reuseBounds.width <= userBounds.x + userBounds.width + 1,
+  );
+  assert(
+    reuseBounds.y >= userBounds.y &&
+      reuseBounds.y + reuseBounds.height <= userBounds.y + userBounds.height + 1,
+  );
+  assert.equal(await page.locator('.assistant .message-reuse').count(), 0);
+  await reuse.click();
+  assert.equal(await page.locator('#prompt').inputValue(), 'workspace-write');
+  await page.locator('#prompt').fill('');
+  check(
+    'finished-turn Diff appears without scrolling; reuse stays inside the user bubble and never on assistant replies',
+  );
   await workspaceTurnBox.scrollIntoViewIfNeeded();
   await workspaceTurnBox.locator('.turn-diff-file > summary').first().waitFor();
   assert.equal(await page.getByRole('button', { name: '查看工作区变更', exact: true }).count(), 0);
@@ -461,19 +486,8 @@ try {
     );
   };
   await page.getByRole('button', { name: '模型设置', exact: true }).first().click();
-  await page.locator('#management .additional-settings > summary').click();
-  await page
-    .getByRole('textbox', { name: 'Session name', exact: true })
-    .fill('Browser managed name');
-  await manageClick('保存会话名称');
-  await wait(
-    () =>
-      controller.snapshot.sessions.some(
-        (s) => s.id === branch && s.title === 'Browser managed name',
-      ),
-    'S6 persisted manual name',
-  );
-  await manageClick('刷新模型目录');
+  assert.equal(await page.locator('#management .additional-settings').count(), 0);
+  await manageClick('刷新模型配置');
   const modelCard = page
     .locator('#management [data-model]')
     .filter({ has: page.locator('h3', { hasText: 'Other' }) });
@@ -511,10 +525,10 @@ try {
   assert(stats.totals.input >= 100);
   assert.equal(stats.totals.cache_read, 50);
   assert.equal(stats.totals.cache_write, 5);
-  assert(stats.groups.some((g) => g.label?.includes('Browser managed name')));
+  assert(stats.groups.some((g) => g.key === branch));
   assert.equal(await page.locator('#management table').count(), 1);
   check(
-    'S6 Chromium: persistent manual title, explicit provider model refresh, visibility and per-session token/cache statistics',
+    'S6 Chromium: single naming/refresh controls without redundant settings, model visibility and per-session token/cache statistics',
   );
   await page.getByRole('button', { name: '返回对话', exact: true }).click();
   const layout = await checkClassicLayout(page, artifacts);
@@ -550,11 +564,52 @@ try {
   check(
     'real history badge follows host residency; manual release preserves entries and explicit input resumes the same native session',
   );
+  const historyMath =
+    '历史公式正文\n' +
+    '保留完整内容。'.repeat(3000) +
+    '\n$$\n\\int_0^1 x^2 dx = \\frac{1}{3}\n$$\n公式末尾已完整恢复';
   for (let i = 0; i < 20; i++) {
-    await prompt(`bounded history ${i}`);
+    await prompt(i === 19 ? historyMath : `bounded history ${i}`);
     await wait(() => controller.snapshot.view?.view?.status === 'Idle', `history fixture ${i}`);
   }
   const beforeOlderReview = (await client.call({ method: 'history', session: branch })).entries;
+  await controller.receive({ type: 'select', session: source });
+  await wait(
+    () => controller.snapshot.selected === source && controller.snapshot.view?.status === 'ready',
+    'switch away',
+  );
+  await controller.receive({ type: 'select', session: branch });
+  await wait(
+    () => controller.snapshot.selected === branch && controller.snapshot.view?.status === 'ready',
+    'restore three full turns',
+  );
+  assert.equal(new Set(controller.snapshot.view.entries.map((r) => r.turn)).size, 3);
+  await page.locator('.assistant .katex').waitFor();
+  await page.locator('.assistant').filter({ hasText: '公式末尾已完整恢复' }).waitFor();
+  await page.getByRole('button', { name: '加载更早消息（20 轮）', exact: true }).click();
+  await wait(
+    () => new Set(controller.snapshot.view.entries.map((r) => r.turn)).size === 23,
+    'prepend twenty complete turns',
+  );
+  await page.waitForFunction(
+    () => document.querySelectorAll('section.turn[data-turn]').length === 23,
+  );
+  assert.equal(await page.getByRole('button', { name: '回到最新消息', exact: true }).count(), 1);
+  await page.locator('#bottom').click();
+  await wait(
+    () =>
+      !controller.snapshot.view.historical &&
+      new Set(controller.snapshot.view.entries.map((r) => r.turn)).size === 3,
+    'arrow restores latest three turns',
+  );
+  await page.getByRole('button', { name: '加载更早消息（20 轮）', exact: true }).click();
+  await wait(
+    () => new Set(controller.snapshot.view.entries.map((r) => r.turn)).size === 23,
+    'restore earlier twenty turns again',
+  );
+  check(
+    'switching restores three complete turns and archived LaTeX; earlier prepends twenty turns and the only latest control is the arrow',
+  );
   const olderTurn = page.locator(`section.turn[data-turn="${workspaceReviewTurn}"]`);
   await olderTurn.scrollIntoViewIfNeeded();
   await olderTurn.locator('.turn-diff-header').waitFor();

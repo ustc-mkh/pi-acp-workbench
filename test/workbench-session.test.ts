@@ -132,14 +132,20 @@ it('disconnect requires explicit reattachment and stopping does not reconnect fo
   expect(peer.requests).toHaveLength(count);
   expect(peer.sockets.size).toBe(0);
 });
-it('earlier browsing preserves current messages while current batches only update the hot view', async () => {
+it('earlier browsing preserves current messages and keeps receiving complete live output', async () => {
   const { peer, view, attaches } = await setup(false);
   const snapshot = emptyView(5);
   snapshot.last_entry_seq = 400;
   const cursor = { version: 3, session: snapshot.id, max_entry_seq: 400, before_seq: 201 };
   peer.query(attaches()[0], 'attached', {
     view: snapshot,
-    recent_page: { entries: [batch(5, 201).entries[0]], next_cursor: cursor },
+    recent_page: {
+      entries: [200, 201, 202, 203].map((n) => ({
+        ...batch(5, n).entries[0],
+        turn: ('turn-' + n) as never,
+      })),
+      next_cursor: { ...cursor, before_seq: 200 },
+    },
   });
   await view.start();
   const earlier = view.earlier();
@@ -152,7 +158,7 @@ it('earlier browsing preserves current messages while current batches only updat
   await earlier;
   send(peer, attaches()[0], batch(6, 401));
   await expect.poll(() => view.view.view?.revision).toBe(6);
-  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1, 201]);
+  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1, 201, 202, 203, 401]);
   expect(view.view.historical).toBe(true);
   const latest = view.latest();
   await expect
