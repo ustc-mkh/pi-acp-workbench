@@ -1,5 +1,6 @@
 /** One immediate, theme-aware tooltip surface for static and streamed content. */
 export function installTooltips(doc: Document = document) {
+  const { Element, Node, MutationObserver } = doc.defaultView!;
   const tip = doc.createElement('div');
   tip.id = 'chat-tooltip';
   tip.className = 'chat-tooltip';

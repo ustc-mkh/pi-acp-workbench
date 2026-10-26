@@ -137,6 +137,9 @@ pub(super) async fn dispatch(
                             continue;
                         }
                     }
+                    if record.retry_at > now() {
+                        continue;
+                    }
                     if tasks.len() >= CAPACITY {
                         continue;
                     }

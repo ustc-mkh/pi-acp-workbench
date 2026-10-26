@@ -50,6 +50,8 @@ let mediaClosed = 0;
 let releaseMedia;
 let nextUpdate = 1;
 let topics = 0;
+const topicNames = [];
+const topicTitleEdits = [];
 let acknowledgements = 0;
 let rateLimit = false;
 let rateFailures = 0;
@@ -138,12 +140,18 @@ const server = createServer(async (request, response) => {
   let result;
   let error;
   if (method === 'getMe') result = { id: 999, is_bot: true, username: 'fixture_bot' };
-  else if (method === 'getUpdates') {
+  else if (method === 'getChat') result = { id: body.chat_id, is_forum: true };
+  else if (method === 'editForumTopic') {
+    topicTitleEdits.push(body);
+    result = true;
+  } else if (method === 'getUpdates') {
     assert.deepEqual(body.allowed_updates, ['message', 'callback_query']);
     if (fatalPoll) error = { error_code: 401, description: `DO NOT LOG ${token}` };
     else result = updates.filter((update) => update.update_id >= body.offset);
-  } else if (method === 'createForumTopic') result = { message_thread_id: 100 + 1000 * ++topics };
-  else if (method === 'sendMessage') {
+  } else if (method === 'createForumTopic') {
+    topicNames.push(body.name);
+    result = { message_thread_id: 100 + 1000 * ++topics };
+  } else if (method === 'sendMessage') {
     if (rateLimit) {
       rateLimit = false;
       rateFailures++;
@@ -455,7 +463,7 @@ try {
     () => stat(`${configGate}.started`).catch(() => null),
     'blocked Telegram provider setting',
   );
-  const otherThread = thread + 1;
+  let otherThread = thread + 1;
   text('/new', otherThread);
   await until(
     async () => (await client.call({ method: 'list' })).sessions.length === 2,
@@ -465,13 +473,10 @@ try {
     (entry) => entry.id !== session,
   ).id;
   await until(
-    () =>
-      sent.some(
-        (message) =>
-          message.message_thread_id === otherThread && message.text.startsWith('Session '),
-      ),
+    () => sent.some((message) => message.text.startsWith(`Session ${otherSession}`)),
     'independent topic binding',
   );
+  otherThread = sent.find((m) => m.text.startsWith(`Session ${otherSession}`)).message_thread_id;
   await client.call({ method: 'attach', session: otherSession });
   const independent = client.waitFor((batch) => turnFinished(batch, otherSession));
   text('independent-while-config-blocked', otherThread);
@@ -647,7 +652,7 @@ try {
   await writeFile(`${configGate}.release`, 'fatal-cleanup barrier finished');
   // Independent topic: preferences are useful before a session even exists.
   // Keep this after the source-removal oracle so its image counts stay independent.
-  const preferenceThread = thread + 2;
+  let preferenceThread = thread + 2;
   const coldBefore = (await trace()).filter((record) =>
     ['boot', 'session/prompt'].includes(record.method),
   );
@@ -700,13 +705,19 @@ try {
     )?.id;
     return (
       preferenceSession &&
-      sent.some(
-        (message) =>
-          message.message_thread_id === preferenceThread &&
-          message.text.startsWith(`Session ${preferenceSession}`),
-      )
+      sent.some((message) => message.text.startsWith(`Session ${preferenceSession}`))
     );
-  }, 'new session bound to the muted topic');
+  }, 'new session gets its own topic');
+  preferenceThread = sent.find((m) =>
+    m.text.startsWith(`Session ${preferenceSession}`),
+  ).message_thread_id;
+  text('/notifications off', preferenceThread);
+  text('/silent on', preferenceThread);
+  await until(
+    () =>
+      sent.some((m) => m.message_thread_id === preferenceThread && m.text.startsWith('Silent: on')),
+    'independent new topic preferences',
+  );
   await client.call({ method: 'attach', session: preferenceSession });
   assert.equal(
     (await client.call({ method: 'inspect', session: preferenceSession })).config.model,
@@ -817,7 +828,7 @@ try {
   const menuTargetSummary = (await client.call({ method: 'create', harness: 'Pi', cwd: root }))
     .Created.summary;
   const menuTarget = menuTargetSummary.id;
-  const menuThread = preferenceThread + 1;
+  let menuThread = preferenceThread + 1;
   const menuButtons = (heading) =>
     sent
       .findLast(
@@ -855,14 +866,7 @@ try {
     menuSession = (await client.call({ method: 'list' })).sessions.find(
       (entry) => !beforeMenu.has(entry.id),
     )?.id;
-    return (
-      menuSession &&
-      sent.some(
-        (message) =>
-          message.message_thread_id === menuThread &&
-          message.text.startsWith(`Session ${menuSession}`),
-      )
-    );
+    return menuSession && sent.some((message) => message.text.startsWith(`Session ${menuSession}`));
   }, 'persisted menu create callback after restart');
   const usedStart = sent.length;
   callback(newButton.callback_data, menuThread);
@@ -884,6 +888,7 @@ try {
   check(
     'interactive configured-harness menu survives restart; wrong-topic/unauthorized/double clicks cannot create extra sessions',
   );
+  menuThread = sent.find((m) => m.text.startsWith(`Session ${menuSession}`)).message_thread_id;
   const preferenceNumber = menuTargetSummary.created_seq;
   for (let i = 0; i < 12; i++) await client.call({ method: 'create', harness: 'Pi', cwd: root });
   text('/menu sessions', menuThread);
@@ -933,12 +938,9 @@ try {
       });
       throw new Error(`menu open failed: ${JSON.stringify(result)}`);
     }
-    return sent.some(
-      (message) =>
-        message.message_thread_id === menuThread &&
-        message.text === `Attached session ${menuTarget}`,
-    );
+    return sent.some((message) => message.text === `Attached session ${menuTarget}`);
   }, 'menu opens the selected cold session');
+  menuThread = sent.findLast((m) => m.text === `Attached session ${menuTarget}`).message_thread_id;
   check(
     'mobile session menu traverses bounded keyset pages and opens the exact selected existing session through the shared command path',
   );
@@ -995,13 +997,13 @@ try {
   assert(staleStop);
   text(`/open ${menuSession}`, menuThread);
   await until(
-    () =>
-      sent.some(
-        (message) =>
-          message.message_thread_id === menuThread &&
-          message.text === `Attached session ${menuSession}`,
-      ),
-    'topic rebind before stale menu click',
+    () => sent.some((message) => message.text === `Attached session ${menuSession}`),
+    'open redirects to the existing topic without stealing bindings',
+  );
+  text('/remove', menuThread);
+  await until(
+    async () => !(await client.call({ method: 'list' })).sessions.some((s) => s.id === menuTarget),
+    'remove invalidates old topic controls',
   );
   const rejectedStart = sent.length;
   const staleTrace = await trace();
@@ -1022,7 +1024,7 @@ try {
     'a stale menu must not cancel/configure a different bound task',
   );
   check(
-    'provider-offered model/mode menu buttons execute real configuration; rebinding invalidates old session controls before Agent effects',
+    'provider-offered model/mode menu buttons execute real configuration; opening keeps bindings and removal invalidates old controls before Agent effects',
   );
   const directoryRoot = join(root, 'directory-fixture');
   for (let index = 0; index < 13; index++)
@@ -1094,11 +1096,7 @@ try {
     )?.id;
     return (
       directorySession &&
-      sent.some(
-        (message) =>
-          message.message_thread_id === directoryThread &&
-          message.text.startsWith(`Session ${directorySession}`),
-      )
+      sent.some((message) => message.text.startsWith(`Session ${directorySession}`))
     );
   }, 'selected directory callback creates after restart');
   const directoryView = await client.call({ method: 'inspect', session: directorySession });
@@ -1158,13 +1156,7 @@ try {
   const restoredStart = sent.length;
   callback(guardedNew.callback_data, directoryThread);
   await until(
-    () =>
-      sent
-        .slice(restoredStart)
-        .some(
-          (message) =>
-            message.message_thread_id === directoryThread && message.text.startsWith('Session '),
-        ),
+    () => sent.slice(restoredStart).some((message) => message.text.startsWith('Session ')),
     'rejected key remains unused after scope restored',
   );
   assert.equal((await client.call({ method: 'list' })).sessions.length, beforeDirectory.size + 2);
@@ -1172,7 +1164,9 @@ try {
   check(
     'directory selection revalidates current canonical workspace before admission; escape cannot create or consume the key, and restored scope permits the original explicit choice',
   );
-  const historyThread = menuThread + 2;
+  const historyThread = sent.find((m) =>
+    m.text.startsWith(`Session ${directorySession}`),
+  ).message_thread_id;
   text('/notifications off', historyThread);
   await until(
     () =>
@@ -1396,26 +1390,21 @@ try {
     'history exported during an active task is not resent by final automatic text/image delivery; reliable completion remains visible and shared dedup survives restart without Agent replay',
   );
   // One integrated mobile workflow, not a new collection of isolated APIs.
-  const flowThread = menuThread + 500;
+  let flowThread = menuThread + 500;
   let flowStart = sent.length;
   text(`/new pi ${chosenDirectory}`, flowThread);
   await until(
-    () =>
-      sent
-        .slice(flowStart)
-        .some(
-          (message) =>
-            message.message_thread_id === flowThread && message.text.startsWith('Session '),
-        ),
+    () => sent.slice(flowStart).some((message) => message.text.startsWith('Session ')),
     'S4 mobile create',
   );
   const flowSession = sent
     .slice(flowStart)
-    .find(
-      (message) => message.message_thread_id === flowThread && message.text.startsWith('Session '),
-    )
+    .find((message) => message.text.startsWith('Session '))
     .text.split('\n')[0]
     .slice(8);
+  flowThread = sent
+    .slice(flowStart)
+    .find((m) => m.text.startsWith(`Session ${flowSession}`)).message_thread_id;
   const promptCountBeforeDiscovery = (await trace()).filter(
     (record) => record.method === 'session/prompt',
   ).length;
@@ -1735,6 +1724,31 @@ try {
   );
   check(
     'S4 integrated mobile create → pre-task discover/model → A/B queue → authorize → stop/interrupt barriers → restart queue → input/output/history → throttled edit preview/reliable final → cross-session sync, without queued-input or Agent replay',
+  );
+  const topicCountBeforeDesktop = topics;
+  const providerCountBeforeDesktop = (await trace()).filter((r) => r.method === 'boot').length;
+  const desktop = (await client.call({ method: 'create', harness: 'Pi', cwd: root })).Created
+    .summary;
+  await until(
+    () =>
+      topics > topicCountBeforeDesktop && topicNames.includes(`#${desktop.created_seq} · 新对话`),
+    'desktop session automatically creates its forum topic',
+  );
+  await client.call({
+    method: 'manage',
+    session: desktop.id,
+    action: { action: 'rename', title: 'Desktop 中文 😀' },
+  });
+  await until(
+    () => topicTitleEdits.some((m) => m.name === `#${desktop.created_seq} · Desktop 中文 😀`),
+    'desktop topic title follows manual rename',
+  );
+  assert.equal(
+    (await trace()).filter((r) => r.method === 'boot').length,
+    providerCountBeforeDesktop,
+  );
+  check(
+    'classic desktop auto-topic/title mirror remains cold and shares stable creation receipts with explicit sync',
   );
   await stop(daemon);
   console.log(`\n${checks} new-workbench Telegram/IPC contract checks passed`);

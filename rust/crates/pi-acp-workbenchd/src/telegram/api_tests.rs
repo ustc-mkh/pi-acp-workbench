@@ -5,6 +5,40 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
+
+#[tokio::test]
+async fn forum_discovery_and_topic_title_edits_use_typed_requests_and_idempotent_unchanged() {
+    let chat = ChatId::new(-100).unwrap();
+    let (base, request) = peer(
+        "200 OK",
+        "",
+        r#"{"ok":true,"result":{"id":-100,"is_forum":true}}"#.into(),
+    )
+    .await;
+    assert!(BotClient::new(&base, "123:SECRET")
+        .unwrap()
+        .forum_chat(chat)
+        .await
+        .unwrap());
+    let body = String::from_utf8(request.await.unwrap()).unwrap();
+    assert!(body.starts_with("POST /bot123:SECRET/getChat "));
+    assert!(body.contains("\"chat_id\":-100"));
+    let (base, request) = peer(
+        "400 Bad Request",
+        "",
+        r#"{"ok":false,"error_code":400,"description":"Bad Request: TOPIC_NOT_MODIFIED"}"#.into(),
+    )
+    .await;
+    BotClient::new(&base, "123:SECRET")
+        .unwrap()
+        .edit_topic(chat, TopicId::new(10).unwrap(), "#1 · 中文 😀")
+        .await
+        .unwrap();
+    let body = String::from_utf8(request.await.unwrap()).unwrap();
+    assert!(body.starts_with("POST /bot123:SECRET/editForumTopic "));
+    assert!(body.contains("\"message_thread_id\":10"));
+    assert!(body.contains("#1 · 中文 😀"));
+}
 async fn peer(
     status: &str,
     extra: &str,

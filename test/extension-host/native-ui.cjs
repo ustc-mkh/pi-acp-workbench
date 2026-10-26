@@ -47,7 +47,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
   const send = async (text, finish = true) => {
     const previous = state().view.entries.filter((entry) => entry.role === 'User').length;
     await frame.locator('#prompt').fill(text);
-    await frame.getByRole('button', { name: 'Send', exact: true }).click();
+    await frame.getByRole('button', { name: '发送消息', exact: true }).click();
     await until(
       () => state().view?.entries.filter((entry) => entry.role === 'User').length > previous,
       `accepted ${text}`,
@@ -144,9 +144,9 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
 
     await vscode.env.clipboard.writeText('p6-owned-clipboard');
     await frame
-      .locator('article.agent')
+      .locator('article.assistant')
       .first()
-      .getByRole('button', { name: 'Copy message', exact: true })
+      .getByRole('button', { name: '复制消息', exact: true })
       .click();
     await until(
       async () => (await vscode.env.clipboard.readText()) === 'echo: IME enter',
@@ -154,18 +154,19 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     );
     checks.push('native clipboard port with test-owned content');
 
-    await frame.getByRole('button', { name: 'Discover provider settings', exact: true }).click();
     await until(
       () => state().view?.view?.catalogue.selects?.some((option) => option.id === 'thought_level'),
-      'provider settings',
+      'automatically loaded provider settings',
     );
-    await frame.getByLabel('Thinking', { exact: true }).selectOption('high');
+    await frame.getByRole('button', { name: '模型、思考和 Fast 设置', exact: true }).click();
+    await frame.getByRole('slider', { name: '思考强度', exact: true }).press('End');
     await until(
       () => state().view?.view?.config.options?.thought_level === 'high',
       'thinking observed',
     );
-    await frame.getByLabel('Fast', { exact: true }).selectOption('on');
+    await frame.getByRole('button', { name: 'Fast Mode', exact: true }).click();
     await until(() => state().view?.view?.config.options?.fast === 'on', 'Fast observed');
+    await frame.locator('[aria-label="思考强度"]').press('Escape');
     checks.push('real settings controls / observed synthetic provider configuration');
 
     await frame.locator('#prompt').fill('session-local draft');
@@ -177,11 +178,14 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     );
     await until(
       async () =>
-        (await frame.getByLabel('Session', { exact: true }).inputValue()) === state().selected &&
+        (await frame
+          .locator('#history-items [aria-selected="true"]')
+          .getAttribute('data-session-id')) === state().selected &&
         (await frame.locator('#prompt').inputValue()) === '',
       'new session rendered without old draft',
     );
-    await frame.getByLabel('Session', { exact: true }).selectOption(first);
+    await frame.getByRole('button', { name: '历史记录', exact: true }).click();
+    await frame.locator(`[data-session-id="${first}"] .history-open`).click();
     await until(
       () => state().selected === first && state().view?.status === 'ready',
       'restore first session',
@@ -201,7 +205,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     await vscode.commands.executeCommand('piAcp.attachSelection');
     await frame.locator('#attachments summary').first().click();
     await frame.locator('#attachments').getByText('selected', { exact: true }).waitFor();
-    await frame.getByRole('button', { name: 'Attach files', exact: true }).click();
+    await frame.getByRole('button', { name: '添加上下文', exact: true }).click();
     const picker = page.locator('.quick-input-widget input').first();
     await picker.waitFor({ state: 'visible' });
     await picker.fill(selectedPath);
@@ -232,7 +236,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     assert(state().view.view.active_turn, 'hiding native view must not cancel the host task');
     await vscode.commands.executeCommand('piAcp.open');
     await findView();
-    await frame.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+    await frame.getByRole('button', { name: '停止输出', exact: true }).click();
     await until(
       () => state().view?.view?.status === 'Idle' && !state().view.view.active_turn,
       'cancel after reopen',
@@ -282,7 +286,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
       );
 
       const cancelledPermission = await permission();
-      await frame.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+      await frame.getByRole('button', { name: '停止输出', exact: true }).click();
       await idle();
       const terminal = await secondPeer.call({ method: 'inspect', session });
       await assert.rejects(
@@ -318,7 +322,9 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
       );
       await until(
         async () =>
-          (await frame.getByLabel('Session', { exact: true }).inputValue()) === state().selected,
+          (await frame
+            .locator('#history-items [aria-selected="true"]')
+            .getAttribute('data-session-id')) === state().selected,
         'new selection rendered',
       );
       const oldBefore = await secondPeer.call({ method: 'inspect', session });
@@ -330,12 +336,13 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
       const oldAfter = await secondPeer.call({ method: 'inspect', session });
       assert.deepEqual(oldAfter.pending_interactions, oldBefore.pending_interactions);
       assert.equal(oldAfter.revision, oldBefore.revision);
-      await frame.getByLabel('Session', { exact: true }).selectOption(session);
+      await frame.getByRole('button', { name: '历史记录', exact: true }).click();
+      await frame.locator(`[data-session-id="${session}"] .history-open`).click();
       await until(
         () => state().selected === session && state().view?.status === 'ready',
         'restore authorization session',
       );
-      await frame.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+      await frame.getByRole('button', { name: '停止输出', exact: true }).click();
       await idle();
       checks.push(
         'detached old native permission button cannot authorize a session after selection changes',
@@ -346,12 +353,14 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
 
     const reviewTurn = await send('workspace-write');
     const reviewTurnElement = frame.locator(`section.turn[data-turn="${reviewTurn}"]`);
+    await reviewTurnElement.locator('.turn-diff-files > summary').waitFor();
+    assert.equal(
+      await reviewTurnElement.getByRole('button', { name: '查看工作区变更', exact: true }).count(),
+      0,
+    );
+    await reviewTurnElement.locator('.turn-diff-file > summary').first().click();
     await reviewTurnElement
-      .getByRole('button', { name: 'Review workspace changes', exact: true })
-      .click();
-    await reviewTurnElement.getByText('complete · +2 −2 lines', { exact: true }).click();
-    await reviewTurnElement
-      .getByRole('button', { name: 'Compare file in editor', exact: true })
+      .getByRole('button', { name: '在编辑器中对比', exact: true })
       .first()
       .click();
     await until(
@@ -368,7 +377,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     assert.equal(diff.modified.scheme, 'workbench-diff');
     assert.equal((await vscode.workspace.openTextDocument(diff.original)).getText(), '');
     assert.equal((await vscode.workspace.openTextDocument(diff.modified)).getText(), 'added\n');
-    await frame.getByRole('button', { name: 'View total Diff in editor', exact: true }).click();
+    await frame.getByRole('button', { name: '查看总 Diff', exact: true }).click();
     await until(
       () =>
         vscode.window.tabGroups.all.some((group) =>
@@ -384,7 +393,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     edit.insert(review.uri, new vscode.Position(0, 0), 'unsaved fixture\n');
     assert(await vscode.workspace.applyEdit(edit));
     assert(review.isDirty);
-    await frame.getByRole('button', { name: 'Undo this turn…', exact: true }).last().click();
+    await frame.getByRole('button', { name: '撤回本轮修改', exact: true }).last().click();
     await until(
       () => state().error?.includes('Save or close dirty editor buffers'),
       'dirty-buffer undo rejection',
@@ -396,7 +405,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     checks.push('native dirty editor buffer prevents undo without touching disk');
 
     const undo = () =>
-      frame.getByRole('button', { name: 'Undo this turn…', exact: true }).last().click();
+      frame.getByRole('button', { name: '撤回本轮修改', exact: true }).last().click();
     await undo();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -416,7 +425,7 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     checks.push('actual Host modal cancellation / confirmation and durable three-file undo');
 
     const exportPath = join(root, 'native-export.md');
-    await frame.getByRole('button', { name: 'Export Markdown', exact: true }).click();
+    await frame.getByRole('button', { name: '导出 Markdown', exact: true }).click();
     await picker.waitFor({ state: 'visible' });
     await picker.fill(exportPath);
     await picker.press('Enter');

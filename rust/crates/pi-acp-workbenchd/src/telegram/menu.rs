@@ -358,16 +358,13 @@ pub(super) async fn build(
                     session.harness,
                     short(session.title.as_deref().unwrap_or(session.cwd.as_str()))
                 );
-                if context
-                    .store
-                    .topic(&session.id)
-                    .await?
-                    .is_some_and(|bound| bound != *topic)
-                {
-                    menu.text.push_str(&format!(
-                        "{label} · already bound to another topic; use that topic\n"
-                    ));
+                let bound = context.store.topic(&session.id).await?;
+                if bound.as_ref().is_some_and(|bound| bound.chat != topic.chat) {
                     continue;
+                }
+                if bound.as_ref().is_some_and(|bound| bound != topic) {
+                    menu.text
+                        .push_str(&format!("{label} · 已有话题，打开时继续使用原话题\n"));
                 }
                 menu.text.push_str(&format!("{label}\n"));
                 menu.push(

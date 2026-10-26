@@ -375,6 +375,7 @@ export type ManagementData = Infer<typeof managementData>;
 export type ManagementQuery = Infer<typeof managementQuery>;
 export type ManagementAction = Infer<typeof managementAction>;
 export const sessionSummary = object({
+  retention_days: optional(checked(uint, (n) => n === 0 || n === 1 || n === 4)),
   title: optional(nullable(string)),
   id: sessionId,
   harness,

@@ -97,9 +97,9 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   expect(dom.window.document.querySelector('script')).toBeNull();
   const click = (name: string) =>
     [...dom.window.document.querySelectorAll('button')]
-      .find((n) => n.textContent === name)!
+      .find((n) => (n.getAttribute('aria-label') || n.textContent) === name)!
       .click();
-  click('Apply Pi context explicitly');
+  click('应用上下文设置');
   expect(sent.at(-1)).toMatchObject({
     type: 'execute',
     command: {
@@ -107,14 +107,32 @@ it('renders searchable grouped models, four prices, explicit context, titles and
       action: { action: 'context', model: 'vendor/model', context_window: 256000 },
     },
   });
-  click('Save prices / visibility');
+  click('保存价格与显示设置');
   expect(sent.at(-1)).toMatchObject({
     command: { action: { action: 'model', price: { cache_read: 0.1, cache_write: 1 } } },
   });
-  click('Hide provider');
+  click('隐藏全部模型');
   expect(sent.at(-1)).toMatchObject({
     command: { action: { action: 'visibility', models: ['vendor/model'], hidden: true } },
   });
+  const input = dom.window.document.querySelector<HTMLInputElement>(
+    '[aria-label="vendor/model input price"]',
+  )!;
+  input.value = '12.5';
+  input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  const beforeRefresh = sent.filter((m) => m.type === 'execute').length;
+  panel.openModels();
+  const refreshed = sent.at(-1)!;
+  panel.receive({
+    type: 'management',
+    request_id: 'request_id' in refreshed ? refreshed.request_id : 0,
+    data,
+  });
+  expect(
+    dom.window.document.querySelector<HTMLInputElement>('[aria-label="vendor/model input price"]')!
+      .value,
+  ).toBe('12.5');
+  expect(sent.filter((m) => m.type === 'execute')).toHaveLength(beforeRefresh);
   panel.openStatistics();
   const stats = sent.at(-1)!;
   const row = {
@@ -139,8 +157,8 @@ it('renders searchable grouped models, four prices, explicit context, titles and
       next_cursor: 'Pi/vendor/model',
     },
   });
-  expect(dom.window.document.body.textContent).toContain('Filtered total');
-  click('Next statistics page');
+  expect(dom.window.document.querySelectorAll('.stats-card')).toHaveLength(4);
+  click('下一页统计');
   expect(sent.at(-1)).toMatchObject({
     type: 'read_management',
     query: { cursor: 'Pi/vendor/model' },

@@ -99,7 +99,7 @@ pub async fn admit_update(
                 }
             }
             TelegramAction::Control(ControlCommand::Menu { create_topic, .. }) => {
-                let forum_general = update.forum && update.topic.thread.is_none();
+                let forum_general = update.forum;
                 if callback.is_some() && *create_topic != forum_general {
                     *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
                 } else {
@@ -110,7 +110,7 @@ pub async fn admit_update(
                 cwd, create_topic, ..
             }) => match authorize_workspace(cwd, &policy.cwd).await {
                 Ok(canonical) => {
-                    let forum_general = update.forum && update.topic.thread.is_none();
+                    let forum_general = update.forum;
                     if callback.is_some() && (*cwd != canonical || *create_topic != forum_general) {
                         *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
                     } else {

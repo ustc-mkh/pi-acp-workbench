@@ -167,6 +167,14 @@ pub(super) enum StoreRequest {
         session: SessionId,
         reply: Reply<SessionView>,
     },
+    Summary {
+        session: SessionId,
+        reply: Reply<SessionSummary>,
+    },
+    WorkerActivity {
+        session: SessionId,
+        reply: Reply<(u64, u64)>,
+    },
     List {
         cursor: Option<ListCursor>,
         limit: Option<usize>,
@@ -506,6 +514,12 @@ fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest)
         StoreRequest::Commit { commit, reply } => {
             let _ = reply.send(query::commit(connection, *commit));
         }
+        StoreRequest::Summary { session, reply } => {
+            let _ = reply.send(query::summary_by_id(connection, &session));
+        }
+        StoreRequest::WorkerActivity { session, reply } => {
+            let _ = reply.send(query::worker_activity(connection, &session));
+        }
         StoreRequest::View { session, reply } => {
             let _ = reply.send(query::view(connection, &session));
         }
@@ -643,6 +657,8 @@ impl StoreRequest {
             Self::Create { .. } => "create",
             Self::Commit { .. } => "commit",
             Self::View { .. } => "view",
+            Self::Summary { .. } => "summary",
+            Self::WorkerActivity { .. } => "worker_activity",
             Self::List { .. } | Self::Search { .. } | Self::ActivityList { .. } => "list",
             Self::History { .. } => "history",
             Self::ContentSlice { .. } => "content_slice",
@@ -1055,6 +1071,21 @@ impl Database {
             reply,
         })
         .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub(crate) async fn summary(&self, session: SessionId) -> Result<SessionSummary, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::Summary { session, reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub(crate) async fn worker_activity(
+        &self,
+        session: SessionId,
+    ) -> Result<(u64, u64), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::WorkerActivity { session, reply })
+            .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn view(&self, session: SessionId) -> Result<SessionView, StoreError> {

@@ -258,27 +258,6 @@ pub(crate) async fn dispatch(
                     .app
                     .operation_result(&record.operation, &command)
                     .await?;
-                let mut destination = topic.clone();
-                if *create_topic {
-                    let operation = OperationId::new(format!("topic-{}", record.id.get()))?;
-                    let folder = cwd
-                        .as_ref()
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("workspace");
-                    let name: String = format!("{harness:?}: {folder}").chars().take(100).collect();
-                    destination.thread = Some(if existing.is_some() {
-                        context
-                            .effects
-                            .completed(&operation, topic.chat, &name)
-                            .await?
-                    } else {
-                        context
-                            .effects
-                            .create_topic(operation, &context.api, topic.chat, name)
-                            .await?
-                    });
-                }
                 let events = match existing {
                     Some(result) => result?,
                     None => {
@@ -292,6 +271,11 @@ pub(crate) async fn dispatch(
                     return Err(DomainError::Persistence(
                         "create receipt missing summary".into(),
                     ));
+                };
+                let destination = if *create_topic {
+                    super::topics::ensure(context, topic.chat, &snapshot.id).await?
+                } else {
+                    topic.clone()
                 };
                 context
                     .store
@@ -319,6 +303,23 @@ pub(crate) async fn dispatch(
                     return Err(DomainError::Persistence("load receipt missing view".into()));
                 };
                 authorize_workspace(&snapshot.cwd, &context.config.workspace).await?;
+                if let Some(existing) = context.store.topic(session).await? {
+                    if existing.chat != topic.chat {
+                        return Err(DomainError::OperationConflict);
+                    }
+                    // Open means continue in the original topic, never steal
+                    // its binding or rebind the caller's unrelated session.
+                    return Ok(Some((existing, format!("Attached session {session}"))));
+                }
+                if context
+                    .auto_forum
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == topic.chat.get()
+                    || matches!(context.api.forum_chat(topic.chat).await, Ok(true))
+                {
+                    let destination = super::topics::ensure(context, topic.chat, session).await?;
+                    return Ok(Some((destination, format!("Attached session {session}"))));
+                }
                 context.store.bind(topic.clone(), session.clone()).await?;
                 format!("Attached session {session}")
             }

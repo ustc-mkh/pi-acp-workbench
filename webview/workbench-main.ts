@@ -1,3 +1,7 @@
+import { ModelControls } from './workbench-model-controls';
+import { installTooltips } from './tooltips';
+import { uiLabel } from './workbench-labels';
+import { buildClassicShell, decorateIcon } from './workbench-shell';
 import { MessageProjection } from '../src/workbench-messages';
 import { reconcile } from './workbench-dom';
 import { installComposerResize } from './composer-resize';
@@ -39,6 +43,8 @@ const images = new Map<string, { asset: ImageAsset; url: string }>();
 const imageErrors = new Map<string, string>(),
   pendingImages = new Map<number, { image: string; session: string }>();
 const diffContents = new Map<string, { text: string; nextOffset?: number | null }>();
+const diffReads = new Set<string>();
+const attemptedDiffs = new Set<string>();
 const turnDiffs = new Map<string, import('../src/workbench-protocol').TurnDiff>();
 let nextUiRequest = 0;
 let titleRefreshTimer: number | undefined;
@@ -69,7 +75,16 @@ function disclosure(key: string, fallback = false) {
 const pendingPrompts = new Map<string, Set<string>>();
 const draftGenerations = new Map<string, number>();
 const promptOperations = new Map<string, { generation: number; operation: string }>();
-const pendingPiDrafts = new Map<string, { generation: number; after: number }>();
+const pendingPiDrafts = new Map<
+  string,
+  {
+    generation: number;
+    after: number;
+    text: string;
+    attachments: ReturnType<AttachmentDrafts['get']>;
+    image?: ImageAsset;
+  }
+>();
 let nextDraftGeneration = 0;
 function clearAcceptedDraft(session: string) {
   inputImages.delete(session);
@@ -95,9 +110,19 @@ function settlePiDraft() {
   if (!rejected && !observed && state.view.view.active_turn) return;
   pendingPiDrafts.delete(selected);
   if (rejected) {
-    error.textContent = 'Pi is working autonomously. Input was not sent; draft preserved.';
-  } else if (pending.generation === (draftGenerations.get(selected) || 0)) {
-    clearAcceptedDraft(selected);
+    const unchanged =
+      pending.generation === (draftGenerations.get(selected) || 0) && !hasDraftContent();
+    if (unchanged) {
+      drafts.set(selected, pending.text);
+      prompt.value = pending.text;
+      attachmentDrafts.set(selected, pending.attachments);
+      if (pending.image) inputImages.set(selected, pending.image);
+      renderAttachments();
+      persist();
+    }
+    error.textContent = unchanged
+      ? 'Agent 正在后台工作，输入未发送，已恢复草稿。'
+      : 'Agent 正在后台工作，输入未发送；当前草稿已保留，旧输入可从对应用户消息恢复。';
   }
 }
 function touchDraft(session = selected || '') {
@@ -115,26 +140,39 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function button(label: string, click: () => void, disabled = false) {
-  const node = element('button', label);
+function button(label: string, click: () => void, disabled = false, translate = true) {
+  const full = translate ? uiLabel(label) : label;
+  const short: Record<string, string> = {
+    'Copy message': '复制',
+    'Use as prompt': '重用',
+    'Fork here': '分支',
+  };
+  const node = element('button', translate ? short[label] || full : full);
+  if (translate && short[label]) node.setAttribute('aria-label', full);
+  if (label === 'Use as prompt' && translate) node.classList.add('message-reuse');
   node.type = 'button';
   node.disabled = disabled;
   node.onclick = click;
   return node;
 }
 const management = new ManagementPanel(send, schedule);
-const header = element('header'),
-  title = element('h1', 'Pi Workbench');
+const modelControls = new ModelControls(schedule);
+const header = element('header');
 const harness = element('select');
-harness.setAttribute('aria-label', 'New session provider');
+harness.id = 'harness-switch';
+harness.setAttribute('aria-label', '切换 Harness');
 for (const name of ['Pi', 'Codex', 'Claude']) {
-  const option = element('option', name);
+  const option = element(
+    'option',
+    name === 'Pi' ? 'Pi Agent' : name === 'Claude' ? 'Claude Code' : name,
+  );
   option.value = name;
   harness.append(option);
 }
 const newSession = button(
   'New session',
   () => {
+    previewActive = false;
     if (!state?.trusted || !state.workspace) return;
     send({
       type: 'create',
@@ -147,28 +185,51 @@ const newSession = button(
   },
   true,
 );
-header.append(
-  title,
-  harness,
-  newSession,
-  button('Refresh', () => send({ type: 'refresh' })),
-  button('Provider login…', () => send({ type: 'login' })),
-  button('Usage statistics', () => management.openStatistics()),
-  button('Model settings', () => management.openModels()),
-  button('Telegram setup', () => send({ type: 'configure_telegram' })),
-  button('Export Markdown', () => {
-    if (state?.selected) send({ type: 'export', session: state.selected as SessionView['id'] });
-  }),
-);
+harness.value = preferences.harness;
+harness.addEventListener('change', () => {
+  saveDraft();
+  preferences.harness = harness.value;
+  persist();
+  const last = preferences.lastSessions[harness.value];
+  const target =
+    state?.sessions.find((item) => item.harness === harness.value && item.id === last) ||
+    state?.sessions.find((item) => item.harness === harness.value);
+  if (target) send({ type: 'select', session: target.id });
+  else send({ type: 'clear_selection' });
+});
+const refresh = button('Refresh', () => send({ type: 'refresh' }));
+const login = button('Provider login…', () => send({ type: 'login' }));
+const statistics = button('Usage statistics', () => management.openStatistics());
+const models = button('Model settings', () => management.openModels());
+const telegramSetup = button('Telegram setup', () => send({ type: 'configure_telegram' }));
+const exportHistory = button('Export Markdown', () => {
+  if (state?.selected) send({ type: 'export', session: state.selected as SessionView['id'] });
+});
+const advanced = element('details');
+advanced.id = 'session-options';
+const advancedSummary = element('summary', '⋯');
+advancedSummary.setAttribute('aria-label', '会话选项');
+advancedSummary.title = '会话选项';
+document.addEventListener('pointerdown', (event) => {
+  if (advanced.open && !advanced.contains(event.target as Node)) advanced.open = false;
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && advanced.open) {
+    advanced.open = false;
+    advancedSummary.focus();
+  }
+});
+const viewOptions = element('section');
+advanced.append(advancedSummary, viewOptions, login, telegramSetup, refresh);
 const historySearch = element('input');
 historySearch.type = 'search';
-historySearch.placeholder = 'Search all saved sessions (title, directory, ID)';
-historySearch.setAttribute('aria-label', 'Search all sessions');
+historySearch.placeholder = '搜索会话名称、目录…';
+historySearch.setAttribute('aria-label', '搜索全部会话');
 historySearch.maxLength = 300;
 const historyHarness = element('select');
 historyHarness.setAttribute('aria-label', 'History harness filter');
 for (const value of ['', 'Pi', 'Codex', 'Claude']) {
-  const option = element('option', value || 'All harnesses');
+  const option = element('option', value || '全部 Agent');
   option.value = value;
   historyHarness.append(option);
 }
@@ -178,13 +239,11 @@ const historyFilter = (): import('../src/workbench-protocol').SessionFilter => (
     null) as import('../src/workbench-protocol').SessionFilter['harness'],
 });
 const historyControls = element('section');
+historyControls.className = 'history-search-controls';
 historyControls.append(
   historySearch,
   historyHarness,
   button('Search history', () => send({ type: 'refresh', filter: historyFilter() })),
-  button('Preview shared history clear…', () =>
-    send({ type: 'prepare_history_clear', filter: historyFilter() }),
-  ),
 );
 historySearch.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.isComposing)
@@ -192,20 +251,111 @@ historySearch.addEventListener('keydown', (event) => {
 });
 const clearProgress = element('section');
 const undoSelections = new Map<string, Set<string>>();
-const sessions = element('select');
-sessions.setAttribute('aria-label', 'Session');
-sessions.addEventListener('change', () => {
-  const session = state?.sessions.find((item) => item.id === sessions.value);
-  if (session) send({ type: 'select', session: session.id });
-});
+let historyReleaseConfirm: string | undefined;
+let historyRemoveConfirm: string | undefined;
+const sessions = element('div');
+sessions.id = 'history-items';
+sessions.setAttribute('role', 'listbox');
+sessions.setAttribute('aria-label', '会话历史');
+const historyPanel = element('section');
+historyPanel.id = 'history';
+const historyHeading = element('div', '会话历史');
+historyHeading.className = 'section-label';
+const historyActions = element('span');
+historyControls.hidden = true;
+historyActions.append(
+  button('搜索', () => {
+    historyControls.hidden = !historyControls.hidden;
+    if (!historyControls.hidden) historySearch.focus();
+  }),
+  button('刷新', () => send({ type: 'refresh' })),
+  button('清空', () => send({ type: 'prepare_history_clear', filter: historyFilter() })),
+);
+historyHeading.append(historyActions);
+historyPanel.append(historyHeading, historyControls, clearProgress, sessions);
 const status = element('p'),
   error = element('p'),
   settings = element('section'),
   planPanel = element('section'),
-  transcript = element('section');
+  transcript = element('main');
+let previewActive = false;
+const messages = element('div');
+messages.id = 'messages';
+const working = element('div');
+working.id = 'working';
+working.hidden = true;
+const workingIcon = element('span');
+workingIcon.className = 'session-indicator running';
+const workingLabel = element('span');
+working.append(workingIcon, workingLabel);
+transcript.append(messages, working);
+function requestAutomaticDiff(session: string, turn: string) {
+  const key = `${session}:${turn}`;
+  if (
+    session !== state?.selected ||
+    !state.view?.entries.some((row) => row.turn === turn) ||
+    turn === state.view.view?.active_turn ||
+    turnDiffs.has(key) ||
+    attemptedDiffs.has(key) ||
+    diffReads.size >= 2
+  )
+    return;
+  attemptedDiffs.add(key);
+  diffReads.add(key);
+  while (attemptedDiffs.size > 64) attemptedDiffs.delete(attemptedDiffs.keys().next().value!);
+  send({ type: 'read_turn_diff', session, turn, automatic: true });
+}
+const diffObserver =
+  typeof window.IntersectionObserver === 'function'
+    ? new window.IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const node = entry.target as HTMLElement;
+            if (
+              entry.isIntersecting &&
+              node.isConnected &&
+              node.dataset.sessionId &&
+              node.dataset.turn
+            )
+              requestAutomaticDiff(node.dataset.sessionId, node.dataset.turn);
+          }
+        },
+        { root: transcript, rootMargin: '200px' },
+      )
+    : undefined;
+
 planPanel.id = 'plan';
-planPanel.setAttribute('aria-label', 'Session plan');
-error.setAttribute('role', 'alert');
+planPanel.setAttribute('aria-label', '待办清单');
+error.id = 'error-message';
+const errorBanner = element('div');
+errorBanner.id = 'error';
+errorBanner.setAttribute('role', 'alert');
+let dismissedError: string | undefined;
+function errorIdentity() {
+  const failed = state?.operations
+    .filter((op) => op.status === 'failed' || op.status === 'uncertain')
+    .at(-1);
+  return `${selected || ''}:${failed?.operation || ''}:${error.textContent || ''}`;
+}
+function refreshErrorBanner() {
+  if (!error.textContent) dismissedError = undefined;
+  errorBanner.hidden = !error.textContent || dismissedError === errorIdentity();
+}
+const dismissError = button('×', () => {
+  dismissedError = errorIdentity();
+  refreshErrorBanner();
+});
+dismissError.id = 'dismiss-error';
+dismissError.setAttribute('aria-label', '关闭错误提示');
+dismissError.title = '关闭错误提示';
+errorBanner.append(error, dismissError);
+errorBanner.hidden = true;
+new window.MutationObserver(refreshErrorBanner).observe(error, {
+  childList: true,
+  subtree: true,
+  characterData: true,
+});
+status.id = 'status';
 status.setAttribute('role', 'status');
 transcript.id = 'transcript';
 const interactions = element('section'),
@@ -215,15 +365,22 @@ operations.id = 'operations';
 const composer = element('form'),
   prompt = element('textarea');
 prompt.id = 'prompt';
-prompt.setAttribute('aria-label', 'Prompt');
-prompt.placeholder = 'Send text, explicit context, or one image (PNG/JPEG/WebP; up to 4 MiB)';
-prompt.rows = 4;
+prompt.setAttribute('aria-label', '发送消息');
+prompt.placeholder = '描述任务，或输入 / 查看命令…';
+prompt.rows = 3;
 prompt.maxLength = 200000;
 prompt.disabled = true;
-const submit = element('button', 'Send');
+const submit = element('button');
+submit.id = 'send';
+decorateIcon(submit, 'send', '发送消息');
+submit.classList.add('primary', 'circle-button');
 submit.type = 'submit';
 submit.disabled = true;
 const cancel = button('Cancel turn', () => mutate({ method: 'cancel', session: current()!.id }));
+cancel.id = 'stop';
+cancel.classList.add('primary', 'circle-button');
+cancel.innerHTML = '<span class="stop-square" aria-hidden="true"></span>';
+cancel.setAttribute('aria-label', '停止输出');
 const attachments = element('section');
 attachments.id = 'attachments';
 attachments.setAttribute('aria-label', 'Explicit file attachments');
@@ -287,6 +444,25 @@ prompt.addEventListener('paste', (event) => {
     void addInputImage(file);
   }
 });
+function hasDraftContent() {
+  return Boolean(
+    prompt.value.trim() ||
+      inputImages.has(selected || '') ||
+      attachmentDrafts.get(selected || '').length,
+  );
+}
+function updateSend() {
+  const snapshot = current();
+  submit.disabled =
+    !snapshot ||
+    !state?.trusted ||
+    state.view?.status !== 'ready' ||
+    !!snapshot.active_turn ||
+    state?.preparing === snapshot.id ||
+    modelControls.busy ||
+    pendingPrompts.has(snapshot.id) ||
+    !hasDraftContent();
+}
 function composeDraft(session: string, text: string) {
   const image = inputImages.get(session);
   const context = attachmentDrafts.get(session);
@@ -305,7 +481,7 @@ const resize = element('div');
 resize.className = 'composer-resize';
 resize.tabIndex = 0;
 resize.setAttribute('role', 'separator');
-resize.setAttribute('aria-label', 'Resize composer');
+resize.setAttribute('aria-label', '调整输入区高度');
 resize.setAttribute('aria-orientation', 'horizontal');
 installComposerResize(resize, prompt, preferences.composerHeight, (height) => {
   preferences.composerHeight = height;
@@ -315,19 +491,40 @@ const completions = element('div');
 completions.id = 'commands';
 completions.setAttribute('role', 'listbox');
 completions.setAttribute('aria-label', 'Provider commands');
-composer.append(
-  attachments,
-  resize,
-  completions,
-  prompt,
-  attach,
-  attachImage,
-  imagePicker,
-  submit,
-  cancel,
-);
+const composerBox = element('div');
+composerBox.className = 'composer';
+const composerTools = element('div');
+composerTools.className = 'composer-tools';
+const composerActions = element('div');
+composerActions.className = 'composer-actions';
+const contextUsage = element('span');
+contextUsage.id = 'usage';
+contextUsage.tabIndex = 0;
+contextUsage.setAttribute('role', 'img');
+contextUsage.innerHTML =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="9.5"/><circle id="usage-fill" cx="12" cy="12" r="9.5" pathLength="100" transform="rotate(-90 12 12)"/></svg>';
+const hint = element('span', 'Enter 发送 · Shift+Enter 换行');
+hint.id = 'hint';
+settings.id = 'selectors';
+attach.id = 'attach';
+attach.setAttribute('aria-label', '添加上下文');
+attach.textContent = '＋ 上下文';
+attachImage.classList.add('image-attachment-action');
+decorateIcon(attachImage, 'image', '添加图片');
+renderContextUsage();
+composerActions.append(contextUsage, cancel, submit);
+composerTools.append(attach, settings, hint, composerActions);
+viewOptions.append(attachImage);
+attach.oncontextmenu = (event) => {
+  event.preventDefault();
+  imagePicker.click();
+};
+attach.title = '添加当前编辑器的选区或文件；右键选择图片，也可粘贴图片';
+composerBox.append(prompt, completions, composerTools, imagePicker);
+composer.append(attachments, resize, composerBox);
 let inputPreviewUrl: string | undefined;
 function renderAttachments() {
+  updateSend();
   if (inputPreviewUrl) {
     URL.revokeObjectURL(inputPreviewUrl);
     inputPreviewUrl = undefined;
@@ -427,6 +624,7 @@ prompt.addEventListener('input', () => {
   touchDraft();
   saveDraft();
   renderCommands();
+  updateSend();
 });
 prompt.addEventListener('keydown', (event) => {
   if (event.isComposing || event.keyCode === 229 || composing) return;
@@ -454,12 +652,20 @@ prompt.addEventListener('keydown', (event) => {
 composer.addEventListener('submit', (event) => {
   event.preventDefault();
   const snapshot = current();
-  if (!snapshot || submit.disabled || pendingPrompts.has(snapshot.id)) return;
+  if (!snapshot || submit.disabled || modelControls.busy || pendingPrompts.has(snapshot.id)) return;
   let text: ReturnType<typeof composePrompt>;
   try {
     text = composeDraft(snapshot.id, prompt.value);
   } catch (failure) {
     error.textContent = failure instanceof Error ? failure.message : 'Invalid prompt';
+    return;
+  }
+  if (
+    snapshot.harness === 'Pi' &&
+    !pendingPiDrafts.has(snapshot.id) &&
+    pendingPiDrafts.size >= 16
+  ) {
+    error.textContent = '仍有输入等待 Agent 确认，请先查看这些会话的状态。';
     return;
   }
   if (pendingPrompts.size >= 16) {
@@ -480,21 +686,73 @@ composer.addEventListener('submit', (event) => {
     generation: draftGenerations.get(snapshot.id) || 0,
   });
 });
-root.append(
+const activity = button('展开执行过程', () => {
+  const snapshot = current();
+  if (!snapshot) return;
+  preferences.activityExpanded = !preferences.activityExpanded;
+  for (const turn of new Set((state?.view?.entries || []).map((row) => row.turn)))
+    preferences.setOpen(`${snapshot.id}:turn:${turn}`, preferences.activityExpanded);
+  persist();
+  schedule();
+});
+activity.id = 'toggle-activity';
+const historySize = element('div');
+historySize.className = 'history-controls';
+const lessHistory = button('收起历史列表', () => {
+  if (preferences.sessionRows === 4) classic.showHistory(false);
+  else {
+    preferences.sessionRows = preferences.sessionRows === 16 ? 10 : 4;
+    persist();
+    schedule();
+  }
+});
+const moreHistory = button('展开历史列表', () => {
+  const available = state?.sessions.length || 0;
+  if (preferences.sessionRows >= available || preferences.sessionRows === 16) return;
+  preferences.sessionRows = preferences.sessionRows === 4 ? 10 : 16;
+  persist();
+  schedule();
+});
+for (const [control, path, label] of [
+  [lessHistory, 'M4 12l6-6 6 6', '收起历史列表'],
+  [moreHistory, 'M4 8l6 6 6-6', '展开历史列表'],
+] as const) {
+  control.setAttribute('aria-label', label);
+  control.title = label;
+  control.innerHTML = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="${path}"/></svg>`;
+}
+historySize.append(lessHistory, moreHistory);
+historyPanel.append(historySize);
+const classic = buildClassicShell({
+  root,
   header,
-  historyControls,
-  clearProgress,
-  sessions,
+  harness,
+  newSession,
+  activity,
+  toolbar: [
+    { node: exportHistory, icon: 'export', label: '导出 Markdown' },
+    { node: models, icon: 'settings', label: '模型设置' },
+    { node: statistics, icon: 'stats', label: '用量统计' },
+  ],
+  history: historyPanel,
   status,
-  error,
-  management.root,
+  error: errorBanner,
+  management: management.root,
   settings,
-  planPanel,
+  plan: planPanel,
   transcript,
   interactions,
   operations,
   composer,
-);
+  advanced,
+  historyOpen: preferences.historyOpen,
+  onHistoryChange: (open) => {
+    preferences.historyOpen = open;
+    if (open) send({ type: 'refresh_names' });
+    persist();
+  },
+});
+installTooltips();
 function current() {
   return state?.view?.view;
 }
@@ -519,22 +777,28 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
   const definition = JSON.stringify([
     snapshot.id,
     snapshot.catalogue,
+    state?.error,
+    state?.view?.error,
+    state?.operations.slice(-1).map((op) => [op.operation, op.status]),
     snapshot.catalogue.models.map((choice) => management.visible(choice.id, snapshot.harness)),
     busy,
     preferences.showThoughts,
     preferences.autoScroll,
     preferences.sessionRows,
+    preferences.activityExpanded,
   ]);
   if (settings.dataset.definition === definition) return;
   settings.dataset.definition = definition;
-  settings.replaceChildren();
-  settings.append(
-    button(
-      'Discover provider settings',
-      () => mutate({ method: 'discover', session: snapshot.id }),
-      busy,
-    ),
+  settings.replaceChildren(modelControls.root);
+  const providerSelects: HTMLSelectElement[] = [];
+  viewOptions.replaceChildren(attachImage);
+  const discover = button(
+    'Discover provider settings',
+    () => mutate({ method: 'discover', session: snapshot.id }),
+    busy,
   );
+  (snapshot.catalogue.models.length ? viewOptions : settings).append(discover);
+
   for (const setting of snapshot.catalogue.selects || []) {
     if (
       setting.category === 'model' ||
@@ -543,7 +807,6 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
       setting.id === 'mode'
     )
       continue;
-    const label = element('label', setting.name);
     const select = element('select');
     select.setAttribute('aria-label', setting.name);
     select.disabled = busy;
@@ -555,15 +818,21 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
     select.value = setting.current_value;
     select.onchange = () =>
       mutate({ method: 'set_option', session: snapshot.id, id: setting.id, value: select.value });
-    label.append(select);
-    settings.append(label);
+    select.dataset.controlKind = /fast/i.test(setting.id + ' ' + setting.name)
+      ? 'fast'
+      : /think|reason|effort|思考/i.test(setting.id + ' ' + setting.category + ' ' + setting.name)
+        ? 'thinking'
+        : 'other';
+    providerSelects.push(select);
   }
   for (const key of ['model', 'mode'] as const) {
     const choices = key === 'model' ? snapshot.catalogue.models : snapshot.catalogue.modes;
+    if (!choices.length || (key === 'mode' && snapshot.harness === 'Pi')) continue;
     const select = element('select');
+    select.title = key === 'model' ? '模型' : '模式';
     select.setAttribute('aria-label', key);
     select.disabled = busy;
-    const unknown = element('option', `Select ${key}`);
+    const unknown = element('option', key === 'model' ? '选择模型' : '选择模式');
     unknown.value = '';
     select.append(unknown);
     for (const choice of choices) {
@@ -596,11 +865,33 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
             },
       );
     });
-    settings.append(select);
+    providerSelects.push(select);
   }
-  const thoughtLabel = element('label', 'Show thoughts');
+  const lastSetting = state?.operations.at(-1);
+  const settingFailure =
+    lastSetting &&
+    ['set_option', 'set_model', 'set_mode'].includes(lastSetting.method) &&
+    ['failed', 'uncertain'].includes(lastSetting.status)
+      ? `${lastSetting.operation}:${lastSetting.status}`
+      : !state?.operations.length
+        ? state?.error || state?.view?.error
+        : undefined;
+  modelControls.update(
+    snapshot.id + ':' + snapshot.catalogue.current_model,
+    providerSelects,
+    settingFailure,
+  );
+  const processLabel = element('label', '显示执行过程');
+  const processToggle = element('input');
+  processToggle.type = 'checkbox';
+  processToggle.checked = preferences.activityExpanded;
+  processToggle.onchange = () => activity.click();
+  processLabel.prepend(processToggle);
+  viewOptions.append(processLabel);
+  const thoughtLabel = element('label', '显示思考过程');
   const showThoughts = element('input');
   showThoughts.type = 'checkbox';
+  showThoughts.setAttribute('aria-label', '显示思考过程');
   showThoughts.checked = preferences.showThoughts;
   showThoughts.addEventListener('change', () => {
     preferences.showThoughts = showThoughts.checked;
@@ -608,7 +899,7 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
     schedule();
   });
   thoughtLabel.prepend(showThoughts);
-  settings.append(thoughtLabel);
+  viewOptions.append(thoughtLabel);
   const autoScroll = element('input');
   autoScroll.type = 'checkbox';
   autoScroll.checked = preferences.autoScroll;
@@ -616,12 +907,12 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
     preferences.autoScroll = autoScroll.checked;
     persist();
   };
-  const scrollLabel = element('label', 'Follow latest output');
+  const scrollLabel = element('label', '跟随最新输出');
   scrollLabel.prepend(autoScroll);
   const rows = element('select');
   rows.setAttribute('aria-label', 'Session list rows');
   for (const i of [4, 10, 16]) {
-    const option = element('option', `${i} session rows`);
+    const option = element('option', `${i} 条会话高度`);
     option.value = String(i);
     rows.append(option);
   }
@@ -631,35 +922,38 @@ function renderSettings(snapshot: SessionView, busy: boolean) {
     persist();
     schedule();
   };
-  settings.append(scrollLabel, rows);
+  viewOptions.append(scrollLabel, rows);
   let confirmRemove = false;
   const remove = button(
     'Remove session',
     () => {
       if (!confirmRemove) {
         confirmRemove = true;
-        remove.textContent = 'Confirm remove (native provider data is retained)';
+        remove.textContent = '确认删除会话（保留原生数据）';
         return;
       }
       mutate({ method: 'remove', session: snapshot.id });
     },
     !state?.trusted,
   );
-  settings.append(remove);
-  if (snapshot.usage.context_size != null)
-    settings.append(
-      element(
-        'p',
-        `Context ${snapshot.usage.context_used ?? '?'} / ${snapshot.usage.context_size}`,
-      ),
+  viewOptions.append(remove);
+  if (snapshot.harness === 'Pi')
+    viewOptions.append(
+      button('Stop Pi background worker', () => mutate({ method: 'cancel', session: snapshot.id })),
     );
-  settings.append(
-    element(
-      'p',
-      `Tokens: ${snapshot.usage.input_tokens} input / ${snapshot.usage.output_tokens} output`,
-    ),
-  );
 }
+function renderContextUsage(snapshot?: SessionView) {
+  const used = snapshot?.usage.context_used,
+    size = snapshot?.usage.context_size;
+  const known = used != null && size != null && size > 0;
+  const percent = known ? Math.min(100, Math.round((used / size) * 100)) : 0;
+  const usageLabel = known ? `上下文占用 ${percent}% · ${used} / ${size}` : '上下文用量暂不可用';
+  contextUsage.title = usageLabel;
+  contextUsage.setAttribute('aria-label', usageLabel);
+  contextUsage.dataset.level = !known ? 'unknown' : percent >= 90 ? 'high' : 'normal';
+  contextUsage.querySelector('#usage-fill')?.setAttribute('stroke-dasharray', `${percent} 100`);
+}
+
 function imageNode(ref: ImageRef, session: SessionView['id']) {
   const box = element('figure'),
     cached = images.get(ref.id);
@@ -735,6 +1029,20 @@ function renderMessageMarkdown(id: string, text: string) {
   while (markdownCache.size > 16) markdownCache.delete(markdownCache.keys().next().value!);
   return html;
 }
+function hasIntermediateAnswers(
+  rows: NonNullable<WorkbenchUiState['view']>['entries'],
+  active?: string | null,
+) {
+  const turns = new Map<string, Set<string>>();
+  for (const row of rows)
+    if (row.role === 'Agent' && row.turn !== active) {
+      const ids = turns.get(row.turn) || new Set<string>();
+      ids.add(row.message || row.id);
+      turns.set(row.turn, ids);
+      if (ids.size > 1) return true;
+    }
+  return false;
+}
 function renderTranscript(snapshot: SessionView, busy: boolean) {
   const rows = state?.view?.entries || [];
   const scroll = transcript.scrollTop,
@@ -752,95 +1060,127 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   );
   const output = element('section');
   const turns = new Map<string, { box: HTMLElement; process: HTMLDetailsElement }>();
-  output.append(
-    button(
-      'Load earlier (keep current messages)',
-      () => send({ type: 'earlier', session: snapshot.id }),
-      !state?.view?.earlier,
-    ),
-  );
-  output.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
+  if (state?.view?.earlier)
+    output.append(
+      button(
+        'Load earlier (keep current messages)',
+        () => send({ type: 'earlier', session: snapshot.id }),
+        !state?.view?.earlier,
+      ),
+    );
+  if (state?.view?.historical)
+    output.append(button('Latest page', () => send({ type: 'latest', session: snapshot.id })));
   output.append(
     element(
       'small',
-      `${rows.length} confirmed entries · ${state?.view?.historical ? 'history window' : 'latest window'}${state?.view?.earlier ? ' · Earlier content is not loaded; the first message may be a continuation. Load earlier, copy or export for complete messages.' : ''}`,
+      state?.view?.earlier ? '更早的消息尚未加载；可继续加载、复制或导出完整历史。' : '',
     ),
   );
-  for (const message of messageProjection.update(rows)) {
+  const projected = messageProjection.update(rows);
+  const lastAnswers = new Map<string, string>();
+  for (const message of projected)
+    if (message.row.role === 'Agent' && !message.row.image)
+      lastAnswers.set(message.row.turn, message.key);
+  const folded = new Set<string>();
+  for (const message of projected) {
     const row =
       message.inlineText !== undefined
         ? { ...message.row, text: { Inline: { text: message.inlineText } } }
         : message.row;
+    const inActivity =
+      row.role === 'Thought' ||
+      (row.role === 'Agent' &&
+        !row.image &&
+        snapshot.active_turn !== row.turn &&
+        lastAnswers.get(row.turn) !== message.key);
+    if (inActivity) folded.add(row.turn);
     let turn = turns.get(row.turn);
     if (!turn) {
       const box = element('section');
       box.dataset.turn = row.turn;
       box.className = 'turn';
-      const process = disclosure(
-        `${snapshot.id}:turn:${row.turn}`,
-        snapshot.active_turn === row.turn,
-      );
-      process.className = 'turn-process';
-      process.append(element('summary', 'Thoughts and tools'));
-      box.append(element('h2', `Turn · ${row.turn}`), process);
-      box.append(
-        button('Review workspace changes', () =>
-          send({ type: 'read_turn_diff', session: snapshot.id, turn: row.turn }),
-        ),
-      );
+      box.dataset.sessionId = snapshot.id;
+      const process = disclosure(`${snapshot.id}:turn:${row.turn}`, preferences.activityExpanded);
+      process.className = 'turn-process activity-group';
+      process.append(element('summary', '思考与工具调用'));
+      box.append(process);
       const savedDiff = turnDiffs.get(`${snapshot.id}:${row.turn}`);
-      if (savedDiff) {
-        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, false);
-        summary.append(
+      if (savedDiff && (savedDiff.files.length || savedDiff.status !== 'complete')) {
+        const diffBox = element('article');
+        diffBox.className = 'message turn-diff';
+        diffBox.dataset.turnReview = 'true';
+        const diffHeading = element('div');
+        diffHeading.className = 'turn-diff-header';
+        diffHeading.append(
           element(
-            'summary',
-            `${savedDiff.status} · +${savedDiff.added} −${savedDiff.removed} lines`,
+            'strong',
+            savedDiff.status === 'unavailable'
+              ? '本轮修改 · 未能采集'
+              : `本轮修改 · ${savedDiff.files.length} 个文件 · +${savedDiff.added} −${savedDiff.removed}${savedDiff.status === 'partial' ? '（部分结果）' : ''}`,
           ),
         );
-        if (
-          savedDiff.status === 'complete' &&
-          savedDiff.files.length &&
-          savedDiff.next_offset === null &&
-          savedDiff.files.length <= 256 &&
-          savedDiff.files.reduce((n, file) => n + new TextEncoder().encode(file.path).length, 0) <=
-            65536
-        )
-          box.append(
-            button(
-              'Undo this turn…',
-              () =>
-                send({
-                  type: 'execute',
-                  session: snapshot.id,
-                  command: { method: 'undo_turn', session: snapshot.id, turn: row.turn },
-                }),
-              busy || snapshot.status !== 'Idle',
-            ),
-          );
-        summary.append(
-          button('View total Diff in editor', () =>
+        const diffActions = element('div');
+        diffActions.className = 'turn-diff-actions';
+        if (savedDiff.files.length) {
+          const total = button('查看总 Diff', () =>
             send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn }),
-          ),
-        );
-        summary.append(
-          element(
-            'p',
-            'Net workspace snapshots include concurrent edits. Ignored files and external/background processes are outside the guarantee. Undo does not rewind model context.',
-          ),
-        );
-        if (!savedDiff.files.length) summary.append(element('p', 'No captured workspace changes.'));
+          );
+          total.className = 'diff-link';
+          const undo = button(
+            '撤回本轮修改',
+            () =>
+              send({
+                type: 'execute',
+                session: snapshot.id,
+                command: { method: 'undo_turn', session: snapshot.id, turn: row.turn },
+              }),
+            busy ||
+              snapshot.status !== 'Idle' ||
+              savedDiff.status !== 'complete' ||
+              savedDiff.next_offset !== null ||
+              savedDiff.files.length > 256 ||
+              savedDiff.files.reduce((n, f) => n + new TextEncoder().encode(f.path).length, 0) >
+                65536,
+          );
+          undo.className = 'diff-link undo-turn';
+          undo.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            const batch = (event.currentTarget as HTMLElement)
+              .closest('[data-turn-review]')
+              ?.querySelector<HTMLDetailsElement>('.turn-diff-batch');
+            if (batch) {
+              batch.hidden = false;
+              batch.open = true;
+            }
+          });
+          undo.title =
+            savedDiff.status !== 'complete'
+              ? '本轮快照不完整，无法安全撤回。'
+              : '确认后撤回本轮修改';
+          diffActions.append(total, undo);
+        }
+        diffHeading.append(diffActions);
+        diffBox.append(diffHeading);
+        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, true);
+        summary.className = 'turn-diff-files';
+        summary.append(element('summary', `全部修改（${savedDiff.files.length} 个文件）`));
+        if (!savedDiff.files.length) summary.append(element('p', '本轮未检测到文件净变化。'));
         const selectionKey = `${snapshot.id}:${row.turn}`;
         const selectedPaths = undoSelections.get(selectionKey) || new Set<string>();
         undoSelections.set(selectionKey, selectedPaths);
         while (undoSelections.size > 16) undoSelections.delete(undoSelections.keys().next().value!);
+        const batchTools = disclosure(`${snapshot.id}:diff-batch:${row.turn}`, false);
+        batchTools.className = 'turn-diff-batch';
+        batchTools.append(element('summary', '按文件选择撤回…'));
+        batchTools.hidden = !batchTools.open;
         if (savedDiff.status === 'complete') {
-          summary.append(
+          batchTools.append(
             element(
               'p',
-              'For large reviews, explicitly select up to 256 files / 64 KiB paths per batch. Each batch needs confirmation; conflicts have per-file results. Load further pages to select other files.',
+              '可按批选择最多 256 个文件（路径共 64 KiB），每批单独确认；冲突逐文件报告，可加载后续页继续选择。',
             ),
           );
-          summary.append(
+          batchTools.append(
             button(
               'Undo selected files…',
               () => {
@@ -861,11 +1201,26 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
           );
         }
         for (const [index, file] of savedDiff.files.entries()) {
-          summary.append(element('h3', `${file.status} · ${file.path}`));
+          const fileDetails = disclosure(
+            `${snapshot.id}:diff:${row.turn}:file:${file.path}`,
+            false,
+          );
+          fileDetails.className = 'turn-diff-file';
+          const fileHeading = element(
+            'summary',
+            `${({ added: '新增', modified: '修改', deleted: '删除' } as Record<string, string>)[file.status] || file.status} · ${file.path}  +${file.added} −${file.removed}`,
+          );
+          fileDetails.append(fileHeading);
+          const fileBody = element('div');
+          summary.append(fileDetails);
           if (savedDiff.status === 'complete') {
             const choice = element('input');
             choice.type = 'checkbox';
             choice.checked = selectedPaths.has(file.path);
+            choice.hidden = !batchTools.open;
+            batchTools.addEventListener('toggle', () => {
+              choice.hidden = !batchTools.open;
+            });
             choice.setAttribute('aria-label', `Select for undo: ${file.path}`);
             choice.addEventListener('change', () => {
               if (choice.checked) {
@@ -882,25 +1237,32 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
                 selectedPaths.add(file.path);
               } else selectedPaths.delete(file.path);
             });
-            summary.append(choice);
+            fileHeading.append(choice);
           }
           if (file.old_mode !== file.new_mode)
-            summary.append(
+            fileBody.append(
               element(
                 'p',
                 `Permissions: ${file.old_mode?.toString(8) ?? 'absent'} → ${file.new_mode?.toString(8) ?? 'absent'}`,
               ),
             );
-          summary.append(
+          fileBody.append(
             button('Compare file in editor', () =>
               send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn, file: index }),
             ),
           );
           if (file.omitted) {
-            summary.append(element('p', file.omitted));
+            fileBody.append(
+              element(
+                'p',
+                file.omitted === 'Diff content can be loaded in bounded slices.'
+                  ? '完整内容已归档，可按需读取或在编辑器中对比。'
+                  : file.omitted,
+              ),
+            );
             for (const after of [false, true])
               if ((after ? file.after : file.before) === null)
-                summary.append(
+                fileBody.append(
                   button(after ? 'Load after' : 'Load before', () =>
                     send({
                       type: 'read_turn_diff_content',
@@ -918,20 +1280,15 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
             if (loaded) {
               const pre = element('pre');
               pre.textContent = loaded.text.slice(0, 30000).split('\n').slice(0, 400).join('\n');
-              summary.append(pre);
+              fileBody.append(pre);
               if (loaded.text.length > 30000 || loaded.text.split('\n').length > 400)
-                summary.append(
-                  element(
-                    'p',
-                    'Inline preview truncated; open the editor diff for full saved text.',
-                  ),
-                );
+                fileBody.append(element('p', '预览已截断；在编辑器中查看完整差异。'));
               if (
                 loaded.text.length < 30000 &&
                 loaded.nextOffset !== null &&
                 loaded.nextOffset !== undefined
               )
-                summary.append(
+                fileBody.append(
                   button('Load next content slice', () =>
                     send({
                       type: 'read_turn_diff_content',
@@ -945,18 +1302,38 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
                 );
             }
           }
-          if (file.before !== null) {
-            summary.append(element('h4', 'Before'));
+          if (file.patch) {
+            const patch = element('pre');
+            patch.className = 'turn-diff-patch';
+            for (const line of file.patch.slice(0, 30000).split('\n').slice(0, 400)) {
+              const span = element('span', line + '\n');
+              span.className = line.startsWith('+')
+                ? 'diff-add'
+                : line.startsWith('-')
+                  ? 'diff-remove'
+                  : line.startsWith('@@')
+                    ? 'diff-hunk'
+                    : '';
+              patch.append(span);
+            }
+            fileBody.append(patch);
+          }
+          if (!file.patch && file.before !== null) {
+            fileBody.append(element('h4', '修改前'));
             const pre = element('pre');
             pre.textContent = file.before ?? '';
-            summary.append(pre);
+            fileBody.append(pre);
           }
-          if (file.after !== null) {
-            summary.append(element('h4', 'After'));
+          if (!file.patch && file.after !== null) {
+            fileBody.append(element('h4', '修改后'));
             const pre = element('pre');
             pre.textContent = file.after ?? '';
-            summary.append(pre);
+            fileBody.append(pre);
           }
+          // Native details hides its body while collapsed. Keep the bounded
+          // body reconciled so a lazy content response updates the live node,
+          // rather than an old toggle listener reattaching an obsolete body.
+          fileDetails.append(fileBody);
         }
         if (savedDiff.next_offset !== null)
           summary.append(
@@ -969,8 +1346,26 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
               }),
             ),
           );
-        for (const warning of savedDiff.warnings) summary.append(element('p', warning));
-        box.append(summary);
+        diffBox.append(summary);
+        if (savedDiff.status === 'complete') diffBox.append(batchTools);
+        const notes = element('div');
+        notes.className = 'turn-diff-notes';
+        const omitted = savedDiff.files.filter(
+          (f) => f.omitted && f.omitted !== 'Diff content can be loaded in bounded slices.',
+        ).length;
+        if (omitted)
+          notes.append(
+            element('p', `${omitted} 个文件未采集文本内容（大小限制、二进制、子模块或读取失败）。`),
+          );
+        for (const warning of savedDiff.warnings) notes.append(element('p', warning));
+        notes.append(
+          element(
+            'p',
+            '工作区本轮开始到结束的净变化；不含 Git 忽略文件。并发的手工或其他会话修改也可能计入；不是文件回滚点。',
+          ),
+        );
+        diffBox.append(notes);
+        box.append(diffBox);
       }
       turn = { box, process };
       turns.set(row.turn, turn);
@@ -999,7 +1394,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       const placeholder = element('article');
       placeholder.dataset.entry = message.key;
       placeholder.dataset.definition = definition;
-      if (row.role === 'Thought') turn.process.append(placeholder);
+      if (inActivity) turn.process.append(placeholder);
       else if (row.role === 'User') turn.box.insertBefore(placeholder, turn.process);
       else turn.box.append(placeholder);
       continue;
@@ -1007,16 +1402,18 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     const article = element('article');
     article.dataset.definition = definition;
     article.dataset.entry = message.key;
-    article.className = row.role.toLowerCase();
-    article.append(element('small', `${row.role} · ${row.seq}`));
-    article.append(
+    article.className = 'message ' + (row.role === 'Agent' ? 'assistant' : row.role.toLowerCase());
+    article.classList.toggle('running-turn', snapshot.active_turn === row.turn);
+    const actions = element('div');
+    actions.className = 'message-actions';
+    actions.append(
       button('Copy message', () =>
         send({ type: 'copy_message', session: snapshot.id, entry: row.id }),
       ),
     );
     if (row.role === 'User' && !row.image && 'Inline' in row.text) {
       const text = row.text.Inline.text;
-      article.append(
+      actions.append(
         button('Use as prompt', () => {
           const next = prompt.value ? `${prompt.value}\n\n${text}` : text;
           if (next.length > prompt.maxLength) {
@@ -1031,6 +1428,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       );
     }
     const content = element('div');
+    content.className = 'message-body';
     if ('Inline' in row.text) {
       // Streaming text stays cheap and selectable. Parse only geometrically growing
       // prefixes; the unparsed tail remains visible until the next checkpoint/end.
@@ -1041,6 +1439,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         : Math.min(text.length, 256 * 1024);
       const parsed = element('div');
       parsed.dataset.markdown = 'true';
+      parsed.className = 'markdown';
       parsed.dataset.definition = `${row.id}:${checkpoint}`;
       const oldPrefix = previous?.querySelector<HTMLElement>('[data-markdown]');
       if (oldPrefix?.dataset.definition !== parsed.dataset.definition)
@@ -1070,10 +1469,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
           const text = copy.parentElement?.querySelector('code')?.textContent ?? '';
           void window.navigator.clipboard?.writeText(text).then(
             () => {
-              copy.textContent = 'Copied';
+              copy.textContent = '已复制';
             },
             () => {
-              copy.textContent = 'Copy unavailable';
+              copy.textContent = '无法复制';
             },
           );
         };
@@ -1096,7 +1495,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       }
     if (row.role === 'Thought') {
       const details = disclosure(`${snapshot.id}:thought:${row.id}`);
-      details.append(element('summary', 'Thought'), content);
+      details.append(element('summary', '思考过程'), content);
       article.append(details);
     } else article.append(content);
     if (row.image) article.append(imageNode(row.image, snapshot.id));
@@ -1109,19 +1508,40 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         }),
       );
       fork.dataset.fork = 'true';
-      article.append(fork);
+      actions.append(fork);
     }
-    if (row.role === 'Thought') turn.process.append(article);
+    article.append(actions);
+    if (inActivity) turn.process.append(article);
     else if (row.role === 'User') turn.box.insertBefore(article, turn.process);
     else turn.box.append(article);
   }
+  for (const turn of turns.values()) {
+    const diff = turn.box.querySelector<HTMLElement>(':scope > [data-turn-review]');
+    if (diff) turn.box.append(diff);
+  }
   const visibleTurns = new Set(rows.map((row) => row.turn));
-  for (const turn of visibleTurns)
-    turns
-      .get(turn)!
-      .process.append(
-        button(`Tools for ${turn}`, () => send({ type: 'read_tools', session: snapshot.id, turn })),
-      );
+  // Browsers read near the viewport, including older turns when scrolled to.
+  // Non-layout renderers use a bounded recent window as a fallback.
+  if (!diffObserver)
+    for (const turn of [...visibleTurns].slice(-16)) requestAutomaticDiff(snapshot.id, turn);
+  for (const turn of visibleTurns) {
+    const process = turns.get(turn)!.process;
+    process.hidden =
+      !preferences.activityExpanded &&
+      !folded.has(turn) &&
+      !rows.some((row) => row.turn === turn && row.role === 'Thought') &&
+      !state?.view?.tools.some((tool) => tool.turn === turn);
+    const thoughtCount = rows.filter((row) => row.turn === turn && row.role === 'Thought').length;
+    const toolCount = state?.view?.tools.filter((tool) => tool.turn === turn).length || 0;
+    process.querySelector('summary')!.textContent =
+      `${snapshot.active_turn === turn ? '处理中' : '执行过程'} · ${toolCount} 次工具调用${thoughtCount ? ` · ${thoughtCount} 段思考` : ''}`;
+    process.classList.toggle('running', snapshot.active_turn === turn);
+    const tools = button('查看工具记录', () =>
+      send({ type: 'read_tools', session: snapshot.id, turn }),
+    );
+    tools.dataset.toolsFor = turn;
+    turns.get(turn)!.process.append(tools);
+  }
   const cursor = state?.view?.toolCursor;
   if (cursor)
     output.append(
@@ -1164,16 +1584,47 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     planPanel.replaceChildren();
     if (snapshot.plan.items.length) {
       const plan = disclosure(`${snapshot.id}:plan`, true);
-      plan.append(element('summary', 'Plan'));
+      planPanel.classList.add('todo-panel');
+      plan.append(
+        element(
+          'summary',
+          `待办清单 · ${snapshot.plan.items.filter((item) => item.status === 'Completed').length}/${snapshot.plan.items.length}`,
+        ),
+      );
+      const list = element('ul');
+      list.className = 'todo-list';
+      list.setAttribute('aria-label', '待办事项');
+      list.tabIndex = 0;
       for (const item of snapshot.plan.items) {
-        const line = element('p', `${item.status}: ${item.description}`);
-        line.dataset.status = item.status;
-        plan.append(line);
+        const line = element('li');
+        const status =
+          item.status === 'Completed'
+            ? 'completed'
+            : item.status === 'InProgress'
+              ? 'in_progress'
+              : 'pending';
+        line.className = `todo-item ${status}`;
+        const circle = element('span', status === 'completed' ? '✓' : '');
+        circle.className = 'todo-circle';
+        circle.setAttribute('role', 'img');
+        circle.setAttribute(
+          'aria-label',
+          status === 'completed' ? '已完成' : status === 'in_progress' ? '进行中' : '待处理',
+        );
+        const label = element('span', item.description);
+        label.className = 'todo-label';
+        line.append(circle, label);
+        list.append(line);
       }
+      plan.append(list);
       planPanel.append(plan);
     }
   }
-  reconcile(transcript, output);
+  reconcile(messages, output);
+  diffObserver?.disconnect();
+  for (const turn of messages.querySelectorAll<HTMLElement>('section.turn[data-turn]'))
+    diffObserver?.observe(turn);
+  messages.classList.toggle('busy', Boolean(snapshot.active_turn));
   for (const fork of transcript.querySelectorAll<HTMLButtonElement>('[data-fork]'))
     fork.disabled = busy || snapshot.status !== 'Idle';
   const restored = [...transcript.querySelectorAll<HTMLElement>('[data-entry]')].find(
@@ -1200,23 +1651,38 @@ function renderInteractions(snapshot: SessionView) {
     if (old?.getAttribute('data-definition') === signature) continue;
     old?.remove();
     const box = element('form');
+    box.className = 'permission-card';
     box.dataset.interaction = interaction.id;
     box.dataset.definition = signature;
-    box.append(element('h2', interaction.title), element('p', interaction.detail));
+    box.append(
+      element(
+        'strong',
+        interaction.kind === 'Permission' && !interaction.title.startsWith('需要授权')
+          ? `需要授权 · ${interaction.title}`
+          : interaction.title,
+      ),
+      element(interaction.kind === 'Permission' ? 'pre' : 'p', interaction.detail),
+    );
+    const interactionActions = element('div');
+    interactionActions.className = 'permission-actions';
     const answer = (response: Parameters<typeof mutate>[0] & { method: 'answer' }) =>
       mutate(response);
     if (interaction.kind === 'Permission') {
       for (const option of interaction.options)
-        box.append(
-          button(option.label, () =>
-            answer({
-              method: 'answer',
-              session: snapshot.id,
-              answer: {
-                interaction: interaction.id,
-                response: { Permission: { option: option.id } },
-              },
-            }),
+        interactionActions.append(
+          button(
+            option.label,
+            () =>
+              answer({
+                method: 'answer',
+                session: snapshot.id,
+                answer: {
+                  interaction: interaction.id,
+                  response: { Permission: { option: option.id } },
+                },
+              }),
+            false,
+            false,
           ),
         );
     } else {
@@ -1278,7 +1744,7 @@ function renderInteractions(snapshot: SessionView) {
         }
         box.append(label);
       }
-      const submit = element('button', 'Submit answer');
+      const submit = element('button', '提交回答');
       submit.type = 'submit';
       box.append(submit);
       box.addEventListener('submit', (event) => {
@@ -1296,7 +1762,7 @@ function renderInteractions(snapshot: SessionView) {
         });
       });
     }
-    box.append(
+    interactionActions.append(
       button('Decline', () =>
         answer({
           method: 'answer',
@@ -1305,6 +1771,7 @@ function renderInteractions(snapshot: SessionView) {
         }),
       ),
     );
+    box.append(interactionActions);
     interactions.append(box);
   }
   for (const [id, child] of existing) if (!id || !retained.has(id)) child.remove();
@@ -1320,6 +1787,8 @@ function render() {
     images.clear();
     contentPages.clear();
     turnDiffs.clear();
+    diffReads.clear();
+    attemptedDiffs.clear();
     diffContents.clear();
     imageBytes = 0;
     imageErrors.clear();
@@ -1347,34 +1816,137 @@ function render() {
         ),
       );
   }
-  sessions.replaceChildren(element('option', 'Select session'));
-  for (const session of state.sessions) {
-    const phase = typeof session.status === 'string' ? session.status : 'Failed';
-    const option = element(
-      'option',
-      `#${session.created_seq} · ${session.title ?? session.id} · ${session.harness} · ${phase} · ${session.cwd}`,
-    );
-    option.value = session.id;
-    sessions.append(option);
+  const historyRows = element('div');
+  sessions.dataset.selected = state.selected || '';
+  const maximumTier = state.sessions.length <= 4 ? 4 : state.sessions.length <= 10 ? 10 : 16;
+  if (preferences.sessionRows > maximumTier) {
+    preferences.sessionRows = maximumTier;
+    persist();
   }
-  // A restored/active session need not be in the currently listed cold page.
-  const selectedView = current();
-  if (selectedView && !state.sessions.some((session) => session.id === selectedView.id)) {
-    const option = element(
-      'option',
-      `${selectedView.harness} · ${selectedView.id} · ${selectedView.cwd} (selected, outside this page)`,
+  moreHistory.disabled =
+    preferences.sessionRows >= state.sessions.length || preferences.sessionRows === 16;
+  sessions.dataset.limit = String(preferences.sessionRows);
+  const listedSessions = state.sessions.map((session) => ({ ...session, outside: false }));
+  const restored = current();
+  if (restored && !listedSessions.some((session) => session.id === restored.id))
+    listedSessions.unshift({
+      id: restored.id,
+      harness: restored.harness,
+      cwd: restored.cwd,
+      status: restored.status,
+      revision: restored.revision,
+      created_seq: 0,
+      title: '当前会话（不在此列表页）',
+      outside: true,
+    });
+  for (const session of listedSessions) {
+    const row = element('div');
+    row.className = 'history-row' + (session.id === state.selected ? ' current' : '');
+    row.dataset.key = `history:${session.id}`;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(session.id === state.selected));
+    row.dataset.sessionId = session.id;
+    const open = button(
+      session.title || `新对话 #${session.created_seq}`,
+      () => {
+        send({ type: 'select', session: session.id });
+        classic.showHistory(false);
+      },
+      false,
+      false,
     );
-    option.value = selectedView.id;
-    sessions.append(option);
+    open.className = 'history-open';
+    open.title = `${session.harness} · ${session.cwd}`;
+    const number = element(
+      'span',
+      session.outside ? '当前' : '#' + String(session.created_seq).padStart(3, '0'),
+    );
+    number.className = 'session-number';
+    number.dataset.retention = String(session.retention_days || 0);
+    number.classList.toggle('alive-long', session.retention_days === 4);
+    number.classList.toggle('alive-short', session.retention_days === 1);
+    number.title =
+      session.retention_days === 4
+        ? '驻留保留 4 天（按最后用户输入）'
+        : session.retention_days === 1
+          ? '驻留保留 1 天（按最后用户输入）'
+          : '当前未驻留；使用时恢复会话';
+    const phase = element('span');
+    phase.className = 'session-indicator';
+    phase.dataset.phase = typeof session.status === 'string' ? session.status : 'Failed';
+    phase.title = phase.dataset.phase;
+    phase.classList.toggle('running', phase.dataset.phase === 'Running');
+    phase.innerHTML =
+      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-5 3v-3H3V4.5a1 1 0 0 1 1-1Z"/></svg>';
+    const provider = element('span', session.harness);
+    provider.className = 'history-harness';
+    provider.hidden = session.harness === 'Pi';
+    const removeHistory = button(
+      '删除会话',
+      () => {
+        if (historyRemoveConfirm === session.id && selected === session.id) {
+          historyRemoveConfirm = undefined;
+          mutate({ method: 'remove', session: session.id });
+        } else {
+          historyRemoveConfirm = session.id;
+          if (selected !== session.id) send({ type: 'select', session: session.id });
+          else schedule();
+        }
+      },
+      !state.trusted,
+    );
+    removeHistory.className = 'history-delete';
+    removeHistory.setAttribute(
+      'aria-label',
+      historyRemoveConfirm === session.id
+        ? `确认删除会话：${session.title || session.id}`
+        : `删除会话：${session.title || session.id}`,
+    );
+    removeHistory.title =
+      historyRemoveConfirm === session.id ? '再次点击确认删除（保留原生数据）' : '删除会话';
+    removeHistory.innerHTML =
+      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M7 5.5V3h6v2.5M5 5.5l.8 11h8.4l.8-11M8 8v5.5M12 8v5.5"/></svg>';
+    const running = ['Running', 'Waiting', 'Cancelling'].includes(
+      typeof session.status === 'string' ? session.status : '',
+    );
+    const release = button(
+      '释放会话',
+      () => {
+        if (running && historyReleaseConfirm !== session.id) {
+          historyReleaseConfirm = session.id;
+          schedule();
+          return;
+        }
+        send({ type: 'release_session', session: session.id, confirmed: running });
+        historyReleaseConfirm = undefined;
+      },
+      !state.trusted || !session.retention_days,
+    );
+    release.className = 'history-release';
+    release.setAttribute(
+      'aria-label',
+      `${historyReleaseConfirm === session.id ? '确认释放会停止当前任务：' : '释放会话：'}${session.title || session.id}`,
+    );
+    release.title =
+      historyReleaseConfirm === session.id
+        ? '再次点击停止任务并释放；保留历史'
+        : '释放后台会话（保留历史）';
+    release.innerHTML =
+      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2v8M5.5 4.5a7 7 0 1 0 9 0"/></svg>';
+    row.append(phase, number, provider, open, release, removeHistory);
+    historyRows.append(row);
   }
-  sessions.value = state.selected || '';
+  if (!listedSessions.length) historyRows.append(element('p', '还没有保存的会话。'));
+  reconcile(sessions, historyRows);
   document.querySelector('[data-session-page]')?.remove();
   const nextSessions = state.sessionsCursor;
   if (nextSessions) {
-    const page = element('span');
+    const page = element('div');
     page.dataset.sessionPage = 'true';
-    page.append(button('Next session page', () => send({ type: 'refresh', cursor: nextSessions })));
-    page.append(button('Latest session page', () => send({ type: 'refresh' })));
+    page.append(
+      button('Next session page', () => send({ type: 'refresh', cursor: nextSessions })),
+      button('Latest session page', () => send({ type: 'refresh' })),
+    );
     sessions.after(page);
   }
   const visibleImages = new Set<string>(
@@ -1388,33 +1960,111 @@ function render() {
   error.textContent =
     state.error ||
     state.view?.error ||
-    (snapshot && typeof snapshot.status === 'object' ? snapshot.status.Failed : '');
+    (snapshot && typeof snapshot.status === 'object' ? snapshot.status.Failed : '') ||
+    (state.operations.some((op) => op.status === 'uncertain')
+      ? '有操作结果尚未确认，请打开会话选项查询原结果；不会自动重发。'
+      : '');
   settlePiDraft();
-  newSession.disabled = !state.trusted || !state.workspace;
+  newSession.disabled =
+    !state.trusted ||
+    !state.workspace ||
+    Boolean(state.preparing) ||
+    state.operations.some((op) => op.method === 'create' && op.status === 'pending');
   harness.disabled = newSession.disabled;
-  status.textContent = `${state.view?.status || 'Select or create a session'}${snapshot ? ` · ${typeof snapshot.status === 'string' ? snapshot.status : 'Failed'} · revision ${snapshot.revision}` : ''}${!state.trusted ? ' · workspace untrusted' : ''}`;
+  const phase = snapshot && typeof snapshot.status === 'string' ? snapshot.status : 'Failed';
+  status.textContent = !state.trusted
+    ? '请先信任工作区'
+    : !snapshot
+      ? '选择或新建会话'
+      : (
+          { Idle: '就绪', Running: '正在处理…', Waiting: '等待授权', Failed: '任务失败' } as Record<
+            string,
+            string
+          >
+        )[phase] || phase;
+  if (state.preparing && state.preparing === snapshot?.id)
+    status.textContent = '正在加载模型与偏好…';
+  status.title = `连接：${state.view?.status || '未选择'}${snapshot ? ` · revision ${snapshot.revision}` : ''}`;
+  if (snapshot) {
+    harness.value = snapshot.harness;
+    preferences.harness = snapshot.harness;
+    preferences.lastSessions[snapshot.harness] = snapshot.id;
+  }
+  const summary = state.sessions.find((item) => item.id === snapshot?.id);
+  activity.textContent = preferences.activityExpanded ? '收起执行过程' : '展开执行过程';
+  activity.setAttribute('aria-pressed', String(preferences.activityExpanded));
+  activity.hidden = !snapshot;
+  classic.update({
+    hasSession: Boolean(snapshot),
+    title: snapshot ? summary?.title || `${snapshot.harness} · #${summary?.created_seq ?? ''}` : '',
+    status: status.textContent,
+    busy: Boolean(snapshot?.active_turn),
+    connected: state.view?.status === 'ready',
+    harness: harness.value,
+    number: summary?.created_seq,
+    retentionDays: summary?.retention_days,
+    entries: state.view?.entries.length || 0,
+    preview: previewActive && !snapshot,
+    hasActivity: Boolean(
+      state.view?.entries.some((row) => row.role === 'Thought') ||
+        hasIntermediateAnswers(state.view?.entries || [], snapshot?.active_turn) ||
+        state.view?.tools.length ||
+        preferences.activityExpanded,
+    ),
+  });
+  refreshErrorBanner();
+  exportHistory.disabled = !snapshot;
   const busy =
-    !snapshot || !state.trusted || state.view?.status !== 'ready' || snapshot.active_turn !== null;
-  submit.disabled = busy || pendingPrompts.has(snapshot?.id || '');
-  submit.textContent = pendingPrompts.has(snapshot?.id || '') ? 'Confirming acceptance…' : 'Send';
+    !snapshot ||
+    !state.trusted ||
+    state.view?.status !== 'ready' ||
+    snapshot.active_turn !== null ||
+    state.preparing === snapshot.id ||
+    modelControls.busy;
+  submit.disabled = busy || pendingPrompts.has(snapshot?.id || '') || !hasDraftContent();
+  submit.setAttribute(
+    'aria-label',
+    pendingPrompts.has(snapshot?.id || '') ? '正在确认发送…' : '发送消息',
+  );
   prompt.disabled = !snapshot;
   attach.disabled = !snapshot || !state.trusted;
   attachImage.disabled = !snapshot || !state.trusted;
   cancel.disabled =
     !snapshot || !state.trusted || (snapshot.active_turn === null && snapshot.harness !== 'Pi');
-  cancel.textContent = snapshot?.active_turn ? 'Cancel turn' : 'Stop Pi background worker';
+  cancel.setAttribute('aria-label', snapshot?.active_turn ? '停止输出' : '停止后台任务');
+  cancel.title = snapshot?.active_turn ? '停止输出' : '停止后台任务';
+  cancel.hidden = !snapshot?.active_turn;
+  submit.hidden = Boolean(snapshot?.active_turn);
+  management.setView(snapshot, state.sessions, state.operations);
   if (snapshot) {
-    management.setView(snapshot, state.sessions, state.operations);
-    sessions.size = preferences.sessionRows;
+    sessions.dataset.limit = String(preferences.sessionRows);
     renderSettings(snapshot, busy);
+    renderContextUsage(snapshot);
+    working.hidden = !snapshot.active_turn;
+    workingLabel.textContent = `${snapshot.harness} 正在处理…`;
     renderTranscript(snapshot, busy);
     renderInteractions(snapshot);
   } else {
+    modelControls.show(false);
+    renderContextUsage();
     settings.replaceChildren();
+    viewOptions.replaceChildren();
     delete settings.dataset.definition;
     planPanel.replaceChildren();
     delete planPanel.dataset.definition;
-    transcript.replaceChildren();
+    working.hidden = true;
+    messages.replaceChildren();
+    if (previewActive) {
+      const article = element('article');
+      article.className = 'message assistant';
+      const body = element('div');
+      body.className = 'markdown';
+      body.innerHTML = markdown(
+        '## Markdown 与公式\n\n这是离线渲染预览。**粗体**、列表、代码和公式均在本地展示。\n\n- 不连接 Agent\n- 不创建会话\n\n```ts\nconst answer = 42;\n```\n\n$$E = mc^2$$',
+      );
+      article.append(body);
+      messages.append(article);
+    }
     interactions.replaceChildren();
   }
   operations.replaceChildren();
@@ -1436,6 +2086,10 @@ function render() {
     operations.append(row);
   }
 }
+document.querySelector('#workbench')!.addEventListener('workbench-preview', () => {
+  previewActive = true;
+  schedule();
+});
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
   const raw = event.data;
   if (!raw || typeof raw !== 'object' || !('type' in raw)) return;
@@ -1508,12 +2162,14 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
           JSON.stringify(raw.prompt) === JSON.stringify(composeDraft(raw.session, text))
         ) {
           if ('pi_after_seq' in raw && typeof raw.pi_after_seq === 'number') {
-            if (pendingPiDrafts.size >= 64)
-              pendingPiDrafts.delete(pendingPiDrafts.keys().next().value!);
             pendingPiDrafts.set(raw.session, {
               generation: raw.generation as number,
               after: raw.pi_after_seq,
+              text,
+              attachments: attachmentDrafts.get(raw.session),
+              image: inputImages.get(raw.session),
             });
+            clearAcceptedDraft(raw.session);
           } else {
             clearAcceptedDraft(raw.session);
           }
@@ -1560,6 +2216,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         offset?: number;
         diff: import('../src/workbench-protocol').TurnDiff;
       };
+      diffReads.delete(`${message.session}:${message.turn}`);
+      attemptedDiffs.delete(`${message.session}:${message.turn}`);
       if (
         message.session === state?.selected &&
         state?.view?.entries.some((row) => row.turn === message.turn)
@@ -1604,7 +2262,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         schedule();
       }
     } else if (raw.type === 'turn_diff_error') {
-      error.textContent = 'Workspace diff unavailable';
+      if ('session' in raw && 'turn' in raw) diffReads.delete(`${raw.session}:${raw.turn}`);
+      if ('error' in raw && raw.error) error.textContent = String(raw.error);
+      schedule();
     } else if (raw.type === 'selection_context' && 'file' in raw && selected) {
       try {
         attachmentDrafts.set(selected, [...attachmentDrafts.get(selected), raw.file]);

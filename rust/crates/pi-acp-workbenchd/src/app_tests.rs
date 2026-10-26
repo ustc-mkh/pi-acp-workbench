@@ -39,6 +39,8 @@ mod query_tests;
 mod registry_tests;
 #[path = "app_replay_tests.rs"]
 mod replay_tests;
+#[path = "app_retention_tests.rs"]
+mod retention_tests;
 #[path = "app_typed_input_tests.rs"]
 mod typed_input_tests;
 #[path = "app_workspace_review_tests.rs"]

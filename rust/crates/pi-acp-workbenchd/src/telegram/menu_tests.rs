@@ -313,6 +313,7 @@ async fn session_menu_is_bounded_authorized_cold_and_uses_stable_keyset_pages() 
         )
         .await
         .unwrap();
+    expected.insert(elsewhere.clone());
     let thread = Some(TopicId::new(101).unwrap());
     command(&context, 1, thread, "/menu sessions").await;
     let late = created(&app, "/tmp").await;
@@ -348,16 +349,19 @@ async fn session_menu_is_bounded_authorized_cold_and_uses_stable_keyset_pages() 
     assert_eq!(found, expected);
     assert!(!found.contains(&forbidden));
     assert!(
-        !found.contains(&elsewhere),
-        "menu must not offer an implicit cross-topic binding transfer"
+        found.contains(&elsewhere),
+        "existing topics remain openable without a binding transfer"
     );
-    assert!(api
-        .0
-        .lock()
-        .await
-        .sent
-        .iter()
-        .any(|message| message.text.contains("already bound to another topic")));
+    assert_eq!(
+        context
+            .store
+            .topic(&elsewhere)
+            .await
+            .unwrap()
+            .unwrap()
+            .thread,
+        Some(TopicId::new(102).unwrap())
+    );
     assert!(!found.contains(&late));
     assert!(!trace.exists());
     assert_eq!(

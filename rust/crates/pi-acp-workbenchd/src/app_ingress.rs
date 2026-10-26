@@ -514,6 +514,10 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                         ))
                     }
                 };
+                let mut result = result;
+                if let Ok(R::List(page)) = &mut result {
+                    core.annotate_residency(page).await;
+                }
                 result.map_err(|error| match error {
                     crate::persistence::database::StoreError::NotFound => {
                         DomainError::Protocol("query target not found".into())

@@ -66,6 +66,12 @@ export const uiCommand = tagged('type', {
   clear_history_batch: object({ type: literal('clear_history_batch'), job: operationId }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
+  release_session: object({
+    type: literal('release_session'),
+    session: sessionId,
+    confirmed: optional(boolean),
+  }),
+  clear_selection: object({ type: literal('clear_selection') }),
   execute: object({
     type: literal('execute'),
     session: sessionId,
@@ -81,6 +87,7 @@ export const uiCommand = tagged('type', {
   }),
   read_turn_diff: object({
     type: literal('read_turn_diff'),
+    automatic: optional(boolean),
     session: sessionId,
     turn: turnId,
     offset: optional(uint),
@@ -129,6 +136,7 @@ export interface WorkbenchUiState {
   sessions: SessionSummary[];
   sessionsCursor?: ListCursor;
   selected?: string;
+  preparing?: string;
   view?: WorkbenchSessionView;
   operations: UiOperation[];
   error?: string;
@@ -206,6 +214,7 @@ export const uiState = object({
   sessions: array(sessionSummary),
   sessionsCursor: optional(listCursor),
   selected: optional(string),
+  preparing: optional(string),
   view: optional(
     object({
       status: variants({

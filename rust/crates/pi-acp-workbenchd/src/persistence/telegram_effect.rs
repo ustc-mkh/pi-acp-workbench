@@ -51,6 +51,9 @@ pub(super) struct Request {
     reply: oneshot::Sender<Result<Option<EffectState>, DomainError>>,
 }
 enum Action {
+    TitleMatches,
+    TitleApplied(TopicId),
+    BeginRename,
     Lookup,
     Begin,
     Finish(EffectState),
@@ -81,6 +84,48 @@ impl TelegramEffects {
             .await
             .map_err(failure)?;
         result.await.map_err(failure)?
+    }
+    pub(crate) async fn rename_topic(
+        &self,
+        api: &impl BotApi,
+        chat: ChatId,
+        thread: TopicId,
+        name: String,
+    ) -> Result<(), DomainError> {
+        let marker = OperationId::new(format!("topic-title-{}-{}", chat.get(), thread.get()))?;
+        if self
+            .request(marker.clone(), chat, name.clone(), Action::TitleMatches)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        // Editing a title is idempotent. A fresh receipt also handles A→B→A
+        // at the same session revision; a historical Completed(A) is not proof
+        // that Telegram still has A after B was applied.
+        let operation = OperationId::new(format!("topic-rename-{}", uuid::Uuid::new_v4()))?;
+        let state = if let Some(state) = self
+            .request(operation.clone(), chat, name.clone(), Action::BeginRename)
+            .await?
+        {
+            state
+        } else {
+            let state = match api.edit_topic(chat, thread, &name).await {
+                Ok(()) => EffectState::Completed(thread),
+                Err(ApiError::Response {
+                    code: code @ 400..=499,
+                    ..
+                }) => EffectState::Failed(code),
+                Err(_) => EffectState::Uncertain,
+            };
+            self.request(operation, chat, name.clone(), Action::Finish(state.clone()))
+                .await?;
+            state
+        };
+        state.result()?;
+        self.request(marker, chat, name, Action::TitleApplied(thread))
+            .await?;
+        Ok(())
     }
     pub async fn completed(
         &self,
@@ -139,6 +184,25 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             )
             .optional()
             .map_err(failure)?;
+        if matches!(action, Action::TitleMatches | Action::TitleApplied(_)) {
+            let result = match action {
+                Action::TitleMatches => found
+                    .map(|(json, _, _)| {
+                        serde_json::from_str::<TopicRequest>(&json).map_err(failure)
+                    })
+                    .transpose()?
+                    .filter(|old| old == &request)
+                    .map(|_| EffectState::Started),
+                Action::TitleApplied(thread) => {
+                    let state = EffectState::Completed(thread);
+                    tx.execute("INSERT INTO telegram_effects(effect_id,status,request_json,result_json) VALUES (?1,'Completed',?2,?3) ON CONFLICT(effect_id) DO UPDATE SET status=excluded.status,request_json=excluded.request_json,result_json=excluded.result_json", params![operation.as_str(),serde_json::to_string(&request).map_err(failure)?,serde_json::to_string(&state).map_err(failure)?]).map_err(failure)?;
+                    Some(state)
+                }
+                _ => unreachable!(),
+            };
+            crate::diagnostics::sqlite_commit(tx).map_err(failure)?;
+            return Ok(result);
+        }
         let stored = found
             .map(|(json, status, result)| {
                 let old: TopicRequest = serde_json::from_str(&json).map_err(failure)?;
@@ -158,9 +222,21 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             })
             .transpose()?;
         let result = match action {
+            Action::TitleMatches | Action::TitleApplied(_) => unreachable!(),
             Action::Lookup => stored,
-            Action::Begin if stored.is_some() => stored,
-            Action::Begin => {
+            Action::Begin | Action::BeginRename
+                if matches!(stored, Some(EffectState::Failed(429)))
+                    || (matches!(action, Action::BeginRename)
+                        && matches!(
+                            stored,
+                            Some(EffectState::Started | EffectState::Uncertain)
+                        )) =>
+            {
+                tx.execute("UPDATE telegram_effects SET status='Started',result_json=?2 WHERE effect_id=?1",params![operation.as_str(),serde_json::to_string(&EffectState::Started).map_err(failure)?]).map_err(failure)?;
+                None
+            }
+            Action::Begin | Action::BeginRename if stored.is_some() => stored,
+            Action::Begin | Action::BeginRename => {
                 tx.execute("INSERT INTO telegram_effects(effect_id,status,request_json,result_json) VALUES (?1,'Started',?2,?3)", params![operation.as_str(), serde_json::to_string(&request).map_err(failure)?, serde_json::to_string(&EffectState::Started).map_err(failure)?]).map_err(failure)?;
                 None
             }

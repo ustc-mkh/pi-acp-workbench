@@ -77,6 +77,14 @@ afterEach(async () => {
   host.documents = [];
   vi.clearAllMocks();
 });
+it('refuses explicit activation in an untrusted workspace before registering resources', () => {
+  host.trusted = false;
+  const subscriptions: vscode.Disposable[] = [];
+  expect(() => activate({ subscriptions } as unknown as vscode.ExtensionContext)).toThrow('信任');
+  expect(subscriptions).toEqual([]);
+  expect(host.provider).toBeUndefined();
+});
+
 it('production entry configures only v3 socket, restricts CSP resources and rejects canonical workspace escapes/trust revocation', async () => {
   const peer = await workbenchPeer();
   cleanups.push(() => peer.close());
@@ -147,7 +155,7 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     },
   });
   await expect.poll(() => peer.requests.length).toBe(2);
-  peer.query(peer.requests[1], 'attached', {
+  const attachedPage = {
     view,
     recent_page: {
       entries: [
@@ -163,7 +171,13 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
       ],
       next_cursor: null,
     },
-  });
+  };
+  peer.query(peer.requests[1], 'attached', attachedPage);
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command.method).toBe('discover');
+  peer.reply(peer.requests[2], { Loaded: { view } });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  peer.query(peer.requests[3], 'attached', attachedPage);
   await creating;
   await expect.poll(() => posted.length).toBeGreaterThan(0);
   expect(provider.controller.snapshot.view?.status).toBe('ready');
@@ -172,8 +186,8 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     session: 'session',
     turn: 'turn',
   });
-  await expect.poll(() => peer.requests.length).toBe(3);
-  peer.query(peer.requests[2], 'turn_diff', {
+  await expect.poll(() => peer.requests.length).toBe(5);
+  peer.query(peer.requests[4], 'turn_diff', {
     status: 'complete',
     files: ['a.ts', 'b.ts'].map((path) => ({
       path,
@@ -195,8 +209,8 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     next_offset: null,
   });
   for (let i = 0; i < 4; i++) {
-    await expect.poll(() => peer.requests.length).toBe(4 + i);
-    peer.query(peer.requests[3 + i], 'turn_diff_content', {
+    await expect.poll(() => peer.requests.length).toBe(6 + i);
+    peer.query(peer.requests[5 + i], 'turn_diff_content', {
       bytes: i % 2 ? 'after' : 'before',
       total_bytes: i % 2 ? 5 : 6,
       next_offset: null,
@@ -238,8 +252,8 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     session: 'session',
     command: { method: 'undo_turn', session: 'session', turn: 'turn' },
   });
-  await expect.poll(() => peer.requests.length).toBe(8);
-  peer.query(peer.requests[7], 'validate_undo', { files: [] });
+  await expect.poll(() => peer.requests.length).toBe(10);
+  peer.query(peer.requests[9], 'validate_undo', { files: [] });
   await blocked;
   expect(api.window.showWarningMessage).not.toHaveBeenCalled();
   expect(provider.controller.snapshot.error).toContain('dirty editor buffers');
@@ -253,8 +267,8 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     session: 'session',
     command: { method: 'undo_turn', session: 'session', turn: 'turn' },
   });
-  await expect.poll(() => peer.requests.length).toBe(9);
-  peer.query(peer.requests[8], 'validate_undo', { files: [] });
+  await expect.poll(() => peer.requests.length).toBe(11);
+  peer.query(peer.requests[10], 'validate_undo', { files: [] });
   await changed;
   expect(api.window.showWarningMessage).toHaveBeenCalledTimes(1);
   expect(provider.controller.snapshot.error).toContain('dirty editor buffers');
@@ -263,16 +277,16 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   // authoritative view, not the unrelated list window, scopes confirmation.
   host.documents = [];
   const listing = provider.controller.receive({ type: 'refresh_names' });
-  await expect.poll(() => peer.requests.length).toBe(10);
-  peer.query(peer.requests[9], 'list', { sessions: [], next_cursor: null });
+  await expect.poll(() => peer.requests.length).toBe(12);
+  peer.query(peer.requests[11], 'list', { sessions: [], next_cursor: null });
   await listing;
   const outsidePage = provider.controller.receive({
     type: 'execute',
     session: 'session',
     command: { method: 'undo_turn', session: 'session', turn: 'turn' },
   });
-  await expect.poll(() => peer.requests.length).toBe(11);
-  peer.query(peer.requests[10], 'validate_undo', { files: [] });
+  await expect.poll(() => peer.requests.length).toBe(13);
+  peer.query(peer.requests[12], 'validate_undo', { files: [] });
   await outsidePage;
   expect(api.window.showWarningMessage).toHaveBeenCalledTimes(2);
   expect(provider.controller.snapshot.error).toBeUndefined();

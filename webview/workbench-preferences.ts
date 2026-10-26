@@ -2,14 +2,28 @@
 const MAX_DISCLOSURES = 256;
 export class Preferences {
   showThoughts = true;
+  historyOpen = false;
+  activityExpanded = false;
+  harness = 'Pi';
+  lastSessions: Partial<Record<string, string>> = {};
   autoScroll = true;
   sessionRows = 4;
-  composerHeight = 100;
+  composerHeight = 80;
   private disclosures = new Map<string, boolean>();
   constructor(saved?: unknown) {
     if (!saved || typeof saved !== 'object' || !('preferences' in saved)) return;
     const value = saved.preferences;
     if (!value || typeof value !== 'object') return;
+    const record = value as Record<string, unknown>;
+    for (const key of ['historyOpen', 'activityExpanded'] as const)
+      if (typeof record[key] === 'boolean') this[key] = record[key];
+    if ('harness' in value && ['Pi', 'Codex', 'Claude'].includes(String(value.harness)))
+      this.harness = String(value.harness);
+    if ('lastSessions' in value && value.lastSessions && typeof value.lastSessions === 'object')
+      for (const name of ['Pi', 'Codex', 'Claude']) {
+        const id = (value.lastSessions as Record<string, unknown>)[name];
+        if (typeof id === 'string' && id.length <= 1000) this.lastSessions[name] = id;
+      }
     if ('showThoughts' in value && typeof value.showThoughts === 'boolean')
       this.showThoughts = value.showThoughts;
     if ('autoScroll' in value && typeof value.autoScroll === 'boolean')
@@ -27,6 +41,7 @@ export class Preferences {
       Number.isFinite(value.composerHeight)
     )
       this.composerHeight = Math.max(65, Math.min(1000, value.composerHeight));
+    if (record.layoutRevision !== 2 && this.composerHeight === 100) this.composerHeight = 80;
     if ('disclosures' in value && Array.isArray(value.disclosures))
       for (const row of value.disclosures.slice(-MAX_DISCLOSURES))
         if (
@@ -51,7 +66,12 @@ export class Preferences {
   snapshot() {
     return {
       preferences: {
+        layoutRevision: 2,
         showThoughts: this.showThoughts,
+        historyOpen: this.historyOpen,
+        activityExpanded: this.activityExpanded,
+        harness: this.harness,
+        lastSessions: { ...this.lastSessions },
         autoScroll: this.autoScroll,
         sessionRows: this.sessionRows,
         composerHeight: this.composerHeight,

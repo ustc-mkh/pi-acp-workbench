@@ -73,6 +73,9 @@ impl From<SafeInteger> for u64 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummary {
+    /// Live coordinator projection only; never persisted or inferred from views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub id: SessionId,

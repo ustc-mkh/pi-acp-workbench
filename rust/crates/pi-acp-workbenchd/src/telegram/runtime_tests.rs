@@ -1,3 +1,5 @@
+#[path = "topic_alignment_tests.rs"]
+mod topic_alignment_tests;
 use super::{
     api::*,
     delivery::deliver_once,
@@ -31,6 +33,9 @@ struct FakeState {
     sequence: Vec<String>,
     fail_media: bool,
     topics: usize,
+    topic_names: Vec<String>,
+    topic_edits: Vec<(TopicId, String)>,
+    forum: bool,
     answers: usize,
     lose_topic_response: bool,
     fail_send: bool,
@@ -125,9 +130,17 @@ impl BotApi for Fake {
         self.0.lock().await.answers += 1;
         Ok(())
     }
-    async fn create_topic(&self, _: ChatId, _: &str) -> Result<ForumTopic, ApiError> {
+    async fn forum_chat(&self, _: ChatId) -> Result<bool, ApiError> {
+        Ok(self.0.lock().await.forum)
+    }
+    async fn edit_topic(&self, _: ChatId, thread: TopicId, name: &str) -> Result<(), ApiError> {
+        self.0.lock().await.topic_edits.push((thread, name.into()));
+        Ok(())
+    }
+    async fn create_topic(&self, _: ChatId, name: &str) -> Result<ForumTopic, ApiError> {
         let mut state = self.0.lock().await;
         state.topics += 1;
+        state.topic_names.push(name.into());
         if std::mem::take(&mut state.lose_topic_response) {
             return Err(ApiError::Transport);
         }
@@ -635,7 +648,11 @@ async fn topic_creation_committed_but_response_lost_never_creates_a_second_topic
     execute_record(&context, &record).await.unwrap();
     execute_record(&context, &record).await.unwrap();
     assert_eq!(api.0.lock().await.topics, 1);
-    assert!(app.list(None, None).await.unwrap().sessions.is_empty());
+    assert_eq!(
+        app.list(None, None).await.unwrap().sessions.len(),
+        1,
+        "created session is retained when topic creation is uncertain"
+    );
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -655,10 +672,13 @@ async fn restart_between_side_effect_and_inbox_completion_replays_topic_and_sess
     poll_once(&context).await.unwrap();
     let record = context.store.pending(8).await.unwrap().remove(0);
     dispatch(&context, &record).await.unwrap(); // crash window before notice/inbox completion
+    let bound = context.store.snapshot().await.unwrap().bindings;
+    let key = super::topics::operation(record.command.topic.chat, bound.values().next().unwrap())
+        .unwrap();
     first.shutdown().await;
     let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
     sql.execute(
-        "UPDATE telegram_effects SET effect_id='hidden-topic-1' WHERE effect_id='topic-1'",
+        "UPDATE telegram_effects SET effect_id='hidden-topic-1' WHERE effect_id LIKE 'session-topic-%'",
         [],
     )
     .unwrap();
@@ -672,13 +692,13 @@ async fn restart_between_side_effect_and_inbox_completion_replays_topic_and_sess
     )
     .await
     .unwrap();
-    assert!(execute_record(&restarted, &record).await.is_err());
-    assert_eq!(api.0.lock().await.topics, 1); // missing receipt cannot authorize another effect
+    execute_record(&restarted, &record).await.unwrap();
+    assert_eq!(api.0.lock().await.topics, 1); // Committed binding recovers without another HTTP effect.
     second.shutdown().await;
     let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
     sql.execute(
-        "UPDATE telegram_effects SET effect_id='topic-1' WHERE effect_id='hidden-topic-1'",
-        [],
+        "UPDATE telegram_effects SET effect_id=?1 WHERE effect_id='hidden-topic-1'",
+        [key.as_str()],
     )
     .unwrap();
     sql.close().unwrap();

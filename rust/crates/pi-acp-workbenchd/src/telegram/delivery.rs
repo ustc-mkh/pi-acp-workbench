@@ -128,6 +128,25 @@ pub(super) async fn deliver_record(
                 outbox.ack(&record.event.id).await?;
                 return Ok(());
             }
+            if topic.is_none()
+                && context
+                    .auto_forum
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != i64::MAX
+                && context.inspect(session).await?.is_some()
+            {
+                // A known/being-discovered forum must get its session topic
+                // before delivery. Never acknowledge output merely because the
+                // bounded topic reconciler has not bound this session yet.
+                outbox
+                    .fail(
+                        &record.event.id,
+                        DeliveryFailure::InvalidTarget,
+                        now().saturating_add(1),
+                    )
+                    .await?;
+                return Ok(());
+            }
             (topic, snapshot)
         }
     };

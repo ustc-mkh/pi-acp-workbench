@@ -11,6 +11,18 @@ use crate::domain::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub(super) const HISTORY_SQL: &str = "SELECT se.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes <= 16384 THEN c.data ELSE NULL END FROM session_entries se JOIN entries e ON e.entry_id = se.entry_id JOIN contents c ON c.id = e.content_id WHERE se.session = ?1 AND se.seq <= ?2 AND se.seq < ?3 ORDER BY se.seq DESC LIMIT ?4";
+// Reuse durable input/usage records: no new schema or timestamp written by reads.
+// Native-fork inherited rows and autonomous turns have no local user inference.
+pub(super) fn worker_activity(
+    db: &Connection,
+    session: &SessionId,
+) -> Result<(u64, u64), StoreError> {
+    let (time, order) = db.query_row("SELECT u.occurred_at/1000,u.rowid FROM usage_facts u WHERE u.session=?1 AND u.kind='inference' AND EXISTS(SELECT 1 FROM entries e WHERE e.turn=substr(u.id,length(?1)+7) AND e.role='User') ORDER BY u.occurred_at DESC,u.rowid DESC LIMIT 1", [session.as_str()], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).optional()?.unwrap_or_default();
+    Ok((
+        u64::try_from(time).map_err(|_| StoreError::Invalid("invalid user activity time"))?,
+        u64::try_from(order).map_err(|_| StoreError::Invalid("invalid user activity order"))?,
+    ))
+}
 pub(super) fn next_counter(db: &Connection, name: &str) -> Result<SafeInteger, StoreError> {
     let value: Option<SafeInteger> = db.query_row("UPDATE store_meta SET value = value + 1 WHERE key = ?1 AND value < 9007199254740991 RETURNING value", [name], |r| r.get(0)).optional()?;
     value.ok_or(StoreError::Invalid("database sequence exhausted"))
@@ -30,8 +42,16 @@ fn parse_harness(value: &str) -> Result<Harness, StoreError> {
         _ => Err(StoreError::Invalid("invalid harness")),
     }
 }
+pub(super) fn summary_by_id(db: &Connection, id: &SessionId) -> Result<SessionSummary, StoreError> {
+    let view = view(db, id)?;
+    let (seq,title) = db.query_row("SELECT s.created_seq,m.title FROM sessions s LEFT JOIN session_metadata m ON m.session=s.id WHERE s.id=?1",[id.as_str()],|r| Ok((r.get::<_,SafeInteger>(0)?,r.get::<_,Option<String>>(1)?)))?;
+    let mut result = summary(&view, seq);
+    result.title = title;
+    Ok(result)
+}
 pub(super) fn summary(view: &SessionView, created_seq: SafeInteger) -> SessionSummary {
     SessionSummary {
+        retention_days: None,
         title: None,
         id: view.id.clone(),
         harness: view.harness.clone(),
@@ -130,8 +150,22 @@ pub(super) fn apply_commit(
     let settled = old.configuration_intent.is_some()
         && commit.next.configuration_intent.is_none()
         && commit.operation.is_some();
-    let observed_before_task = commit.next.active_turn.is_some()
-        && commit.next.catalogue != old.catalogue
+    let observation_changed = commit.next.catalogue.current_model.is_some()
+        && (commit.next.active_turn != old.active_turn || commit.next.catalogue != old.catalogue)
+        && commit.next.configuration_intent.is_none();
+    let user_turn = if observation_changed {
+        if let Some(turn) = &commit.next.active_turn {
+            commit.append.iter().any(|e| &e.turn == turn && e.role == crate::domain::transcript::EntryRole::User) || tx.query_row("SELECT EXISTS(SELECT 1 FROM entries e INDEXED BY entries_turn_role CROSS JOIN session_entries se ON se.entry_id=e.entry_id WHERE e.turn=?2 AND e.role='User' AND se.session=?1)",
+            params![commit.next.id.as_str(), turn.as_str()], |row| row.get::<_, bool>(0))?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let observed_before_task = user_turn
+        && commit.next.catalogue.current_model.is_some()
+        && (commit.next.active_turn != old.active_turn || commit.next.catalogue != old.catalogue)
         && commit.next.configuration_intent.is_none()
         && commit
             .next
@@ -169,18 +203,18 @@ pub(super) fn apply_commit(
                 options: Default::default(),
             },
         };
-        if commit.next.config.model.is_some() {
-            defaults.model = commit.next.config.model.clone();
-        }
-        for (id, value) in &commit.next.config.options {
-            if commit
-                .next
-                .catalogue
-                .selects
-                .iter()
-                .any(|s| &s.id == id && s.category.as_deref() == Some("thought_level"))
-            {
-                defaults.options.insert(id.clone(), value.clone());
+        defaults.model = commit
+            .next
+            .config
+            .model
+            .clone()
+            .or_else(|| commit.next.catalogue.current_model.clone())
+            .or(defaults.model);
+        for setting in &commit.next.catalogue.selects {
+            if setting.category.as_deref() == Some("thought_level") {
+                defaults
+                    .options
+                    .insert(setting.id.clone(), setting.current_value.clone());
             }
         }
         tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![harness_name(&commit.next.harness), encode(&defaults)?])?;
@@ -616,6 +650,7 @@ fn list_impl(
             break;
         }
         let item = SessionSummary {
+            retention_days: None,
             title: row.get(7)?,
             id: SessionId::new(row.get::<_, String>(0)?)
                 .map_err(|_| StoreError::Invalid("invalid summary id"))?,

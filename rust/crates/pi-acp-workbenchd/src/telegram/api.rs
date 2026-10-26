@@ -4,6 +4,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{future::Future, sync::Arc, time::Duration};
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {
+    #[error("Telegram topic title is unchanged")]
+    TopicNotModified,
     #[error("Telegram transport failed")]
     Transport,
     #[error("invalid Telegram API response")]
@@ -164,6 +166,17 @@ pub trait BotApi: Clone + Send + Sync + 'static {
         query: &str,
         text: &str,
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    fn forum_chat(&self, _chat: ChatId) -> impl Future<Output = Result<bool, ApiError>> + Send {
+        async { Ok(false) }
+    }
+    fn edit_topic(
+        &self,
+        _chat: ChatId,
+        _thread: TopicId,
+        _name: &str,
+    ) -> impl Future<Output = Result<(), ApiError>> + Send {
+        async { Err(ApiError::Protocol) }
+    }
     fn create_topic(
         &self,
         chat: ChatId,
@@ -181,6 +194,7 @@ struct Envelope<R> {
     result: Option<R>,
     error_code: Option<u16>,
     parameters: Option<ResponseParameters>,
+    description: Option<String>,
 }
 #[derive(Deserialize)]
 struct ResponseParameters {
@@ -249,6 +263,14 @@ impl BotClient {
         let response: Envelope<R> =
             serde_json::from_slice(&bytes).map_err(|_| ApiError::Protocol)?;
         if !status.is_success() || !response.ok {
+            if response.error_code == Some(400)
+                && response
+                    .description
+                    .as_deref()
+                    .is_some_and(|s| s.contains("TOPIC_NOT_MODIFIED"))
+            {
+                return Err(ApiError::TopicNotModified);
+            }
             return Err(ApiError::Response {
                 code: response.error_code.unwrap_or(status.as_u16()),
                 retry_after: response
@@ -361,6 +383,40 @@ impl BotApi for BotClient {
             return Err(ApiError::Protocol);
         }
         Ok(())
+    }
+    async fn forum_chat(&self, chat: ChatId) -> Result<bool, ApiError> {
+        #[derive(Serialize)]
+        struct Request {
+            chat_id: ChatId,
+        }
+        let value: WireChat = self.call("getChat", &Request { chat_id: chat }).await?;
+        if value.id != chat {
+            return Err(ApiError::Protocol);
+        }
+        Ok(value.is_forum)
+    }
+    async fn edit_topic(&self, chat: ChatId, thread: TopicId, name: &str) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Request<'a> {
+            chat_id: ChatId,
+            message_thread_id: TopicId,
+            name: &'a str,
+        }
+        match self
+            .call::<_, bool>(
+                "editForumTopic",
+                &Request {
+                    chat_id: chat,
+                    message_thread_id: thread,
+                    name,
+                },
+            )
+            .await
+        {
+            Ok(true) | Err(ApiError::TopicNotModified) => Ok(()),
+            Ok(false) => Err(ApiError::Protocol),
+            Err(error) => Err(error),
+        }
     }
     async fn create_topic(&self, chat: ChatId, name: &str) -> Result<ForumTopic, ApiError> {
         #[derive(Serialize)]

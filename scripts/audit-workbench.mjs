@@ -163,7 +163,7 @@ for (const [file, name] of [
 const allowed = {
   extension: /^src\/workbench-[^/]+\.ts$/,
   browser:
-    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|markdown|diagrams))\.ts$/,
+    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-model-controls|workbench-shell|workbench-labels|tooltips|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|markdown|diagrams))\.ts$/,
   adapter: /^src\/(?:pi-[^/]+|adapter-[^/]+|atomic-json|native-branch|telemetry)\.ts$/,
 };
 for (const [kind, entry] of [

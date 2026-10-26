@@ -1,3 +1,4 @@
+import { checkClassicLayout } from './lib/workbench-classic-layout.mjs';
 // Production v3 extension/browser graph + real new daemon. Synthetic ACP; no account/Bot/model.
 import { chromium } from '@playwright/test';
 import { createServer } from 'node:http';
@@ -180,19 +181,23 @@ try {
       await new Promise((done) => setTimeout(done, 20));
     }
   };
-  await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await wait(() => controller.snapshot.view?.status === 'ready', 'created session');
+  await page.getByRole('button', { name: '新对话', exact: true }).click();
+  await wait(
+    () => controller.snapshot.view?.status === 'ready' && !controller.snapshot.preparing,
+    'created session with automatic settings',
+  );
   const source = controller.snapshot.selected;
   assert(source);
   assert.equal(controller.snapshot.view.view.harness, 'Pi');
-  check('production browser/controller creates a session through the actual single host IPC v3');
+  check(
+    'production browser/controller creates a session and automatically loads settings through the actual host IPC v3',
+  );
   const prompt = async (text) => {
     await page.waitForFunction(
       (selected) =>
-        document.querySelector('select[aria-label="Session"]')?.value === selected &&
-        [...document.querySelectorAll('button')].some(
-          (button) => button.textContent === 'Send' && !button.disabled,
-        ),
+        document.querySelector('#history-items [aria-selected="true"]')?.dataset.sessionId ===
+          selected &&
+        [...document.querySelectorAll('button')].some((button) => button.id === 'send'),
       controller.snapshot.selected,
     );
     const previous =
@@ -200,7 +205,7 @@ try {
         (row) => row.role === 'User' && row.text.Inline?.text === text,
       ).length || 0;
     await page.locator('#prompt').fill(text);
-    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByRole('button', { name: '发送消息', exact: true }).click();
     await wait(
       () =>
         (controller.snapshot.view?.entries.filter(
@@ -208,23 +213,48 @@ try {
         ).length || 0) > previous,
       `prompt ${text}`,
     );
+    await page.waitForFunction(() => document.querySelector('#prompt').value === '');
   };
-  await page.getByRole('button', { name: 'Discover provider settings', exact: true }).click();
   await wait(
     () => controller.snapshot.view?.view?.catalogue.selects?.some((s) => s.id === 'thought_level'),
-    'first-task provider discovery',
+    'automatic provider discovery without manual load',
   );
   assert.equal(controller.snapshot.view.entries.length, 0);
-  await page.getByLabel('Thinking', { exact: true }).selectOption('high');
+  await page.waitForFunction(() => {
+    const slider = document.querySelector('[aria-label="思考强度"]');
+    return slider && !slider.disabled;
+  });
+  await page.getByRole('button', { name: '模型、思考和 Fast 设置', exact: true }).click();
+  await page.waitForFunction(() => {
+    const s = document.querySelector('[aria-label="思考强度"]');
+    return !s.disabled;
+  });
+  await page.getByRole('slider', { name: '思考强度', exact: true }).press('End');
   await wait(
     () => controller.snapshot.view?.view?.config.options?.thought_level === 'high',
     'observed thinking before first task',
   );
-  await page.getByLabel('Fast', { exact: true }).selectOption('on');
+  await page.getByRole('button', { name: 'Fast Mode', exact: true }).click();
   await wait(
     () => controller.snapshot.view?.view?.config.options?.fast === 'on',
     'observed independent Fast',
   );
+  await page.screenshot({ path: join(artifacts, 'model-controls-open.png') });
+  await page.getByRole('button', { name: '恢复打开面板时的思考强度', exact: true }).click();
+  await wait(
+    () => controller.snapshot.view?.view?.config.options?.thought_level === 'low',
+    'reset opening thinking',
+  );
+  await page.waitForFunction(() => {
+    const s = document.querySelector('[aria-label="思考强度"]');
+    return !s.disabled;
+  });
+  await page.getByRole('slider', { name: '思考强度', exact: true }).press('End');
+  await wait(
+    () => controller.snapshot.view?.view?.config.options?.thought_level === 'high',
+    'restore high thinking',
+  );
+  await page.keyboard.press('Escape');
   check(
     'explicit desktop discovery configures actual independent Thinking/Fast before the first task',
   );
@@ -243,7 +273,7 @@ try {
   check(
     'logical messages join text fragments while preserving role boundaries and immutable committed entries',
   );
-  await page.getByRole('button', { name: 'Fork here', exact: true }).first().click();
+  await page.getByRole('button', { name: '从此处分支', exact: true }).first().click();
   await wait(
     () => controller.snapshot.selected !== source && controller.snapshot.view?.status === 'ready',
     'native branch selection',
@@ -261,7 +291,7 @@ try {
   await prompt('elicitation-text');
   await page.locator('#interactions textarea').waitFor();
   await page.locator('#interactions textarea').fill('browser typed answer');
-  await page.getByRole('button', { name: 'Submit answer', exact: true }).click();
+  await page.getByRole('button', { name: '提交回答', exact: true }).click();
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
@@ -279,13 +309,18 @@ try {
   );
   const toolTurn = controller.snapshot.view.entries.at(-1).turn;
   const toolProcess = page.locator(`[data-turn="${toolTurn}"] .turn-process`);
+  if (!(await toolProcess.isVisible())) {
+    await page.getByLabel('会话选项', { exact: true }).click();
+    await page.getByLabel('显示执行过程', { exact: true }).check();
+    await page.getByLabel('会话选项', { exact: true }).click();
+  }
   await toolProcess.waitFor();
-  await page.getByRole('button', { name: 'Stop Pi background worker', exact: true }).waitFor();
+  await page.locator('#stop').waitFor({ state: 'hidden' });
   // A turn first rendered while active is already expanded. Clicking its summary
   // unconditionally closes it, so observe the disclosure before opening it.
   if (!(await toolProcess.evaluate((node) => node.open)))
     await toolProcess.locator('summary').first().click();
-  await toolProcess.getByRole('button', { name: `Tools for ${toolTurn}`, exact: true }).click();
+  await toolProcess.locator('[data-tools-for]').click();
   await wait(() => controller.snapshot.view.tools.length > 0, 'bounded tools query');
   assert(controller.snapshot.view.tools.length > 0);
   check(
@@ -298,14 +333,14 @@ try {
       controller.snapshot.view.view.status === 'Idle',
     'image completion',
   );
-  await page.getByRole('button', { name: 'Load archived image', exact: true }).click();
+  await page.getByRole('button', { name: '加载图片', exact: true }).click();
   await page.locator('figure img').waitFor();
   await page.waitForFunction(() => document.querySelector('figure img')?.naturalWidth > 0);
   assert((await page.locator('figure img').getAttribute('src')).startsWith('blob:'));
   check(
     'explicit archive-only image read displays a real decoded raster with no remote/path fallback',
   );
-  await page.getByRole('button', { name: 'Attach files', exact: true }).click();
+  await page.getByRole('button', { name: '添加上下文', exact: true }).click();
   await page.locator('#attachments summary').click();
   await page.getByRole('button', { name: 'Remove attachment example.ts', exact: true }).click();
   assert.equal(await page.locator('#attachments pre').count(), 0);
@@ -341,7 +376,7 @@ try {
   );
   await prompt('```mermaid\ngraph TD; A-->B\n```');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'diagram turn completion');
-  await page.getByRole('button', { name: 'Render diagrams', exact: true }).first().click();
+  await page.getByRole('button', { name: '渲染图表', exact: true }).first().click();
   await page.locator('.diagram-canvas svg').first().waitFor();
   assert.equal(
     await page.locator('.diagram-canvas image, .diagram-canvas foreignObject').count(),
@@ -368,7 +403,7 @@ try {
   );
   await prompt('elicitation-text');
   await page.locator('#interactions textarea').waitFor();
-  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
+  await page.getByRole('button', { name: '停止输出', exact: true }).click();
   await wait(
     () =>
       controller.snapshot.view?.status === 'ready' &&
@@ -379,22 +414,27 @@ try {
   check('reserved control cancels a live waiting turn and clears its exact pending interaction');
   await prompt('workspace-write');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'workspace write completion');
-  const review = page.getByRole('button', { name: 'Review workspace changes', exact: true }).last();
-  await review.click();
-  await page.getByText('complete · +1 −1 lines', { exact: true }).click();
-  await page.getByRole('button', { name: 'View total Diff in editor', exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Load before', exact: true }).click();
-  await page.getByRole('button', { name: 'Load after', exact: true }).click();
+  const workspaceReviewTurn = controller.snapshot.view.entries.at(-1).turn;
+  const workspaceTurnBox = page.locator(`section.turn[data-turn="${workspaceReviewTurn}"]`);
+  await workspaceTurnBox.scrollIntoViewIfNeeded();
+  await workspaceTurnBox.locator('.turn-diff-file > summary').first().waitFor();
+  assert.equal(await page.getByRole('button', { name: '查看工作区变更', exact: true }).count(), 0);
+  await page.locator('.turn-diff-file > summary').first().click();
+  await page.getByRole('button', { name: '查看总 Diff', exact: true }).waitFor();
+  if (await page.getByRole('button', { name: '读取修改前', exact: true }).count())
+    await page.getByRole('button', { name: '读取修改前', exact: true }).click();
+  if (await page.getByRole('button', { name: '读取修改后', exact: true }).count())
+    await page.getByRole('button', { name: '读取修改后', exact: true }).click();
   await page.locator('pre').filter({ hasText: 'before' }).waitFor();
   await page.locator('pre').filter({ hasText: 'after' }).waitFor();
-  await page.getByRole('button', { name: 'Compare file in editor', exact: true }).click();
+  await page.getByRole('button', { name: '在编辑器中对比', exact: true }).click();
   await wait(() => editorDiffs.length === 1, 'single editor port');
   assert.deepEqual(editorDiffs[0].files, [
     { path: 'review.txt', before: 'before\n', after: 'after\n' },
   ]);
-  await page.getByRole('button', { name: 'View total Diff in editor', exact: true }).click();
+  await page.getByRole('button', { name: '查看总 Diff', exact: true }).click();
   await wait(() => editorDiffs.length === 2, 'total editor port');
-  await page.getByRole('button', { name: 'Undo this turn…', exact: true }).click();
+  await page.getByRole('button', { name: '撤回本轮修改', exact: true }).click();
   await wait(
     () =>
       confirmations === 1 &&
@@ -420,11 +460,12 @@ try {
       `S6 ${name}`,
     );
   };
-  await page.getByRole('button', { name: 'Model settings', exact: true }).first().click();
+  await page.getByRole('button', { name: '模型设置', exact: true }).first().click();
+  await page.locator('#management .additional-settings > summary').click();
   await page
     .getByRole('textbox', { name: 'Session name', exact: true })
     .fill('Browser managed name');
-  await manageClick('Save session name');
+  await manageClick('保存会话名称');
   await wait(
     () =>
       controller.snapshot.sessions.some(
@@ -432,18 +473,17 @@ try {
       ),
     'S6 persisted manual name',
   );
-  await manageClick('Refresh provider models explicitly');
+  await manageClick('刷新模型目录');
   const modelCard = page
-    .locator('#management details')
-    .filter({ has: page.locator('summary', { hasText: 'Other' }) });
-  await modelCard.locator('summary').click();
-  await modelCard
-    .getByRole('checkbox', { name: 'Visible in model selector', exact: true })
-    .uncheck();
+    .locator('#management [data-model]')
+    .filter({ has: page.locator('h3', { hasText: 'Other' }) });
+  await page.locator('#management .provider-group > summary').first().click();
   const manageBefore = controller.snapshot.operations.filter(
     (op) => op.method === 'manage' && op.status === 'completed',
   ).length;
-  await modelCard.getByRole('button', { name: 'Save visibility only', exact: true }).click();
+  await modelCard
+    .getByRole('checkbox', { name: 'Visible in model selector', exact: true })
+    .uncheck();
   await wait(
     () =>
       controller.snapshot.operations.filter(
@@ -454,14 +494,16 @@ try {
   await page.waitForFunction(
     () => !document.querySelector('select[aria-label="model"] option[value="other"]'),
   );
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
   await prompt('usage-complete');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'S6 usage completion');
-  await page.getByRole('button', { name: 'Usage statistics', exact: true }).first().click();
+  await page.getByRole('button', { name: '用量统计', exact: true }).first().click();
+  await page.locator('#management .additional-settings > summary').click();
   await page
     .getByRole('combobox', { name: 'Usage session filter', exact: true })
     .selectOption(branch);
-  await page.getByRole('button', { name: 'Apply usage filters', exact: true }).click();
-  await page.getByText('Filtered total', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '应用筛选', exact: true }).click();
+  await page.locator('#management .stats-totals').waitFor();
   const stats = await client.call({
     method: 'management',
     query: { group: 'session', session: branch },
@@ -474,6 +516,119 @@ try {
   check(
     'S6 Chromium: persistent manual title, explicit provider model refresh, visibility and per-session token/cache statistics',
   );
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  const layout = await checkClassicLayout(page, artifacts);
+  await writeFile(join(artifacts, 'classic-layout.json'), JSON.stringify(layout, null, 2));
+  check(
+    'classic shell: narrow/wide dark/light layout, pinned composer, history and independent settings preserve drafts',
+  );
+  const beforeRelease = await client.call({ method: 'history', session: branch });
+  const nativeBeforeRelease = controller.snapshot.view.view.provider_session;
+  await page.getByRole('button', { name: '历史记录', exact: true }).click();
+  await wait(
+    () => controller.snapshot.sessions.find((s) => s.id === branch)?.retention_days === 4,
+    'host-derived four-day badge',
+  );
+  const releaseRow = page.locator(`#history-items [data-session-id="${branch}"]`);
+  await releaseRow.locator('.session-number.alive-long').waitFor();
+  await releaseRow.locator('.history-release').click();
+  await wait(
+    () => controller.snapshot.sessions.find((s) => s.id === branch)?.retention_days === 0,
+    'explicit physical release updates badge',
+  );
+  assert.deepEqual(
+    (await client.call({ method: 'history', session: branch })).entries,
+    beforeRelease.entries,
+  );
+  await page.getByRole('button', { name: '历史记录', exact: true }).click();
+  await prompt('after manual release');
+  await wait(
+    () => controller.snapshot.view?.view?.status === 'Idle',
+    'native resume after explicit release',
+  );
+  assert.equal(controller.snapshot.view.view.provider_session, nativeBeforeRelease);
+  check(
+    'real history badge follows host residency; manual release preserves entries and explicit input resumes the same native session',
+  );
+  for (let i = 0; i < 20; i++) {
+    await prompt(`bounded history ${i}`);
+    await wait(() => controller.snapshot.view?.view?.status === 'Idle', `history fixture ${i}`);
+  }
+  const beforeOlderReview = (await client.call({ method: 'history', session: branch })).entries;
+  const olderTurn = page.locator(`section.turn[data-turn="${workspaceReviewTurn}"]`);
+  await olderTurn.scrollIntoViewIfNeeded();
+  await olderTurn.locator('.turn-diff-header').waitFor();
+  assert.equal(await olderTurn.locator('.turn-review-action').count(), 0);
+  assert.deepEqual(
+    (await client.call({ method: 'history', session: branch })).entries,
+    beforeOlderReview,
+  );
+  check(
+    'scrolling back beyond the recent diff cache automatically restores the older card without a button or provider input',
+  );
+  // Visual fixture from the user's four-file reference, after functional checks.
+  // This is display-only evidence, not a claim that those repository files changed.
+  await page.setViewportSize({ width: 1360, height: 1000 });
+  await page.evaluate(
+    ({ session, turn }) => {
+      document.documentElement.style.zoom = '2';
+      const root = document.documentElement.style;
+      root.setProperty('--bg', '#26283b');
+      root.setProperty('--fg', '#c6d0f5');
+      root.setProperty('--code-bg', '#26283b');
+      root.setProperty('--border', '#383b4f');
+      root.setProperty('--muted', '#a5adce');
+      const paths = [
+        'docs/e2e_latency_validation.md',
+        'llm_router/simulation/decode_gate_validation.py',
+        'llm_router/simulation/decode_transfer_validation.py',
+        'llm_router/simulation/decode_validation.py',
+      ];
+      window.postMessage(
+        {
+          type: 'turn_diff',
+          session,
+          turn,
+          diff: {
+            status: 'partial',
+            added: 9,
+            removed: 3,
+            warnings: [],
+            next_offset: null,
+            files: paths.map((path, i) => ({
+              path,
+              status: 'modified',
+              added: i ? 1 : 6,
+              removed: i ? 1 : 0,
+              before: null,
+              after: null,
+              before_hash: null,
+              after_hash: null,
+              patch: null,
+              old_mode: 33188,
+              new_mode: 33188,
+              omitted: i === 3 ? 'size' : null,
+            })),
+          },
+        },
+        '*',
+      );
+    },
+    { session: branch, turn: workspaceReviewTurn },
+  );
+  await page.waitForFunction(
+    (turn) =>
+      document
+        .querySelector(`section.turn[data-turn="${turn}"] .turn-diff-header`)
+        ?.textContent.includes('4 个文件'),
+    workspaceReviewTurn,
+  );
+  await olderTurn
+    .locator('[data-turn-review]')
+    .screenshot({ path: join(artifacts, 'classic-diff-reference.png') });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = '';
+  });
   const sourcePage = await client.call({ method: 'history', session: source });
   assert.deepEqual(sourcePage.entries, sourceRows);
   assert.equal(controller.snapshot.selected, branch);

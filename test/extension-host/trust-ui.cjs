@@ -46,6 +46,53 @@ exports.run = async () => {
     assert(vscode.workspace.isTrusted);
     return product().activate();
   };
+  const assertRestricted = async () => {
+    assert.equal(vscode.workspace.isTrusted, false);
+    const { WorkbenchWire } = await import('./workbench-wire.mjs');
+    const wire = await WorkbenchWire.open(join(base, 'data/workbench.sock'));
+    const tracePath = join(base, 'provider-trace.ndjson');
+    try {
+      const before = await wire.call({ method: 'list' });
+      const traceBefore = await readFile(tracePath, 'utf8').catch((error) => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      const extension = product();
+      if (extension) {
+        // VS Code may mark even a failed activation attempt as isActive and
+        // resolve with undefined. Assert the actual boundary: no product API,
+        // no new session and no provider side effect, rather than that flag.
+        let result;
+        try {
+          result = await extension.activate();
+        } catch {
+          /* Native refusal. */
+        }
+        assert.equal(result, undefined, 'Restricted Mode must not expose the product API');
+        assert.equal(extension.exports, undefined, 'Rejected activation must have no exports');
+      }
+      try {
+        await vscode.commands.executeCommand('piAcp.newSession');
+      } catch {
+        /* Unavailable command. */
+      }
+      assert.deepEqual(
+        await wire.call({ method: 'list' }),
+        before,
+        'Restricted command cannot create or mutate sessions',
+      );
+      assert.equal(
+        await readFile(tracePath, 'utf8').catch((error) => {
+          if (error.code === 'ENOENT') return '';
+          throw error;
+        }),
+        traceBefore,
+        'Restricted activation cannot launch or contact a provider',
+      );
+    } finally {
+      wire.close();
+    }
+  };
   const findView = async () => {
     await until(async () => {
       for (const p of browser.contexts()[0].pages())
@@ -67,14 +114,29 @@ exports.run = async () => {
       throw e;
     });
     await until(() => vscode.workspace.isTrusted === value, 'trust transition');
+    if (value) {
+      // This test deliberately forces an activation failure while restricted.
+      // VS Code memoizes that failed attempt; a normal native window reload is
+      // required before probing a trusted activation again. Preserve phase first.
+      checkpoint.transitions.push({
+        phase: checkpoint.phase,
+        trusted: true,
+        reload_after_restricted_probe: true,
+        pid: process.pid,
+      });
+      await writeFile(file, JSON.stringify(checkpoint), { mode: 0o600 });
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
+      await new Promise(() => {});
+    }
   };
   try {
     if (checkpoint.phase === 'initial') {
       assert.equal(vscode.workspace.isTrusted, false);
       assert(!product()?.isActive);
-      if (product()) await assert.rejects(() => product().activate());
-      else assert(!(await vscode.commands.getCommands(true)).includes('piAcp.newSession'));
-      checkpoint.checks.push('actual Restricted Mode refuses production extension activation');
+      await assertRestricted();
+      checkpoint.checks.push(
+        'actual Restricted Mode has no product API, session mutation or provider effect',
+      );
       await save('grant');
       await trust(true);
     }
@@ -89,7 +151,7 @@ exports.run = async () => {
       );
       await findView();
       await frame.locator('#prompt').fill('permission');
-      await frame.getByRole('button', { name: 'Send', exact: true }).click();
+      await frame.getByRole('button', { name: '发送消息', exact: true }).click();
       await until(
         () => Object.keys(api.getState().view?.view?.pending_interactions || {}).length === 1,
         'pending authorization',
@@ -106,9 +168,8 @@ exports.run = async () => {
     if (checkpoint.phase === 'revoked') {
       await until(() => !vscode.workspace.isTrusted, 'revocation');
       // VS Code unloads extensions which do not support Restricted Mode.
-      await until(() => !product()?.isActive, 'production extension unloaded');
-      if (product()) await assert.rejects(() => product().activate());
-      else assert(!(await vscode.commands.getCommands(true)).includes('piAcp.newSession'));
+      await until(() => !product()?.exports, 'production extension API unavailable');
+      await assertRestricted();
       const { WorkbenchWire } = await import('./workbench-wire.mjs');
       const wire = await WorkbenchWire.open(join(base, 'data/workbench.sock'));
       try {
@@ -120,7 +181,7 @@ exports.run = async () => {
         wire.close();
       }
       checkpoint.checks.push(
-        'native trust revocation unloads extension without answering or replaying the pending host task',
+        'native trust revocation removes product API without answering or replaying the pending host task',
       );
       await save('regrant');
       await trust(true);

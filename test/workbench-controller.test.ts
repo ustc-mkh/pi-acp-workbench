@@ -367,6 +367,91 @@ it('file picking posts only to its selected session without provider mutation', 
   expect(peer.requests.map((request) => request.command.method)).toEqual(['list', 'attach']);
 });
 
+it('new session creation automatically discovers settings and refreshes before enabling input', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const action = controller.receive({
+    type: 'create',
+    command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.reply(peer.requests[0], { Created: { summary: summary() } });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  expect(controller.snapshot.preparing).toBe('session');
+  peer.query(peer.requests[1], 'attached', attached());
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command).toEqual({ method: 'discover', session: 'session' });
+  peer.reply(peer.requests[2], { Loaded: { view: emptyView(6) } });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  expect(peer.requests[3].command.method).toBe('attach');
+  expect(controller.snapshot.preparing).toBe('session');
+  peer.query(peer.requests[3], 'attached', attached(6));
+  await action;
+  expect(controller.snapshot.preparing).toBeUndefined();
+  expect(controller.snapshot.view?.status).toBe('ready');
+  expect(peer.requests.map((r) => r.command.method)).toEqual([
+    'create',
+    'attach',
+    'discover',
+    'attach',
+  ]);
+});
+
+it('releases an unselected session through its authorized cancel receipt without loading or removing it', async () => {
+  const { peer, controller } = await setup();
+  const action = controller.receive({ type: 'release_session', session: 'other' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command).toEqual({ method: 'inspect', session: 'other' });
+  peer.query(peer.requests[2], 'view', { ...emptyView(), id: 'other' });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  expect(peer.requests[3].command).toEqual({ method: 'cancel', session: 'other' });
+  peer.reply(peer.requests[3], { Accepted: { session: 'other', revision: 1 } });
+  await expect.poll(() => peer.requests.length).toBe(5);
+  peer.query(peer.requests[4], 'list', { sessions: [summary()], next_cursor: null });
+  await action;
+  expect(controller.snapshot.selected).toBe('session');
+  expect(peer.requests.map((x) => x.command.method)).toEqual([
+    'list',
+    'attach',
+    'inspect',
+    'cancel',
+    'list',
+  ]);
+});
+
+it('does not release a running session without confirmation or a session outside the authorized workspace', async () => {
+  const { peer, controller } = await setup();
+  const active = controller.receive({ type: 'release_session', session: 'other' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'view', {
+    ...emptyView(),
+    id: 'other',
+    status: 'Running',
+    active_turn: 'live-turn',
+  });
+  await active;
+  expect(controller.snapshot.error).toContain('再次确认');
+  const outside = controller.receive({
+    type: 'release_session',
+    session: 'outside',
+    confirmed: true,
+  });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  peer.query(peer.requests[3], 'view', { ...emptyView(), id: 'outside', cwd: '/forbidden' });
+  await outside;
+  expect(controller.snapshot.error).toContain('outside workspace');
+  expect(
+    peer.requests.some((r) => r.command.method === 'cancel' || r.command.method === 'load'),
+  ).toBe(false);
+});
+
 it('selection is cold, typed state reaches the webview, and only user mutation explicitly loads a provider', async () => {
   const { peer, controller, messages, authorization } = await setup();
   expect(peer.requests.map((r) => r.command.method)).toEqual(['list', 'attach']);
@@ -628,4 +713,16 @@ it('does not dispatch if durable local handle persistence fails', async () => {
   });
   expect(peer.requests).toEqual([]);
   expect(controller.snapshot.error).toBe('preferences unavailable');
+});
+
+it('detaches the view when switching to an empty harness without cancelling or creating provider work', async () => {
+  const { controller, peer } = await setup();
+  const before = peer.requests.length;
+  await controller.receive({ type: 'clear_selection' });
+  expect(controller.snapshot.selected).toBeUndefined();
+  expect(controller.snapshot.view).toBeUndefined();
+  await expect.poll(() => peer.requests.length).toBe(before + 1);
+  expect(peer.requests.slice(before).map((request) => request.command.method)).toEqual(['detach']);
+  await controller.receive({ type: 'clear_selection' });
+  expect(peer.requests).toHaveLength(before + 1);
 });

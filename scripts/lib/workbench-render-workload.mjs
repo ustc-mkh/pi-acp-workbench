@@ -138,7 +138,7 @@ export function measureRenderWorkload(page, snapshot) {
       inputToFrame: distribution(inputToFrame),
       longTasks: distribution(longTasks),
       messages: document.querySelectorAll('article').length,
-      code: document.querySelector('article.agent code')?.textContent.includes('fragment 998'),
+      code: document.querySelector('article.assistant code')?.textContent.includes('fragment 998'),
     };
   }, snapshot);
 }

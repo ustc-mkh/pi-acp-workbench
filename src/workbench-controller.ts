@@ -67,6 +67,8 @@ export class WorkbenchController {
   private state: WorkbenchUiState = { sessions: [], operations: [], trusted: false };
   private unobserve: () => void;
   private selecting = false;
+  private preparing?: SessionId;
+  private residencyTimer?: ReturnType<typeof setTimeout>;
   private exporting = false;
   private attaching = false;
   private undoConfirming = false;
@@ -115,6 +117,7 @@ export class WorkbenchController {
     return {
       ...this.state,
       selected: this.selected?.id,
+      preparing: this.preparing,
       view: this.selected?.view,
       operations: this.operations,
       trusted: this.ports.trusted(),
@@ -134,7 +137,10 @@ export class WorkbenchController {
     if (this.closed) return;
     try {
       const message = uiCommand.parse(value);
-      if (this.undoConfirming && ['execute', 'create', 'select'].includes(message.type))
+      if (
+        this.undoConfirming &&
+        ['execute', 'create', 'select', 'clear_selection'].includes(message.type)
+      )
         throw new Error('Finish or cancel the undo confirmation first');
       switch (message.type) {
         case 'open_link': {
@@ -280,6 +286,38 @@ export class WorkbenchController {
           } else await this.selected?.refresh();
           if (this.selected?.view.status === 'ready') this.resetReconnect();
           break;
+        case 'clear_selection': {
+          if (this.selecting) throw new Error('Another session selection is in progress');
+          ++this.selection;
+          const previous = this.selected;
+          this.selected = undefined;
+          this.restoredSelection = undefined;
+          this.turnDiffCache.clear();
+          // Detach observation only: harness navigation never stops or resumes work.
+          await previous?.stop();
+          await this.ports.saveSelection?.(undefined);
+          this.emit();
+          break;
+        }
+        case 'release_session': {
+          const view = await this.client.call({ method: 'inspect', session: message.session });
+          const token = await this.authorize(view.cwd);
+          this.assertAuthorization(token);
+          this.state.sessions = this.state.sessions.map((row) =>
+            row.id === message.session
+              ? { ...row, status: view.status, revision: view.revision }
+              : row,
+          );
+          if (
+            (view.active_turn || Object.keys(view.pending_interactions).length) &&
+            !message.confirmed
+          )
+            throw new Error('会话正在运行或等待授权，请再次确认释放。');
+          await this.execute({ method: 'cancel', session: message.session });
+          await this.refresh();
+          if (this.selected?.id === message.session) await this.selected.refresh();
+          break;
+        }
         case 'select':
           await this.select(message.session);
           break;
@@ -291,7 +329,21 @@ export class WorkbenchController {
           if (!result || typeof result !== 'object' || !('Created' in result))
             throw new Error('Created session missing');
           this.upsert(result.Created.summary);
-          await this.select(result.Created.summary.id);
+          const id = result.Created.summary.id;
+          this.preparing = id;
+          this.emit();
+          try {
+            await this.select(id);
+            await this.prepareNewSession(id);
+            if (
+              this.selected?.view.view?.catalogue.models.length ||
+              this.state.sessions.some((s) => s.retention_days !== undefined)
+            )
+              this.scheduleResidencyRefresh();
+          } finally {
+            if (this.preparing === id) this.preparing = undefined;
+            this.emit();
+          }
           break;
         }
         case 'execute': {
@@ -321,6 +373,8 @@ export class WorkbenchController {
             throw new Error('Command is not a user mutation');
           const snapshot = selected.view.view;
           const control = ['cancel', 'answer', 'remove'].includes(message.command.method);
+          if (this.preparing === selected.id && !control)
+            throw new Error('新会话正在加载模型与偏好，请稍候。');
           if (
             !snapshot ||
             (control
@@ -405,6 +459,7 @@ export class WorkbenchController {
               });
           });
           if (message.command.method === 'manage') await this.refresh();
+
           if (undoTurn && result && typeof result === 'object' && 'UndoCompleted' in result)
             this.ports.post({
               type: 'undo_result',
@@ -566,7 +621,7 @@ export class WorkbenchController {
                 type: 'turn_diff_error',
                 session: selected.id,
                 turn: message.turn,
-                error: 'Workspace diff unavailable',
+                error: message.automatic ? '' : 'Workspace diff unavailable',
               });
           }
           break;
@@ -862,6 +917,12 @@ export class WorkbenchController {
       this.emit();
     }
   }
+  private scheduleResidencyRefresh() {
+    clearTimeout(this.residencyTimer);
+    this.residencyTimer = setTimeout(() => {
+      if (!this.closed) void this.refresh().catch(() => {});
+    }, 300);
+  }
   private persistOperations() {
     const saved = this.operations.map((row) => ({ ...row }));
     const task = this.persistence.catch(() => {}).then(() => this.ports.saveOperations?.(saved));
@@ -909,6 +970,26 @@ export class WorkbenchController {
                 : undefined;
     }
     await this.persistOperations();
+  }
+  private async prepareNewSession(id: SessionId) {
+    const selected = this.selected;
+    if (!selected || selected.id !== id) return;
+    const run = async (command: ClientCommand) => {
+      if (this.selected !== selected || this.closed) return false;
+      const view = selected.view.view;
+      if (!view) throw new Error('新会话不可用');
+      const token = await this.authorize(view.cwd);
+      this.assertAuthorization(token);
+      if (this.selected !== selected || this.closed) return false;
+      await this.execute(command);
+      await selected.refresh();
+      // Residency is owned by the host, never guessed from the viewed session.
+      if (this.selected !== selected || this.closed) return false;
+      if (selected.view.status !== 'ready' || !selected.view.view)
+        throw new Error('新会话设置尚未就绪');
+      return true;
+    };
+    if (!(await run({ method: 'discover', session: id }))) return;
   }
   private async execute(
     command: ClientCommand,
@@ -962,6 +1043,8 @@ export class WorkbenchController {
       throw error;
     } finally {
       this.workflows.delete(operation);
+      if (this.state.sessions.some((s) => s.retention_days !== undefined))
+        this.scheduleResidencyRefresh();
       await this.persistOperations();
       this.emit();
     }
@@ -969,6 +1052,7 @@ export class WorkbenchController {
   dispose() {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.residencyTimer);
     this.selection++;
     this.listRequest++;
     this.authorizationGeneration++;

@@ -41,6 +41,8 @@ pub(crate) struct Context<A: BotApi> {
     pub config: TelegramConfig,
     pub username: Option<String>,
     pub bot_id: i64,
+    pub topics: super::topics::Locks,
+    pub auto_forum: std::sync::Arc<std::sync::atomic::AtomicI64>,
     pub preview: std::sync::Arc<tokio::sync::Mutex<super::preview::State>>,
     pub delivery: std::sync::Arc<super::delivery_scheduler::DeliveryJobs>,
     pub delivered: std::sync::Arc<
@@ -69,6 +71,8 @@ impl<A: BotApi> Context<A> {
             config,
             bot_id: bot.id.get(),
             username: bot.username,
+            topics: Default::default(),
+            auto_forum: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX)),
             preview: Default::default(),
             delivery: Default::default(),
             delivered: Default::default(),
@@ -192,10 +196,14 @@ async fn supervise(
     let _cancel_children_on_drop = stop.clone().drop_guard();
     let app = context.app.clone();
     let mut tasks = children.lock().await;
+    context
+        .auto_forum
+        .store(0, std::sync::atomic::Ordering::Release);
     tasks.spawn(super::polling::run(context.clone(), stop.clone()));
     tasks.spawn(super::execution::run(context.clone(), stop.clone()));
     tasks.spawn(super::delivery::run(context.clone(), stop.clone()));
     tasks.spawn(super::preview::observe(context.clone(), stop.clone()));
+    tasks.spawn(super::topics::run(context.clone(), stop.clone()));
     let mut result = tokio::select! {
         biased;
         _ = stop.cancelled() => Ok(()),

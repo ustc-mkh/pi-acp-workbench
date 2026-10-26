@@ -1,17 +1,14 @@
 //! Bounded sync pages, immutable plan and the existing topic effect/outbox.
 use super::{
-    admission::authorize_workspace,
-    api::BotApi,
-    runtime::Context,
-    state::InboxRecord,
-    types::{TopicKey, UpdateId},
+    admission::authorize_workspace, api::BotApi, runtime::Context, state::InboxRecord,
+    types::UpdateId,
 };
 use crate::{
     domain::{
         error::DomainError,
         fork::ContentHash,
         query::{ListCursor, SafeInteger},
-        NoticeId, OperationId, SessionId, WorkspacePath,
+        NoticeId, SessionId, WorkspacePath,
     },
     persistence::{inbox::HistoryExport, payload::NoticeContent},
 };
@@ -158,43 +155,7 @@ pub(super) async fn run(
             Some(topic) if topic.chat == record.command.topic.chat => topic,
             Some(_) => return Err(DomainError::OperationConflict),
             None if plan.forum => {
-                // Shared across sync requests: concurrent retries cannot create
-                // a second topic. An uncertain effect needs explicit repair.
-                let key = format!(
-                    "sync-topic-{}-{}",
-                    record.command.topic.chat.get(),
-                    ContentHash::of(item.session.as_str()).as_str()
-                );
-                let name = format!(
-                    "{:?}: {}",
-                    view.harness,
-                    item.cwd
-                        .as_ref()
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("workspace")
-                )
-                .chars()
-                .take(100)
-                .collect();
-                let thread = context
-                    .effects
-                    .create_topic(
-                        OperationId::new(key)?,
-                        &context.api,
-                        record.command.topic.chat,
-                        name,
-                    )
-                    .await?;
-                let topic = TopicKey {
-                    chat: record.command.topic.chat,
-                    thread: Some(thread),
-                };
-                context
-                    .store
-                    .bind_available(topic.clone(), item.session.clone())
-                    .await?;
-                topic
+                super::topics::ensure(context, record.command.topic.chat, &item.session).await?
             }
             None => return Err(DomainError::OperationConflict),
         };

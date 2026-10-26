@@ -144,6 +144,26 @@ impl RegistryHandle {
             .unwrap_or_else(|_| panic!("registry closed"));
         wait.await.unwrap()
     }
+    // Serialized with user commands and worker events by the session owner.
+    // Fence events now, but retain physical attachment until the caller joins.
+    pub(crate) async fn retire_idle_worker(
+        &self,
+        session: SessionId,
+        epoch: u64,
+    ) -> Result<(), DomainError> {
+        let (reply, wait) = oneshot::channel();
+        self.tx
+            .send(RegistryCommand::WorkerStopped {
+                session,
+                epoch,
+                idle_only: true,
+                reply,
+            })
+            .await
+            .map_err(|_| DomainError::MailboxClosed)?;
+        wait.await.map_err(|_| DomainError::MailboxClosed)??;
+        Ok(())
+    }
     pub(crate) async fn worker_stopped(&self, session: SessionId, epoch: u64) {
         let (reply, wait) = oneshot::channel();
         if self
@@ -151,6 +171,7 @@ impl RegistryHandle {
             .send(RegistryCommand::WorkerStopped {
                 session,
                 epoch,
+                idle_only: false,
                 reply,
             })
             .await
@@ -195,6 +216,7 @@ enum RegistryCommand {
     WorkerStopped {
         session: SessionId,
         epoch: u64,
+        idle_only: bool,
         reply: Reply,
     },
     Command {
@@ -309,6 +331,7 @@ fn cacheable(state: &SessionView, epoch: Option<u64>) -> bool {
 enum SessionCommand {
     WorkerStopped {
         epoch: u64,
+        idle_only: bool,
         reply: Reply,
     },
     Command {
@@ -456,11 +479,25 @@ async fn session_loop(
         }
 
         let (command, reply, operation) = match message {
-            SessionCommand::WorkerStopped { epoch, reply } => {
+            SessionCommand::WorkerStopped {
+                epoch,
+                idle_only,
+                reply,
+            } => {
+                if idle_only
+                    && (worker_epoch != Some(epoch)
+                        || state.active_turn.is_some()
+                        || !state.pending_interactions.is_empty()
+                        || state.configuration_intent.is_some())
+                {
+                    snapshot!();
+                    let _ = reply.send(Err(DomainError::Busy));
+                    continue;
+                }
                 if worker_epoch == Some(epoch) {
                     worker_epoch = None;
                 }
-                if attached_epoch == Some(epoch) {
+                if !idle_only && attached_epoch == Some(epoch) {
                     attached_epoch = None;
                 }
                 snapshot!();

@@ -58,6 +58,8 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
                     background_safe: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     pins: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     last_used: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    last_user_input_at: 0,
+                    resident_since: 0,
                     task,
                 },
             );

@@ -650,7 +650,7 @@ pub(super) async fn run(
                     if event.is_none() { state.start_worker(session,epoch,reply,&store,mailbox); }
                     else { enqueue(SessionCommand::Worker {queued:crate::diagnostics::Stamp::now(),epoch,event,reply}, &session,&state.sessions,&state.activities); }
                 },
-                Some(RegistryCommand::WorkerStopped {session,epoch,reply}) => enqueue(SessionCommand::WorkerStopped {epoch,reply}, &session, &state.sessions, &state.activities),
+                Some(RegistryCommand::WorkerStopped {session,epoch,idle_only,reply}) => enqueue(SessionCommand::WorkerStopped {epoch,idle_only,reply}, &session, &state.sessions, &state.activities),
                 Some(RegistryCommand::Shutdown(reply)) => { shutdown_reply = Some(reply); break; }, None => break,
             },
         }

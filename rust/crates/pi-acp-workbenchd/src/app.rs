@@ -29,6 +29,8 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 #[path = "app_fork_control.rs"]
 mod fork_control;
+#[path = "app_worker_retention.rs"]
+mod worker_retention;
 
 #[path = "app_fork.rs"]
 mod forks;
@@ -49,6 +51,8 @@ struct AdapterHandle {
     background_safe: Arc<std::sync::atomic::AtomicBool>,
     pins: Arc<std::sync::atomic::AtomicUsize>,
     last_used: Arc<std::sync::atomic::AtomicU64>,
+    last_user_input_at: u64,
+    resident_since: u64,
 }
 impl AdapterHandle {
     async fn cancel_and_stop(self) -> Result<(), DomainError> {
@@ -96,7 +100,6 @@ struct SessionCoordinator {
     reviews: Arc<crate::workspace_reviews::Reviews>,
     supervisor: Arc<WorkerSupervisor>,
     tasks: TaskScope,
-    clock: std::sync::atomic::AtomicU64,
 }
 impl SessionCoordinator {
     fn new(database: Database, supervisor: Arc<WorkerSupervisor>) -> Self {
@@ -108,14 +111,7 @@ impl SessionCoordinator {
             reviews: crate::workspace_reviews::Reviews::new(database),
             supervisor,
             tasks: TaskScope::default(),
-            clock: std::sync::atomic::AtomicU64::new(1),
         }
-    }
-    fn touch(&self, handle: &AdapterHandle) {
-        handle.last_used.store(
-            self.clock.fetch_add(1, Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
     }
 }
 struct CommandCore {
@@ -164,6 +160,23 @@ impl WorkbenchApp {
             workspace_gate: Arc::new(WorkspaceGate::default()),
             history_clear_admission: Arc::new(tokio::sync::Semaphore::new(1)),
         });
+        let weak = Arc::downgrade(&core);
+        let stop = core.coordinator.stop.clone();
+        core.coordinator.tasks.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    _ = interval.tick() => {
+                        let Some(core) = weak.upgrade() else { break };
+                        let _admission = core.coordinator.admission.lock().await;
+                        let _ = core.reclaim_workers(None, true).await;
+                    }
+                }
+            }
+        })?;
         let ingress = IngressHandle::start(core.clone());
         Ok(Self {
             runtime: core.runtime.clone(),
@@ -1013,18 +1026,61 @@ impl CommandCore {
         }
         result.receipt()
     }
-    async fn reclaim_idle_worker(&self, exclude: &SessionId) -> Result<(), DomainError> {
+    async fn annotate_residency(&self, page: &mut crate::domain::query::ListPage) {
+        let adapters = self.coordinator.adapters.lock().await;
+        let mut recent: Vec<_> = adapters
+            .iter()
+            .filter(|(_, h)| {
+                h.last_used.load(Ordering::Relaxed) != 0
+                    && !h.stop.is_cancelled()
+                    && !h.task.is_finished()
+                    && !h.tx.is_closed()
+            })
+            .map(|(id, h)| (id, h.last_used.load(Ordering::Relaxed)))
+            .collect();
+        recent.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+        let recent: std::collections::HashSet<_> =
+            recent.into_iter().take(8).map(|(id, _)| id).collect();
+        for row in &mut page.sessions {
+            row.retention_days = adapters
+                .get(&row.id)
+                .filter(|h| !h.stop.is_cancelled() && !h.task.is_finished() && !h.tx.is_closed())
+                .map(|_| if recent.contains(&row.id) { 4 } else { 1 })
+                .or(Some(0));
+        }
+    }
+    // Caller owns admission. Capacity reclaims one oldest idle resident; expiry
+    // reclaims all expired idle residents. Reads/discovery never refresh the clock.
+    async fn reclaim_workers(
+        &self,
+        exclude: Option<&SessionId>,
+        expired_only: bool,
+    ) -> Result<(), DomainError> {
         let mut adapters = self.coordinator.adapters.lock().await;
+        let mut recent: Vec<_> = adapters
+            .iter()
+            .filter(|(_, h)| {
+                h.last_used.load(Ordering::Relaxed) != 0
+                    && !h.stop.is_cancelled()
+                    && !h.task.is_finished()
+                    && !h.tx.is_closed()
+            })
+            .map(|(id, h)| (id.clone(), h.last_used.load(Ordering::Relaxed)))
+            .collect();
+        recent.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+        let recent: std::collections::HashSet<_> =
+            recent.into_iter().take(8).map(|(id, _)| id).collect();
+        let now = worker_retention::now();
         let mut candidates: Vec<_> = adapters
             .keys()
-            .filter(|id| *id != exclude)
+            .filter(|id| exclude != Some(*id))
             .cloned()
             .collect();
         candidates.sort_by_key(|id| {
             adapters
                 .get(id)
-                .map(|handle| handle.last_used.load(Ordering::Relaxed))
-                .unwrap_or(u64::MAX)
+                .map(|handle| (handle.last_used.load(Ordering::Relaxed), handle.epoch))
+                .unwrap_or((u64::MAX, u64::MAX))
         });
         for id in candidates {
             let Some(handle) = adapters.get(&id) else {
@@ -1032,10 +1088,19 @@ impl CommandCore {
             };
             if handle.pins.load(Ordering::Acquire) != 0
                 || !handle.resumable.load(Ordering::Acquire)
-                || !handle.background_safe.load(Ordering::Acquire)
                 || handle.stop.is_cancelled()
                 || handle.task.is_finished()
                 || handle.tx.is_closed()
+            {
+                continue;
+            }
+            if expired_only
+                && !worker_retention::expired(
+                    now,
+                    handle.resident_since,
+                    handle.last_user_input_at,
+                    recent.contains(&id),
+                )
             {
                 continue;
             }
@@ -1056,14 +1121,41 @@ impl CommandCore {
             if self.coordinator.forks.owns_session(&id) {
                 continue;
             }
+            // The owner atomically rejects retirement if a user/background turn
+            // or permission arrived after the snapshot. Its epoch fence rejects
+            // later peer events; the physical pin is released only after join.
+            if self
+                .runtime
+                .registry
+                .retire_idle_worker(id.clone(), handle.epoch)
+                .await
+                .is_err()
+            {
+                continue;
+            }
             let handle = adapters.remove(&id).expect("candidate is still registered");
+            crate::diagnostics::gauge(
+                "last_reclaimed_background_capable",
+                usize::from(!handle.background_safe.load(Ordering::Acquire)),
+            );
             // Fence map ownership before requesting physical termination. The
             // admission lock prevents a concurrent session start from replacing it.
             handle.stop.cancel();
+            // Queries can observe the logical release while physical join is
+            // still pending. Admission and the owner's attachment pin continue
+            // to prevent slot reuse or owner eviction until that join finishes.
+            drop(adapters);
             handle.stop().await;
-            return Ok(());
+            if !expired_only {
+                return Ok(());
+            }
+            adapters = self.coordinator.adapters.lock().await;
         }
-        Err(DomainError::WorkerCapacity)
+        if expired_only {
+            Ok(())
+        } else {
+            Err(DomainError::WorkerCapacity)
+        }
     }
     async fn stop_session_adapter(&self, session: &SessionId) -> Result<(), DomainError> {
         let _worker_admission = self.coordinator.admission.lock().await;
@@ -1137,7 +1229,7 @@ impl CommandCore {
         if view.view().is_some_and(|view| view.active_turn.is_some()) {
             return Err(DomainError::Busy);
         }
-        let (sender, _) = self.adapter_sender(session.clone()).await?;
+        let (sender, config) = self.adapter_sender(session.clone()).await?;
         let (reply, wait) = tokio::sync::oneshot::channel();
         sender
             .try_send(AdapterCommand::Ready { reply })
@@ -1148,6 +1240,70 @@ impl CommandCore {
             return Err(DomainError::Worker(
                 "provider discovery did not become ready".into(),
             ));
+        }
+        // Discovery must show the same inherited choices that the next prompt
+        // will use, rather than the provider's fresh native defaults.
+        let observed = self
+            .runtime
+            .registry
+            .command_admitted(DomainCommand::Inspect(session.clone()))
+            .await?;
+        let snapshot = observed
+            .view()
+            .ok_or_else(|| DomainError::NotFound(session.clone()))?;
+        let differs = config
+            .model
+            .as_ref()
+            .is_some_and(|v| snapshot.catalogue.current_model.as_ref() != Some(v))
+            || config
+                .mode
+                .as_ref()
+                .is_some_and(|v| snapshot.catalogue.current_mode.as_ref() != Some(v))
+            || config.options.iter().any(|(id, value)| {
+                !snapshot
+                    .catalogue
+                    .selects
+                    .iter()
+                    .any(|s| &s.id == id && &s.current_value == value)
+            });
+        if differs {
+            let restore = crate::domain::session::SessionConfig {
+                model: snapshot.catalogue.current_model.clone(),
+                mode: snapshot.catalogue.current_mode.clone(),
+                options: snapshot
+                    .catalogue
+                    .selects
+                    .iter()
+                    .filter(|s| config.options.contains_key(&s.id))
+                    .map(|s| (s.id.clone(), s.current_value.clone()))
+                    .collect(),
+            };
+            self.commit(DomainCommand::PrepareConfiguration {
+                session: session.clone(),
+                intent: crate::domain::session::ConfigurationIntent {
+                    requested: config.clone(),
+                    restore,
+                },
+            })
+            .await?;
+            let applied = async {
+                let (reply, wait) = tokio::sync::oneshot::channel();
+                sender
+                    .try_send(AdapterCommand::Configure { config, reply })
+                    .map_err(DomainError::mailbox)?;
+                wait.await.map_err(|_| {
+                    DomainError::Worker("adapter stopped while applying saved preferences".into())
+                })??;
+                self.commit(DomainCommand::CommitConfiguration {
+                    session: session.clone(),
+                })
+                .await
+            }
+            .await;
+            if let Err(error) = applied {
+                self.stop_session_adapter(&session).await?;
+                return Err(error);
+            }
         }
         self.runtime
             .registry
@@ -1161,7 +1317,16 @@ impl CommandCore {
         turn: crate::domain::TurnId,
         text: crate::domain::Prompt,
     ) -> Result<(), DomainError> {
-        let (sender, config) = self.adapter_sender(session).await?;
+        let activity = self
+            .database
+            .worker_activity(session.clone())
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        let (sender, config) = self.adapter_sender(session.clone()).await?;
+        if let Some(handle) = self.coordinator.adapters.lock().await.get_mut(&session) {
+            handle.last_user_input_at = activity.0;
+            handle.last_used.store(activity.1, Ordering::Relaxed);
+        }
         sender
             .try_send(AdapterCommand::Prompt { turn, text, config })
             .map_err(DomainError::mailbox)
@@ -1215,10 +1380,14 @@ impl CommandCore {
         {
             let adapters = self.coordinator.adapters.lock().await;
             if let Some(adapter) = adapters.get(&session) {
-                self.coordinator.touch(adapter);
                 return Ok((adapter.tx.clone(), config));
             }
         }
+        let activity = self
+            .database
+            .worker_activity(session.clone())
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))?;
         let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
             .map_err(DomainError::Persistence)?;
         let workspace_lease = self.workspace_gate.enter(root, false)?;
@@ -1229,7 +1398,7 @@ impl CommandCore {
             .spawn_for(session.clone(), &harness, events)
             .await;
         if matches!(worker, Err(DomainError::WorkerCapacity)) {
-            self.reclaim_idle_worker(&session).await?;
+            self.reclaim_workers(Some(&session), false).await?;
             (events, updates) = mpsc::channel(32);
             worker = self
                 .coordinator
@@ -1300,9 +1469,9 @@ impl CommandCore {
                 resumable,
                 background_safe,
                 pins,
-                last_used: Arc::new(std::sync::atomic::AtomicU64::new(
-                    self.coordinator.clock.fetch_add(1, Ordering::Relaxed),
-                )),
+                last_used: Arc::new(std::sync::atomic::AtomicU64::new(activity.1)),
+                last_user_input_at: activity.0,
+                resident_since: worker_retention::now(),
             },
         );
         Ok((tx, config))

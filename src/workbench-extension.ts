@@ -25,6 +25,7 @@ async function hasDirtyDocuments(cwd: string) {
 }
 /** New production entry. Legacy extension/controller/wire files are not imported or bundled. */
 export function activate(context: vscode.ExtensionContext) {
+  if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区，再启动 Pi Agent');
   const provider = new WorkbenchProvider(context);
   context.subscriptions.push(
     provider,

@@ -8,7 +8,7 @@ pub enum DomainError {
     NotFound(SessionId),
     #[error("mailbox is full")]
     Backpressure,
-    #[error("provider worker capacity exhausted; no safely evictable idle worker (Pi background wakeups may remain pinned until explicit stop/removal)")]
+    #[error("provider worker capacity exhausted; all resident workers are busy, pinned or cannot resume; wait for a task to finish or explicitly stop one")]
     WorkerCapacity,
     #[error("mailbox is closed")]
     MailboxClosed,
