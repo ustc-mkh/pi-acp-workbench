@@ -375,6 +375,7 @@ async fn sqlite_session_commit_archives_notices_and_interactions_with_intents_or
     };
     // Use the same typed archived interaction encoding as the standalone facade.
     let interaction = Interaction {
+        question: None,
         id: crate::domain::InteractionId::generate(),
         kind: crate::domain::interaction::InteractionKind::Permission,
         title: "exact title".into(),

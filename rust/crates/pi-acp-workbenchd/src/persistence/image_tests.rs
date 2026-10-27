@@ -75,6 +75,7 @@ async fn payload_entries_notices_and_interactions_survive_physical_database_rest
         text: "通知 🌏\n\"escaped\"".into(),
     };
     let interaction = Interaction {
+        question: None,
         id: InteractionId::generate(),
         kind: InteractionKind::Permission,
         title: "allow?".into(),

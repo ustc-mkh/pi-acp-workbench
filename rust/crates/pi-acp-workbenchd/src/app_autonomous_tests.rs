@@ -93,12 +93,34 @@ async fn autonomous_wake_permission_usage_history_cancel_and_cold_reopen() {
     tokio::fs::write(&gate, "second").await.unwrap();
     wait_interaction(&mut events).await;
     assert_ne!(inspect_view(&app, &id).await.active_turn, Some(background));
+    let original_epoch = app.core.coordinator.adapters.lock().await[&id].epoch;
     app.command(DomainCommand::Cancel {
         session: id.clone(),
     })
     .await
     .unwrap();
     assert!(inspect_view(&app, &id).await.active_turn.is_none());
+    assert!(inspect_view(&app, &id).await.usage.reported);
+    assert_eq!(inspect_view(&app, &id).await.usage.output_tokens, 11);
+    assert_eq!(
+        app.core.coordinator.adapters.lock().await[&id].epoch,
+        original_epoch
+    );
+    // A successful stop cancels this run, preserving future extension wakeups
+    // in exactly the same native worker, as v1 did.
+    tokio::fs::write(&gate, "third").await.unwrap();
+    wait_interaction(&mut events).await;
+    assert_eq!(
+        app.core.coordinator.adapters.lock().await[&id].epoch,
+        original_epoch
+    );
+    app.command(DomainCommand::ReleaseWorker {
+        session: id.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(inspect_view(&app, &id).await.active_turn.is_none());
+    assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
     let saved = history_text(&app, &id).await;
     app.shutdown().await;
     let app = app_at(&root);
@@ -166,6 +188,41 @@ async fn autonomous_last_mile_rejection_keeps_a_distinct_turn_and_does_not_kill_
     .unwrap();
     wait_finished(&mut events).await;
     assert_eq!(inspect_view(&app, &id).await.usage.output_tokens, 11);
+    app.shutdown().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn unresponsive_background_cancel_falls_back_to_joined_worker_stop() {
+    let root = std::env::temp_dir().join(format!("wb-background-timeout-{}", uuid::Uuid::new_v4()));
+    let gate = root.join("wake");
+    let app = app_at_with_env(
+        &root,
+        std::collections::HashMap::from([
+            ("WORKBENCH_CONTRACT_AUTONOMOUS".into(), "1".into()),
+            (
+                "WORKBENCH_CONTRACT_AUTONOMOUS_IGNORE_CANCEL".into(),
+                "1".into(),
+            ),
+            (
+                "WORKBENCH_CONTRACT_WAKE_GATE".into(),
+                gate.to_string_lossy().into_owned(),
+            ),
+        ]),
+    );
+    let id = create(&app).await;
+    let mut events = app.subscribe();
+    prompt(&app, &id, "autonomous-arm").await;
+    wait_finished(&mut events).await;
+    tokio::fs::write(&gate, "wake").await.unwrap();
+    wait_interaction(&mut events).await;
+    app.command(DomainCommand::Cancel {
+        session: id.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(inspect_view(&app, &id).await.active_turn.is_none());
+    assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

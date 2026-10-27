@@ -375,8 +375,17 @@ h1 {
   cursor: pointer;
   overflow-wrap: anywhere;
 }
+article.thought {
+  border: 0;
+  border-radius: 0;
+  margin: 10px 0;
+}
+article.thought > details {
+  margin: 0;
+}
 .tool-body,
-.thought > .markdown {
+.thought > .markdown,
+.thought-body {
   padding: 0 12px 12px;
   max-height: 500px;
   overflow: auto;
@@ -2055,6 +2064,28 @@ body {
 #interactions p {
   font-size: 11px;
 }
+#interactions:has(.extension-question) {
+  max-height: 40vh;
+  padding: 0;
+}
+.chat-page:has(#interactions .extension-question) .composer-tools {
+  min-height: 28px;
+}
+#interactions form.extension-question {
+  margin: 8px 12px;
+}
+#interactions .extension-question p {
+  font-size: inherit;
+}
+#interactions .extension-question textarea {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 2px;
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 64px;
+}
 #plan:empty {
   display: none;
 }
@@ -2221,9 +2252,9 @@ body {
   position: fixed;
   z-index: 100;
   box-sizing: border-box;
-  padding: 16px;
+  padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: 16px;
   background: color-mix(in srgb, var(--input) 65%, var(--bg));
   box-shadow: 0 8px 28px #0003;
   max-height: calc(100vh - 24px);
@@ -2235,7 +2266,7 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 .model-controls-heading > button {
   width: 30px;
@@ -2266,8 +2297,8 @@ body {
   gap: 2px;
 }
 .model-thinking-label {
-  font-size: 18px;
-  line-height: 26px;
+  font-size: 16px;
+  line-height: 24px;
   color: var(--control-accent);
 }
 .model-picker-trigger {
@@ -2281,7 +2312,7 @@ body {
 }
 .model-thinking-track {
   position: relative;
-  height: 32px;
+  height: 28px;
   display: flex;
   align-items: center;
 }
@@ -2292,7 +2323,7 @@ body {
   z-index: 1;
   margin: 0;
   width: 100%;
-  height: 28px;
+  height: 24px;
   border-radius: 20px;
   border: 1px solid var(--border);
   background: linear-gradient(
@@ -2306,16 +2337,16 @@ body {
 .model-thinking-track input::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border: 0;
   border-radius: 50%;
   background: var(--vscode-button-foreground, #fff);
   box-shadow: 0 1px 3px #0001;
 }
 .model-thinking-track input::-moz-range-thumb {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border: 0;
   border-radius: 50%;
   background: var(--vscode-button-foreground, #fff);
@@ -2393,7 +2424,7 @@ body {
 }
 .model-picker-options {
   display: grid;
-  max-height: 200px;
+  max-height: 180px;
   overflow: auto;
   margin-top: 5px;
 }

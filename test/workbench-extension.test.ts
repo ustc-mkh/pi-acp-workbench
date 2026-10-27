@@ -154,7 +154,7 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
       },
     },
   });
-  await expect.poll(() => peer.requests.length).toBe(2);
+  await expect.poll(() => peer.requests.length).toBe(3);
   const attachedPage = {
     view,
     recent_page: {
@@ -175,9 +175,12 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   peer.query(peer.requests[1], 'attached', attachedPage);
   await expect.poll(() => peer.requests.length).toBe(3);
   expect(peer.requests[2].command.method).toBe('discover');
-  peer.reply(peer.requests[2], { Loaded: { view } });
+  // A newer discovery receipt with transcript rows must still reattach rather
+  // than advancing the view without fetching those rows.
+  const discoveredView = { ...view, revision: view.revision + 1 };
+  peer.reply(peer.requests[2], { Loaded: { view: discoveredView } });
   await expect.poll(() => peer.requests.length).toBe(4);
-  peer.query(peer.requests[3], 'attached', attachedPage);
+  peer.query(peer.requests[3], 'attached', { ...attachedPage, view: discoveredView });
   await creating;
   await expect.poll(() => posted.length).toBeGreaterThan(0);
   expect(provider.controller.snapshot.view?.status).toBe('ready');

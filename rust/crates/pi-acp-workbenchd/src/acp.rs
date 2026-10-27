@@ -36,6 +36,26 @@ pub use dto::*;
 use crate::domain::error::DomainError;
 use serde_json::Value;
 
+/// Consume the opaque permission rawInput at the codec boundary. Ordinary
+/// tool inputs remain opaque; only known Pi question display hints leave here.
+pub fn decode_question_input<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<interaction::PermissionQuestionInput>, D::Error> {
+    use serde::Deserialize;
+    let raw = Value::deserialize(deserializer)?;
+    let Some(method @ ("select" | "confirm")) = raw.get("method").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some(interaction::PermissionQuestionInput {
+        method: method.into(),
+        message: raw
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .into(),
+    }))
+}
+
 /// Keep native session identity until the adapter has validated its owner.
 pub fn decode_notification(raw: Value) -> Result<dto::SessionNotification, DomainError> {
     #[derive(serde::Deserialize)]

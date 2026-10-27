@@ -386,7 +386,7 @@ it('file picking posts only to its selected session without provider mutation', 
   expect(peer.requests.map((request) => request.command.method)).toEqual(['list', 'attach']);
 });
 
-it('new session creation automatically discovers settings and refreshes before enabling input', async () => {
+it('new session subscribes and discovers concurrently and uses the confirmed empty receipt without reattaching', async () => {
   const peer = await workbenchPeer();
   peers.push(peer);
   const controller = new WorkbenchController(peer.client(), {
@@ -402,25 +402,18 @@ it('new session creation automatically discovers settings and refreshes before e
   });
   await expect.poll(() => peer.requests.length).toBe(1);
   peer.reply(peer.requests[0], { Created: { summary: summary() } });
-  await expect.poll(() => peer.requests.length).toBe(2);
-  expect(controller.snapshot.preparing).toBe('session');
-  peer.query(peer.requests[1], 'attached', attached());
+  // Discovery must start even while the initial subscription is still blocked.
   await expect.poll(() => peer.requests.length).toBe(3);
-  expect(peer.requests[2].command).toEqual({ method: 'discover', session: 'session' });
-  peer.reply(peer.requests[2], { Loaded: { view: emptyView(6) } });
-  await expect.poll(() => peer.requests.length).toBe(4);
-  expect(peer.requests[3].command.method).toBe('attach');
+  const attach = peer.requests.find((r) => r.command.method === 'attach')!;
+  const discover = peer.requests.find((r) => r.command.method === 'discover')!;
   expect(controller.snapshot.preparing).toBe('session');
-  peer.query(peer.requests[3], 'attached', attached(6));
+  peer.reply(discover, { Loaded: { view: emptyView(6) } });
+  peer.query(attach, 'attached', attached(5));
   await action;
   expect(controller.snapshot.preparing).toBeUndefined();
   expect(controller.snapshot.view?.status).toBe('ready');
-  expect(peer.requests.map((r) => r.command.method)).toEqual([
-    'create',
-    'attach',
-    'discover',
-    'attach',
-  ]);
+  expect(controller.snapshot.view?.view?.revision).toBe(6);
+  expect(peer.requests.map((r) => r.command.method)).toEqual(['create', 'attach', 'discover']);
 });
 
 it('releases an unselected session through its authorized cancel receipt without loading or removing it', async () => {
@@ -430,7 +423,7 @@ it('releases an unselected session through its authorized cancel receipt without
   expect(peer.requests[2].command).toEqual({ method: 'inspect', session: 'other' });
   peer.query(peer.requests[2], 'view', { ...emptyView(), id: 'other' });
   await expect.poll(() => peer.requests.length).toBe(4);
-  expect(peer.requests[3].command).toEqual({ method: 'cancel', session: 'other' });
+  expect(peer.requests[3].command).toEqual({ method: 'cancel', session: 'other', release: true });
   peer.reply(peer.requests[3], { Accepted: { session: 'other', revision: 1 } });
   await expect.poll(() => peer.requests.length).toBe(5);
   peer.query(peer.requests[4], 'list', { sessions: [summary()], next_cursor: null });
@@ -744,4 +737,51 @@ it('detaches the view when switching to an empty harness without cancelling or c
   expect(peer.requests.slice(before).map((request) => request.command.method)).toEqual(['detach']);
   await controller.receive({ type: 'clear_selection' });
   expect(peer.requests).toHaveLength(before + 1);
+});
+
+it('copies selected plain text through the host clipboard without issuing a provider request', async () => {
+  const copied: string[] = [];
+  const { controller, peer } = await setup(undefined, undefined, [], async (text) => {
+    copied.push(text);
+  });
+  const before = peer.requests.length;
+  await controller.receive({ type: 'copy_text', text: '选中的文字\nconst x = 1;' });
+  expect(copied).toEqual(['选中的文字\nconst x = 1;']);
+  expect(peer.requests).toHaveLength(before);
+});
+
+it('opens and initializes a new session without waiting for the previous session detach acknowledgement', async () => {
+  const peer = await workbenchPeer({ autoDetach: false });
+  peers.push(peer);
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const selecting = controller.receive({ type: 'select', session: 'session' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.query(peer.requests[0], 'attached', attached());
+  await selecting;
+  const action = controller.receive({
+    type: 'create',
+    command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+  });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  peer.reply(peer.requests[1], { Created: { summary: { ...summary(), id: 'new-session' } } });
+  await expect.poll(() => peer.requests.length).toBe(5);
+  const detach = peer.requests.find((r) => r.command.method === 'detach')!;
+  const attach = peer.requests.find(
+    (r) => r.command.method === 'attach' && r.command.session === 'new-session',
+  )!;
+  const discover = peer.requests.find((r) => r.command.method === 'discover')!;
+  peer.query(attach, 'attached', { ...attached(), view: { ...emptyView(5), id: 'new-session' } });
+  peer.reply(discover, { Loaded: { view: { ...emptyView(6), id: 'new-session' } } });
+  await action;
+  expect(controller.snapshot.selected).toBe('new-session');
+  expect(controller.snapshot.view?.view?.revision).toBe(6);
+  expect(controller.snapshot.preparing).toBeUndefined();
+  peer.send(detach.socket, { type: 'detached', id: detach.id, session: 'session' });
+  expect(peer.requests.filter((r) => r.command.method === 'attach')).toHaveLength(2);
 });

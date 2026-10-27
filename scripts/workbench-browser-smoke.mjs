@@ -299,6 +299,40 @@ try {
   );
   await page.locator('#interactions form').waitFor({ state: 'detached' });
   check('typed elicitation fields render and answer the exact interaction, not a guessed prompt');
+  for (const method of ['select', 'confirm', 'input', 'editor']) {
+    await prompt(`pi-question-${method}`);
+    const card = page.locator('.extension-question');
+    await card.waitFor();
+    assert.equal(await card.locator('strong').textContent(), 'Pi · 等待你的回答');
+    assert.equal(await card.locator('p').textContent(), 'Review before continuing');
+    if (method === 'input' || method === 'editor') {
+      const input = card.getByRole('textbox', { name: '回答', exact: true });
+      assert.equal(await input.inputValue(), 'original\n计划');
+      assert.equal(await input.getAttribute('rows'), method === 'editor' ? '6' : '3');
+      await input.fill(method === 'editor' ? '' : 'browser exact answer');
+      await card.getByRole('button', { name: '提交回答', exact: true }).click();
+    } else {
+      await card
+        .getByRole('button', {
+          name: method === 'confirm' ? 'Change plan' : 'Continue',
+          exact: true,
+        })
+        .click();
+    }
+    await wait(() => controller.snapshot.view?.view?.status === 'Idle', `Pi ${method} answer`);
+    await card.waitFor({ state: 'detached' });
+    if (method === 'input' || method === 'editor') {
+      const rows = controller.snapshot.view.entries;
+      const answer = rows.filter((row) => row.role === 'Agent').at(-1);
+      assert.deepEqual(JSON.parse(answer.text.Inline.text), {
+        action: 'accept',
+        content: { value: method === 'editor' ? '' : 'browser exact answer' },
+      });
+    }
+    check(
+      `Pi ${method} question preserves the classic card and exact typed answer through the real host`,
+    );
+  }
   await prompt('tool-metadata');
   await wait(
     () =>
@@ -319,7 +353,7 @@ try {
   // unconditionally closes it, so observe the disclosure before opening it.
   if (!(await toolProcess.evaluate((node) => node.open)))
     await toolProcess.locator('summary').first().click();
-  await toolProcess.locator('[data-tools-for]').click();
+  // Opening the classic process disclosure now loads its tool records directly.
   await wait(() => controller.snapshot.view.tools.length > 0, 'bounded tools query');
   assert(controller.snapshot.view.tools.length > 0);
   check(
@@ -716,7 +750,10 @@ try {
   const metrics = await measureRenderWorkload(page, controller.snapshot);
   assert.equal(metrics.messages, 2);
   assert(metrics.code);
-  assert(metrics.markdown.count <= 16, 'Markdown must not be reparsed for every delta');
+  assert(
+    metrics.markdown.count <= metrics.render.count + 1,
+    'Markdown parses must stay bounded by coalesced paints',
+  );
   await page.getByRole('link', { name: 'External', exact: true }).click();
   await wait(() => externalLinks.length === 1, 'normalized explicit link request');
   assert.equal(externalLinks[0], 'https://xn--fsqu00a.xn--0zwm56d/path');

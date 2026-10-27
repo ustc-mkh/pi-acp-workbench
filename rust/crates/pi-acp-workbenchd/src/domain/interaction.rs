@@ -9,6 +9,8 @@ pub enum InteractionKind {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Interaction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<QuestionPresentation>,
     pub id: InteractionId,
     pub kind: InteractionKind,
     pub title: String,
@@ -17,6 +19,25 @@ pub struct Interaction {
     #[serde(default)]
     pub options: Vec<InteractionOption>,
     pub expires_at: Option<u64>,
+}
+/// Display hints for Pi RPC questions. Answers still use the validated
+/// permission/form contract and the original interaction identity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionPresentation {
+    pub method: QuestionMethod,
+    pub title: String,
+    pub message: String,
+    pub placeholder: String,
+    pub prefill: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum QuestionMethod {
+    Select,
+    Confirm,
+    Input,
+    Editor,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct InteractionOption {
@@ -80,6 +101,25 @@ pub enum InteractionResolution {
 impl Interaction {
     pub fn validate_definition(&self) -> Result<(), DomainError> {
         let invalid = || DomainError::InvalidAnswer("invalid interaction definition".into());
+        if let Some(question) = &self.question {
+            if question.title.len() > 10000
+                || question.message.len() > 40000
+                || question.placeholder.len() > 10000
+                || question.prefill.chars().count() > 10000
+            {
+                return Err(invalid());
+            }
+            match question.method {
+                QuestionMethod::Select | QuestionMethod::Confirm
+                    if self.kind == InteractionKind::Permission => {}
+                QuestionMethod::Input | QuestionMethod::Editor
+                    if self.kind == InteractionKind::Elicitation
+                        && self.fields.len() == 1
+                        && self.fields[0].name == "value"
+                        && matches!(self.fields[0].kind, FieldKind::Text { .. }) => {}
+                _ => return Err(invalid()),
+            }
+        }
         let valid_options = |options: &[InteractionOption]| {
             !options.is_empty()
                 && options.len() <= 64

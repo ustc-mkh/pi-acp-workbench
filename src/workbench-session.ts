@@ -39,6 +39,8 @@ export class WorkbenchSession {
   private text = new HistoryText();
   private resolvingText = false;
   private toolsRequest = 0;
+  private toolsReadSequence = 0;
+  private toolTurnRequests = new Map<string, number>();
   private pending: CommitBatch[] = [];
   private pendingBytes = 0;
   private startTask?: Promise<void>;
@@ -57,6 +59,33 @@ export class WorkbenchSession {
   ) {}
   get view() {
     return this.current;
+  }
+  /** Discovery receipts contain a confirmed hot view, but no transcript rows.
+   * Adopt a newer receipt only for an empty session; otherwise preserve the
+   * contiguous stream or reattach rather than skipping unseen message rows. */
+  confirmEmptyView(view: SessionView): boolean {
+    const current = this.current.view;
+    if (
+      !this.active ||
+      this.attaching ||
+      this.current.status !== 'ready' ||
+      !current ||
+      view.id !== this.id
+    )
+      return false;
+    if (current.revision >= view.revision) return true;
+    if (
+      this.current.entries.length ||
+      current.last_entry_seq ||
+      view.last_entry_seq ||
+      current.active_turn ||
+      view.active_turn ||
+      view.status !== 'Idle' ||
+      Object.keys(view.pending_interactions).length
+    )
+      return false;
+    this.publish({ view });
+    return true;
   }
   observe(listener: (view: WorkbenchSessionView) => void) {
     this.listeners.add(listener);
@@ -304,7 +333,11 @@ export class WorkbenchSession {
   async loadTools(turn: EntryHeader['turn'], cursor?: ToolCursor) {
     if (!this.active || this.current.status !== 'ready') return;
     const generation = this.generation;
-    const request = ++this.toolsRequest;
+    const epoch = this.toolsRequest;
+    const request = ++this.toolsReadSequence;
+    this.toolTurnRequests.set(turn, request);
+    while (this.toolTurnRequests.size > 256)
+      this.toolTurnRequests.delete(this.toolTurnRequests.keys().next().value!);
     const requestedRevision = this.current.view?.revision;
     const page = await this.client.call({
       method: 'tools',
@@ -313,10 +346,24 @@ export class WorkbenchSession {
       cursor,
       limit: 200,
     });
-    if (!this.active || generation !== this.generation || request !== this.toolsRequest) return;
+    if (
+      !this.active ||
+      generation !== this.generation ||
+      epoch !== this.toolsRequest ||
+      request !== this.toolTurnRequests.get(turn)
+    )
+      return;
     if (requestedRevision !== this.current.view?.revision) return;
+    const tools = new Map(
+      this.current.tools
+        .filter((tool) => cursor || tool.turn !== turn)
+        .map((tool) => [`${tool.turn}:${tool.id}`, tool]),
+    );
+    for (const tool of page.tools) tools.set(`${tool.turn}:${tool.id}`, tool);
+    const bounded = [...tools.values()];
+    while (bounded.length > 200 || jsonBytes(bounded) > 1024 * 1024) bounded.shift();
     this.publish({
-      tools: page.tools,
+      tools: bounded,
       toolCursor: page.next_cursor ?? undefined,
       error: undefined,
     });

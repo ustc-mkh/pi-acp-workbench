@@ -56,3 +56,11 @@ node scripts/workbench-ui-parity.mjs --baseline /path/to/v1-extension/dist
 留存字段需要配套更新宿主和扩展；连接不提供该字段的旧宿主时显示默认颜色并禁用手动释放。该记录描述源码验收范围；正式发布与安装须使用配套版本、备份并核对制品。
 
 本轮验证记录及散列：`.test-results/ui-alignment/classic-followup-summary.json`。截图 `test-results/workbench-browser/classic-diff-reference.png` 使用与用户参考相同的四文件展示数据，仅用于检查样式，不代表修改了那些文件。功能检查使用真实隔离宿主、模拟 Agent 和本地 Telegram HTTP 服务。
+
+## Pi 提问与后台运行的 1.0 对照
+
+- `select`、`confirm`、`input`、`editor` 恢复“Pi · 等待你的回答”专用卡片，保留原始选项、说明、输入提示、编辑器预填内容和 3/6 行输入区。取消与空文本提交分别传递；普通状态刷新不覆盖正在编辑的回答。文本仍使用标准 elicitation 传值，展示提示随有类型的交互保存，不再借用 permission 的私有回答字段。
+- 等待回答时完整渲染当前消息的 Markdown，继续显示用户消息操作，隐藏正在生成的助手消息操作。提问卡片出现后，处于跟随模式的对话继续滚动到底部。
+- Pi 后台自主运行的“停止”先取消当前运行，正常结束后保留同一个 worker 及未来扩展唤醒；5 秒未结束时，使用现有持久取消围栏并终止、join worker。历史列表的电源按钮仍明确释放 worker，独立于“停止当前运行”。后台开始不再插入伪装成助手回答的内部诊断文字。
+- v1.0.0 同样按容量和空闲期限回收 worker，并不保证后台计时器跨 worker 释放或宿主重启自动恢复。当前继续保留这项边界；不新增原版没有的通用后台任务管理面板。
+- `scripts/workbench-ui-parity.mjs` 对照真实 v1.0.0 源码构建的页面，覆盖四种提问卡片的 320/460px 截图。功能验证使用隔离 ACP peer；不将模拟结果表述为真实在线 Pi 扩展验收。

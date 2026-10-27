@@ -542,7 +542,9 @@ impl CommandCore {
         let owner_session = match &command {
             DomainCommand::Prompt { session, .. }
             | DomainCommand::Cancel { session }
+            | DomainCommand::ReleaseWorker { session }
             | DomainCommand::RequestCancel { session }
+            | DomainCommand::Interrupt { session, .. }
             | DomainCommand::AnswerInteraction { session, .. }
             | DomainCommand::Fork { session, .. }
             | DomainCommand::SetModel { session, .. }
@@ -704,7 +706,26 @@ impl CommandCore {
         if let DomainCommand::CancelFork { session, operation } = &command {
             return self.cancel_fork(session, operation).await;
         }
-        if let DomainCommand::Cancel { session } = &command {
+        if let DomainCommand::Cancel { session } | DomainCommand::ReleaseWorker { session } =
+            &command
+        {
+            if matches!(&command, DomainCommand::Cancel { .. }) {
+                if let Some(turn) = self.interrupt_background(session).await? {
+                    return self
+                        .runtime
+                        .registry
+                        .command_with_operation(
+                            DomainCommand::Interrupt {
+                                session: session.clone(),
+                                turn,
+                                completed: true,
+                            },
+                            operation,
+                        )
+                        .await?
+                        .receipt();
+                }
+            }
             self.commit(DomainCommand::RequestCancel {
                 session: session.clone(),
             })
@@ -998,6 +1019,96 @@ impl CommandCore {
             self.coordinator.supervisor.shutdown().await?;
         }
         Ok(())
+    }
+    /// v1 Pi stops cancel the active autonomous run first. Only unresponsive
+    /// providers fall back to the existing durable fence/physical join path.
+    async fn interrupt_background(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<crate::domain::TurnId>, DomainError> {
+        let view = self
+            .database
+            .view(session.clone())
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        if view.harness != crate::domain::Harness::Pi {
+            return Ok(None);
+        }
+        let Some(turn) = view.active_turn else {
+            return Ok(None);
+        };
+        let sender = self
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .get(session)
+            .map(|h| h.tx.clone());
+        let Some(sender) = sender else {
+            return Ok(None);
+        };
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        if sender
+            .try_send(AdapterCommand::CanInterrupt {
+                turn: turn.clone(),
+                reply,
+            })
+            .is_err()
+            || !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), wait).await,
+                Ok(Ok(true))
+            )
+        {
+            return Ok(None);
+        }
+        self.commit(DomainCommand::Interrupt {
+            session: session.clone(),
+            turn: turn.clone(),
+            completed: false,
+        })
+        .await?;
+        let mut events = self.events.subscribe();
+        let graceful = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            sender
+                .try_send(AdapterCommand::Interrupt {
+                    turn: turn.clone(),
+                    reply,
+                })
+                .map_err(DomainError::mailbox)?;
+            let supported = wait
+                .await
+                .map_err(|_| DomainError::Worker("interruption observer closed".into()))??;
+            loop {
+                let current = self
+                    .database
+                    .view(session.clone())
+                    .await
+                    .map_err(|e| DomainError::Persistence(e.to_string()))?;
+                if matches!(current.status, crate::domain::SessionStatus::Failed(_)) {
+                    return Ok(false);
+                }
+                if current.active_turn.as_ref() != Some(&turn) {
+                    return Ok(true);
+                }
+                if !supported {
+                    return Ok(false);
+                }
+                match events.recv().await {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => {
+                        return Err(DomainError::Worker(
+                            "interruption event stream closed".into(),
+                        ))
+                    }
+                }
+            }
+        })
+        .await;
+        if matches!(graceful, Ok(Ok(true))) {
+            return Ok(Some(turn));
+        }
+        Ok(None)
     }
     async fn commit(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
         self.runtime

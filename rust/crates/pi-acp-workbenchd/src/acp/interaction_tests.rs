@@ -35,3 +35,77 @@ fn nested_or_constrained_unsupported_form_schemas_are_not_silently_truncated() {
         assert!(decode_request(request).is_err());
     }
 }
+
+#[test]
+fn pi_questions_preserve_presentation_and_keep_typed_answer_validation() {
+    use crate::domain::interaction::*;
+    for method in ["select", "confirm", "input", "editor"] {
+        let presentation = json!({"method":method,"title":"Choose a plan","message":"Review it", "placeholder":"Answer here", "prefill":"original\n中文"});
+        let (rpc, params) = if matches!(method, "select" | "confirm") {
+            (
+                "session/request_permission",
+                json!({"sessionId":"native-session", "toolCall":{"toolCallId":"pi-ui-1", "title":"Choose a plan", "rawInput":{"method":method,"message":"Review it"}}, "options":[{"optionId":"yes", "name":"Yes", "kind":"allow_once"}]}),
+            )
+        } else {
+            (
+                "elicitation/create",
+                json!({"sessionId":"native-session", "mode":"form", "message":"Choose a plan", "_meta":{"pi-workbench-question":presentation}, "requestedSchema":{"type":"object","properties":{"value":{"type":"string","maxLength":10000}},"required":[]}}),
+            )
+        };
+        let request = decode_request(
+            JsonRpcRequest::new(RequestId::String(method.into()), rpc, params).unwrap(),
+        )
+        .unwrap();
+        let interaction = request
+            .to_domain(crate::domain::InteractionId::generate())
+            .unwrap();
+        let restored: Interaction =
+            serde_json::from_value(serde_json::to_value(&interaction).unwrap()).unwrap();
+        assert_eq!(restored.question.as_ref().unwrap().message, "Review it");
+        if matches!(method, "input" | "editor") {
+            assert_eq!(
+                restored.question.as_ref().unwrap().prefill,
+                "original\n中文"
+            );
+            let answer = InteractionAnswer {
+                interaction: restored.id.clone(),
+                response: InteractionResponse::Form {
+                    fields: std::collections::BTreeMap::from([(
+                        "value".into(),
+                        FieldValue::Text(String::new()),
+                    )]),
+                },
+            };
+            restored.validate_answer(answer, 0).unwrap();
+        } else {
+            assert!(restored
+                .validate_answer(
+                    InteractionAnswer {
+                        interaction: restored.id.clone(),
+                        response: InteractionResponse::Permission {
+                            option: "invented".into()
+                        }
+                    },
+                    0
+                )
+                .is_err());
+        }
+    }
+}
+
+#[test]
+fn question_hints_cannot_change_permission_semantics_or_hide_an_unsupported_form() {
+    let params = json!({"sessionId":"native-session", "mode":"form", "message":"Q", "_meta":{"pi-workbench-question":{"method":"select","title":"Q","message":"","placeholder":"","prefill":""}}, "requestedSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":[]}});
+    let request = decode_request(
+        JsonRpcRequest::new(
+            RequestId::String("invalid".into()),
+            "elicitation/create",
+            params,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(request
+        .to_domain(crate::domain::InteractionId::generate())
+        .is_err());
+}

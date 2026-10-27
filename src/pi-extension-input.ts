@@ -21,10 +21,19 @@ export async function handleExtensionInput(
     sessionId: session.sessionId,
     mode: 'form',
     message: placeholder ? `${title}\n${placeholder}` : title,
+    _meta: {
+      'pi-workbench-question': {
+        method: ev.method === 'editor' ? 'editor' : 'input',
+        title,
+        message: typeof ev.message === 'string' ? ev.message : '',
+        placeholder,
+        prefill: typeof ev.prefill === 'string' ? ev.prefill : '',
+      },
+    },
     requestedSchema: {
       type: 'object',
       properties: { value: { type: 'string', title, maxLength: 10000 } },
-      required: ['value'],
+      required: [],
     },
   });
   const content = 'content' in response ? response.content : undefined;

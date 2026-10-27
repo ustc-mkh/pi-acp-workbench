@@ -253,7 +253,9 @@ impl RegistryState {
             DomainCommand::LoadSession(id) | DomainCommand::RemoveSession(id) => Some(id),
             DomainCommand::Prompt { session, .. }
             | DomainCommand::Cancel { session }
+            | DomainCommand::ReleaseWorker { session }
             | DomainCommand::RequestCancel { session }
+            | DomainCommand::Interrupt { session, .. }
             | DomainCommand::AnswerInteraction { session, .. }
             | DomainCommand::Fork { session, .. }
             | DomainCommand::PrepareFork { session, .. }
@@ -453,7 +455,9 @@ impl RegistryState {
                 let id = match &other {
                     DomainCommand::Prompt { session, .. }
                     | DomainCommand::Cancel { session }
+                    | DomainCommand::ReleaseWorker { session }
                     | DomainCommand::RequestCancel { session }
+                    | DomainCommand::Interrupt { session, .. }
                     | DomainCommand::AnswerInteraction { session, .. }
                     | DomainCommand::Fork { session, .. }
                     | DomainCommand::PrepareFork { session, .. }

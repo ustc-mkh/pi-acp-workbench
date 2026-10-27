@@ -46,6 +46,14 @@ pub enum AdapterCommand {
         reply: tokio::sync::oneshot::Sender<Result<crate::domain::ProviderSessionId, DomainError>>,
     },
     Answer(InteractionAnswer),
+    CanInterrupt {
+        turn: TurnId,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    Interrupt {
+        turn: TurnId,
+        reply: tokio::sync::oneshot::Sender<Result<bool, DomainError>>,
+    },
     Cancel {
         reply: tokio::sync::oneshot::Sender<Result<(), DomainError>>,
     },
@@ -252,6 +260,21 @@ async fn run_protocol(
         };
         if runs.autonomous.is_some() {
             match command {
+                AdapterCommand::CanInterrupt { turn, reply } => {
+                    let _ = reply.send(runs.autonomous.as_ref() == Some(&turn));
+                }
+                AdapterCommand::Interrupt { turn, reply } => {
+                    if runs.autonomous.as_ref() != Some(&turn) {
+                        let _ = reply.send(Ok(false));
+                        continue;
+                    }
+                    let result = client.cancel(native.clone()).await.map(|()| true);
+                    for request in background_interactions.values() {
+                        let _ = client.answer(request, InteractionResponse::Cancel).await;
+                    }
+                    background_interactions.clear();
+                    let _ = reply.send(result);
+                }
                 AdapterCommand::Answer(answer) => {
                     if let Some(request) = background_interactions.remove(&answer.interaction) {
                         if client.answer(&request, answer.response).await.is_err() {
@@ -393,6 +416,14 @@ async fn run_protocol(
                 }
                 continue;
             }
+            AdapterCommand::CanInterrupt { reply, .. } => {
+                let _ = reply.send(false);
+                continue;
+            }
+            AdapterCommand::Interrupt { reply, .. } => {
+                let _ = reply.send(Ok(false));
+                continue;
+            }
             AdapterCommand::Cancel { reply } => {
                 let result = client.cancel(native.clone()).await;
                 let _ = reply.send(result);
@@ -513,6 +544,8 @@ async fn run_protocol(
                             }
                         }
                     }
+                    Some(AdapterCommand::CanInterrupt { reply, .. }) => { let _ = reply.send(false); }
+                    Some(AdapterCommand::Interrupt { reply, .. }) => { let _ = reply.send(Ok(false)); }
                     Some(AdapterCommand::Cancel { reply }) => {
                         let result = client.cancel(native.clone()).await;
                         for interaction in interactions.values() { let _ = client.answer(interaction, InteractionResponse::Cancel).await; }

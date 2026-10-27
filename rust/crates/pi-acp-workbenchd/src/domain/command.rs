@@ -22,7 +22,16 @@ pub enum DomainCommand {
     RequestCancel {
         session: SessionId,
     },
+    /// Graceful interruption keeps the worker epoch until provider settlement.
+    Interrupt {
+        session: SessionId,
+        turn: TurnId,
+        completed: bool,
+    },
     Cancel {
+        session: SessionId,
+    },
+    ReleaseWorker {
         session: SessionId,
     },
     AnswerInteraction {

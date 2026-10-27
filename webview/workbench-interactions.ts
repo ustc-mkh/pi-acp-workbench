@@ -1,4 +1,4 @@
-import type { ClientCommand, SessionView } from '../src/workbench-protocol';
+import type { ClientCommand, Interaction, SessionView } from '../src/workbench-protocol';
 import { element, button } from './workbench-elements';
 
 type AnswerCommand = Extract<ClientCommand, { method: 'answer' }>;
@@ -23,6 +23,11 @@ export function renderInteractions(
     box.className = 'permission-card';
     box.dataset.interaction = interaction.id;
     box.dataset.definition = signature;
+    if (interaction.question) {
+      renderQuestion(box, interaction, snapshot, answer);
+      interactions.append(box);
+      continue;
+    }
     box.append(
       element(
         'strong',
@@ -142,4 +147,56 @@ export function renderInteractions(
     interactions.append(box);
   }
   for (const [id, child] of existing) if (!id || !retained.has(id)) child.remove();
+}
+
+/** Pi extension questions retain the v1 card; their wire answers remain typed. */
+function renderQuestion(
+  box: HTMLFormElement,
+  interaction: Interaction,
+  snapshot: SessionView,
+  answer: (command: AnswerCommand) => void,
+) {
+  const question = interaction.question!;
+  box.classList.add('extension-question');
+  const title = element('div', question.title || '请选择');
+  title.className = 'question-title';
+  box.append(element('strong', 'Pi · 等待你的回答'), title);
+  if (question.message) box.append(element('p', question.message));
+  let editor: HTMLTextAreaElement | undefined;
+  if (question.method === 'input' || question.method === 'editor') {
+    editor = element('textarea');
+    editor.rows = question.method === 'editor' ? 6 : 3;
+    editor.maxLength = 10000;
+    editor.setAttribute('aria-label', '回答');
+    editor.placeholder = question.placeholder || '输入你的回答';
+    editor.value = question.prefill;
+    box.append(editor);
+  }
+  const actions = element('div');
+  actions.className = 'permission-actions';
+  const respond = (response: AnswerCommand['answer']['response']) => {
+    answer({
+      method: 'answer',
+      session: snapshot.id,
+      answer: { interaction: interaction.id, response },
+    });
+    for (const control of box.querySelectorAll('button')) control.disabled = true;
+  };
+  if (editor) {
+    const submit = element('button', '提交回答');
+    submit.type = 'submit';
+    actions.append(submit);
+    box.addEventListener('submit', (event) => {
+      event.preventDefault();
+      respond({ Form: { fields: { value: { Text: editor!.value } } } });
+    });
+  } else {
+    for (const option of interaction.options)
+      actions.append(
+        button(option.label, () => respond({ Permission: { option: option.id } }), false, false),
+      );
+    box.addEventListener('submit', (event) => event.preventDefault());
+  }
+  actions.append(button('取消', () => respond('Cancel'), false, false));
+  box.append(actions);
 }

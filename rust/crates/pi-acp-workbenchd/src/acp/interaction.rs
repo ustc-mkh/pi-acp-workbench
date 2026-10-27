@@ -30,6 +30,18 @@ pub struct PermissionToolCall {
     pub title: String,
     #[serde(default)]
     pub status: Option<super::dto::ToolStatus>,
+    #[serde(default, deserialize_with = "super::decode_question_input")]
+    pub raw_input: Option<PermissionQuestionInput>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PermissionQuestionInput {
+    pub method: String,
+    pub message: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FormMetadata {
+    #[serde(default, rename = "pi-workbench-question")]
+    pub question: Option<QuestionPresentation>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +61,8 @@ pub enum PermissionKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormRequest {
+    #[serde(default, rename = "_meta")]
+    pub meta: FormMetadata,
     pub session_id: NativeSessionId,
     pub mode: FormMode,
     pub message: String,
@@ -141,6 +155,7 @@ impl InboundRequest {
     pub fn to_domain(&self, id: InteractionId) -> Result<Interaction, DomainError> {
         let interaction = match self {
             Self::Permission { request, .. } => Interaction {
+                question: permission_question(&request.tool_call),
                 id,
                 kind: InteractionKind::Permission,
                 title: request.tool_call.title.clone(),
@@ -232,6 +247,7 @@ impl InboundRequest {
                     });
                 }
                 Interaction {
+                    question: request.meta.question.clone(),
                     id,
                     kind: InteractionKind::Elicitation,
                     title: request.message.clone(),
@@ -245,6 +261,24 @@ impl InboundRequest {
         interaction.validate_definition()?;
         Ok(interaction)
     }
+}
+fn permission_question(tool: &PermissionToolCall) -> Option<QuestionPresentation> {
+    if !tool.tool_call_id.starts_with("pi-ui-") {
+        return None;
+    }
+    let raw = tool.raw_input.as_ref()?;
+    let method = match raw.method.as_str() {
+        "select" => QuestionMethod::Select,
+        "confirm" => QuestionMethod::Confirm,
+        _ => return None,
+    };
+    Some(QuestionPresentation {
+        method,
+        title: tool.title.clone(),
+        message: raw.message.clone(),
+        placeholder: String::new(),
+        prefill: String::new(),
+    })
 }
 fn choices(options: &[SchemaChoice]) -> Vec<InteractionOption> {
     options

@@ -17,7 +17,7 @@ export interface PeerRequest {
   command: ClientCommand;
   socket: Socket;
 }
-export async function workbenchPeer() {
+export async function workbenchPeer({ autoDetach = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'wb-client-'));
   const requests: PeerRequest[] = [],
     sockets = new Set<Socket>();
@@ -38,7 +38,7 @@ export async function workbenchPeer() {
         buffer = buffer.slice(end + 1);
         const request = { ...raw, command: clientCommand.parse(raw.command), socket };
         requests.push(request);
-        if (request.command.method === 'detach')
+        if (autoDetach && request.command.method === 'detach')
           send(socket, { type: 'detached', id: request.id, session: request.command.session });
       }
     });

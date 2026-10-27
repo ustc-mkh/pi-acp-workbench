@@ -50,6 +50,7 @@ fn interaction(state: &mut SessionView) {
         DomainCommand::Agent {
             session: state.id.clone(),
             event: AgentEvent::Interaction(Interaction {
+                question: None,
                 id: InteractionId::generate(),
                 kind: InteractionKind::Permission,
                 title: "Allow?".into(),

@@ -7,7 +7,9 @@ import { handleExtensionInput } from '../src/pi-extension-input';
 function session(response: acp.CreateElicitationResponse) {
   return {
     sessionId: 'native-pi-input',
-    conn: { unstable_createElicitation: vi.fn(async () => response) },
+    conn: {
+      unstable_createElicitation: vi.fn(async (_request: acp.CreateElicitationRequest) => response),
+    },
     proc: { sendExtensionUiResponse: vi.fn(async (_value: Record<string, unknown>) => {}) },
   };
 }
@@ -22,10 +24,19 @@ it('Pi extension input uses a typed elicitation and returns the exact submitted 
     sessionId: 'native-pi-input',
     mode: 'form',
     message: 'Consent\nType consent',
+    _meta: {
+      'pi-workbench-question': {
+        method: 'input',
+        title: 'Consent',
+        message: '',
+        placeholder: 'Type consent',
+        prefill: '',
+      },
+    },
     requestedSchema: {
       type: 'object',
       properties: { value: { type: 'string', title: 'Consent', maxLength: 10000 } },
-      required: ['value'],
+      required: [],
     },
   });
   expect(s.proc.sendExtensionUiResponse).toHaveBeenCalledExactlyOnceWith({
@@ -72,4 +83,34 @@ it('the pinned pi-acp SDK runtime exposes the actual elicitation method used by 
   const upstream = createRequire(root.resolve('pi-acp'));
   const runtime = await import(pathToFileURL(upstream.resolve('@agentclientprotocol/sdk')).href);
   expect(typeof runtime.AgentSideConnection.prototype.unstable_createElicitation).toBe('function');
+});
+
+it('preserves editor presentation, prompt and prefill without mixing it into the answer', async () => {
+  const s = session({ action: 'accept', content: { value: 'edited\n中文' } });
+  await handleExtensionInput(
+    s,
+    {
+      method: 'editor',
+      title: 'Edit plan',
+      message: 'Review before continuing',
+      placeholder: 'Your plan',
+      prefill: 'original\n计划',
+    },
+    'editor',
+  );
+  expect(s.conn.unstable_createElicitation.mock.calls[0][0]).toMatchObject({
+    _meta: {
+      'pi-workbench-question': {
+        method: 'editor',
+        title: 'Edit plan',
+        message: 'Review before continuing',
+        placeholder: 'Your plan',
+        prefill: 'original\n计划',
+      },
+    },
+  });
+  expect(s.proc.sendExtensionUiResponse).toHaveBeenCalledExactlyOnceWith({
+    id: 'editor',
+    value: 'edited\n中文',
+  });
 });

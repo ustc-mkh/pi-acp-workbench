@@ -172,3 +172,44 @@ it('earlier browsing preserves current messages and keeps receiving complete liv
   expect(view.view.entries.map((entry) => entry.seq)).toEqual([401]);
   expect(view.view.historical).toBe(false);
 });
+
+it('retains tools from other turns across concurrent history reads and appends subsequent pages', async () => {
+  const { peer, view } = await setup();
+  const tool = (id: string, turn: string) => ({
+    id,
+    turn,
+    status: 'Completed',
+    kind: null,
+    title: id,
+    name: null,
+    locations: [],
+    content: [],
+  });
+  const first = view.loadTools('first' as never);
+  const second = view.loadTools('second' as never);
+  const requests = () => peer.requests.filter((r) => r.command.method === 'tools');
+  await expect.poll(() => requests().length).toBe(2);
+  peer.query(requests()[1], 'tools', { tools: [tool('b', 'second')], next_cursor: null });
+  await second;
+  peer.query(requests()[0], 'tools', { tools: [tool('a', 'first')], next_cursor: null });
+  await first;
+  expect(view.view.tools.map((t) => t.id).sort()).toEqual(['a', 'b']);
+  const cursor = { version: 3, session: view.id, turn: 'first', after_tool: 'a' };
+  // Use the actual protocol cursor shape to request the next bounded page.
+  const paging = view.loadTools('first' as never, cursor as never);
+  await expect.poll(() => requests().length).toBe(3);
+  peer.query(requests()[2], 'tools', { tools: [tool('c', 'first')], next_cursor: null });
+  await paging;
+  expect(view.view.tools.map((t) => t.id).sort()).toEqual(['a', 'b', 'c']);
+});
+
+it('only adopts complete empty discovery views without skipping unseen transcript rows or moving revisions backward', async () => {
+  const { view } = await setup();
+  expect(view.confirmEmptyView(emptyView(6))).toBe(true);
+  expect(view.view.view?.revision).toBe(6);
+  expect(view.confirmEmptyView({ ...emptyView(7), id: 'other' as never })).toBe(false);
+  expect(view.confirmEmptyView({ ...emptyView(7), last_entry_seq: 1 })).toBe(false);
+  expect(view.view.view?.revision).toBe(6);
+  expect(view.confirmEmptyView(emptyView(5))).toBe(true);
+  expect(view.view.view?.revision).toBe(6);
+});

@@ -1453,3 +1453,292 @@ it('renders a whole archived formula and exposes only the arrow for returning to
   arrow.click();
   expect(b.sent.at(-1)).toEqual({ type: 'latest', session: 'session' });
 });
+
+it('copies the selected transcript text through the host on Ctrl/Cmd+C and keeps composer copy native', async () => {
+  const b = await browser();
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('copy-selection'),
+        turn: 'turn' as never,
+        role: 'Agent',
+        message: null,
+        image: null,
+        text: { Inline: { text: 'Select **only these words** to copy.' } },
+      },
+    ],
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelector('strong')?.textContent).toBe('only these words');
+  const strong = b.document.querySelector('strong')!;
+  const range = b.document.createRange();
+  range.selectNodeContents(strong);
+  dom!.window.getSelection()!.addRange(range);
+  for (const modifier of ['ctrlKey', 'metaKey']) {
+    const key = new dom!.window.KeyboardEvent('keydown', {
+      key: 'c',
+      [modifier]: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    strong.dispatchEvent(key);
+    expect(key.defaultPrevented).toBe(true);
+    expect(b.sent.at(-1)).toEqual({ type: 'copy_text', text: 'only these words' });
+  }
+  const count = b.sent.length;
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  const key = new dom!.window.KeyboardEvent('keydown', {
+    key: 'c',
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  prompt.dispatchEvent(key);
+  expect(key.defaultPrevented).toBe(false);
+  expect(b.sent).toHaveLength(count);
+});
+
+it('counts logical thoughts, restores classic activity containers and folds a completed trace', async () => {
+  const b = await browser();
+  const snapshot = b.state.view!.view!;
+  snapshot.active_turn = 'turn' as never;
+  snapshot.status = 'Running';
+  b.state.view = {
+    ...b.state.view!,
+    entries: ['first ', 'second ', 'third'].map((text, i) => ({
+      seq: i + 1,
+      id: entryId.parse(`thought-${i}`),
+      turn: 'turn' as never,
+      role: 'Thought',
+      message: 'one-thought' as never,
+      image: null,
+      text: { Inline: { text } },
+    })),
+    tools: [
+      {
+        id: 'tool' as never,
+        turn: 'turn' as never,
+        status: 'Completed',
+        kind: null,
+        name: null,
+        title: 'Read file',
+        locations: [],
+        content: [],
+      },
+    ],
+  };
+  b.update();
+  await expect
+    .poll(() => b.document.querySelector('.turn-process > summary')?.textContent)
+    .toBe('处理中 · 1 次工具调用 · 1 段思考');
+  const process = b.document.querySelector<HTMLDetailsElement>('.turn-process')!;
+  expect(process.querySelectorAll('.activity-body article.thought')).toHaveLength(1);
+  expect(process.querySelector('.thought-body')?.textContent?.replace(/\n/g, '')).toBe(
+    'first second third',
+  );
+  expect(process.querySelector('.tool > summary')?.textContent).toBe('✓ Read file完成');
+  expect(process.querySelector('.tool > .tool-body')).not.toBeNull();
+  process.open = true;
+  process.dispatchEvent(new dom!.window.Event('toggle'));
+  expect(b.sent).toContainEqual({ type: 'read_tools', session: 'session', turn: 'turn' });
+  snapshot.active_turn = null;
+  snapshot.status = 'Idle';
+  b.update(2);
+  await expect
+    .poll(() => process.querySelector(':scope > summary')?.textContent)
+    .toBe('执行过程 · 1 次工具调用 · 1 段思考');
+  expect(process.open).toBe(false);
+});
+
+for (const method of ['select', 'confirm', 'input', 'editor'] as const) {
+  it(`restores the v1 ${method} question card and submits the original typed interaction`, async () => {
+    const b = await browser();
+    const text = method === 'input' || method === 'editor';
+    b.state.view!.view!.pending_interactions = {
+      question: {
+        id: 'question' as never,
+        kind: text ? 'Elicitation' : 'Permission',
+        title: 'Choose a plan',
+        detail: '',
+        question: {
+          method,
+          title: 'Choose a plan',
+          message: 'Review before continuing',
+          placeholder: 'Your answer',
+          prefill: 'original\n计划',
+        },
+        fields: text
+          ? [
+              {
+                name: 'value',
+                label: 'Choose a plan',
+                required: false,
+                kind: { Text: { max_length: 10000 } },
+              },
+            ]
+          : [],
+        options: text
+          ? []
+          : [
+              { id: 'yes', label: 'Yes' },
+              { id: 'no', label: 'No' },
+            ],
+        expires_at: null,
+      },
+    };
+    b.update();
+    await expect
+      .poll(() => b.document.querySelector('.extension-question strong')?.textContent)
+      .toBe('Pi · 等待你的回答');
+    const card = b.document.querySelector<HTMLFormElement>('.extension-question')!;
+    expect(card.textContent).not.toContain('需要授权');
+    expect(card.querySelector('.question-title')?.textContent).toBe('Choose a plan');
+    expect(card.querySelector('p')?.textContent).toBe('Review before continuing');
+    if (text) {
+      const editor = card.querySelector('textarea')!;
+      expect(editor.rows).toBe(method === 'editor' ? 6 : 3);
+      expect(editor.placeholder).toBe('Your answer');
+      expect(editor.value).toBe('original\n计划');
+      editor.value = 'my edited answer';
+      b.state.view!.view!.revision++;
+      b.update(2);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(card.querySelector('textarea')).toBe(editor);
+      expect(editor.value).toBe('my edited answer');
+      editor.value = '';
+      card.dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
+      expect(b.sent.at(-1)).toMatchObject({
+        type: 'execute',
+        command: {
+          method: 'answer',
+          answer: {
+            interaction: 'question',
+            response: { Form: { fields: { value: { Text: '' } } } },
+          },
+        },
+      });
+    } else {
+      [...card.querySelectorAll('button')].find((button) => button.textContent === 'No')!.click();
+      expect(b.sent.at(-1)).toMatchObject({
+        type: 'execute',
+        command: {
+          method: 'answer',
+          answer: { interaction: 'question', response: { Permission: { option: 'no' } } },
+        },
+      });
+    }
+    expect([...card.querySelectorAll('button')].every((button) => button.disabled)).toBe(true);
+  });
+}
+
+it('finishes Markdown and hides current-turn actions while waiting for a question answer', async () => {
+  const b = await browser();
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('answer'),
+        turn: 'turn' as never,
+        role: 'Agent',
+        message: 'm' as never,
+        image: null,
+        text: { Inline: { text: 'A **complete** answer.\n\n```ts\nconst value = 1;\n```' } },
+      },
+    ],
+  };
+  b.update();
+  await expect
+    .poll(() => b.document.querySelector('article.assistant code')?.textContent)
+    .toContain('const value');
+  b.state.view!.view!.status = 'Waiting';
+  b.state.view!.view!.active_turn = 'turn' as never;
+  b.update(2);
+  await expect
+    .poll(() => b.document.querySelector('article.assistant')?.classList.contains('running-turn'))
+    .toBe(true);
+  expect(b.document.querySelector('article.assistant code')?.textContent).toBe(
+    'const value = 1;\n',
+  );
+  expect(b.document.querySelector('article.assistant .message-body > pre')).toBeNull();
+});
+
+it('cancels a Pi editor question without submitting its prefilled answer', async () => {
+  const b = await browser();
+  b.state.view!.view!.pending_interactions = {
+    q: {
+      id: 'q' as never,
+      kind: 'Elicitation',
+      title: 'Edit',
+      detail: '',
+      question: {
+        method: 'editor',
+        title: 'Edit',
+        message: '',
+        placeholder: '',
+        prefill: 'do not submit this',
+      },
+      options: [],
+      fields: [
+        { name: 'value', label: 'Edit', required: false, kind: { Text: { max_length: 10000 } } },
+      ],
+      expires_at: null,
+    },
+  };
+  b.update();
+  await expect
+    .poll(() => b.document.querySelector('.extension-question textarea')?.textContent !== undefined)
+    .toBe(true);
+  [...b.document.querySelectorAll<HTMLButtonElement>('.extension-question button')]
+    .find((button) => button.textContent === '取消')!
+    .click();
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: { method: 'answer', answer: { interaction: 'q', response: 'Cancel' } },
+  });
+});
+
+it('renders completed Markdown syntax from each short live chunk before the turn ends', async () => {
+  const b = await browser();
+  b.state.view!.view!.active_turn = 'live' as never;
+  b.state.view!.view!.status = 'Running';
+  const chunks = [
+    '# Live heading\n\n**em',
+    'phasis**\n\n- first item\n',
+    '\n```ts\nconst live = 1;\n',
+    '```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n',
+  ];
+  const entries: NonNullable<WorkbenchUiState['view']>['entries'][number][] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    entries.push({
+      seq: i + 1,
+      id: entryId.parse(`live-${i}`),
+      turn: 'live' as never,
+      role: 'Agent',
+      message: 'live-message' as never,
+      image: null,
+      text: { Inline: { text: chunks[i] } },
+    });
+    b.state.view = { ...b.state.view!, entries: [...entries] };
+    b.update(i + 1);
+    await expect
+      .poll(() => b.document.querySelector('article.assistant')?.textContent)
+      .toContain(i < 2 ? 'Live heading' : 'const live = 1;');
+    if (i === 1)
+      await expect
+        .poll(() => b.document.querySelector('article.assistant strong')?.textContent)
+        .toBe('emphasis');
+    if (i === 2)
+      await expect
+        .poll(() => b.document.querySelector('article.assistant code')?.textContent)
+        .toContain('const live = 1;');
+    if (i === 3)
+      await expect
+        .poll(() => b.document.querySelector('article.assistant td')?.textContent)
+        .toBe('1');
+    expect(b.document.querySelector('article.assistant .message-body > pre')).toBeNull();
+  }
+  expect(b.state.view!.view!.active_turn).toBe('live');
+});

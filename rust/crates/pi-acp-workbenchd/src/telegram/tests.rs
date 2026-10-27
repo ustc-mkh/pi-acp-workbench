@@ -53,6 +53,7 @@ fn snapshot() -> crate::domain::query::SessionView {
 }
 fn interaction() -> Interaction {
     Interaction {
+        question: None,
         id: InteractionId::generate(),
         kind: InteractionKind::Permission,
         title: "Permission".into(),
@@ -222,6 +223,7 @@ fn ambiguous_text_is_rejected_and_explicit_multifield_answers_are_typed() {
         Err(RejectionReason::UnknownCommand)
     ));
     let form = Interaction {
+        question: None,
         id: InteractionId::generate(),
         kind: InteractionKind::Elicitation,
         title: "Form".into(),

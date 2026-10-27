@@ -47,6 +47,7 @@ export const uiCommand = tagged('type', {
   open_link: object({ type: literal('open_link'), url: string }),
   login: object({ type: literal('login') }),
   copy_message: object({ type: literal('copy_message'), session: sessionId, entry: entryId }),
+  copy_text: object({ type: literal('copy_text'), text: string }),
   configure_telegram: object({ type: literal('configure_telegram') }),
   read_management: object({
     type: literal('read_management'),

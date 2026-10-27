@@ -154,6 +154,11 @@ export class WorkbenchController {
           await this.ports.login();
           break;
         }
+        case 'copy_text': {
+          if (!this.ports.copyText) throw new Error('Clipboard unavailable');
+          await this.ports.copyText(message.text);
+          break;
+        }
         case 'copy_message': {
           const selected = this.selected;
           const entry = selected?.view.entries.find((e) => e.id === message.entry);
@@ -313,7 +318,7 @@ export class WorkbenchController {
             !message.confirmed
           )
             throw new Error('会话正在运行或等待授权，请再次确认释放。');
-          await this.execute({ method: 'cancel', session: message.session });
+          await this.execute({ method: 'cancel', session: message.session, release: true });
           await this.refresh();
           if (this.selected?.id === message.session) await this.selected.refresh();
           break;
@@ -333,8 +338,14 @@ export class WorkbenchController {
           this.preparing = id;
           this.emit();
           try {
-            await this.select(id);
-            await this.prepareNewSession(id);
+            // Subscription and provider startup are independent. Start both
+            // immediately rather than waiting for attach and view persistence.
+            const initialization = await Promise.allSettled([
+              this.select(id),
+              this.prepareNewSession(id, result.Created.summary.cwd),
+            ]);
+            for (const result of initialization)
+              if (result.status === 'rejected') throw result.reason;
             if (
               this.selected?.view.view?.catalogue.models.length ||
               this.state.sessions.some((s) => s.retention_days !== undefined)
@@ -896,7 +907,9 @@ export class WorkbenchController {
       this.selected = undefined;
       this.turnDiffCache.clear();
       this.emit();
-      if (previous) await previous.stop();
+      // stop() synchronously drops the old observer before awaiting its detach
+      // acknowledgement. An unrelated old socket reply must not block the new view.
+      if (previous) void previous.stop();
       if (this.closed || generation !== this.selection) return;
       // Cold inspection is display-only and does not load a provider.
       const view = new WorkbenchSession(this.client, session);
@@ -971,18 +984,19 @@ export class WorkbenchController {
     }
     await this.persistOperations();
   }
-  private async prepareNewSession(id: SessionId) {
+  private async prepareNewSession(id: SessionId, cwd: string) {
     const selected = this.selected;
     if (!selected || selected.id !== id) return;
     const run = async (command: ClientCommand) => {
       if (this.selected !== selected || this.closed) return false;
-      const view = selected.view.view;
-      if (!view) throw new Error('新会话不可用');
-      const token = await this.authorize(view.cwd);
+      const token = await this.authorize(cwd);
       this.assertAuthorization(token);
       if (this.selected !== selected || this.closed) return false;
-      await this.execute(command);
-      await selected.refresh();
+      const result = await this.execute(command);
+      await selected.start();
+      if (this.selected !== selected || this.closed) return false;
+      if (!result || !('Loaded' in result) || !selected.confirmEmptyView(result.Loaded.view))
+        await selected.refresh();
       // Residency is owned by the host, never guessed from the viewed session.
       if (this.selected !== selected || this.closed) return false;
       if (selected.view.status !== 'ready' || !selected.view.view)

@@ -205,6 +205,11 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       action: r.result?.action,
     });
     if (autonomous && r.id === `autonomous-${autonomous}`) {
+      if (
+        process.env.WORKBENCH_CONTRACT_AUTONOMOUS_IGNORE_CANCEL === '1' &&
+        r.result?.outcome?.outcome === 'cancelled'
+      )
+        return;
       const id = autonomous;
       autonomous = undefined;
       previousAutonomous = id;
@@ -541,6 +546,50 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       return;
     }
     if (text === 'crash') process.exit(7);
+    if (text.startsWith('pi-question-')) {
+      const method = text.slice('pi-question-'.length);
+      const question = {
+        method,
+        title: 'Pi question',
+        message: 'Review before continuing',
+        placeholder: 'Your answer',
+        prefill: 'original\n计划',
+      };
+      pending = r.id;
+      if (method === 'input' || method === 'editor') {
+        send({
+          jsonrpc: '2.0',
+          id: 'elicitation-1',
+          method: 'elicitation/create',
+          params: {
+            sessionId,
+            mode: 'form',
+            message: question.title,
+            _meta: { 'pi-workbench-question': question },
+            requestedSchema: {
+              type: 'object',
+              properties: { value: { type: 'string', maxLength: 10000 } },
+              required: [],
+            },
+          },
+        });
+      } else {
+        send({
+          jsonrpc: '2.0',
+          id: 'perm-1',
+          method: 'session/request_permission',
+          params: {
+            sessionId,
+            toolCall: { toolCallId: 'pi-ui-question', title: question.title, rawInput: question },
+            options: [
+              { optionId: 'yes', name: 'Continue', kind: 'allow_once' },
+              { optionId: 'no', name: 'Change plan', kind: 'reject_once' },
+            ],
+          },
+        });
+      }
+      return;
+    }
     if (text.startsWith('elicitation')) {
       pending = r.id;
       send({

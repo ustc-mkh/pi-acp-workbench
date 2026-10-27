@@ -96,6 +96,15 @@ const fieldValue = variants({
   Integer: integer,
 });
 const interaction = object({
+  question: optional(
+    object({
+      method: oneOf('select', 'confirm', 'input', 'editor'),
+      title: string,
+      message: string,
+      placeholder: string,
+      prefill: string,
+    }),
+  ),
   id: interactionId,
   kind: oneOf('Permission', 'Elicitation'),
   title: string,
@@ -690,7 +699,7 @@ const mutationCommand = tagged('method', {
     ...session,
     prompt: typedPrompt,
   }),
-  cancel: object({ method: literal('cancel'), ...session }),
+  cancel: object({ method: literal('cancel'), ...session, release: optional(boolean) }),
   answer: object({ method: literal('answer'), ...session, answer }),
   fork: object({ method: literal('fork'), ...session, request: object({ entry: entryId }) }),
   cancel_fork: object({ method: literal('cancel_fork'), ...session, operation: operationId }),

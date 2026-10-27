@@ -85,6 +85,7 @@ impl Request {
             Self::Command {
                 command:
                     DomainCommand::Cancel { .. }
+                    | DomainCommand::ReleaseWorker { .. }
                     | DomainCommand::CancelFork { .. }
                     | DomainCommand::AnswerInteraction { .. }
                     | DomainCommand::UndoTurn { .. }
@@ -113,7 +114,9 @@ impl Request {
                     | DomainCommand::RemoveSession(session)
                     | DomainCommand::Prompt { session, .. }
                     | DomainCommand::Cancel { session }
+                    | DomainCommand::ReleaseWorker { session }
                     | DomainCommand::RequestCancel { session }
+                    | DomainCommand::Interrupt { session, .. }
                     | DomainCommand::AnswerInteraction { session, .. }
                     | DomainCommand::Fork { session, .. }
                     | DomainCommand::PrepareFork { session, .. }

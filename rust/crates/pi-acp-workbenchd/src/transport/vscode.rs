@@ -129,6 +129,8 @@ pub enum ClientCommand {
     },
     Cancel {
         session: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release: Option<bool>,
     },
     Answer {
         session: SessionId,
@@ -297,7 +299,11 @@ impl ClientCommand {
             Self::Create { harness, cwd } => DomainCommand::CreateSession { harness, cwd },
             Self::Load { session } => DomainCommand::LoadSession(session),
             Self::Prompt { session, prompt } => DomainCommand::Prompt { session, prompt },
-            Self::Cancel { session } => DomainCommand::Cancel { session },
+            Self::Cancel {
+                session,
+                release: Some(true),
+            } => DomainCommand::ReleaseWorker { session },
+            Self::Cancel { session, .. } => DomainCommand::Cancel { session },
             Self::Answer { session, answer } => {
                 DomainCommand::AnswerInteraction { session, answer }
             }

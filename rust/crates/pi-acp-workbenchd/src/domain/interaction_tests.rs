@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 fn form() -> Interaction {
     Interaction {
+        question: None,
         id: InteractionId::generate(),
         kind: InteractionKind::Elicitation,
         title: "Questions".into(),

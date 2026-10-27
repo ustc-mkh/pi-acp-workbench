@@ -118,7 +118,7 @@ export async function startMixedUI(socket, workspace, session) {
         const metrics = await measureRenderWorkload(page, displaySnapshot);
         assert.equal(metrics.messages, 2);
         assert(metrics.code);
-        assert(metrics.markdown.count <= 16);
+        assert(metrics.markdown.count <= metrics.render.count + 1);
         assert.deepEqual(errors, []);
         return metrics;
       },

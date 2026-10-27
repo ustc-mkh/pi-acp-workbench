@@ -303,7 +303,7 @@ export class ModelControls {
   private position() {
     if (this.panel.hidden) return;
     const anchor = this.trigger.getBoundingClientRect();
-    const width = Math.min(340, Math.max(0, window.innerWidth - 24));
+    const width = Math.min(304, Math.max(0, window.innerWidth - 24));
     this.panel.style.width = width + 'px';
     this.panel.style.left =
       Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)) + 'px';

@@ -8,6 +8,7 @@ import { buildClassicShell, decorateIcon } from './workbench-shell';
 import { MessageProjection } from '../src/workbench-messages';
 import { reconcile } from './workbench-dom';
 import { installComposerResize } from './composer-resize';
+import { PaintScheduler } from './paint-scheduler';
 import { Drafts } from './workbench-drafts';
 import { Preferences } from './workbench-preferences';
 import { ManagementPanel } from './workbench-management';
@@ -39,6 +40,21 @@ declare function acquireVsCodeApi(): {
 const vscode = acquireVsCodeApi(),
   root = document.querySelector<HTMLElement>('#workbench')!;
 const markdown = createRenderer(window);
+// VS Code webviews may route the native copy command to the focused composer.
+// Send the actual document selection through the extension clipboard port.
+document.addEventListener('keydown', (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'c') return;
+  const target = event.target;
+  if (
+    target instanceof window.HTMLElement &&
+    target.closest('input, textarea, [contenteditable="true"]')
+  )
+    return;
+  const text = window.getSelection()?.toString();
+  if (!text) return;
+  event.preventDefault();
+  send({ type: 'copy_text', text });
+});
 let state: WorkbenchUiState | undefined,
   sequence = 0,
   selected: string | undefined;
@@ -51,8 +67,7 @@ const attemptedDiffs = new Set<string>();
 const turnDiffs = new Map<string, import('../src/workbench-protocol').TurnDiff>();
 let nextUiRequest = 0;
 let titleRefreshTimer: number | undefined;
-let imageBytes = 0,
-  rendering = false;
+let imageBytes = 0;
 const saved = vscode.getState?.();
 const drafts = new Drafts(saved);
 const preferences = new Preferences(saved);
@@ -755,18 +770,19 @@ function mutate(command: ClientCommand) {
   const snapshot = current();
   if (snapshot) send({ type: 'execute', session: snapshot.id, command });
 }
-function schedule() {
-  if (rendering) return;
-  rendering = true;
-  requestAnimationFrame(() => {
-    rendering = false;
-    const start = performance.now();
-    render();
-    performance.measure('workbench.render', { start });
-    // Keep instrumentation bounded in a long-lived view.
-    if (performance.getEntriesByName('workbench.render').length > 2048)
-      performance.clearMeasures('workbench.render');
-  });
+const paintScheduler = new PaintScheduler(() => {
+  const start = performance.now();
+  render();
+  performance.measure('workbench.render', { start });
+  // Keep instrumentation bounded in a long-lived view.
+  if (performance.getEntriesByName('workbench.render').length > 2048)
+    performance.clearMeasures('workbench.render');
+});
+function schedule(streaming = false) {
+  paintScheduler.request(
+    streaming,
+    `${state?.selected || ''}:${state?.view?.view?.active_turn || ''}`,
+  );
 }
 function renderContextUsage(snapshot?: SessionView) {
   const used = snapshot?.usage.context_used,
@@ -871,6 +887,7 @@ function hasIntermediateAnswers(
 }
 function renderTranscript(snapshot: SessionView, busy: boolean) {
   const rows = state?.view?.entries || [];
+  const streaming = snapshot.status === 'Running';
   const scroll = transcript.scrollTop,
     bottom = transcript.scrollHeight - transcript.clientHeight - scroll < 80;
   const anchor = [...transcript.querySelectorAll<HTMLElement>('[data-entry]')].find(
@@ -885,7 +902,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     ]),
   );
   const output = element('section');
-  const turns = new Map<string, { box: HTMLElement; process: HTMLDetailsElement }>();
+  const turns = new Map<
+    string,
+    { box: HTMLElement; process: HTMLDetailsElement; body: HTMLElement }
+  >();
   if (state?.view?.earlier)
     output.append(
       button(
@@ -932,16 +952,28 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         !row.image &&
         snapshot.active_turn !== row.turn &&
         lastAnswers.get(row.turn) !== message.key);
-    if (inActivity) folded.add(row.turn);
+    if (inActivity && (row.role !== 'Thought' || preferences.showThoughts)) folded.add(row.turn);
     let turn = turns.get(row.turn);
     if (!turn) {
       const box = element('section');
       box.dataset.turn = row.turn;
       box.className = 'turn';
       box.dataset.sessionId = snapshot.id;
+      const previousProcess = [...messages.querySelectorAll<HTMLElement>('[data-turn]')]
+        .find((node) => node.dataset.turn === row.turn)
+        ?.querySelector('.turn-process');
+      if (previousProcess?.classList.contains('running') && snapshot.active_turn !== row.turn)
+        preferences.setOpen(`${snapshot.id}:turn:${row.turn}`, false);
       const process = disclosure(`${snapshot.id}:turn:${row.turn}`, preferences.activityExpanded);
       process.className = 'turn-process activity-group';
       process.append(element('summary', '思考与工具调用'));
+      const activityBody = element('div');
+      activityBody.className = 'activity-body';
+      process.append(activityBody);
+      process.addEventListener('toggle', () => {
+        if (process.isConnected && process.open)
+          send({ type: 'read_tools', session: snapshot.id, turn: row.turn });
+      });
       box.append(process);
       const savedDiff = turnDiffs.get(`${snapshot.id}:${row.turn}`);
       if (savedDiff && snapshot.active_turn !== row.turn) {
@@ -1206,7 +1238,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         summary.append(notes);
         box.append(diffBox);
       }
-      turn = { box, process };
+      turn = { box, process, body: activityBody };
       turns.set(row.turn, turn);
       output.append(box);
     }
@@ -1216,6 +1248,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       message.entries.at(-1)!.id,
       message.entries.length,
       row.role !== 'User' && snapshot.active_turn === row.turn,
+      row.role !== 'User' && snapshot.active_turn === row.turn && streaming,
       message.entries.flatMap((entry) =>
         'Archived' in entry.text
           ? [
@@ -1238,7 +1271,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       const placeholder = element('article');
       placeholder.dataset.entry = message.key;
       placeholder.dataset.definition = definition;
-      if (inActivity) turn.process.append(placeholder);
+      if (inActivity) turn.body.append(placeholder);
       else if (row.role === 'User') turn.box.insertBefore(placeholder, turn.process);
       else turn.box.append(placeholder);
       continue;
@@ -1247,7 +1280,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     article.dataset.definition = definition;
     article.dataset.entry = message.key;
     article.className = 'message ' + (row.role === 'Agent' ? 'assistant' : row.role.toLowerCase());
-    article.classList.toggle('running-turn', snapshot.active_turn === row.turn);
+    article.classList.toggle(
+      'running-turn',
+      row.role !== 'User' && snapshot.active_turn === row.turn,
+    );
     const actions = element('div');
     actions.className = 'message-actions';
     actions.append(
@@ -1274,13 +1310,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     const content = element('div');
     content.className = 'message-body';
     if ('Inline' in row.text) {
-      // Streaming text stays cheap and selectable. Parse only geometrically growing
-      // prefixes; the unparsed tail remains visible until the next checkpoint/end.
+      // Parse all received Markdown on each bounded streaming paint. Cutting a
+      // prefix mid-fence/emphasis leaves complete syntax in a plain-text tail.
       const text = row.text.Inline.text;
-      const active = row.role !== 'User' && snapshot.active_turn === row.turn;
-      const checkpoint = active
-        ? Math.min(128 * 1024, 2 ** Math.floor(Math.log2(Math.max(1, text.length))))
-        : Math.min(text.length, 2 * 1024 * 1024);
+      const checkpoint = Math.min(text.length, 256 * 1024);
       const parsed = element('div');
       parsed.dataset.markdown = 'true';
       parsed.className = 'markdown';
@@ -1311,14 +1344,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         copy.onclick = (event) => {
           const copy = event.currentTarget as HTMLButtonElement;
           const text = copy.parentElement?.querySelector('code')?.textContent ?? '';
-          void window.navigator.clipboard?.writeText(text).then(
-            () => {
-              copy.textContent = '已复制';
-            },
-            () => {
-              copy.textContent = '无法复制';
-            },
-          );
+          send({ type: 'copy_text', text });
         };
       if (parsed.querySelector('.mermaid-diagram')) {
         const draw = button('Render diagrams', () => {});
@@ -1339,6 +1365,8 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       }
     if (row.role === 'Thought') {
       const details = disclosure(`${snapshot.id}:thought:${row.id}`);
+      details.className = 'thought';
+      content.classList.add('thought-body');
       details.append(element('summary', '思考过程'), content);
       article.append(details);
     } else article.append(content);
@@ -1354,8 +1382,8 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       fork.dataset.fork = 'true';
       actions.append(fork);
     }
-    article.append(actions);
-    if (inActivity) turn.process.append(article);
+    if (row.role === 'Agent' || row.role === 'User') article.append(actions);
+    if (inActivity) turn.body.append(article);
     else if (row.role === 'User') turn.box.insertBefore(article, turn.process);
     else turn.box.append(article);
   }
@@ -1373,21 +1401,15 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     for (const turn of [...visibleTurns].slice(-16)) requestAutomaticDiff(snapshot.id, turn);
   for (const turn of visibleTurns) {
     const process = turns.get(turn)!.process;
-    process.hidden =
-      !preferences.activityExpanded &&
-      !folded.has(turn) &&
-      !rows.some((row) => row.turn === turn && row.role === 'Thought') &&
-      !state?.view?.tools.some((tool) => tool.turn === turn);
-    const thoughtCount = rows.filter((row) => row.turn === turn && row.role === 'Thought').length;
+    process.hidden = !folded.has(turn) && !state?.view?.tools.some((tool) => tool.turn === turn);
+    const thoughtCount = preferences.showThoughts
+      ? projected.filter((message) => message.row.turn === turn && message.row.role === 'Thought')
+          .length
+      : 0;
     const toolCount = state?.view?.tools.filter((tool) => tool.turn === turn).length || 0;
     process.querySelector('summary')!.textContent =
       `${snapshot.active_turn === turn ? '处理中' : '执行过程'} · ${toolCount} 次工具调用${thoughtCount ? ` · ${thoughtCount} 段思考` : ''}`;
     process.classList.toggle('running', snapshot.active_turn === turn);
-    const tools = button('查看工具记录', () =>
-      send({ type: 'read_tools', session: snapshot.id, turn }),
-    );
-    tools.dataset.toolsFor = turn;
-    turns.get(turn)!.process.append(tools);
   }
   const cursor = state?.view?.toolCursor;
   if (cursor)
@@ -1399,7 +1421,44 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   for (const tool of state?.view?.tools || []) {
     if (!visibleTurns.has(tool.turn)) continue;
     const details = disclosure(`${snapshot.id}:tool:${tool.id}`);
-    details.append(element('summary', `${tool.title} · ${tool.status}`));
+    details.className = 'message tool';
+    const summary = element(
+      'summary',
+      `${tool.status === 'Completed' ? '✓' : tool.status === 'Failed' ? '×' : '◇'} ${tool.title}`,
+    );
+    const badge = element(
+      'span',
+      {
+        Pending: '等待',
+        InProgress: '执行中',
+        Completed: '完成',
+        Failed: '失败',
+      }[tool.status],
+    );
+    badge.className = `badge ${tool.status === 'InProgress' ? 'in_progress' : tool.status.toLowerCase()}`;
+    summary.append(badge);
+    details.append(summary);
+    const bodyNode = element('div');
+    bodyNode.className = 'tool-body';
+    details.addEventListener('toggle', () => {
+      if (!details.isConnected || !details.open) return;
+      const current = state?.view?.tools.find(
+        (item) => item.id === tool.id && item.turn === tool.turn,
+      );
+      for (const body of current?.content || []) {
+        const refs =
+          'Text' in body
+            ? [body.Text.content]
+            : 'Diff' in body
+              ? [body.Diff.old_text, body.Diff.new_text]
+              : 'ResourceText' in body
+                ? [body.ResourceText.content]
+                : [];
+        for (const ref of refs)
+          if (ref && !contentPages.has(ref.id))
+            send({ type: 'read_content', session: snapshot.id, ref, offset: 0 });
+      }
+    });
     for (const body of tool.content) {
       if ('Text' in body) details.append(contentNode(body.Text.content, snapshot.id));
       else if ('Diff' in body) {
@@ -1422,7 +1481,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         );
       else details.append(element('p', `Unsupported binary: ${body.Unsupported.kind}`));
     }
-    turns.get(tool.turn)!.process.append(details);
+    // Keep native details as the card root, matching the classic tool layout.
+    bodyNode.append(...[...details.children].slice(1));
+    details.append(bodyNode);
+    turns.get(tool.turn)!.body.append(details);
   }
   renderCommands();
   const signature = JSON.stringify([snapshot.id, snapshot.plan]);
@@ -1767,9 +1829,15 @@ function render() {
     });
     renderContextUsage(snapshot);
     working.hidden = !snapshot.active_turn;
-    workingLabel.textContent = `${snapshot.harness} 正在处理…`;
+    workingLabel.textContent = `${snapshot.harness === 'Pi' ? 'Pi Agent' : snapshot.harness} 正在处理…`;
+    const follow =
+      preferences.autoScroll &&
+      transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop < 80;
     renderTranscript(snapshot, busy);
     renderInteractions(interactions, snapshot, mutate);
+    // Question cards change the transcript viewport after its own render. Apply
+    // follow again so the last message/spinner stays visible above the card.
+    if (follow) transcript.scrollTop = transcript.scrollHeight;
   } else {
     modelControls.show(false);
     renderContextUsage();
@@ -1848,7 +1916,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
           )
         )
           pendingPrompts.delete(session);
-      schedule();
+      schedule(state.view?.status === 'ready' && state.view.view?.status === 'Running');
     } else if (
       raw.type === 'prompt_submitted' &&
       'session' in raw &&

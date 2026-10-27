@@ -251,9 +251,14 @@ try {
       'models-expanded',
       'statistics',
       'activity',
+      'activity-expanded',
       'running',
       'todo',
       'permission',
+      'question-select',
+      'question-confirm',
+      'question-input',
+      'question-editor',
     ])
       for (const width of [320, 460]) {
         const page = await browser.newPage({
@@ -277,10 +282,10 @@ try {
           { kind, state: state(kind, scenario) },
         );
         await page.waitForTimeout(100);
-        if (['activity', 'running', 'todo', 'permission'].includes(scenario)) {
+        if (['activity', 'activity-expanded', 'running', 'todo', 'permission'].includes(scenario)) {
           const fixture = state(kind, scenario);
           if (kind === 'old') {
-            if (scenario === 'activity')
+            if (scenario.startsWith('activity'))
               fixture.entries.splice(1, 0, {
                 id: 'thought',
                 turnId: 't1',
@@ -308,7 +313,7 @@ try {
                 },
               ];
           } else {
-            if (scenario === 'activity')
+            if (scenario.startsWith('activity'))
               fixture.view.entries.splice(1, 0, {
                 id: 'thought',
                 turn: 't1',
@@ -355,6 +360,83 @@ try {
             { kind, state: fixture },
           );
         }
+        if (scenario === 'activity-expanded') {
+          await page.locator('.activity-group > summary').first().click();
+          await page.locator('.thought > summary').first().click();
+        }
+        if (scenario.startsWith('question-')) {
+          const method = scenario.slice('question-'.length);
+          const text = method === 'input' || method === 'editor';
+          const question = {
+            method,
+            title: '请选择下一步操作',
+            message: '确认方案后继续执行。',
+            placeholder: '输入你的回答',
+            prefill: '保留已有方案\n补充下一步计划',
+          };
+          const options = text
+            ? [{ optionId: 'submit', name: '提交回答', kind: 'allow_once' }]
+            : [
+                { optionId: 'yes', name: '继续执行', kind: 'allow_once' },
+                { optionId: 'no', name: '调整方案', kind: 'reject_once' },
+              ];
+          const fixture = state(kind, scenario);
+          if (kind === 'old') {
+            fixture.status = 'busy';
+            fixture.activeTurnId = 't1';
+            fixture.permissions = [
+              {
+                id: 'question',
+                request: {
+                  _meta: { 'pi-workbench-input': true },
+                  toolCall: {
+                    toolCallId: 'pi-ui-question',
+                    title: question.title,
+                    rawInput: question,
+                  },
+                  options,
+                },
+              },
+            ];
+          } else {
+            fixture.view.view.status = 'Waiting';
+            fixture.view.view.active_turn = 't1';
+            fixture.view.view.pending_interactions = {
+              question: {
+                id: 'question',
+                kind: text ? 'Elicitation' : 'Permission',
+                title: question.title,
+                detail: '',
+                question,
+                options: text ? [] : options.map((o) => ({ id: o.optionId, label: o.name })),
+                fields: text
+                  ? [
+                      {
+                        name: 'value',
+                        label: question.title,
+                        required: false,
+                        kind: { Text: { max_length: 10000 } },
+                      },
+                    ]
+                  : [],
+                expires_at: null,
+              },
+            };
+          }
+          await page.evaluate(
+            ({ kind, state }) =>
+              window.dispatchEvent(
+                new MessageEvent('message', {
+                  data:
+                    kind === 'old'
+                      ? { type: 'state', revision: 2, state }
+                      : { type: 'state', sequence: 2, state },
+                }),
+              ),
+            { kind, state: fixture },
+          );
+          await page.locator('.extension-question').waitFor();
+        }
         if (scenario === 'history')
           await page.getByRole('button', { name: '历史记录', exact: true }).click();
         if (scenario.startsWith('models')) {
@@ -400,7 +482,17 @@ try {
     await import('node:fs/promises')
   ).writeFile(join(output, 'screens.json'), JSON.stringify(report, null, 2));
   const comparisons = [];
-  for (const scenario of ['empty', 'conversation', 'activity', 'todo'])
+  for (const scenario of [
+    'empty',
+    'conversation',
+    'activity',
+    'activity-expanded',
+    'todo',
+    'question-select',
+    'question-confirm',
+    'question-input',
+    'question-editor',
+  ])
     for (const width of [320, 460]) {
       const before = report.find(
           (x) => x.kind === 'old' && x.scenario === scenario && x.width === width,

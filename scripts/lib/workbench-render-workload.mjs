@@ -90,6 +90,16 @@ export function measureRenderWorkload(page, snapshot) {
       update();
       if (i % 10 === 9) {
         await frame();
+        if (i === 9) {
+          const deadline = performance.now() + 250;
+          while (!document.querySelector('article.assistant code') && performance.now() < deadline)
+            await frame();
+        }
+        if (
+          !document.querySelector('article.assistant code') ||
+          document.querySelector('article.assistant .message-body > pre')
+        )
+          throw new Error(`Live Markdown fell back to a plain-text tail at fragment ${i}`);
         if (
           document.activeElement !== input ||
           first !== document.querySelector('article') ||

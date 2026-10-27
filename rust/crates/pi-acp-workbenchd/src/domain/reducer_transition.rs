@@ -129,7 +129,9 @@ pub fn transition(
     let session = match &command {
         DomainCommand::Prompt { session, .. }
         | DomainCommand::Cancel { session }
+        | DomainCommand::ReleaseWorker { session }
         | DomainCommand::RequestCancel { session }
+        | DomainCommand::Interrupt { session, .. }
         | DomainCommand::AnswerInteraction { session, .. }
         | DomainCommand::SetModel { session, .. }
         | DomainCommand::SetMode { session, .. }
@@ -146,9 +148,21 @@ pub fn transition(
     if matches!(command, DomainCommand::Inspect(_)) {
         return Ok(None);
     }
+    if let DomainCommand::Interrupt { turn, .. } = &command {
+        if view.active_turn.as_ref() != Some(turn) {
+            return Ok(None);
+        }
+    }
     if let DomainCommand::Agent { event, .. } = &command {
         if matches!(view.status, SessionStatus::Cancelling)
-            && !matches!(event, AgentEvent::Crashed { .. })
+            && !matches!(
+                event,
+                AgentEvent::Crashed { .. }
+                    | AgentEvent::Cancelled { .. }
+                    | AgentEvent::Finished { .. }
+                    | AgentEvent::Usage { .. }
+                    | AgentEvent::ContextUsage { .. }
+            )
         {
             return Ok(None);
         }
@@ -223,7 +237,10 @@ pub fn transition(
                     .push(entry(turn.clone(), EntryRole::User, text, None, image)?);
             }
         }
-        DomainCommand::RequestCancel { .. } => {
+        DomainCommand::RequestCancel { .. }
+        | DomainCommand::Interrupt {
+            completed: false, ..
+        } => {
             if view.active_turn.is_none() {
                 // Still fences the attached worker in the owner; idle Pi may wake.
                 return Ok(None);
@@ -233,7 +250,11 @@ pub fn transition(
             }
             change.next.status = SessionStatus::Cancelling;
         }
-        DomainCommand::Cancel { .. } => {
+        DomainCommand::Cancel { .. }
+        | DomainCommand::ReleaseWorker { .. }
+        | DomainCommand::Interrupt {
+            completed: true, ..
+        } => {
             let Some(turn) = change.next.active_turn.take() else {
                 return Ok(None); // Receipt-only stop of an idle background worker.
             };
@@ -337,11 +358,6 @@ pub fn transition(
                 change.next.usage.reported = false;
                 change.next.plan = Default::default();
                 change.next.status = SessionStatus::Running;
-                change.append.push(entry(
-                    turn, EntryRole::Agent,
-                    "Pi autonomous run. Workspace Diff unavailable: start was reported after execution began. Background wakeups pin this worker until stopped; idle does not prove there is no pending work.".into(),
-                    None, None,
-                )?);
             }
             AgentEvent::Cancelled { turn } => {
                 change.next.active_turn = None;

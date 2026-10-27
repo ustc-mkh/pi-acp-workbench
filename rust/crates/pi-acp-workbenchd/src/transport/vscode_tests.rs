@@ -455,3 +455,22 @@ async fn invalid_connection_is_isolated_and_socket_cleanup_preserves_replacement
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+#[test]
+fn stop_and_explicit_worker_release_have_distinct_domain_intents() {
+    for (release, expected_release) in [(None, false), (Some(false), false), (Some(true), true)] {
+        let mut json = serde_json::json!({"method":"cancel","session":"s"});
+        if let Some(release) = release {
+            json["release"] = serde_json::json!(release);
+        }
+        let command: ClientCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(command.pool(), 1);
+        assert_eq!(
+            matches!(
+                command.into_domain().unwrap(),
+                DomainCommand::ReleaseWorker { .. }
+            ),
+            expected_release
+        );
+    }
+}

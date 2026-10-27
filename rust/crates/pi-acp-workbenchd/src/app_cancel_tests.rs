@@ -321,3 +321,67 @@ async fn cancellation_prepare_failure_keeps_live_turn_and_final_failure_keeps_fe
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn background_interrupt_prepare_failure_never_sends_native_cancel() {
+    let root = std::env::temp_dir().join(format!("wb-background-prepare-{}", uuid::Uuid::new_v4()));
+    let trace = root.join("trace");
+    let gate = root.join("wake");
+    let config = config_at(
+        &root,
+        std::collections::HashMap::from([
+            ("WORKBENCH_CONTRACT_AUTONOMOUS".into(), "1".into()),
+            (
+                "WORKBENCH_CONTRACT_TRACE".into(),
+                trace.to_string_lossy().into_owned(),
+            ),
+            (
+                "WORKBENCH_CONTRACT_WAKE_GATE".into(),
+                gate.to_string_lossy().into_owned(),
+            ),
+        ]),
+    );
+    let app = WorkbenchApp::start(config, |history, mailbox| {
+        Runtime::start(
+            CancelFault {
+                history,
+                fail: Arc::new(AtomicBool::new(true)),
+                final_commit: false,
+            },
+            mailbox,
+        )
+    })
+    .unwrap();
+    let id = create(&app).await;
+    let mut events = app.subscribe();
+    prompt(&app, &id, "autonomous-arm").await;
+    wait_finished(&mut events).await;
+    tokio::fs::write(&gate, "wake").await.unwrap();
+    wait_interaction(&mut events).await;
+    let original = inspect(&app, &id).await;
+    let process = pid(&trace).await;
+    assert!(matches!(
+        app.command(DomainCommand::Cancel {
+            session: id.clone()
+        })
+        .await,
+        Err(DomainError::Persistence(_))
+    ));
+    let current = inspect(&app, &id).await;
+    assert_eq!(current.revision, original.revision);
+    assert_eq!(current.active_turn, original.active_turn);
+    assert!(matches!(current.status, SessionStatus::Waiting));
+    assert_eq!(unsafe { libc::kill(process, 0) }, 0);
+    assert!(!tokio::fs::read_to_string(&trace)
+        .await
+        .unwrap()
+        .contains("session/cancel"));
+    app.command(DomainCommand::Cancel {
+        session: id.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(inspect(&app, &id).await.active_turn.is_none());
+    app.shutdown().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
