@@ -27,6 +27,14 @@ pub enum ManagementAction {
         hidden: bool,
         price: Option<Price>,
     },
+    ModelConfig {
+        model: String,
+        hidden: bool,
+        price: Option<Price>,
+        multiplier: f64,
+        context_window: Option<u64>,
+        apply_context: bool,
+    },
     Visibility {
         models: Vec<String>,
         hidden: bool,
@@ -44,7 +52,15 @@ pub enum ManagementAction {
 }
 impl ManagementAction {
     pub fn external(&self) -> bool {
-        matches!(self, Self::RefreshModels | Self::Context { .. })
+        matches!(
+            self,
+            Self::RefreshModels
+                | Self::Context { .. }
+                | Self::ModelConfig {
+                    apply_context: true,
+                    ..
+                }
+        )
     }
     pub fn validate(&self) -> bool {
         let model = |s: &str| !s.is_empty() && s.len() <= 300 && !s.chars().any(char::is_control);
@@ -57,6 +73,20 @@ impl ManagementAction {
             Self::Model {
                 model: m, price, ..
             } => model(m) && price.as_ref().is_none_or(Price::valid),
+            Self::ModelConfig {
+                model: m,
+                price,
+                multiplier,
+                context_window,
+                ..
+            } => {
+                model(m)
+                    && price.as_ref().is_none_or(Price::valid)
+                    && multiplier.is_finite()
+                    && *multiplier >= 0.0
+                    && *multiplier <= 1_000_000.0
+                    && context_window.is_none_or(|n| n > 0 && n <= 100_000_000)
+            }
             Self::Visibility { models, .. } => {
                 !models.is_empty() && models.len() <= 500 && models.iter().all(|s| model(s))
             }
@@ -103,6 +133,11 @@ pub struct ModelSetting {
     pub price: Option<Price>,
     pub default_price: Option<Price>,
     pub context_window: Option<u64>,
+    pub default_context_window: Option<u64>,
+    pub context_override: Option<u64>,
+    pub multiplier: f64,
+    pub context_state: Option<String>,
+    pub context_error: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +177,8 @@ pub struct ProviderModel {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderModels {
     pub models: Vec<ProviderModel>,
+    #[serde(default, rename = "contextAck")]
+    pub context_ack: Option<ContextProjection>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TitleUsage {
@@ -158,4 +195,23 @@ pub struct TitleResponse {
     pub title: String,
     #[serde(default)]
     pub records: Vec<TitleUsage>,
+}
+
+/// SQLite desired-state revision used only for the local Pi profile projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextProjection {
+    pub owner: String,
+    pub revision: u64,
+}
+#[derive(Clone, Debug)]
+pub struct ContextIntent {
+    pub revision: u64,
+    pub model: String,
+    pub context_window: Option<u64>,
+}
+#[derive(Clone, Debug)]
+pub struct ContextSnapshot {
+    pub revision: u64,
+    pub pending: Vec<ContextIntent>,
 }

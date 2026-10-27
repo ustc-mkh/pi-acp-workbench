@@ -20,7 +20,8 @@ import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branc
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
 import { fastConfig } from './pi-fast-config';
-import { refreshPiModels } from './pi-context-config';
+import { refreshPiModels, getPiModelDefaults, getPiContextAck } from './pi-context-config';
+import { piModelDefaults } from './pi-model-defaults';
 import { generatePiTitle } from './pi-title';
 type ModelResponse = {
   models: {
@@ -84,6 +85,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           nativeFork: true,
           title: true,
           models: true,
+          contextProjection: true,
           autonomousRuns: true,
         },
       };
@@ -175,33 +177,23 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
                 params.contextWindow! > 100000000))
           )
             throw new Error('Invalid context setting');
-          await refreshPiModels(session.proc, {
-            model: params.model,
-            contextWindow: params.contextWindow!,
-          });
-        } else await refreshPiModels(session.proc);
+          await refreshPiModels(
+            session.proc,
+            {
+              model: params.model,
+              contextWindow: params.contextWindow!,
+            },
+            true,
+            params.contextProjection,
+          );
+        } else await refreshPiModels(session.proc, undefined, true);
         await this.publishConfigOptions(session);
         const available = await session.proc.getAvailableModels();
         if ((available.models?.length ?? 0) > 500)
           throw new Error('Model catalogue exceeds budget');
         return {
-          models: (available.models || [])
-            .filter((m) => m.provider && m.id)
-            .map((m) => ({
-              model: `${m.provider}/${m.id}`,
-              price: validPrice(m.cost)
-                ? {
-                    input: m.cost!.input,
-                    output: m.cost!.output,
-                    cache_read: m.cost!.cacheRead,
-                    cache_write: m.cost!.cacheWrite,
-                  }
-                : null,
-              contextWindow:
-                Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0
-                  ? m.contextWindow!
-                  : null,
-            })),
+          models: getPiModelDefaults(session.proc) ?? piModelDefaults(available.models || []),
+          ...(params.setContext ? { contextAck: getPiContextAck(session.proc) } : {}),
         };
       }
       if (method === '_pi_workbench/fork') return this.forkNative(session, params, Process);

@@ -112,17 +112,34 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   });
   click('刷新模型配置');
   expect(sent.at(-1)).toMatchObject({ command: { action: { action: 'refresh_models' } } });
-  click('应用上下文设置');
+  expect(
+    [...dom.window.document.querySelectorAll('button')].some(
+      (n) => (n.getAttribute('aria-label') || n.textContent) === '应用上下文设置',
+    ),
+  ).toBe(false);
+  const context = dom.window.document.querySelector<HTMLInputElement>(
+    '[aria-label="vendor/model context k tokens"]',
+  )!;
+  const multiplier = dom.window.document.querySelector<HTMLInputElement>(
+    '[aria-label="vendor/model price multiplier"]',
+  )!;
+  expect(context.value).toBe('256');
+  expect(multiplier.value).toBe('1');
+  context.value = '512';
+  multiplier.value = '0.5';
+  click('保存模型设置');
   expect(sent.at(-1)).toMatchObject({
     type: 'execute',
     command: {
       method: 'manage',
-      action: { action: 'context', model: 'vendor/model', context_window: 256000 },
+      action: {
+        action: 'model_config',
+        price: null,
+        multiplier: 0.5,
+        context_window: 512000,
+        apply_context: true,
+      },
     },
-  });
-  click('保存价格与显示设置');
-  expect(sent.at(-1)).toMatchObject({
-    command: { action: { action: 'model', price: { cache_read: 0.1, cache_write: 1 } } },
   });
   click('隐藏全部模型');
   expect(sent.at(-1)).toMatchObject({
@@ -176,5 +193,135 @@ it('renders searchable grouped models, four prices, explicit context, titles and
     type: 'read_management',
     query: { cursor: 'Pi/vendor/model' },
   });
+  dom.window.close();
+});
+
+it('shares Pi defaults across model aliases, preserves explicit overrides and saves context/prices/multiplier together', () => {
+  const dom = new JSDOM('<main></main>');
+  vi.stubGlobal('document', dom.window.document);
+  const sent: UiCommand[] = [];
+  const panel = new ManagementPanel(
+    (m) => sent.push(m),
+    () => {},
+  );
+  dom.window.document.body.append(panel.root);
+  const view = emptyView();
+  const model = 'wwzz/gpt-6.1-sol';
+  view.catalogue.models = [{ id: model as never, name: 'gpt-6.1-sol' }];
+  panel.setView(view, [], []);
+  panel.openModels();
+  const base: ManagementData = {
+    naming_policy: 'off',
+    title_model: null,
+    groups: [],
+    totals: null,
+    next_cursor: null,
+    models: [
+      {
+        harness: 'Pi',
+        model: 'openai/GPT-6.1 Sol',
+        hidden: false,
+        price: null,
+        default_price: { input: 2, output: 12, cache_read: 0.2, cache_write: 0 },
+        context_window: 272000,
+        default_context_window: 272000,
+        multiplier: 1,
+      },
+    ],
+  };
+  const receive = (data: ManagementData) => {
+    const q = sent.at(-1)!;
+    panel.receive({ type: 'management', request_id: 'request_id' in q ? q.request_id : 0, data });
+  };
+  receive(base);
+  const input = (label: string) =>
+    dom.window.document.querySelector<HTMLInputElement>(`[aria-label="${model} ${label}"]`)!;
+  const click = (label: string) =>
+    [...dom.window.document.querySelectorAll<HTMLElement>(`[data-model="Pi:${model}"] button`)]
+      .find((n) => n.getAttribute('aria-label') === label)!
+      .click();
+  expect(input('input price').value).toBe('2');
+  expect(input('context k tokens').value).toBe('272');
+  expect(input('price multiplier').value).toBe('1');
+  for (const [label, value] of [
+    ['input price', '3'],
+    ['context k tokens', '1000'],
+    ['price multiplier', '0.4'],
+  ]) {
+    input(label).value = value;
+    input(label).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  }
+  click('保存模型设置');
+  expect(sent.at(-1)).toMatchObject({
+    command: {
+      action: {
+        action: 'model_config',
+        model,
+        context_window: 1000000,
+        apply_context: true,
+        multiplier: 0.4,
+        price: { input: 3, output: 12, cache_read: 0.2, cache_write: 0 },
+      },
+    },
+  });
+  let n = 0;
+  const confirmed = (data: ManagementData) => {
+    panel.setView(
+      view,
+      [],
+      [
+        {
+          operation: `save-${++n}` as never,
+          method: 'manage',
+          session: view.id,
+          status: 'completed',
+        },
+      ],
+    );
+    receive(data);
+  };
+  const override = {
+    harness: 'Pi' as const,
+    model,
+    hidden: false,
+    price: { input: 3, output: 12, cache_read: 0.2, cache_write: 0 },
+    default_price: { input: 2, output: 12, cache_read: 0.2, cache_write: 0 },
+    context_window: 1000000,
+    context_override: 1000000,
+    context_state: 'applied' as const,
+    default_context_window: 272000,
+    multiplier: 0.4,
+  };
+  confirmed({ ...base, models: [...base.models, override] });
+  expect(input('input price').value).toBe('3');
+  expect(input('context k tokens').value).toBe('1000');
+  expect(input('price multiplier').value).toBe('0.4');
+  click('恢复模型默认设置');
+  expect(sent.at(-1)).toMatchObject({
+    command: {
+      action: {
+        action: 'model_config',
+        price: null,
+        multiplier: 1,
+        context_window: null,
+        apply_context: true,
+      },
+    },
+  });
+  confirmed({
+    ...base,
+    models: [
+      ...base.models,
+      { ...override, price: null, context_window: 272000, context_override: null, multiplier: 1 },
+    ],
+  });
+  expect(input('input price').value).toBe('2');
+  expect(input('context k tokens').value).toBe('272');
+  expect(input('price multiplier').value).toBe('1');
+  const before = sent.length;
+  input('price multiplier').value = '-1';
+  click('保存模型设置');
+  expect(sent).toHaveLength(before);
+  expect(dom.window.document.body.textContent).toContain('价格倍率必须');
   dom.window.close();
 });

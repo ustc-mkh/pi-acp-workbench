@@ -442,6 +442,11 @@ try {
     'finished-turn Diff appears without scrolling; reuse stays inside the user bubble and never on assistant replies',
   );
   await workspaceTurnBox.scrollIntoViewIfNeeded();
+  const diffFiles = workspaceTurnBox.locator('.turn-diff-files');
+  const diffNotes = diffFiles.locator('.turn-diff-notes');
+  assert.equal(await diffNotes.isVisible(), false);
+  await diffFiles.locator(':scope > summary').click();
+  await diffNotes.waitFor({ state: 'visible' });
   await workspaceTurnBox.locator('.turn-diff-file > summary').first().waitFor();
   assert.equal(await page.getByRole('button', { name: '查看工作区变更', exact: true }).count(), 0);
   await page.locator('.turn-diff-file > summary').first().click();
@@ -495,9 +500,17 @@ try {
   const manageBefore = controller.snapshot.operations.filter(
     (op) => op.method === 'manage' && op.status === 'completed',
   ).length;
+  assert.equal(await modelCard.locator('.apply-context').count(), 0);
+  assert.equal(
+    await modelCard.getByLabel('other price multiplier', { exact: true }).inputValue(),
+    '1',
+  );
+  await modelCard.getByLabel('other price multiplier', { exact: true }).fill('0.5');
+  await modelCard.getByLabel('other context k tokens', { exact: true }).fill('256');
   await modelCard
     .getByRole('checkbox', { name: 'Visible in model selector', exact: true })
     .uncheck();
+  await modelCard.getByRole('button', { name: '保存模型设置', exact: true }).click();
   await wait(
     () =>
       controller.snapshot.operations.filter(
@@ -508,6 +521,7 @@ try {
   await page.waitForFunction(
     () => !document.querySelector('select[aria-label="model"] option[value="other"]'),
   );
+  await page.screenshot({ path: join(artifacts, 'model-defaults-multiplier.png') });
   await page.getByRole('button', { name: '返回对话', exact: true }).click();
   await prompt('usage-complete');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'S6 usage completion');

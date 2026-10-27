@@ -1,7 +1,10 @@
 import { expect, it } from 'vitest';
 import { enhancePiAgent } from '../src/pi-enhancements';
+import { CONTEXT_APPLIED } from '../src/pi-context-mode';
 it('negotiated model refresh and explicit context use only the registered internal extension and preserve provider defaults', async () => {
   const prompts: string[] = [];
+  const entries: unknown[] = [];
+  const projection = { owner: 'a'.repeat(64), revision: 1 };
   const updates: unknown[] = [];
   const model = {
     provider: 'provider',
@@ -16,11 +19,23 @@ it('negotiated model refresh and explicit context use only the registered intern
     request: async (command: { type: string }) =>
       command.type === 'get_commands'
         ? { success: true, data: { commands: [{ name: 'pi-acp-workbench-models' }] } }
-        : { success: true, data: { entries: [] } },
+        : { success: true, data: { entries } },
     prompt: async (text: string) => {
       prompts.push(text);
       const input = JSON.parse(Buffer.from(text.split(' ')[1], 'base64').toString());
-      if (input.model) model.contextWindow = input.contextWindow ?? 200000;
+      if (input.model) {
+        model.contextWindow = input.contextWindow ?? 200000;
+        entries.push({
+          type: 'custom',
+          customType: CONTEXT_APPLIED,
+          data: {
+            requestId: input.requestId,
+            model: input.model,
+            contextWindow: input.contextWindow,
+            projection: input.contextProjection,
+          },
+        });
+      }
     },
   };
   // Use the actual registered command name from the existing trusted Pi extension.
@@ -28,7 +43,7 @@ it('negotiated model refresh and explicit context use only the registered intern
   proc.request = async (command: { type: string }) =>
     command.type === 'get_commands'
       ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
-      : { success: true, data: { entries: [] } };
+      : { success: true, data: { entries } };
   class Base {
     sessions = new Map([['native', { sessionId: 'native', proc }]]);
     conn = {
@@ -55,6 +70,7 @@ it('negotiated model refresh and explicit context use only the registered intern
     setContext: true,
     model: 'provider/model',
     contextWindow: 256000,
+    contextProjection: projection,
   });
   expect(model.contextWindow).toBe(256000);
   expect(updates.length).toBeGreaterThan(0);
@@ -71,6 +87,7 @@ it('negotiated model refresh and explicit context use only the registered intern
     setContext: true,
     model: 'provider/model',
     contextWindow: null,
+    contextProjection: { ...projection, revision: 2 },
   });
   expect(model.contextWindow).toBe(200000);
 });

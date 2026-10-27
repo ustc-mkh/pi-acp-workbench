@@ -36,6 +36,7 @@ const nativeFixture = process.env.WORKBENCH_CONTRACT_NATIVE_STATE
 let nativePrompt;
 let waitingFork;
 let sessionId;
+let workspace;
 let pending; // pending session/prompt request id
 let permission; // pending permission request id
 const permissionBatch = new Set();
@@ -283,16 +284,21 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
             nativeFork: true,
             title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
             models: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+            contextProjection:
+              !!process.env.WORKBENCH_CONTRACT_MANAGEMENT &&
+              process.env.WORKBENCH_CONTRACT_CONTEXT_PROJECTION !== '0',
           },
         },
       },
       authMethods: [],
     });
   } else if (r.method === 'session/new') {
+    workspace = r.params.cwd;
     sessionId = randomUUID();
     nativeFixture?.create(sessionId, configOptions[0].currentValue, modes.currentModeId);
     reply(r.id, { sessionId, configOptions, modes });
   } else if (r.method === 'session/load') {
+    workspace = r.params.cwd;
     if (nativeFixture) {
       try {
         const state = nativeFixture.read(r.params.sessionId);
@@ -782,9 +788,55 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       fail(r.id, 'not negotiated');
       return;
     }
-    if (r.params.setContext)
+    if (
+      r.params.setContext &&
+      r.params.contextProjection?.revision === 1 &&
+      process.env.WORKBENCH_CONTRACT_CONTEXT_GATE
+    ) {
+      await new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (existsSync(process.env.WORKBENCH_CONTRACT_CONTEXT_GATE)) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 5);
+      });
+    }
+    const refreshGate = process.env.WORKBENCH_CONTRACT_MODELS_GATE;
+    if (
+      !r.params.setContext &&
+      refreshGate &&
+      existsSync(`${refreshGate}.workspace`) &&
+      readFileSync(`${refreshGate}.workspace`, 'utf8') === workspace
+    ) {
+      trace({ method: 'models_refresh_blocked', workspace });
+      await new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (existsSync(refreshGate)) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 5);
+      });
+    }
+    if (r.params.setContext) {
       process.env.WORKBENCH_CONTRACT_CONTEXT = String(r.params.contextWindow ?? 200000);
+      if (process.env.WORKBENCH_CONTRACT_CONTEXT_FILE)
+        writeFileSync(
+          process.env.WORKBENCH_CONTRACT_CONTEXT_FILE,
+          process.env.WORKBENCH_CONTRACT_CONTEXT,
+        );
+    }
+    if (
+      process.env.WORKBENCH_CONTRACT_CONTEXT_FILE &&
+      existsSync(process.env.WORKBENCH_CONTRACT_CONTEXT_FILE)
+    )
+      process.env.WORKBENCH_CONTRACT_CONTEXT = readFileSync(
+        process.env.WORKBENCH_CONTRACT_CONTEXT_FILE,
+        'utf8',
+      );
     reply(r.id, {
+      contextAck: r.params.contextProjection ?? null,
       models: ['default', 'other'].map((model) => ({
         model,
         contextWindow: Number(process.env.WORKBENCH_CONTRACT_CONTEXT ?? 200000),

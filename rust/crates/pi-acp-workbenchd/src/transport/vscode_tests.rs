@@ -6,7 +6,8 @@ use crate::config::{
 #[tokio::test]
 async fn partial_frame_and_deadline_survive_reply_or_batch_select_cancellation() {
     use tokio::io::AsyncWriteExt;
-    let (mut writer, mut reader) = tokio::io::duplex(256);
+    let (mut writer, reader) = tokio::io::duplex(256);
+    let mut reader = tokio::io::BufReader::new(reader);
     let stop = CancellationToken::new();
     let mut frame = Vec::new();
     let mut deadline = None;

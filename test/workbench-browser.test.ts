@@ -328,7 +328,11 @@ it('automatically reads finished-turn diff and renders the classic header withou
   const header = b.document.querySelector('.turn-diff-header')!;
   expect(header.textContent).toContain('查看总 Diff');
   expect(header.textContent).toContain('撤回本轮修改');
-  expect(b.document.querySelector<HTMLDetailsElement>('.turn-diff-files')!.open).toBe(true);
+  const files = b.document.querySelector<HTMLDetailsElement>('.turn-diff-files')!;
+  expect(files.open).toBe(false);
+  expect(b.document.querySelector('.turn-diff-notes')?.closest('details')).toBe(files);
+  files.open = true;
+  expect(files.textContent).toContain('不是文件回滚点。');
   expect(b.document.querySelector('.turn-diff-notes')?.textContent).toContain(
     '1 个文件未采集文本内容',
   );

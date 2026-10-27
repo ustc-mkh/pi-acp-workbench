@@ -159,9 +159,13 @@ impl AcpClient {
         native: &NativeSessionId,
         metadata: &extensions::ProviderMetadata,
         action: &crate::domain::management::ManagementAction,
+        projection: Option<&crate::domain::management::ContextProjection>,
     ) -> Result<crate::domain::management::ProviderModels, DomainError> {
         if !metadata.supports_models() {
             return Err(DomainError::UnsupportedFeature("provider does not negotiate model configuration; its ACP catalogue remains available".into()));
+        }
+        if projection.is_some() && !metadata.supports_context_projection() {
+            return Err(DomainError::UnsupportedFeature("provider does not negotiate fenced context projection; update the matching Pi adapter".into()));
         }
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -170,11 +174,18 @@ impl AcpClient {
             model: Option<&'a str>,
             context_window: Option<u64>,
             set_context: bool,
+            context_projection: Option<&'a crate::domain::management::ContextProjection>,
         }
         let (model, context_window, set_context) = match action {
             crate::domain::management::ManagementAction::Context {
                 model,
                 context_window,
+            }
+            | crate::domain::management::ManagementAction::ModelConfig {
+                model,
+                context_window,
+                apply_context: true,
+                ..
             } => (Some(model.as_str()), *context_window, true),
             _ => (None, None, false),
         };
@@ -185,6 +196,7 @@ impl AcpClient {
                 model,
                 context_window,
                 set_context,
+                context_projection: projection,
             },
         )
         .await

@@ -47,7 +47,12 @@ export async function writeAtomicFile(
 }
 
 /** Synchronous counterpart for the upstream adapter's synchronous registry API. */
-export function writeAtomicFileSync(file: string, body: string, durable = false): void {
+export function writeAtomicFileSync(
+  file: string,
+  body: string,
+  durable = false,
+  beforeRename?: () => void,
+): void {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     const handle = openSync(temp, 'wx', 0o600);
@@ -57,6 +62,7 @@ export function writeAtomicFileSync(file: string, body: string, durable = false)
     } finally {
       closeSync(handle);
     }
+    beforeRename?.();
     renameSync(temp, file);
     if (durable) {
       const directory = openSync(dirname(file), 'r');

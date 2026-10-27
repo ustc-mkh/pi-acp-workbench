@@ -79,4 +79,5 @@ export interface WorkbenchParams {
   cursor?: number;
   setContext?: boolean;
   contextWindow?: number | null;
+  contextProjection?: import('./pi-context-projection').ContextProjection;
 }

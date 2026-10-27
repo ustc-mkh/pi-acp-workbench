@@ -29,8 +29,14 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 #[path = "app_fork_control.rs"]
 mod fork_control;
+#[path = "app_model_context.rs"]
+mod model_context;
+#[path = "app_residency.rs"]
+mod residency;
 #[path = "app_worker_retention.rs"]
 mod worker_retention;
+#[path = "app_workspace.rs"]
+mod workspace;
 
 #[path = "app_fork.rs"]
 mod forks;
@@ -53,6 +59,7 @@ struct AdapterHandle {
     last_used: Arc<std::sync::atomic::AtomicU64>,
     last_user_input_at: u64,
     resident_since: u64,
+    context_revision: u64,
 }
 impl AdapterHandle {
     async fn cancel_and_stop(self) -> Result<(), DomainError> {
@@ -95,6 +102,7 @@ pub struct WorkbenchApp {
 struct SessionCoordinator {
     adapters: Arc<Mutex<HashMap<SessionId, AdapterHandle>>>,
     admission: Mutex<()>,
+    model_settings: Mutex<()>,
     stop: CancellationToken,
     forks: Arc<fork_control::ForkControls>,
     reviews: Arc<crate::workspace_reviews::Reviews>,
@@ -106,6 +114,7 @@ impl SessionCoordinator {
         Self {
             adapters: Arc::new(Mutex::new(HashMap::new())),
             admission: Mutex::new(()),
+            model_settings: Mutex::new(()),
             stop: CancellationToken::new(),
             forks: Arc::new(fork_control::ForkControls::default()),
             reviews: crate::workspace_reviews::Reviews::new(database),
@@ -124,6 +133,7 @@ struct CommandCore {
     journal: JournalStore,
     history: SessionStore,
     pending_interactions: usize,
+    context_owner: String,
     workspace_gate: Arc<WorkspaceGate>,
     history_clear_admission: Arc<tokio::sync::Semaphore>,
 }
@@ -140,6 +150,13 @@ impl WorkbenchApp {
             .map_err(|error| DomainError::Persistence(error.to_string()))?;
         let database = Database::open_sync(&config.storage.root, &lease)
             .map_err(|error| DomainError::Persistence(error.to_string()))?;
+        use sha2::Digest;
+        let context_root = std::fs::canonicalize(&config.storage.root)
+            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        let context_owner = format!(
+            "{:x}",
+            sha2::Sha256::digest(context_root.as_os_str().as_encoded_bytes())
+        );
         let mut supervisor =
             WorkerSupervisor::configured(config.workers, config.sessions.max_workers);
         if let Some(telegram) = &config.telegram {
@@ -157,6 +174,7 @@ impl WorkbenchApp {
             database,
             history,
             pending_interactions: config.limits.pending_interactions,
+            context_owner,
             workspace_gate: Arc::new(WorkspaceGate::default()),
             history_clear_admission: Arc::new(tokio::sync::Semaphore::new(1)),
         });
@@ -718,34 +736,7 @@ impl CommandCore {
                     .await
                     .map_err(|e| DomainError::Persistence(e.to_string()));
             }
-            let view = self
-                .database
-                .view(session.clone())
-                .await
-                .map_err(|e| DomainError::Persistence(e.to_string()))?;
-            if view.active_turn.is_some() || view.configuration_intent.is_some() {
-                return Err(DomainError::Busy);
-            }
-            let (sender, _) = self.adapter_sender(session.clone()).await?;
-            let (reply, wait) = tokio::sync::oneshot::channel();
-            sender
-                .try_send(AdapterCommand::Models {
-                    action: action.clone(),
-                    reply,
-                })
-                .map_err(DomainError::mailbox)?;
-            let response = tokio::time::timeout(std::time::Duration::from_secs(20), wait)
-                .await
-                .map_err(|_| DomainError::OperationInterrupted)?
-                .map_err(|_| DomainError::OperationInterrupted)??;
-            self.database
-                .model_defaults(session.clone(), response)
-                .await
-                .map_err(|e| DomainError::Persistence(e.to_string()))?;
-            return Ok(CommandReceipt::Accepted {
-                session: session.clone(),
-                revision: view.revision,
-            });
+            return self.manage_external(session, action).await;
         }
         if let DomainCommand::UndoTurn {
             session,
@@ -753,41 +744,7 @@ impl CommandCore {
             files,
         } = &command
         {
-            let view = self
-                .database
-                .view(session.clone())
-                .await
-                .map_err(|e| DomainError::Persistence(e.to_string()))?;
-            let diff = self
-                .database
-                .turn_diff(session.clone(), turn.clone())
-                .await
-                .map_err(|e| DomainError::Persistence(e.to_string()))?
-                .ok_or_else(|| DomainError::NotFound(session.clone()))?;
-            let files = files.clone();
-            // Validate selection before stopping a provider.
-            crate::workspace_undo::select_files(diff.clone(), files.as_deref())
-                .map_err(DomainError::Persistence)?;
-            let root = crate::workspace_review::canonical(std::path::Path::new(view.cwd.as_str()))
-                .map_err(DomainError::Persistence)?;
-            if view.active_turn.is_some() {
-                return Err(DomainError::Busy);
-            }
-            // Idle providers may still produce background writes. Join this
-            // session's provider before acquiring the exclusive workspace permit;
-            // other overlapping providers keep their permits and cause Busy.
-            self.stop_session_adapter(session).await?;
-            let _undo_lease = self.workspace_gate.enter(root.clone(), true)?;
-            let report = tokio::task::spawn_blocking(move || {
-                crate::workspace_undo::undo_selected(&root, diff, files.as_deref(), false)
-            })
-            .await
-            .map_err(|_| DomainError::Persistence("undo task interrupted".into()))?
-            .map_err(DomainError::Persistence)?;
-            return Ok(CommandReceipt::UndoCompleted {
-                session: session.clone(),
-                report,
-            });
+            return self.undo_turn(session, turn, files).await;
         }
         if let DomainCommand::RemoveSession(session) = &command {
             // A cold session has no current process owner. A live active owner
@@ -931,6 +888,9 @@ impl CommandCore {
             if view.active_turn.is_some() {
                 return Err(DomainError::Busy);
             }
+            if view.harness == crate::domain::Harness::Pi {
+                self.ensure_model_context(session).await?;
+            }
             let cwd = view.cwd.clone();
             let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
                 .map_err(DomainError::Persistence)?;
@@ -1026,137 +986,6 @@ impl CommandCore {
         }
         result.receipt()
     }
-    async fn annotate_residency(&self, page: &mut crate::domain::query::ListPage) {
-        let adapters = self.coordinator.adapters.lock().await;
-        let mut recent: Vec<_> = adapters
-            .iter()
-            .filter(|(_, h)| {
-                h.last_used.load(Ordering::Relaxed) != 0
-                    && !h.stop.is_cancelled()
-                    && !h.task.is_finished()
-                    && !h.tx.is_closed()
-            })
-            .map(|(id, h)| (id, h.last_used.load(Ordering::Relaxed)))
-            .collect();
-        recent.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
-        let recent: std::collections::HashSet<_> =
-            recent.into_iter().take(8).map(|(id, _)| id).collect();
-        for row in &mut page.sessions {
-            row.retention_days = adapters
-                .get(&row.id)
-                .filter(|h| !h.stop.is_cancelled() && !h.task.is_finished() && !h.tx.is_closed())
-                .map(|_| if recent.contains(&row.id) { 4 } else { 1 })
-                .or(Some(0));
-        }
-    }
-    // Caller owns admission. Capacity reclaims one oldest idle resident; expiry
-    // reclaims all expired idle residents. Reads/discovery never refresh the clock.
-    async fn reclaim_workers(
-        &self,
-        exclude: Option<&SessionId>,
-        expired_only: bool,
-    ) -> Result<(), DomainError> {
-        let mut adapters = self.coordinator.adapters.lock().await;
-        let mut recent: Vec<_> = adapters
-            .iter()
-            .filter(|(_, h)| {
-                h.last_used.load(Ordering::Relaxed) != 0
-                    && !h.stop.is_cancelled()
-                    && !h.task.is_finished()
-                    && !h.tx.is_closed()
-            })
-            .map(|(id, h)| (id.clone(), h.last_used.load(Ordering::Relaxed)))
-            .collect();
-        recent.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
-        let recent: std::collections::HashSet<_> =
-            recent.into_iter().take(8).map(|(id, _)| id).collect();
-        let now = worker_retention::now();
-        let mut candidates: Vec<_> = adapters
-            .keys()
-            .filter(|id| exclude != Some(*id))
-            .cloned()
-            .collect();
-        candidates.sort_by_key(|id| {
-            adapters
-                .get(id)
-                .map(|handle| (handle.last_used.load(Ordering::Relaxed), handle.epoch))
-                .unwrap_or((u64::MAX, u64::MAX))
-        });
-        for id in candidates {
-            let Some(handle) = adapters.get(&id) else {
-                continue;
-            };
-            if handle.pins.load(Ordering::Acquire) != 0
-                || !handle.resumable.load(Ordering::Acquire)
-                || handle.stop.is_cancelled()
-                || handle.task.is_finished()
-                || handle.tx.is_closed()
-            {
-                continue;
-            }
-            if expired_only
-                && !worker_retention::expired(
-                    now,
-                    handle.resident_since,
-                    handle.last_user_input_at,
-                    recent.contains(&id),
-                )
-            {
-                continue;
-            }
-            let view = match self.database.view(id.clone()).await {
-                Ok(view) => view,
-                Err(_) => continue,
-            };
-            if view.active_turn.is_some()
-                || !view.pending_interactions.is_empty()
-                || view.configuration_intent.is_some()
-            {
-                continue;
-            }
-            // Fork work does not mark the source as an active turn. Its
-            // admission lease protects inspection, remote mutation and adopt
-            // even while the stored session still looks idle. Recheck after
-            // the database await; admission/map locks serialize worker starts.
-            if self.coordinator.forks.owns_session(&id) {
-                continue;
-            }
-            // The owner atomically rejects retirement if a user/background turn
-            // or permission arrived after the snapshot. Its epoch fence rejects
-            // later peer events; the physical pin is released only after join.
-            if self
-                .runtime
-                .registry
-                .retire_idle_worker(id.clone(), handle.epoch)
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let handle = adapters.remove(&id).expect("candidate is still registered");
-            crate::diagnostics::gauge(
-                "last_reclaimed_background_capable",
-                usize::from(!handle.background_safe.load(Ordering::Acquire)),
-            );
-            // Fence map ownership before requesting physical termination. The
-            // admission lock prevents a concurrent session start from replacing it.
-            handle.stop.cancel();
-            // Queries can observe the logical release while physical join is
-            // still pending. Admission and the owner's attachment pin continue
-            // to prevent slot reuse or owner eviction until that join finishes.
-            drop(adapters);
-            handle.stop().await;
-            if !expired_only {
-                return Ok(());
-            }
-            adapters = self.coordinator.adapters.lock().await;
-        }
-        if expired_only {
-            Ok(())
-        } else {
-            Err(DomainError::WorkerCapacity)
-        }
-    }
     async fn stop_session_adapter(&self, session: &SessionId) -> Result<(), DomainError> {
         let _worker_admission = self.coordinator.admission.lock().await;
         let adapter = self.coordinator.adapters.lock().await.remove(session);
@@ -1241,6 +1070,7 @@ impl CommandCore {
                 "provider discovery did not become ready".into(),
             ));
         }
+        self.ensure_model_context(&session).await?;
         // Discovery must show the same inherited choices that the next prompt
         // will use, rather than the provider's fresh native defaults.
         let observed = self
@@ -1471,6 +1301,7 @@ impl CommandCore {
                 pins,
                 last_used: Arc::new(std::sync::atomic::AtomicU64::new(activity.1)),
                 last_user_input_at: activity.0,
+                context_revision: 0,
                 resident_since: worker_retention::now(),
             },
         );

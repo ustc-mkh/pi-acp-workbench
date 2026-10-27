@@ -46,7 +46,18 @@ CREATE TABLE provider_preferences (harness TEXT PRIMARY KEY, config_json TEXT NO
 CREATE TABLE model_settings (
     harness TEXT NOT NULL, model TEXT NOT NULL CHECK(length(model)<=300), hidden INTEGER NOT NULL CHECK(hidden IN (0,1)),
     price TEXT CHECK(price IS NULL OR json_valid(price)), default_price TEXT CHECK(default_price IS NULL OR json_valid(default_price)),context_window INTEGER,
+    price_multiplier REAL NOT NULL DEFAULT 1 CHECK(price_multiplier >= 0 AND price_multiplier <= 1000000), context_override INTEGER CHECK(context_override IS NULL OR (context_override > 0 AND context_override <= 100000000)),
     PRIMARY KEY(harness,model)
+) STRICT;
+CREATE TABLE model_context_clock (
+    id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision BETWEEN 0 AND 9007199254740991)
+) STRICT;
+INSERT INTO model_context_clock VALUES(1,0);
+CREATE TABLE model_context_intents (
+    model TEXT PRIMARY KEY CHECK(length(model) BETWEEN 1 AND 300),
+    revision INTEGER NOT NULL UNIQUE CHECK(revision BETWEEN 1 AND 9007199254740991),
+    context_window INTEGER CHECK(context_window IS NULL OR (context_window > 0 AND context_window <= 100000000)),
+    state TEXT NOT NULL CHECK(state IN ('pending','applied')), error TEXT
 ) STRICT;
 CREATE TABLE usage_facts (
     id TEXT PRIMARY KEY, session TEXT NOT NULL, session_number INTEGER NOT NULL DEFAULT 0, harness TEXT NOT NULL, model TEXT NOT NULL, kind TEXT NOT NULL,
@@ -219,3 +230,5 @@ CREATE TABLE telegram_effects (
     result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json))
 ) STRICT;
 PRAGMA user_version = 3;
+
+PRAGMA application_id = 1346978609;

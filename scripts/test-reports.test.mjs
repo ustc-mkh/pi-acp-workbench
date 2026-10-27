@@ -28,6 +28,27 @@ test('retains recent reports, protects active runs and leaves unrelated files an
   }
 });
 
+test('retains benchmark artifact classes independently', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-test-reports-'));
+  try {
+    for (const [i, name] of [
+      'soak-00000000-0000-0000-0000-000000000001',
+      'soak-00000000-0000-0000-0000-000000000002',
+      'scale-00000000-0000-0000-0000-000000000001',
+    ].entries()) {
+      await mkdir(join(root, name));
+      await utimes(join(root, name), i + 1, i + 1);
+    }
+    await pruneTestReports(root, 1);
+    assert.deepEqual((await readdir(root)).sort(), [
+      'scale-00000000-0000-0000-0000-000000000001',
+      'soak-00000000-0000-0000-0000-000000000002',
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('rejects invalid retention before touching reports', () => {
   assert.equal(reportRetention(), 5);
   for (const value of ['0', '-1', '1.5', 'NaN', ''])

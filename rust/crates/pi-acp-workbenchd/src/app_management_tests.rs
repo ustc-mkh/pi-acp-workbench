@@ -510,3 +510,644 @@ async fn native_fork_and_native_load_do_not_duplicate_inherited_usage() {
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn management_model_config_defaults_multiplier_context_and_restart() {
+    let root = std::env::temp_dir().join(format!("model-config-{}", uuid::Uuid::new_v4()));
+    let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);
+    let app = app_at_with_env(&root, env.clone());
+    let session = create(&app).await;
+    manage(
+        &app,
+        &session,
+        ManagementAction::Naming {
+            policy: "off".into(),
+            model: None,
+        },
+    )
+    .await;
+    manage(&app, &session, ManagementAction::RefreshModels).await;
+    let mut events = app.subscribe();
+    prompt(&app, &session, "usage-complete").await;
+    wait_finished(&mut events).await;
+    let original = data(&app, query("model"))
+        .await
+        .totals
+        .unwrap()
+        .estimated_usd;
+    manage(
+        &app,
+        &session,
+        ManagementAction::ModelConfig {
+            model: "default".into(),
+            hidden: true,
+            price: Some(Price {
+                input: 3.0,
+                output: 4.0,
+                cache_read: 0.2,
+                cache_write: 2.0,
+            }),
+            multiplier: 0.5,
+            context_window: Some(512000),
+            apply_context: true,
+        },
+    )
+    .await;
+    let read = data(&app, query("model")).await;
+    assert!((read.totals.unwrap().estimated_usd - 0.0002).abs() < 1e-12);
+    let model = read.models.iter().find(|m| m.model == "default").unwrap();
+    assert_eq!(model.context_override, Some(512000));
+    assert_eq!(model.context_window, Some(512000));
+    assert_eq!(model.multiplier, 0.5);
+    app.shutdown_checked().await.unwrap();
+    let app = app_at_with_env(&root, env);
+    manage(&app, &session, ManagementAction::RefreshModels).await;
+    let read = data(&app, query("model")).await;
+    let model = read.models.iter().find(|m| m.model == "default").unwrap();
+    assert_eq!(model.default_context_window, Some(200000));
+    assert_eq!(model.context_window, Some(512000));
+    assert_eq!(model.price.as_ref().unwrap().input, 3.0);
+    assert_eq!(model.multiplier, 0.5);
+    assert!(model.hidden);
+    assert!((read.totals.unwrap().estimated_usd - 0.0002).abs() < 1e-12);
+    manage(
+        &app,
+        &session,
+        ManagementAction::ModelConfig {
+            model: "default".into(),
+            hidden: false,
+            price: None,
+            multiplier: 1.0,
+            context_window: None,
+            apply_context: true,
+        },
+    )
+    .await;
+    let read = data(&app, query("model")).await;
+    let model = read.models.iter().find(|m| m.model == "default").unwrap();
+    assert_eq!(model.context_override, None);
+    assert_eq!(model.context_window, Some(200000));
+    assert!(model.price.is_none());
+    assert!((read.totals.unwrap().estimated_usd - original).abs() < 1e-12);
+    for multiplier in [-1.0, f64::INFINITY, f64::NAN, 1000001.0] {
+        assert!(!ManagementAction::ModelConfig {
+            model: "default".into(),
+            hidden: false,
+            price: None,
+            multiplier,
+            context_window: None,
+            apply_context: false
+        }
+        .validate());
+    }
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn management_alias_defaults_and_additive_existing_root_upgrade() {
+    let root =
+        std::env::temp_dir().join(format!("model-defaults-upgrade-{}", uuid::Uuid::new_v4()));
+    let app = app_at(&root);
+    let session = create(&app).await;
+    app.database()
+        .model_defaults(
+            session.clone(),
+            ProviderModels {
+                context_ack: None,
+                models: vec![
+                    ProviderModel {
+                        model: "openai/GPT-6.1 Sol".into(),
+                        price: Some(Price {
+                            input: 2.0,
+                            output: 12.0,
+                            cache_read: 0.2,
+                            cache_write: 0.0,
+                        }),
+                        context_window: Some(272000),
+                    },
+                    ProviderModel {
+                        model: "wwzz/gpt-6.1-sol".into(),
+                        price: None,
+                        context_window: None,
+                    },
+                    ProviderModel {
+                        model: "wwzz/gpt-6.1-sol-mini".into(),
+                        price: None,
+                        context_window: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    manage(
+        &app,
+        &session,
+        ManagementAction::Model {
+            model: "wwzz/gpt-6.1-sol".into(),
+            hidden: true,
+            price: Some(Price {
+                input: 5.0,
+                output: 15.0,
+                cache_read: 0.5,
+                cache_write: 0.0,
+            }),
+        },
+    )
+    .await;
+    let read = data(&app, query("model")).await;
+    let alias = read
+        .models
+        .iter()
+        .find(|m| m.model == "wwzz/gpt-6.1-sol")
+        .unwrap();
+    assert_eq!(alias.price.as_ref().unwrap().input, 5.0);
+    assert_eq!(alias.default_price.as_ref().unwrap().input, 2.0);
+    assert_eq!(alias.context_window, Some(272000));
+    let mini = read
+        .models
+        .iter()
+        .find(|m| m.model.ends_with("mini"))
+        .unwrap();
+    assert!(mini.default_price.is_none());
+    assert!(mini.context_window.is_none());
+    app.database()
+        .title_result(
+            session.clone(),
+            TitleResponse {
+                title: String::new(),
+                records: [
+                    "wwzz/gpt-6.1-sol",
+                    "proxy/GPT_6.1 Sol",
+                    "proxy/gpt-6.1-sol-mini",
+                ]
+                .iter()
+                .map(|m| TitleUsage {
+                    input: 100,
+                    output: 20,
+                    cache_read: 0,
+                    cache_write: 0,
+                    model: (*m).into(),
+                })
+                .collect(),
+            },
+        )
+        .await
+        .unwrap();
+    let totals = data(&app, query("model")).await.totals.unwrap();
+    assert_eq!(totals.unpriced, 1);
+    assert!((totals.estimated_usd - 0.00124).abs() < 1e-12);
+    app.shutdown_checked().await.unwrap();
+    // Emulate an otherwise-valid installed 2.0.x root, retaining every old setting.
+    let db = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    db.execute_batch("ALTER TABLE model_settings DROP COLUMN price_multiplier; ALTER TABLE model_settings DROP COLUMN context_override; DROP TABLE model_context_intents; DROP TABLE model_context_clock; PRAGMA application_id=0;").unwrap();
+    drop(db);
+    let app = app_at(&root);
+    let read = data(&app, query("model")).await;
+    let alias = read
+        .models
+        .iter()
+        .find(|m| m.model == "wwzz/gpt-6.1-sol")
+        .unwrap();
+    assert_eq!(alias.price.as_ref().unwrap().input, 5.0);
+    assert!(alias.hidden);
+    assert_eq!(alias.multiplier, 1.0);
+    assert_eq!(alias.context_window, Some(272000));
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn context_intents_survive_restart_and_stale_settlement_cannot_clear_latest() {
+    let root =
+        std::env::temp_dir().join(format!("context-intent-restart-{}", uuid::Uuid::new_v4()));
+    let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);
+    let app = app_at_with_env(&root, env.clone());
+    let session = create(&app).await;
+    let first = app
+        .database()
+        .context_stage(
+            session.clone(),
+            ManagementAction::Context {
+                model: "default".into(),
+                context_window: Some(256000),
+            },
+        )
+        .await
+        .unwrap();
+    let second = app
+        .database()
+        .context_stage(
+            session.clone(),
+            ManagementAction::Context {
+                model: "default".into(),
+                context_window: Some(512000),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(app
+        .database()
+        .context_settle(first.revision, None)
+        .await
+        .is_err());
+    let row = data(&app, query("model")).await.models.remove(0);
+    assert_eq!(row.context_state.as_deref(), Some("pending"));
+    assert_eq!(row.context_window, Some(512000));
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
+    app.shutdown_checked().await.unwrap();
+    let app = app_at_with_env(&root, env);
+    let row = data(&app, query("model")).await.models.remove(0);
+    assert_eq!(row.context_state.as_deref(), Some("pending"));
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
+    app.command(DomainCommand::Discover {
+        session: session.clone(),
+    })
+    .await
+    .unwrap();
+    let snapshot = app.database().context_snapshot().await.unwrap();
+    assert_eq!(snapshot.revision, second.revision);
+    assert!(snapshot.pending.is_empty());
+    let row = data(&app, query("model"))
+        .await
+        .models
+        .into_iter()
+        .find(|m| m.model == "default")
+        .unwrap();
+    assert_eq!(row.context_state.as_deref(), Some("applied"));
+    assert_eq!(row.context_override, Some(512000));
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn context_projection_settlement_failure_remains_pending_until_provider_use() {
+    let root = std::env::temp_dir().join(format!(
+        "context-projection-settle-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);
+    let app = app_at_with_env(&root, env.clone());
+    let session = create(&app).await;
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    sql.execute_batch("CREATE TRIGGER lose_context_applied BEFORE UPDATE ON model_context_intents WHEN NEW.state='applied' BEGIN SELECT RAISE(FAIL,'context settlement lost'); END;").unwrap();
+    let operation = OperationId::generate();
+    let command = DomainCommand::Manage {
+        session: session.clone(),
+        action: ManagementAction::Context {
+            model: "default".into(),
+            context_window: Some(768000),
+        },
+    };
+    assert!(app
+        .command_durable(operation.clone(), command.clone())
+        .await
+        .is_err());
+    let row = data(&app, query("model"))
+        .await
+        .models
+        .into_iter()
+        .find(|m| m.model == "default")
+        .unwrap();
+    assert_eq!(row.context_state.as_deref(), Some("pending"));
+    assert_eq!(row.context_override, Some(768000));
+    app.shutdown_checked().await.unwrap();
+    sql.execute_batch("DROP TRIGGER lose_context_applied")
+        .unwrap();
+    drop(sql);
+    let app = app_at_with_env(&root, env);
+    assert!(app.command_durable(operation, command).await.is_err());
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
+    manage(&app, &session, ManagementAction::RefreshModels).await;
+    let row = data(&app, query("model"))
+        .await
+        .models
+        .into_iter()
+        .find(|m| m.model == "default")
+        .unwrap();
+    assert_eq!(row.context_state.as_deref(), Some("applied"));
+    assert_eq!(row.context_override, Some(768000));
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn context_saves_from_two_workspaces_are_serialized_before_file_effects() {
+    let root =
+        std::env::temp_dir().join(format!("context-cross-workspace-{}", uuid::Uuid::new_v4()));
+    let gate = root.join("release");
+    let trace = root.join("trace");
+    let env = HashMap::from([
+        ("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into()),
+        (
+            "WORKBENCH_CONTRACT_CONTEXT_GATE".into(),
+            gate.to_string_lossy().into_owned(),
+        ),
+        (
+            "WORKBENCH_CONTRACT_TRACE".into(),
+            trace.to_string_lossy().into_owned(),
+        ),
+        (
+            "WORKBENCH_CONTRACT_CONTEXT_FILE".into(),
+            root.join("shared-context").to_string_lossy().into_owned(),
+        ),
+    ]);
+    let app = app_at_with_env(&root, env);
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+    let mut sessions = vec![];
+    for dir in ["a", "b"] {
+        let CommandReceipt::Created { summary } = app
+            .command(DomainCommand::CreateSession {
+                harness: Harness::Pi,
+                cwd: WorkspacePath::new(root.join(dir).to_string_lossy()).unwrap(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("create")
+        };
+        sessions.push(summary.id);
+    }
+    let a = app.clone();
+    let first = sessions[0].clone();
+    let task_a = tokio::spawn(async move {
+        a.command_durable(
+            OperationId::generate(),
+            DomainCommand::Manage {
+                session: first,
+                action: ManagementAction::Context {
+                    model: "default".into(),
+                    context_window: Some(256000),
+                },
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if fs::read_to_string(&trace)
+                .unwrap_or_default()
+                .contains("contextProjection")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let b = app.clone();
+    let second = sessions[1].clone();
+    let operation = OperationId::generate();
+    let op = operation.clone();
+    let task_b = tokio::spawn(async move {
+        b.command_durable(
+            op,
+            DomainCommand::Manage {
+                session: second,
+                action: ManagementAction::Context {
+                    model: "default".into(),
+                    context_window: Some(1024000),
+                },
+            },
+        )
+        .await
+    });
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let found: bool = sql
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operations WHERE operation=?1)",
+                    [operation.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if found {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!task_b.is_finished());
+    assert_eq!(app.database().context_snapshot().await.unwrap().revision, 1);
+    fs::write(&gate, "go").unwrap();
+    task_a.await.unwrap().unwrap();
+    task_b.await.unwrap().unwrap();
+    let snapshot = app.database().context_snapshot().await.unwrap();
+    assert_eq!(snapshot.revision, 2);
+    assert!(snapshot.pending.is_empty());
+    assert_eq!(
+        fs::read_to_string(root.join("shared-context")).unwrap(),
+        "1024000"
+    );
+    app.command(DomainCommand::Discover {
+        session: sessions[0].clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.core
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .get(&sessions[0])
+            .unwrap()
+            .context_revision,
+        2
+    );
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn blocked_context_refresh_does_not_hold_profile_lock_or_confirm_a_stale_revision() {
+    let root = std::env::temp_dir().join(format!(
+        "context-refresh-isolation-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let gate = root.join("refresh-release");
+    let trace = root.join("trace");
+    let app = app_at_with_env(
+        &root,
+        HashMap::from([
+            ("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into()),
+            (
+                "WORKBENCH_CONTRACT_MODELS_GATE".into(),
+                gate.to_string_lossy().into_owned(),
+            ),
+            (
+                "WORKBENCH_CONTRACT_TRACE".into(),
+                trace.to_string_lossy().into_owned(),
+            ),
+            (
+                "WORKBENCH_CONTRACT_CONTEXT_FILE".into(),
+                root.join("shared-context").to_string_lossy().into_owned(),
+            ),
+        ]),
+    );
+    let mut sessions = vec![];
+    for dir in ["a", "b"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+        let CommandReceipt::Created { summary } = app
+            .command(DomainCommand::CreateSession {
+                harness: Harness::Pi,
+                cwd: WorkspacePath::new(root.join(dir).to_string_lossy()).unwrap(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("create")
+        };
+        sessions.push(summary.id);
+    }
+    manage(
+        &app,
+        &sessions[0],
+        ManagementAction::Context {
+            model: "default".into(),
+            context_window: Some(256000),
+        },
+    )
+    .await;
+    // B has a current catalogue. A needs a read-only refresh.
+    app.command(DomainCommand::Discover {
+        session: sessions[1].clone(),
+    })
+    .await
+    .unwrap();
+    app.core
+        .coordinator
+        .adapters
+        .lock()
+        .await
+        .get_mut(&sessions[0])
+        .unwrap()
+        .context_revision = 0;
+    fs::write(
+        gate.with_extension("workspace"),
+        root.join("a").to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    let a = app.clone();
+    let first = sessions[0].clone();
+    let refresh = tokio::spawn(async move { a.core.ensure_model_context(&first).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .contains("models_refresh_blocked")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!refresh.is_finished());
+    // Neither using a current worker nor a new profile save waits on A's RPC.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.core.ensure_model_context(&sessions[1]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        manage(
+            &app,
+            &sessions[1],
+            ManagementAction::Context {
+                model: "default".into(),
+                context_window: Some(512000),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    fs::write(&gate, "go").unwrap();
+    assert!(matches!(refresh.await.unwrap(), Err(DomainError::Busy)));
+    assert_eq!(
+        app.core
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .get(&sessions[0])
+            .unwrap()
+            .context_revision,
+        0
+    );
+    app.core.ensure_model_context(&sessions[0]).await.unwrap();
+    assert_eq!(
+        app.core
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .get(&sessions[0])
+            .unwrap()
+            .context_revision,
+        2
+    );
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn context_projection_marker_rejects_lost_intent_tables_instead_of_resetting_state() {
+    let root = std::env::temp_dir().join(format!("context-lost-schema-{}", uuid::Uuid::new_v4()));
+    let app = app_at(&root);
+    let _session = create(&app).await;
+    app.shutdown_checked().await.unwrap();
+    let db = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    for statement in [
+        "DROP TABLE model_context_intents",
+        "DROP TABLE model_context_clock",
+    ] {
+        db.execute_batch(statement).unwrap();
+        assert!(WorkbenchApp::new(config_at(&root, Default::default())).is_err());
+    }
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn context_projection_requires_capability_before_any_provider_write() {
+    let root = std::env::temp_dir().join(format!("context-no-capability-{}", uuid::Uuid::new_v4()));
+    let trace = root.join("trace");
+    let env = HashMap::from([
+        ("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into()),
+        ("WORKBENCH_CONTRACT_CONTEXT_PROJECTION".into(), "0".into()),
+        (
+            "WORKBENCH_CONTRACT_TRACE".into(),
+            trace.to_string_lossy().into_owned(),
+        ),
+    ]);
+    let app = app_at_with_env(&root, env);
+    let session = create(&app).await;
+    assert!(app
+        .command_durable(
+            OperationId::generate(),
+            DomainCommand::Manage {
+                session: session.clone(),
+                action: ManagementAction::Context {
+                    model: "default".into(),
+                    context_window: Some(256000)
+                }
+            }
+        )
+        .await
+        .is_err());
+    let calls = fs::read_to_string(&trace).unwrap();
+    assert!(!calls.contains("_pi_workbench/models"));
+    let row = data(&app, query("model")).await.models.remove(0);
+    assert_eq!(row.context_state.as_deref(), Some("pending"));
+    assert!(row.context_error.unwrap().contains("negotiate"));
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}

@@ -1,6 +1,9 @@
 import { ModelControls } from './workbench-model-controls';
 import { installTooltips } from './tooltips';
 import { uiLabel } from './workbench-labels';
+import { element, button } from './workbench-elements';
+import { renderInteractions } from './workbench-interactions';
+import { renderSettings } from './workbench-settings';
 import { buildClassicShell, decorateIcon } from './workbench-shell';
 import { MessageProjection } from '../src/workbench-messages';
 import { reconcile } from './workbench-dom';
@@ -135,26 +138,6 @@ function saveDraft() {
   persist();
 }
 const send = (message: UiCommand) => vscode.postMessage(message);
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) {
-  const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-function button(label: string, click: () => void, disabled = false, translate = true) {
-  const full = translate ? uiLabel(label) : label;
-  const short: Record<string, string> = {
-    'Copy message': '复制',
-    'Use as prompt': '重用',
-    'Fork here': '分支',
-  };
-  const node = element('button', translate ? short[label] || full : full);
-  if (translate && short[label]) node.setAttribute('aria-label', full);
-  if (label === 'Use as prompt' && translate) node.classList.add('message-reuse');
-  node.type = 'button';
-  node.disabled = disabled;
-  node.onclick = click;
-  return node;
-}
 const management = new ManagementPanel(send, schedule);
 const modelControls = new ModelControls(schedule);
 const header = element('header');
@@ -785,175 +768,6 @@ function schedule() {
       performance.clearMeasures('workbench.render');
   });
 }
-function renderSettings(snapshot: SessionView, busy: boolean) {
-  const definition = JSON.stringify([
-    snapshot.id,
-    snapshot.catalogue,
-    state?.error,
-    state?.view?.error,
-    state?.operations.slice(-1).map((op) => [op.operation, op.status]),
-    snapshot.catalogue.models.map((choice) => management.visible(choice.id, snapshot.harness)),
-    busy,
-    preferences.showThoughts,
-    preferences.autoScroll,
-    preferences.sessionRows,
-    preferences.activityExpanded,
-  ]);
-  if (settings.dataset.definition === definition) return;
-  settings.dataset.definition = definition;
-  settings.replaceChildren(modelControls.root);
-  const providerSelects: HTMLSelectElement[] = [];
-  viewOptions.replaceChildren(attachImage);
-  const discover = button(
-    'Discover provider settings',
-    () => mutate({ method: 'discover', session: snapshot.id }),
-    busy,
-  );
-  (snapshot.catalogue.models.length ? viewOptions : settings).append(discover);
-
-  for (const setting of snapshot.catalogue.selects || []) {
-    if (
-      setting.category === 'model' ||
-      setting.category === 'mode' ||
-      setting.id === 'model' ||
-      setting.id === 'mode'
-    )
-      continue;
-    const select = element('select');
-    select.setAttribute('aria-label', setting.name);
-    select.disabled = busy;
-    for (const choice of setting.choices) {
-      const option = element('option', choice.name);
-      option.value = choice.value;
-      select.append(option);
-    }
-    select.value = setting.current_value;
-    select.onchange = () =>
-      mutate({ method: 'set_option', session: snapshot.id, id: setting.id, value: select.value });
-    select.dataset.controlKind = /fast/i.test(setting.id + ' ' + setting.name)
-      ? 'fast'
-      : /think|reason|effort|思考/i.test(setting.id + ' ' + setting.category + ' ' + setting.name)
-        ? 'thinking'
-        : 'other';
-    providerSelects.push(select);
-  }
-  for (const key of ['model', 'mode'] as const) {
-    const choices = key === 'model' ? snapshot.catalogue.models : snapshot.catalogue.modes;
-    if (!choices.length || (key === 'mode' && snapshot.harness === 'Pi')) continue;
-    const select = element('select');
-    select.title = key === 'model' ? '模型' : '模式';
-    select.setAttribute('aria-label', key);
-    select.disabled = busy;
-    const unknown = element('option', key === 'model' ? '选择模型' : '选择模式');
-    unknown.value = '';
-    select.append(unknown);
-    for (const choice of choices) {
-      if (
-        key === 'model' &&
-        choice.id !== snapshot.catalogue.current_model &&
-        !management.visible(choice.id, snapshot.harness)
-      )
-        continue;
-      const option = element('option', choice.name);
-      option.value = choice.id;
-      select.append(option);
-    }
-    select.value =
-      (key === 'model' ? snapshot.catalogue.current_model : snapshot.catalogue.current_mode) || '';
-    select.addEventListener('change', () => {
-      const value = choices.find((choice) => choice.id === select.value);
-      if (!value) return;
-      mutate(
-        key === 'model'
-          ? {
-              method: 'set_model',
-              session: snapshot.id,
-              model: value.id as NonNullable<SessionView['config']['model']>,
-            }
-          : {
-              method: 'set_mode',
-              session: snapshot.id,
-              mode: value.id as NonNullable<SessionView['config']['mode']>,
-            },
-      );
-    });
-    providerSelects.push(select);
-  }
-  const lastSetting = state?.operations.at(-1);
-  const settingFailure =
-    lastSetting &&
-    ['set_option', 'set_model', 'set_mode'].includes(lastSetting.method) &&
-    ['failed', 'uncertain'].includes(lastSetting.status)
-      ? `${lastSetting.operation}:${lastSetting.status}`
-      : !state?.operations.length
-        ? state?.error || state?.view?.error
-        : undefined;
-  modelControls.update(
-    snapshot.id + ':' + snapshot.catalogue.current_model,
-    providerSelects,
-    settingFailure,
-  );
-  const processLabel = element('label', '显示执行过程');
-  const processToggle = element('input');
-  processToggle.type = 'checkbox';
-  processToggle.checked = preferences.activityExpanded;
-  processToggle.onchange = () => activity.click();
-  processLabel.prepend(processToggle);
-  viewOptions.append(processLabel);
-  const thoughtLabel = element('label', '显示思考过程');
-  const showThoughts = element('input');
-  showThoughts.type = 'checkbox';
-  showThoughts.setAttribute('aria-label', '显示思考过程');
-  showThoughts.checked = preferences.showThoughts;
-  showThoughts.addEventListener('change', () => {
-    preferences.showThoughts = showThoughts.checked;
-    persist();
-    schedule();
-  });
-  thoughtLabel.prepend(showThoughts);
-  viewOptions.append(thoughtLabel);
-  const autoScroll = element('input');
-  autoScroll.type = 'checkbox';
-  autoScroll.checked = preferences.autoScroll;
-  autoScroll.onchange = () => {
-    preferences.autoScroll = autoScroll.checked;
-    persist();
-  };
-  const scrollLabel = element('label', '跟随最新输出');
-  scrollLabel.prepend(autoScroll);
-  const rows = element('select');
-  rows.setAttribute('aria-label', 'Session list rows');
-  for (const i of [4, 10, 16]) {
-    const option = element('option', `${i} 条会话高度`);
-    option.value = String(i);
-    rows.append(option);
-  }
-  rows.value = String(preferences.sessionRows);
-  rows.onchange = () => {
-    preferences.sessionRows = Number(rows.value);
-    persist();
-    schedule();
-  };
-  viewOptions.append(scrollLabel, rows);
-  let confirmRemove = false;
-  const remove = button(
-    'Remove session',
-    () => {
-      if (!confirmRemove) {
-        confirmRemove = true;
-        remove.textContent = '确认删除会话（保留原生数据）';
-        return;
-      }
-      mutate({ method: 'remove', session: snapshot.id });
-    },
-    !state?.trusted,
-  );
-  viewOptions.append(remove);
-  if (snapshot.harness === 'Pi')
-    viewOptions.append(
-      button('Stop Pi background worker', () => mutate({ method: 'cancel', session: snapshot.id })),
-    );
-}
 function renderContextUsage(snapshot?: SessionView) {
   const used = snapshot?.usage.context_used,
     size = snapshot?.usage.context_size;
@@ -1186,7 +1000,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
         }
         diffHeading.append(diffActions);
         diffBox.append(diffHeading);
-        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, true);
+        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, false);
         summary.className = 'turn-diff-files';
         summary.append(element('summary', `全部修改（${savedDiff.files.length} 个文件）`));
         if (!savedDiff.files.length) summary.append(element('p', '本轮未检测到文件净变化。'));
@@ -1389,7 +1203,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
             '工作区本轮开始到结束的净变化；不含 Git 忽略文件。并发的手工或其他会话修改也可能计入；不是文件回滚点。',
           ),
         );
-        diffBox.append(notes);
+        summary.append(notes);
         box.append(diffBox);
       }
       turn = { box, process };
@@ -1673,145 +1487,6 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   if (jumpToLatest && !state?.view?.historical && state?.view?.status === 'ready')
     jumpToLatest = false;
 }
-function renderInteractions(snapshot: SessionView) {
-  // Preserve partially entered answers across streaming/snapshot refresh. A
-  // definition change must replace that form; answered/expired IDs disappear.
-  const existing = new Map(
-    [...interactions.children].map((child) => [child.getAttribute('data-interaction'), child]),
-  );
-  const retained = new Set<string>();
-  for (const interaction of Object.values(snapshot.pending_interactions)) {
-    const signature = JSON.stringify(interaction),
-      old = existing.get(interaction.id);
-    retained.add(interaction.id);
-    if (old?.getAttribute('data-definition') === signature) continue;
-    old?.remove();
-    const box = element('form');
-    box.className = 'permission-card';
-    box.dataset.interaction = interaction.id;
-    box.dataset.definition = signature;
-    box.append(
-      element(
-        'strong',
-        interaction.kind === 'Permission' && !interaction.title.startsWith('需要授权')
-          ? `需要授权 · ${interaction.title}`
-          : interaction.title,
-      ),
-      element(interaction.kind === 'Permission' ? 'pre' : 'p', interaction.detail),
-    );
-    const interactionActions = element('div');
-    interactionActions.className = 'permission-actions';
-    const answer = (response: Parameters<typeof mutate>[0] & { method: 'answer' }) =>
-      mutate(response);
-    if (interaction.kind === 'Permission') {
-      for (const option of interaction.options)
-        interactionActions.append(
-          button(
-            option.label,
-            () =>
-              answer({
-                method: 'answer',
-                session: snapshot.id,
-                answer: {
-                  interaction: interaction.id,
-                  response: { Permission: { option: option.id } },
-                },
-              }),
-            false,
-            false,
-          ),
-        );
-    } else {
-      type FieldValue = Extract<
-        import('../src/workbench-protocol').InteractionAnswer['response'],
-        { Form: unknown }
-      >['Form']['fields'][string];
-      const inputs: { name: string; get(): FieldValue | undefined }[] = [];
-      for (const field of interaction.fields) {
-        const label = element('label', field.label),
-          kind = field.kind;
-        if (kind === 'Boolean') {
-          const input = element('input');
-          input.type = 'checkbox';
-          label.append(input);
-          inputs.push({ name: field.name, get: () => ({ Boolean: input.checked }) });
-        } else if ('Text' in kind) {
-          const input = element('textarea');
-          input.required = field.required;
-          input.maxLength = kind.Text.max_length;
-          label.append(input);
-          inputs.push({
-            name: field.name,
-            get: () => (input.value || field.required ? { Text: input.value } : undefined),
-          });
-        } else if ('Choice' in kind) {
-          const input = element('select');
-          input.multiple = kind.Choice.multiple;
-          input.required = field.required;
-          if (!field.required && !input.multiple) {
-            const empty = element('option', 'No selection');
-            empty.value = '';
-            input.append(empty);
-          }
-          for (const option of kind.Choice.options) {
-            const node = element('option', option.label);
-            node.value = option.id;
-            input.append(node);
-          }
-          label.append(input);
-          inputs.push({
-            name: field.name,
-            get: () => ({
-              Selected: [...input.selectedOptions].map((option) => option.value).filter(Boolean),
-            }),
-          });
-        } else {
-          const input = element('input');
-          input.type = 'number';
-          input.step = '1';
-          input.required = field.required;
-          if (kind.Integer.min !== null) input.min = String(kind.Integer.min);
-          if (kind.Integer.max !== null) input.max = String(kind.Integer.max);
-          label.append(input);
-          inputs.push({
-            name: field.name,
-            get: () => (input.value ? { Integer: Number(input.value) } : undefined),
-          });
-        }
-        box.append(label);
-      }
-      const submit = element('button', '提交回答');
-      submit.type = 'submit';
-      box.append(submit);
-      box.addEventListener('submit', (event) => {
-        event.preventDefault();
-        if (!box.reportValidity()) return;
-        const fields: Record<string, FieldValue> = Object.create(null);
-        for (const input of inputs) {
-          const value = input.get();
-          if (value !== undefined) fields[input.name] = value;
-        }
-        answer({
-          method: 'answer',
-          session: snapshot.id,
-          answer: { interaction: interaction.id, response: { Form: { fields } } },
-        });
-      });
-    }
-    interactionActions.append(
-      button('Decline', () =>
-        answer({
-          method: 'answer',
-          session: snapshot.id,
-          answer: { interaction: interaction.id, response: 'Decline' },
-        }),
-      ),
-    );
-    box.append(interactionActions);
-    interactions.append(box);
-  }
-  for (const [id, child] of existing) if (!id || !retained.has(id)) child.remove();
-}
 function render() {
   if (!state) return;
   if (selected !== state.selected) {
@@ -2076,12 +1751,25 @@ function render() {
   management.setView(snapshot, state.sessions, state.operations);
   if (snapshot) {
     sessions.dataset.limit = String(preferences.sessionRows);
-    renderSettings(snapshot, busy);
+    renderSettings(snapshot, {
+      settings,
+      viewOptions,
+      attachImage,
+      modelControls,
+      management,
+      state: () => state,
+      busy,
+      preferences,
+      activity,
+      mutate,
+      persist,
+      schedule,
+    });
     renderContextUsage(snapshot);
     working.hidden = !snapshot.active_turn;
     workingLabel.textContent = `${snapshot.harness} 正在处理…`;
     renderTranscript(snapshot, busy);
-    renderInteractions(snapshot);
+    renderInteractions(interactions, snapshot, mutate);
   } else {
     modelControls.show(false);
     renderContextUsage();

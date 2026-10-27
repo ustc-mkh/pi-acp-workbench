@@ -1,3 +1,4 @@
+import { modelDefaultKey } from '../src/workbench-model-defaults';
 import { uiLabel } from './workbench-labels';
 import {
   managementData,
@@ -38,6 +39,10 @@ export class ManagementPanel {
   private seen = new Set<string>();
   private search = '';
   private modelDrafts = new Map<string, { value: string; checked: boolean }[]>();
+  private submittedDrafts = new Map<
+    string,
+    { snapshot: string; action: Extract<ManagementAction, { action: 'model_config' }> }
+  >();
   private focusSearch = false;
   private statisticsFiltersOpen = false;
   private expanded = new Set<string>();
@@ -70,7 +75,10 @@ export class ManagementPanel {
   }
   setView(view: SessionView | undefined, sessions: SessionSummary[], operations: UiOperation[]) {
     const switched = this.view?.id !== view?.id;
-    if (switched) this.modelDrafts.clear();
+    if (switched) {
+      this.modelDrafts.clear();
+      this.submittedDrafts.clear();
+    }
     this.view = view;
     this.sessions = sessions;
     let updated = false;
@@ -113,8 +121,37 @@ export class ManagementPanel {
     }
     try {
       this.data = managementData.parse(m.data);
+      for (const [key, submitted] of this.submittedDrafts) {
+        const a = submitted.action;
+        const saved = this.data.models.find(
+          (row) => row.model === a.model && row.harness === this.view?.harness,
+        );
+        const priceEqual =
+          saved &&
+          (a.price === null
+            ? saved.price === null
+            : saved.price &&
+              (['input', 'output', 'cache_read', 'cache_write'] as const).every(
+                (k) => saved.price![k] === a.price![k],
+              ));
+        if (
+          saved &&
+          priceEqual &&
+          saved.hidden === a.hidden &&
+          (saved.multiplier ?? 1) === a.multiplier &&
+          (!a.apply_context ||
+            ((saved.context_override ?? null) === a.context_window &&
+              saved.context_state === 'applied'))
+        ) {
+          if (JSON.stringify(this.modelDrafts.get(key)) === submitted.snapshot)
+            this.modelDrafts.delete(key);
+          this.submittedDrafts.delete(key);
+        }
+      }
       this.status.textContent =
-        this.mode === 'models' ? '' : '费用按模型设置中的单价估算；缺失用量单独统计，不按零计算。';
+        this.mode === 'models'
+          ? ''
+          : '费用按模型设置中的单价 × 倍率估算；缺失用量单独统计，不按零计算。';
       this.render();
       this.changed();
     } catch {
@@ -148,6 +185,13 @@ export class ManagementPanel {
     if (!this.view) {
       this.status.textContent = '请先选择会话';
       return;
+    }
+    if (action.action === 'model_config') {
+      const key = `${this.view.id}:${action.model}`;
+      this.submittedDrafts.set(key, {
+        snapshot: JSON.stringify(this.modelDrafts.get(key)),
+        action,
+      });
     }
     this.send({
       type: 'execute',
@@ -281,7 +325,11 @@ export class ManagementPanel {
           const grid = el('div');
           grid.className = 'price-grid';
           card.append(grid);
-          const price = saved?.price ?? saved?.default_price;
+          const matched = this.data?.models.find(
+            (m) => m.harness === 'Pi' && modelDefaultKey(m.model) === modelDefaultKey(model),
+          );
+          const defaultPrice = saved?.default_price ?? matched?.default_price;
+          const price = saved?.price ?? defaultPrice;
           const priceNote = el(
             'small',
             saved?.price ? '自定义价格' : price ? '默认价格' : '暂无价格',
@@ -316,7 +364,16 @@ export class ManagementPanel {
           context.min = '0.001';
           context.max = '100000';
           context.step = 'any';
-          context.value = saved?.context_window ? (saved.context_window / 1000).toString() : '';
+          const defaultContext =
+            saved?.default_context_window ??
+            matched?.default_context_window ??
+            matched?.context_window;
+          const effectiveContext =
+            saved?.context_override ?? saved?.context_window ?? defaultContext;
+          context.value = effectiveContext ? (effectiveContext / 1000).toString() : '';
+          context.placeholder = defaultContext
+            ? `默认 ${defaultContext / 1000}`
+            : 'Pi 未提供默认值';
           context.disabled = this.view!.harness !== 'Pi';
           context.setAttribute('aria-label', `${model} context k tokens`);
           const footer = el('div');
@@ -324,13 +381,31 @@ export class ManagementPanel {
           const contextField = field('Context（k tokens）', context);
           contextField.className = 'model-context-field';
           footer.append(contextField);
+          const multiplier = el('input');
+          multiplier.type = 'number';
+          multiplier.min = '0';
+          multiplier.max = '1000000';
+          multiplier.step = 'any';
+          multiplier.value = String(saved?.multiplier ?? 1);
+          multiplier.setAttribute('aria-label', `${model} price multiplier`);
+          const multiplierField = field('价格倍率', multiplier);
+          multiplierField.className = 'model-multiplier-field';
+          footer.append(multiplierField);
           card.append(footer);
+          if (saved?.context_state === 'pending') {
+            const note = el('small', 'Context 待应用；请刷新模型配置重试，或核对后重新保存。');
+            note.className = 'model-settings-status';
+            note.title = saved.context_error ?? '';
+            card.append(note);
+          }
           const actions = el('div');
           actions.className = 'model-settings-buttons';
           footer.append(actions);
           actions.append(
-            button('保存价格与显示设置', () => {
+            button('保存模型设置', () => {
+              const empty = inputs.every((n) => n.value === '');
               if (
+                !empty &&
                 inputs.some(
                   (n) =>
                     n.value === '' ||
@@ -339,52 +414,67 @@ export class ManagementPanel {
                     Number(n.value) > 1000000,
                 )
               ) {
-                this.status.textContent = '请填写四项有效的非负价格，或恢复默认价格。';
+                this.status.textContent = '请填写四项有效的非负价格，或全部留空使用默认值。';
                 return;
               }
+              const factor = Number(multiplier.value);
+              const tokens = context.value ? Number(context.value) * 1000 : null;
+              if (
+                multiplier.value === '' ||
+                !Number.isFinite(factor) ||
+                factor < 0 ||
+                factor > 1000000
+              ) {
+                this.status.textContent = '价格倍率必须是 0 到 1000000 的有效数字。';
+                return;
+              }
+              if (
+                context.value &&
+                (!Number.isSafeInteger(tokens) || tokens! <= 0 || tokens! > 100000000)
+              ) {
+                this.status.textContent = '上下文必须是正整数 Token 数量';
+                return;
+              }
+              const edited = empty
+                ? null
+                : {
+                    input: Number(inputs[0].value),
+                    output: Number(inputs[3].value),
+                    cache_read: Number(inputs[1].value),
+                    cache_write: Number(inputs[2].value),
+                  };
+              const defaultUnchanged =
+                edited &&
+                defaultPrice &&
+                Object.keys(edited).every(
+                  (key) =>
+                    edited[key as keyof typeof edited] ===
+                    defaultPrice[key as keyof typeof defaultPrice],
+                );
               this.mutate({
-                action: 'model',
+                action: 'model_config',
                 model,
                 hidden: !visible.checked,
-                price: {
-                  input: Number(inputs[0].value),
-                  output: Number(inputs[3].value),
-                  cache_read: Number(inputs[1].value),
-                  cache_write: Number(inputs[2].value),
-                },
+                price: defaultUnchanged && !saved?.price ? null : edited,
+                multiplier: factor,
+                context_window: tokens,
+                apply_context:
+                  this.view!.harness === 'Pi' &&
+                  (tokens !== (effectiveContext ?? null) || saved?.context_state === 'pending'),
               });
             }),
-            button('保存显示设置', () =>
+            button('恢复模型默认设置', () =>
               this.mutate({
-                action: 'model',
+                action: 'model_config',
                 model,
-                hidden: !visible.checked,
-                price: saved?.price ?? null,
+                hidden: false,
+                price: null,
+                multiplier: 1,
+                context_window: null,
+                apply_context: this.view!.harness === 'Pi',
               }),
-            ),
-            button('恢复默认价格与显示', () =>
-              this.mutate({ action: 'model', model, hidden: false, price: null }),
             ),
           );
-          if (this.view!.harness === 'Pi')
-            card.append(
-              button('应用上下文设置', () => {
-                const tokens = Number(context.value) * 1000;
-                if (
-                  !context.value ||
-                  !Number.isSafeInteger(tokens) ||
-                  tokens <= 0 ||
-                  tokens > 100000000
-                ) {
-                  this.status.textContent = '上下文必须是正整数 Token 数量';
-                  return;
-                }
-                this.mutate({ action: 'context', model, context_window: tokens });
-              }),
-              button('恢复默认上下文', () =>
-                this.mutate({ action: 'context', model, context_window: null }),
-              ),
-            );
           modelsBody.append(card);
           const draftKey = `${this.view!.id}:${model}`;
           const fields = [...card.querySelectorAll<HTMLInputElement>('input')];
@@ -418,7 +508,7 @@ export class ManagementPanel {
     this.body.prepend(
       el(
         'p',
-        '单价：USD / 百万 token。四项价格与 Pi context 分别保存；右上角勾选控制模型显示。其他 Agent 暂不支持修改 context。',
+        '单价：USD / 百万 token；费用按单价 × 价格倍率估算（默认 1）。价格和 context 默认取自 Pi，同型号跨渠道共用默认值；用户设置优先。统一点击保存；context 留空恢复默认。其他 Agent 暂不支持修改 context。',
       ),
     );
     const count = el(
@@ -437,36 +527,14 @@ export class ManagementPanel {
     for (const button of list.querySelectorAll('button')) {
       const label = button.textContent!;
       button.setAttribute('aria-label', label);
-      if (label === '保存价格与显示设置') {
+      if (label === '保存模型设置') {
         button.textContent = '保存';
         button.classList.add('primary');
       }
       if (label === '显示全部模型') button.textContent = '全部显示';
       if (label === '隐藏全部模型') button.textContent = '全部不显示';
       if (label === '恢复默认显示') button.textContent = '全部恢复默认';
-      if (label === '保存显示设置') {
-        button.hidden = true;
-        const checkbox = button
-          .closest('[data-model]')!
-          .querySelector<HTMLInputElement>('input[type=checkbox]')!;
-        checkbox.onchange = () => button.click();
-      }
-      if (label === '应用上下文设置') {
-        button.textContent = '应用';
-        button.className = 'apply-context';
-        button.closest('[data-model]')!.querySelector('.model-context-field')!.append(button);
-      }
-      if (label === '恢复默认上下文') {
-        button.hidden = true;
-        const context = button
-          .closest('[data-model]')!
-          .querySelector<HTMLInputElement>('input[type=number][aria-label$="context k tokens"]')!;
-        context.oncontextmenu = (event) => {
-          event.preventDefault();
-          button.click();
-        };
-      }
-      if (label === '恢复默认价格与显示') button.textContent = '恢复默认';
+      if (label === '恢复模型默认设置') button.textContent = '恢复默认';
     }
   }
   private statistics() {

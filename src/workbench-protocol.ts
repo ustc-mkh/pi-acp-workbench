@@ -312,6 +312,15 @@ export const managementAction = tagged('action', {
     hidden: boolean,
     price: nullable(modelPrice),
   }),
+  model_config: object({
+    action: literal('model_config'),
+    model: checked(string, (s) => s.length > 0 && s.length <= 300),
+    hidden: boolean,
+    price: nullable(modelPrice),
+    multiplier: checked(money, (n) => n <= 1000000),
+    context_window: nullable(checked(uint, (n) => n > 0 && n <= 100000000)),
+    apply_context: boolean,
+  }),
   visibility: object({
     action: literal('visibility'),
     models: checked(
@@ -363,6 +372,11 @@ export const managementData = object({
       price: nullable(modelPrice),
       default_price: nullable(modelPrice),
       context_window: nullable(uint),
+      default_context_window: optional(nullable(uint)),
+      context_override: optional(nullable(uint)),
+      multiplier: optional(checked(money, (n) => n <= 1000000)),
+      context_state: optional(nullable(oneOf('pending', 'applied'))),
+      context_error: optional(nullable(string)),
     }),
   ),
   naming_policy: string,

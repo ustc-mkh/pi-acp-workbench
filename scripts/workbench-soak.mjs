@@ -2,12 +2,13 @@
 // overnight production soak. Every round joins before the next round starts.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { openSync, closeSync, rmSync } from 'node:fs';
 import { mkdir, writeFile, readFile, copyFile, chmod } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { resolveWorkbenchBinary } from './lib/workbench-binary.mjs';
+import { pruneTestReports, reportRetention } from './lib/test-reports.mjs';
 const { values } = parseArgs({
   options: {
     'duration-seconds': { type: 'string', default: '600' },
@@ -21,6 +22,10 @@ assert(
 );
 const directory = resolve('.test-results', `soak-${randomUUID()}`);
 await mkdir(directory, { recursive: true, mode: 0o700 });
+const activeMarker = join(directory, '.active');
+await writeFile(activeMarker, String(process.pid), { mode: 0o600 });
+process.once('exit', () => rmSync(activeMarker, { force: true }));
+await pruneTestReports(resolve('.test-results'), reportRetention());
 // Freeze executable inputs once. Recompiling each round allowed concurrent
 // development to silently change the code under a nominal 600-second sample.
 const built = spawnSync(

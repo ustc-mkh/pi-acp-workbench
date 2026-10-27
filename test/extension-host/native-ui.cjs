@@ -358,6 +358,9 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
       await reviewTurnElement.getByRole('button', { name: '查看工作区变更', exact: true }).count(),
       0,
     );
+    const diffFiles = reviewTurnElement.locator('.turn-diff-files');
+    if (!(await diffFiles.evaluate((node) => node.open)))
+      await diffFiles.locator(':scope > summary').click();
     await reviewTurnElement.locator('.turn-diff-file > summary').first().click();
     await reviewTurnElement
       .getByRole('button', { name: '在编辑器中对比', exact: true })

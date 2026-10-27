@@ -518,7 +518,10 @@ async fn connection(
     stop: CancellationToken,
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
-    let mut reader = read;
+    // Buffer socket reads so the framing loop's byte-wise parsing doesn't issue
+    // one async read syscall per byte. BufReader retains unread bytes across
+    // select cancellation; frame/deadline state remains connection-owned.
+    let mut reader = tokio::io::BufReader::new(read);
     let mut frame = Vec::new();
     let mut frame_deadline = None;
     // Register before any snapshot read. The broadcast itself is the bounded

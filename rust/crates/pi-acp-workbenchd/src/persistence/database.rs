@@ -1,5 +1,5 @@
 //! Single SQLite writer and two fixed readonly executors. Business code submits typed requests, never SQL or closures.
-use super::{format::StorageLease, query, schema};
+use super::{database_dispatch::execute_request, format::StorageLease, schema};
 use crate::domain::{
     query::{
         CommitBatch, ContentRef, HistoryCursor, HistoryPage, ListCursor, ListPage, QueryError,
@@ -8,7 +8,6 @@ use crate::domain::{
     transition::Transition,
     SessionId,
 };
-use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::{
     path::Path,
@@ -70,164 +69,7 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StoreError> {
     Ok(serde_json::to_string(value)?)
 }
 
-type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
-pub(super) enum StoreRequest {
-    ManagementRead {
-        query: crate::domain::management::ManagementQuery,
-        reply: Reply<crate::domain::management::ManagementData>,
-    },
-    ManagementUpdate {
-        session: SessionId,
-        action: crate::domain::management::ManagementAction,
-        ticket: Option<crate::domain::operation::OperationTicket>,
-        reply: Reply<crate::domain::query::CommandReceipt>,
-    },
-    ModelDefaults {
-        session: SessionId,
-        models: crate::domain::management::ProviderModels,
-        reply: Reply<()>,
-    },
-    TitleJob {
-        session: SessionId,
-        reply: Reply<Option<String>>,
-    },
-    TitleResult {
-        session: SessionId,
-        result: crate::domain::management::TitleResponse,
-        reply: Reply<()>,
-    },
-    TurnDiffSave {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        diff: Box<crate::workspace_review::TurnDiff>,
-        reply: Reply<()>,
-    },
-    TurnDiffGet {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        reply: Reply<Option<crate::workspace_review::TurnDiff>>,
-    },
-    TurnDiffPage {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        offset: usize,
-        reply: Reply<crate::workspace_review::TurnDiff>,
-    },
-    TurnDiffContent {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        file: usize,
-        after: bool,
-        offset: SafeInteger,
-        reply: Reply<crate::workspace_review::DiffContent>,
-    },
-    Attached {
-        session: SessionId,
-        reply: Reply<crate::domain::query::Attached>,
-    },
-    Tools {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        cursor: Option<crate::domain::query::ToolCursor>,
-        limit: Option<usize>,
-        reply: Reply<crate::domain::query::ToolPage>,
-    },
-    Remove {
-        session: SessionId,
-        operation: Option<crate::domain::operation::OperationTicket>,
-        reply: Reply<CommitBatch>,
-    },
-    Tool {
-        session: SessionId,
-        turn: crate::domain::TurnId,
-        tool: crate::domain::ToolCallId,
-        reply: Reply<Option<crate::domain::query::ToolHeader>>,
-    },
-    PrepareFork {
-        view: Box<SessionView>,
-        request: crate::domain::fork::ForkRequest,
-        candidates: Vec<crate::domain::fork::ForkCandidate>,
-        reply: Reply<crate::domain::fork::ForkPlan>,
-    },
-    AdoptFork {
-        plan: Box<crate::domain::fork::ForkPlan>,
-        native: crate::domain::ProviderSessionId,
-        reply: Reply<(SessionView, SessionSummary)>,
-    },
-    #[cfg(test)]
-    Create {
-        view: Box<SessionView>,
-        reply: Reply<SessionSummary>,
-    },
-    Commit {
-        commit: Box<Transition>,
-        reply: Reply<CommitBatch>,
-    },
-    View {
-        session: SessionId,
-        reply: Reply<SessionView>,
-    },
-    Summary {
-        session: SessionId,
-        reply: Reply<SessionSummary>,
-    },
-    WorkerActivity {
-        session: SessionId,
-        reply: Reply<(u64, u64)>,
-    },
-    List {
-        cursor: Option<ListCursor>,
-        limit: Option<usize>,
-        reply: Reply<ListPage>,
-    },
-    HistoryClear {
-        request: super::history_clear::Request,
-        reply: Reply<super::history_clear::Output>,
-    },
-    Search {
-        filter: crate::domain::query::SessionFilter,
-        cursor: Option<ListCursor>,
-        limit: Option<usize>,
-        reply: Reply<ListPage>,
-    },
-    ActivityList {
-        cursor: Option<ListCursor>,
-        limit: Option<usize>,
-        reply: Reply<ListPage>,
-    },
-    History {
-        session: SessionId,
-        cursor: Option<HistoryCursor>,
-        limit: Option<usize>,
-        reply: Reply<HistoryPage>,
-    },
-    ContentSlice {
-        content: ContentRef,
-        offset: SafeInteger,
-        length: Option<usize>,
-        reply: Reply<crate::domain::query::ContentSlice>,
-    },
-    Content {
-        content: ContentRef,
-        reply: Reply<String>,
-    },
-    Delivery(Box<super::delivery::Request>),
-    Payload(Box<super::payload::Request>),
-    TelegramInbox(Box<super::inbox::Request>),
-    TelegramEffect(Box<super::telegram_effect::Request>),
-    Journal(Box<super::journal::Request>),
-    #[cfg(test)]
-    ArchiveImage {
-        asset: crate::domain::image::ImageAsset,
-        reply: Reply<()>,
-    },
-    Image {
-        id: crate::domain::ImageId,
-        reply: Reply<crate::domain::image::ImageAsset>,
-    },
-    #[cfg(test)]
-    Test(super::sqlite_tests::TestRequest),
-}
+pub(super) use super::database_request::StoreRequest;
 #[derive(Clone)]
 struct Senders {
     writer: mpsc::Sender<QueuedRequest>,
@@ -308,373 +150,11 @@ struct Inner {
     shutdown_result: Arc<Mutex<Option<Result<(), StoreError>>>>,
     shutdown_notify: Arc<tokio::sync::Notify>,
 }
-fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest) {
-    match request {
-        StoreRequest::ManagementRead { query, reply } => {
-            let _ = reply.send(super::management::read(connection, &query));
-        }
-        StoreRequest::ManagementUpdate {
-            session,
-            action,
-            ticket,
-            reply,
-        } => {
-            let _ = reply.send(super::management::update(
-                connection,
-                &session,
-                &action,
-                ticket.as_ref(),
-            ));
-        }
-        StoreRequest::ModelDefaults {
-            session,
-            models,
-            reply,
-        } => {
-            let _ = reply.send(super::management::models(connection, &session, &models));
-        }
-        StoreRequest::TitleJob { session, reply } => {
-            let _ = reply.send(super::management::title_job(connection, &session));
-        }
-        StoreRequest::TitleResult {
-            session,
-            result,
-            reply,
-        } => {
-            let _ = reply.send(super::management::title_result(
-                connection, &session, &result,
-            ));
-        }
-        StoreRequest::TurnDiffSave {
-            session,
-            turn,
-            diff,
-            reply,
-        } => {
-            let result = (|| {
-                let encoded = serde_json::to_string(&diff)
-                    .map_err(|_| StoreError::Invalid("turn diff encode failed"))?;
-                if encoded.len() > 32 * 1024 * 1024 {
-                    return Err(StoreError::Invalid("turn diff exceeds archive budget"));
-                }
-                connection.execute("INSERT INTO turn_diffs(session,turn,diff_json) VALUES (?1,?2,?3) ON CONFLICT(session,turn) DO NOTHING", rusqlite::params![session.as_str(),turn.as_str(),encoded])?;
-                Ok(())
-            })();
-            let _ = reply.send(result);
-        }
-        StoreRequest::TurnDiffPage {
-            session,
-            turn,
-            offset,
-            reply,
-        } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|v| {
-                    v.map(|j| {
-                        serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
-                            .map_err(|_| StoreError::Invalid("turn diff corrupt"))
-                    })
-                    .transpose()
-                })
-                .and_then(|d| {
-                    crate::workspace_review::summary(d, offset).map_err(StoreError::Query)
-                });
-            let _ = reply.send(result);
-        }
-        StoreRequest::TurnDiffContent {
-            session,
-            turn,
-            file,
-            after,
-            offset,
-            reply,
-        } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|v| v.ok_or(StoreError::NotFound))
-                .and_then(|j| {
-                    serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
-                        .map_err(|_| StoreError::Invalid("turn diff corrupt"))
-                })
-                .and_then(|d| {
-                    crate::workspace_review::content(&d, file, after, offset.get() as usize)
-                        .map_err(StoreError::Query)
-                });
-            let _ = reply.send(result);
-        }
-        StoreRequest::TurnDiffGet {
-            session,
-            turn,
-            reply,
-        } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|value| {
-                    value
-                        .map(|json| {
-                            serde_json::from_str(&json)
-                                .map_err(|_| StoreError::Invalid("turn diff archive is corrupt"))
-                        })
-                        .transpose()
-                });
-            let _ = reply.send(result);
-        }
-        StoreRequest::Attached { session, reply } => {
-            let result = (|| {
-                let tx = connection.transaction()?;
-                let mut attached = crate::domain::query::Attached {
-                    view: query::view(&tx, &session)?,
-                    recent_page: query::history(&tx, &session, None, None)?,
-                };
-                while attached.validate().is_err() {
-                    if attached.recent_page.entries.len() <= 1 {
-                        return Err(crate::domain::query::QueryError::TooLarge.into());
-                    }
-                    attached.recent_page.entries.remove(0);
-                    attached.recent_page.next_cursor = Some(crate::domain::query::HistoryCursor {
-                        version: crate::domain::query::ProtocolVersion,
-                        session: session.clone(),
-                        max_entry_seq: attached.view.last_entry_seq,
-                        before_seq: attached.recent_page.entries[0].seq,
-                    });
-                }
-                crate::diagnostics::sqlite_commit(tx)?;
-                Ok(attached)
-            })();
-            let _ = reply.send(result);
-        }
-        StoreRequest::Tools {
-            session,
-            turn,
-            cursor,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(query::tools(connection, &session, &turn, cursor, limit));
-        }
-        StoreRequest::Remove {
-            session,
-            operation,
-            reply,
-        } => {
-            let _ = reply.send(query::remove(connection, &session, operation.as_ref()));
-        }
-        StoreRequest::Tool {
-            session,
-            turn,
-            tool,
-            reply,
-        } => {
-            let _ = reply.send(query::tool(connection, &session, &turn, &tool));
-        }
-        StoreRequest::PrepareFork {
-            view,
-            request,
-            candidates,
-            reply,
-        } => {
-            let result = (|| {
-                let tx = connection.transaction()?;
-                let plan = super::fork::prepare(&tx, &view, &request, &candidates)?;
-                crate::diagnostics::sqlite_commit(tx)?;
-                Ok(plan)
-            })();
-            let _ = reply.send(result);
-        }
-        StoreRequest::AdoptFork {
-            plan,
-            native,
-            reply,
-        } => {
-            let _ = reply.send(super::fork::adopt(connection, *plan, native));
-        }
-        #[cfg(test)]
-        StoreRequest::Create { view, reply } => {
-            let _ = reply.send(query::create(connection, &view));
-        }
-        StoreRequest::Commit { commit, reply } => {
-            let _ = reply.send(query::commit(connection, *commit));
-        }
-        StoreRequest::Summary { session, reply } => {
-            let _ = reply.send(query::summary_by_id(connection, &session));
-        }
-        StoreRequest::WorkerActivity { session, reply } => {
-            let _ = reply.send(query::worker_activity(connection, &session));
-        }
-        StoreRequest::View { session, reply } => {
-            let _ = reply.send(query::view(connection, &session));
-        }
-        StoreRequest::List {
-            cursor,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(query::list(connection, cursor, limit));
-        }
-        StoreRequest::HistoryClear { request, reply } => {
-            let _ = reply.send(super::history_clear::execute(connection, request));
-        }
-        StoreRequest::Search {
-            filter,
-            cursor,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(query::search(connection, filter, cursor, limit));
-        }
-        StoreRequest::ActivityList {
-            cursor,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(query::activity_list(connection, cursor, limit));
-        }
-        StoreRequest::History {
-            session,
-            cursor,
-            limit,
-            reply,
-        } => {
-            let _ = reply.send(query::history(connection, &session, cursor, limit));
-        }
-        StoreRequest::ContentSlice {
-            content,
-            offset,
-            length,
-            reply,
-        } => {
-            let _ = reply.send(super::content::slice(connection, &content, offset, length));
-        }
-        StoreRequest::Content { content, reply } => {
-            let _ = reply.send(super::content::read_text(connection, &content));
-        }
-        #[cfg(test)]
-        StoreRequest::ArchiveImage { asset, reply } => {
-            let result = (|| -> Result<(), StoreError> {
-                let tx = connection.transaction()?;
-                super::content::put_image(&tx, &asset)?;
-                crate::diagnostics::sqlite_commit(tx)?;
-                Ok(())
-            })();
-            let _ = reply.send(result);
-        }
-        StoreRequest::Image { id, reply } => {
-            let _ = reply.send(super::content::image(connection, &id));
-        }
-        StoreRequest::Delivery(request) => {
-            super::delivery::execute(connection, *request);
-        }
-        StoreRequest::Payload(request) => {
-            super::payload::execute(connection, *request);
-        }
-        StoreRequest::TelegramInbox(request) => {
-            super::telegram_sql::execute(connection, *request);
-        }
-        StoreRequest::TelegramEffect(request) => {
-            super::telegram_effect::execute(connection, *request);
-        }
-        StoreRequest::Journal(request) => {
-            super::journal::execute(connection, *request);
-        }
-        #[cfg(test)]
-        StoreRequest::Test(request) => super::sqlite_tests::execute(connection, request),
-    }
-}
-
 struct QueuedRequest {
     request: StoreRequest,
     enqueued: Instant,
     enqueue_wait: Duration,
     depth: usize,
-}
-impl StoreRequest {
-    fn read_only(&self) -> bool {
-        match self {
-            Self::ManagementRead { .. }
-            | Self::TurnDiffGet { .. }
-            | Self::TurnDiffPage { .. }
-            | Self::TurnDiffContent { .. }
-            | Self::Attached { .. }
-            | Self::Tools { .. }
-            | Self::Tool { .. }
-            | Self::View { .. }
-            | Self::List { .. }
-            | Self::Search { .. }
-            | Self::History { .. }
-            | Self::ContentSlice { .. }
-            | Self::Content { .. }
-            | Self::Image { .. } => true,
-            #[cfg(test)]
-            Self::Test(super::sqlite_tests::TestRequest::ReaderPause { .. }) => true,
-            Self::Delivery(request) => matches!(
-                request.as_ref(),
-                super::delivery::Request::DispatchSnapshot { .. }
-            ),
-            Self::Journal(request) => {
-                matches!(request.as_ref(), super::journal::Request::Status { .. })
-            }
-            _ => false,
-        }
-    }
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::HistoryClear { .. } => "history_clear",
-            Self::ManagementRead { .. } => "management_read",
-            Self::ManagementUpdate { .. } => "management_update",
-            Self::ModelDefaults { .. } => "model_defaults",
-            Self::TitleJob { .. } => "title_job",
-            Self::TitleResult { .. } => "title_result",
-            Self::TurnDiffGet { .. } => "turn_diff",
-            Self::TurnDiffPage { .. } => "turn_diff_page",
-            Self::TurnDiffContent { .. } => "turn_diff_content",
-            Self::TurnDiffSave { .. } => "turn_diff_save",
-            Self::Attached { .. } => "attach",
-            Self::Tools { .. } => "tools",
-            Self::Remove { .. } => "remove",
-            Self::Tool { .. } => "tool",
-            Self::PrepareFork { .. } => "fork_prepare",
-            Self::AdoptFork { .. } => "fork_adopt",
-            #[cfg(test)]
-            Self::Create { .. } => "create",
-            Self::Commit { .. } => "commit",
-            Self::View { .. } => "view",
-            Self::Summary { .. } => "summary",
-            Self::WorkerActivity { .. } => "worker_activity",
-            Self::List { .. } | Self::Search { .. } | Self::ActivityList { .. } => "list",
-            Self::History { .. } => "history",
-            Self::ContentSlice { .. } => "content_slice",
-            Self::Content { .. } => "content",
-            Self::Delivery(_) => "delivery",
-            Self::Payload(_) => "payload",
-            Self::TelegramInbox(_) => "inbox",
-            Self::TelegramEffect(_) => "telegram_effect",
-            Self::Journal(_) => "operation",
-            #[cfg(test)]
-            Self::ArchiveImage { .. } => "archive_image",
-            Self::Image { .. } => "image",
-            #[cfg(test)]
-            Self::Test(_) => "test",
-        }
-    }
 }
 #[derive(Clone)]
 pub struct Database {
@@ -862,6 +342,42 @@ impl Database {
             session,
             action,
             ticket,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn context_stage(
+        &self,
+        session: SessionId,
+        action: crate::domain::management::ManagementAction,
+    ) -> Result<crate::domain::management::ContextIntent, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ContextStage {
+            session,
+            action,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn context_snapshot(
+        &self,
+    ) -> Result<crate::domain::management::ContextSnapshot, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ContextSnapshot { reply })
+            .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn context_settle(
+        &self,
+        revision: u64,
+        error: Option<String>,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ContextSettle {
+            revision,
+            error,
             reply,
         })
         .await?;

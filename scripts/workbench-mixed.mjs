@@ -1,10 +1,11 @@
 // Versioned, storage-only baseline. No provider credentials, host root or Bot.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { cpus, release, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { pruneTestReports, reportRetention } from './lib/test-reports.mjs';
 import { parseArgs } from 'node:util';
 
 const { values: options } = parseArgs({
@@ -19,6 +20,10 @@ const testCase =
 
 const directory = resolve('.test-results', `mixed-v1-${randomUUID()}`);
 mkdirSync(directory, { recursive: true, mode: 0o700 });
+const activeMarker = join(directory, '.active');
+writeFileSync(activeMarker, String(process.pid), { mode: 0o600 });
+process.once('exit', () => rmSync(activeMarker, { force: true }));
+await pruneTestReports(resolve('.test-results'), reportRetention());
 const built = spawnSync(
   'cargo',
   [

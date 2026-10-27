@@ -1422,11 +1422,13 @@ body.vscode-high-contrast-light button {
   gap: 8px;
   margin-top: 7px;
 }
-.model-context-field {
+.model-context-field,
+.model-multiplier-field {
   font-size: 11px;
   color: var(--muted);
 }
-.model-context-field input {
+.model-context-field input,
+.model-multiplier-field input {
   display: block;
   width: 100%;
   box-sizing: border-box;
@@ -1442,7 +1444,7 @@ body.vscode-high-contrast-light button {
   margin: 0;
 }
 .model-settings-buttons {
-  grid-column: 2 / -1;
+  grid-column: 1 / -1;
   justify-self: end;
   display: flex;
   gap: 3px;
@@ -1461,6 +1463,9 @@ body.vscode-high-contrast-light button {
   .model-price-card .price-grid,
   .model-settings-footer {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .model-settings-buttons {
+    grid-column: 3 / -1;
   }
 }
 .pasted-image {
@@ -2166,13 +2171,7 @@ body {
 .model-context-field {
   position: relative;
 }
-.apply-context {
-  position: absolute;
-  top: 0;
-  right: 0;
-  padding: 0;
-  font-size: 9px;
-}
+
 .additional-settings input,
 .additional-settings select {
   background: var(--input);

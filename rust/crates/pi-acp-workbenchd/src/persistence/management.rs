@@ -72,6 +72,33 @@ pub(super) fn observe(
     }
     Ok(())
 }
+pub(super) fn save_model_config(
+    tx: &Connection,
+    h: &crate::domain::session::Harness,
+    action: &ManagementAction,
+) -> Result<(), StoreError> {
+    if let ManagementAction::ModelConfig {
+        model,
+        hidden,
+        price,
+        multiplier,
+        context_window,
+        apply_context,
+    } = action
+    {
+        let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_settings WHERE harness=?1 AND model=?2)",
+            params![harness(h), model],
+            |r| r.get(0),
+        )?;
+        if count >= 1500 && !exists {
+            return Err(StoreError::Invalid("model settings budget exceeded"));
+        }
+        tx.execute("INSERT INTO model_settings(harness,model,hidden,price,price_multiplier,context_override) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price,price_multiplier=excluded.price_multiplier,context_override=CASE WHEN ?7 THEN excluded.context_override ELSE context_override END", params![harness(h),model,hidden,price.as_ref().map(encode).transpose()?,multiplier,if *apply_context { context_window.map(|n|n as i64) } else { None },apply_context])?;
+    }
+    Ok(())
+}
 pub(super) fn update(
     db: &mut Connection,
     session: &SessionId,
@@ -104,6 +131,7 @@ pub(super) fn update(
             }
             tx.execute("INSERT INTO model_settings(harness,model,hidden,price) VALUES(?1,?2,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price",params![harness(&view.harness),model,hidden,price.as_ref().map(encode).transpose()?])?;
         }
+        ManagementAction::ModelConfig { .. } => save_model_config(&tx, &view.harness, action)?,
         ManagementAction::Visibility {
             models,
             hidden,
@@ -115,7 +143,7 @@ pub(super) fn update(
                 return Err(StoreError::Invalid("model settings budget exceeded"));
             }
             for model in models {
-                tx.execute("INSERT INTO model_settings(harness,model,hidden) VALUES(?1,?2,?3) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=CASE WHEN ?4 THEN NULL ELSE price END",params![harness(&view.harness),model,hidden,reset])?;
+                tx.execute("INSERT INTO model_settings(harness,model,hidden) VALUES(?1,?2,?3) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=CASE WHEN ?4 THEN NULL ELSE price END,price_multiplier=CASE WHEN ?4 THEN 1 ELSE price_multiplier END",params![harness(&view.harness),model,hidden,reset])?;
             }
             let count: u32 =
                 tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
@@ -259,6 +287,56 @@ fn group(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageGroup> {
         estimated_usd: row.get(9)?,
     })
 }
+fn model_key(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+fn matched_defaults(models: &[ModelSetting], model: &str) -> (Option<Price>, Option<u64>) {
+    let key = model_key(model);
+    let mut candidates: Vec<_> = models
+        .iter()
+        .filter(|m| m.harness == crate::domain::session::Harness::Pi && model_key(&m.model) == key)
+        .collect();
+    let priority = |m: &&ModelSetting| {
+        [
+            "openai",
+            "anthropic",
+            "google",
+            "mistral",
+            "xai",
+            "deepseek",
+            "openai-codex",
+            "groq",
+        ]
+        .iter()
+        .position(|p| *p == m.model.split('/').next().unwrap_or(""))
+        .unwrap_or(100)
+    };
+    candidates.sort_by_key(|m| (priority(m), &m.model));
+    let price = candidates
+        .iter()
+        .filter(|m| priority(m) < 100)
+        .find_map(|m| m.default_price.as_ref())
+        .or_else(|| {
+            candidates.iter().find_map(|m| {
+                m.default_price.as_ref().filter(|p| {
+                    [p.input, p.output, p.cache_read, p.cache_write]
+                        .iter()
+                        .any(|n| *n > 0.0)
+                })
+            })
+        })
+        .or_else(|| candidates.iter().find_map(|m| m.default_price.as_ref()))
+        .cloned();
+    let context = candidates.iter().find_map(|m| m.default_context_window);
+    (price, context)
+}
 pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<ManagementData, StoreError> {
     if !q.valid() {
         return Err(StoreError::Invalid("invalid statistics filter"));
@@ -270,7 +348,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let models = {
-        let mut statement=tx.prepare("SELECT harness,model,hidden,price,default_price,context_window FROM model_settings ORDER BY harness,model LIMIT 1500")?;
+        let mut statement=tx.prepare("SELECT m.harness,m.model,m.hidden,m.price,m.default_price,m.context_window,m.context_override,m.price_multiplier,c.state,c.error FROM model_settings m LEFT JOIN model_context_intents c ON m.harness='Pi' AND c.model=m.model ORDER BY m.harness,m.model LIMIT 1500")?;
         let rows = statement.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -279,22 +357,40 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<SafeInteger>>(5)?.map(|n| n.get()),
+                r.get::<_, Option<SafeInteger>>(6)?.map(|n| n.get()),
+                r.get::<_, f64>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         })?;
         let mut models = vec![];
         for row in rows {
-            let (h, m, hidden, p, d, c) = row?;
+            let (h, m, hidden, p, d, c, override_context, multiplier, context_state, context_error) =
+                row?;
             models.push(ModelSetting {
                 harness: serde_json::from_str(&format!("\"{h}\""))?,
                 model: m,
                 hidden,
                 price: p.map(|s| serde_json::from_str(&s)).transpose()?,
                 default_price: d.map(|s| serde_json::from_str(&s)).transpose()?,
-                context_window: c,
+                context_window: override_context.or(c),
+                default_context_window: c,
+                context_override: override_context,
+                multiplier,
+                context_state,
+                context_error,
             });
         }
         models
     };
+    let mut models = models;
+    let defaults = models.clone();
+    for model in &mut models {
+        let (price, context) = matched_defaults(&defaults, &model.model);
+        model.default_price = price.or(model.default_price.take());
+        model.default_context_window = context.or(model.default_context_window);
+        model.context_window = model.context_override.or(model.default_context_window);
+    }
     let mut data = ManagementData {
         models,
         naming_policy,
@@ -304,6 +400,37 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
         next_cursor: None,
     };
     if let Some(dimension) = &q.group {
+        #[derive(serde::Serialize)]
+        struct ResolvedPrice {
+            harness: String,
+            model: String,
+            price: Option<Price>,
+            multiplier: f64,
+        }
+        let mut prices: Vec<ResolvedPrice> = data
+            .models
+            .iter()
+            .map(|m| ResolvedPrice {
+                harness: harness(&m.harness).into(),
+                model: m.model.clone(),
+                price: m.price.clone().or(m.default_price.clone()),
+                multiplier: m.multiplier,
+            })
+            .collect();
+        let missing = tx.prepare("SELECT DISTINCT u.harness,u.model FROM usage_facts u LEFT JOIN model_settings m ON m.harness=u.harness AND m.model=u.model WHERE m.model IS NULL LIMIT 1500")?
+            .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+        for (h, model) in missing {
+            let (price, _) = matched_defaults(&defaults, &model);
+            prices.push(ResolvedPrice {
+                harness: h,
+                model,
+                price,
+                multiplier: 1.0,
+            });
+        }
+        let prices = serde_json::to_string(&prices)?;
+        // A bounded materialized SELECT keeps read-only readers cold and the join indexed.
+        let cte = "WITH management_prices AS MATERIALIZED (SELECT json_extract(value,'$.harness') AS harness,json_extract(value,'$.model') AS model,json_extract(value,'$.price') AS price,json_extract(value,'$.multiplier') AS multiplier FROM json_each(?6))";
         let key = match dimension.as_str() {
             "model" => "u.harness || '/' || u.model",
             "session" => "u.session",
@@ -311,14 +438,14 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             "month" => "strftime('%Y-%m',u.occurred_at/1000,'unixepoch')",
             _ => "date(u.occurred_at/1000,'unixepoch')",
         };
-        let base="FROM usage_facts u LEFT JOIN model_settings m ON m.harness=u.harness AND m.model=u.model LEFT JOIN session_metadata n ON n.session=u.session WHERE u.occurred_at>=?1 AND u.occurred_at<=?2 AND (?3 IS NULL OR u.session=?3) AND (?4 IS NULL OR u.model=?4)";
-        let aggregate="count(*),COALESCE(sum(u.input IS NULL OR u.output IS NULL),0),COALESCE(sum(u.cache_read IS NULL OR u.cache_write IS NULL),0),COALESCE(sum(COALESCE(m.price,m.default_price) IS NULL),0),COALESCE(sum(u.input),0),COALESCE(sum(u.output),0),COALESCE(sum(u.cache_read),0),COALESCE(sum(u.cache_write),0),COALESCE(sum((COALESCE(u.input,0)*json_extract(COALESCE(m.price,m.default_price),'$.input')+COALESCE(u.output,0)*json_extract(COALESCE(m.price,m.default_price),'$.output')+COALESCE(u.cache_read,0)*json_extract(COALESCE(m.price,m.default_price),'$.cache_read')+COALESCE(u.cache_write,0)*json_extract(COALESCE(m.price,m.default_price),'$.cache_write'))/1000000.0),0.0)";
+        let base="FROM usage_facts u LEFT JOIN management_prices m ON m.harness=u.harness AND m.model=u.model LEFT JOIN session_metadata n ON n.session=u.session WHERE u.occurred_at>=?1 AND u.occurred_at<=?2 AND (?3 IS NULL OR u.session=?3) AND (?4 IS NULL OR u.model=?4)";
+        let aggregate="count(*),COALESCE(sum(u.input IS NULL OR u.output IS NULL),0),COALESCE(sum(u.cache_read IS NULL OR u.cache_write IS NULL),0),COALESCE(sum(m.price IS NULL),0),COALESCE(sum(u.input),0),COALESCE(sum(u.output),0),COALESCE(sum(u.cache_read),0),COALESCE(sum(u.cache_write),0),COALESCE(sum((COALESCE(u.input,0)*json_extract(m.price,'$.input')+COALESCE(u.output,0)*json_extract(m.price,'$.output')+COALESCE(u.cache_read,0)*json_extract(m.price,'$.cache_read')+COALESCE(u.cache_write,0)*json_extract(m.price,'$.cache_write'))*COALESCE(m.multiplier,1)/1000000.0),0.0)";
         let from = q.from.unwrap_or(0) as i64;
         let to = q.to.unwrap_or(8_640_000_000_000_000) as i64;
         let session = q.session.as_ref().map(|s| s.as_str());
         data.totals = Some(tx.query_row(
-            &format!("SELECT 'total',{aggregate},NULL {base}"),
-            params![from, to, session, q.model],
+            &format!("{cte} SELECT 'total',{aggregate},NULL {base}"),
+            params![from, to, session, q.model, None::<String>, &prices],
             group,
         )?);
         let label = if dimension == "session" {
@@ -326,7 +453,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
         } else {
             "NULL"
         };
-        let sql=format!("SELECT {key} AS group_key,{aggregate},{label} {base} GROUP BY group_key HAVING group_key>?5 ORDER BY group_key LIMIT 101");
+        let sql=format!("{cte} SELECT {key} AS group_key,{aggregate},{label} {base} GROUP BY group_key HAVING group_key>?5 ORDER BY group_key LIMIT 101");
         let mut statement = tx.prepare(&sql)?;
         data.groups = statement
             .query_map(
@@ -335,7 +462,8 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
                     to,
                     session,
                     q.model,
-                    q.cursor.as_deref().unwrap_or("")
+                    q.cursor.as_deref().unwrap_or(""),
+                    &prices
                 ],
                 group,
             )?

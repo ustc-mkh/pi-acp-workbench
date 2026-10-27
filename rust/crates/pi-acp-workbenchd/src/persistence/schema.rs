@@ -196,6 +196,59 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
         return Err(StoreError::Invalid("SQLite foreign key integrity failed"));
     }
     drop(foreign_keys);
+    // Additive settings upgrade only after validating the complete existing v3 root.
+    // Old overrides remain untouched; no journal/history migration or replay.
+    let columns = connection
+        .prepare("PRAGMA table_info(model_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let projection_version: u32 =
+        connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let projection_tables:u32=connection.query_row("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('model_context_clock','model_context_intents')",[],|r|r.get(0))?;
+    if ![0, 1346978609].contains(&projection_version)
+        || projection_tables == 1
+        || (projection_version == 1346978609 && projection_tables != 2)
+    {
+        return Err(StoreError::Invalid(
+            "incomplete model context projection schema",
+        ));
+    }
+    if projection_tables == 2 {
+        connection.prepare(
+            "SELECT model,revision,context_window,state,error FROM model_context_intents LIMIT 0",
+        )?;
+        let clock: i64 = connection.query_row(
+            "SELECT revision FROM model_context_clock WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let latest: i64 = connection.query_row(
+            "SELECT COALESCE(max(revision),0) FROM model_context_intents",
+            [],
+            |r| r.get(0),
+        )?;
+        if clock < latest {
+            return Err(StoreError::Invalid("model context revision regressed"));
+        }
+    }
+    if projection_version != 1346978609
+        || projection_tables == 0
+        || !columns.iter().any(|c| c == "price_multiplier")
+        || !columns.iter().any(|c| c == "context_override")
+    {
+        let tx = connection.transaction()?;
+        if !columns.iter().any(|c| c == "price_multiplier") {
+            tx.execute_batch("ALTER TABLE model_settings ADD COLUMN price_multiplier REAL NOT NULL DEFAULT 1 CHECK(price_multiplier >= 0 AND price_multiplier <= 1000000)")?;
+        }
+        if !columns.iter().any(|c| c == "context_override") {
+            tx.execute_batch("ALTER TABLE model_settings ADD COLUMN context_override INTEGER CHECK(context_override IS NULL OR (context_override > 0 AND context_override <= 100000000))")?;
+        }
+        if projection_tables == 0 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS model_context_clock (\n    id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision BETWEEN 0 AND 9007199254740991)\n) STRICT;\nINSERT OR IGNORE INTO model_context_clock VALUES(1,0);\nCREATE TABLE IF NOT EXISTS model_context_intents (\n    model TEXT PRIMARY KEY CHECK(length(model) BETWEEN 1 AND 300),\n    revision INTEGER NOT NULL UNIQUE CHECK(revision BETWEEN 1 AND 9007199254740991),\n    context_window INTEGER CHECK(context_window IS NULL OR (context_window > 0 AND context_window <= 100000000)),\n    state TEXT NOT NULL CHECK(state IN ('pending','applied')), error TEXT\n) STRICT;\n")?;
+        }
+        tx.pragma_update(None, "application_id", 1346978609u32)?;
+        crate::diagnostics::sqlite_commit(tx)?;
+    }
     if initializing {
         format::complete_database(root)?;
     }

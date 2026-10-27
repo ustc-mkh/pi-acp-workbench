@@ -7,6 +7,7 @@ import {
   durableCommand,
   ipcMessage,
   operationId,
+  MAX_FRAME_BYTES,
   type ClientCommand,
   type CommandResult,
   type CommitBatch,
@@ -16,7 +17,7 @@ import {
 } from './workbench-protocol';
 
 export const WORKBENCH_LIMITS = {
-  frameBytes: 8 * 1024 * 1024,
+  frameBytes: MAX_FRAME_BYTES,
   pools: [16, 4, 4] as const,
   connectMs: 5000,
   partialMs: 10000,

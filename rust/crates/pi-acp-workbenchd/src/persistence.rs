@@ -2,6 +2,8 @@ pub const FORMAT_VERSION: u32 = 3;
 mod checkpoint;
 mod content;
 pub mod database;
+mod database_dispatch;
+mod database_request;
 pub mod delivery;
 #[cfg(test)]
 mod delivery_sql_tests;
@@ -25,6 +27,7 @@ mod management;
 mod metrics;
 #[cfg(test)]
 mod mixed_workload_tests;
+mod model_context;
 pub use metrics::RequestMetrics;
 pub mod outbox;
 pub mod payload;

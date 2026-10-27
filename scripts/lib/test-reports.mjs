@@ -12,7 +12,11 @@ export async function pruneTestReports(root, keep) {
   reportRetention(keep);
   const reports = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^run-[\w-]+$/.test(entry.name)) continue;
+    if (
+      !entry.isDirectory() ||
+      !/^(?:run-[\w-]+|soak-[a-f0-9-]+|scale-[a-f0-9-]+|mixed-v1-[a-f0-9-]+)$/.test(entry.name)
+    )
+      continue;
     const path = join(root, entry.name);
     let active = false;
     try {
@@ -31,15 +35,20 @@ export async function pruneTestReports(root, keep) {
       if (error.code !== 'ENOENT') throw error;
     }
     try {
-      reports.push({ path, active, modified: (await stat(path)).mtimeMs });
+      reports.push({ name: entry.name, path, active, modified: (await stat(path)).mtimeMs });
     } catch (error) {
       // Another completed run may have pruned this directory concurrently.
       if (error.code !== 'ENOENT') throw error;
     }
   }
-  reports.sort((a, b) => b.modified - a.modified || a.path.localeCompare(b.path));
-  const inactive = reports.filter((r) => !r.active);
-  const slots = Math.max(0, keep - reports.filter((r) => r.active).length);
-  for (const report of inactive.slice(slots))
-    await rm(report.path, { recursive: true, force: true });
+  // Keep each artifact class independently: a soak run must not evict the
+  // smaller typecheck/release reports, and vice versa.
+  for (const prefix of ['run-', 'soak-', 'scale-', 'mixed-v1-']) {
+    const group = reports.filter((r) => r.name.startsWith(prefix));
+    group.sort((a, b) => b.modified - a.modified || a.path.localeCompare(b.path));
+    const inactive = group.filter((r) => !r.active);
+    const slots = Math.max(0, keep - group.filter((r) => r.active).length);
+    for (const report of inactive.slice(slots))
+      await rm(report.path, { recursive: true, force: true });
+  }
 }

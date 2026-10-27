@@ -1,11 +1,16 @@
 // Five independent process samples; timings/RSS are diagnostic, spies are gates.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { pruneTestReports, reportRetention } from './lib/test-reports.mjs';
 const directory = resolve('.test-results', `scale-${randomUUID()}`);
-mkdirSync(directory, { recursive: true });
+mkdirSync(directory, { recursive: true, mode: 0o700 });
+const activeMarker = join(directory, '.active');
+writeFileSync(activeMarker, String(process.pid), { mode: 0o600 });
+process.once('exit', () => rmSync(activeMarker, { force: true }));
+await pruneTestReports(resolve('.test-results'), reportRetention());
 const built = spawnSync(
   'cargo',
   [

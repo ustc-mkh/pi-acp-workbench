@@ -25,6 +25,8 @@ pub struct PiWorkbenchCapabilities {
     pub title: bool,
     #[serde(default)]
     pub models: bool,
+    #[serde(default)]
+    pub context_projection: bool,
     /// Explicit true means background wakeups may exist; false is affirmative
     /// evidence that the provider may be suspended when otherwise idle.
     #[serde(default)]
@@ -61,6 +63,11 @@ impl ProviderMetadata {
         self.pi_workbench
             .as_ref()
             .is_some_and(|c| c.version == 1 && c.models)
+    }
+    pub fn supports_context_projection(&self) -> bool {
+        self.pi_workbench
+            .as_ref()
+            .is_some_and(|c| c.version == 1 && c.models && c.context_projection)
     }
     pub fn supports_inspection(&self) -> bool {
         self.pi_workbench

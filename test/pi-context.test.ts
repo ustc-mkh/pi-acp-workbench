@@ -1,4 +1,4 @@
-import { it, expect, vi } from 'vitest';
+import { it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import {
   installContextConfig,
   piModelsConfigPath,
   type ContextContext,
+  CONTEXT_APPLIED,
 } from '../src/pi-context-mode';
 import { refreshPiModels } from '../src/pi-context-config';
 import type { PiProcess } from '../src/pi-rpc-types';
@@ -147,14 +148,29 @@ it('does not turn an unregistered command into a model prompt', async () => {
   expect(prompt).not.toHaveBeenCalled();
 });
 it('confirms applied metadata and rejects busy workers', async () => {
-  const prompt = vi.fn(),
+  let requestId = '';
+  let desired: number | null = null;
+  const projection = { owner: 'a'.repeat(64), revision: 1 };
+  const prompt = vi.fn(async (text: string) => {
+      const input = JSON.parse(Buffer.from(text.split(' ')[1], 'base64').toString());
+      requestId = input.requestId;
+      desired = input.contextWindow;
+    }),
     proc = {
       getState: async () => ({}),
       request: async (c: { type: string }) => ({
         success: true,
         data:
           c.type === 'get_entries'
-            ? { entries: [] }
+            ? {
+                entries: [
+                  {
+                    type: 'custom',
+                    customType: CONTEXT_APPLIED,
+                    data: { requestId, model: 'p/m', contextWindow: desired, projection },
+                  },
+                ],
+              }
             : { commands: [{ name: 'workbench-context' }] },
       }),
       prompt,
@@ -162,11 +178,23 @@ it('confirms applied metadata and rejects busy workers', async () => {
         models: [{ provider: 'p', id: 'm', contextWindow: 200 }],
       }),
     } as unknown as PiProcess;
-  await expect(refreshPiModels(proc, { model: 'p/m', contextWindow: 200 })).resolves.toBe(true);
-  await expect(refreshPiModels(proc, { model: 'p/m', contextWindow: 100 })).rejects.toThrow(
-    '未确认',
-  );
+  await expect(
+    refreshPiModels(proc, { model: 'p/m', contextWindow: 200 }, false, projection),
+  ).resolves.toBe(true);
+  await expect(
+    refreshPiModels(proc, { model: 'p/m', contextWindow: 100 }, false, projection),
+  ).rejects.toThrow('未确认');
   const busy = { ...proc, getState: async () => ({ isStreaming: true }) } as unknown as PiProcess;
   await expect(refreshPiModels(busy)).resolves.toBe(false);
   await expect(refreshPiModels(busy, { model: 'p/m', contextWindow: 100 })).rejects.toThrow('任务');
+});
+
+let isolatedProfile: string;
+beforeEach(() => {
+  isolatedProfile = mkdtempSync(join(tmpdir(), 'pi-context-api-'));
+  vi.stubEnv('PI_CODING_AGENT_DIR', isolatedProfile);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(isolatedProfile, { recursive: true, force: true });
 });

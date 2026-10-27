@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub enum AdapterCommand {
     Models {
         action: crate::domain::management::ManagementAction,
+        projection: Option<crate::domain::management::ContextProjection>,
         reply: tokio::sync::oneshot::Sender<
             Result<crate::domain::management::ProviderModels, DomainError>,
         >,
@@ -284,14 +285,18 @@ async fn run_protocol(
         }
         background_interactions.clear();
         let (turn, text, config) = match command {
-            AdapterCommand::Models { action, reply } => {
+            AdapterCommand::Models {
+                action,
+                projection,
+                reply,
+            } => {
                 let result = async {
                     let (response, mut captured) = super::control::pump(
                         &client,
                         &mut updates,
                         &stop,
                         Some(&native),
-                        client.models(&native, &metadata, &action),
+                        client.models(&native, &metadata, &action, projection.as_ref()),
                     )
                     .await?;
                     runs.drain(
