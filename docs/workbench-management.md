@@ -53,4 +53,4 @@ Telegram setup 在受信任 Extension Host 中选择明确工作目录，收集 
 - `app_management_tests.rs`：真实子进程/隔离 root，价格、cache、missing、冷恢复、分页、标题与下一 prompt 并行、manual-wins、fork/load 不重复计数、receipt/外部设置 settlement 丢失。
 - `test/workbench-management.test.ts`、`test/pi-model-settings.test.ts`、controller tests：实际 UI 动作、配置生成与注册命令、正文复制预算；`scripts/workbench-browser-smoke.mjs`：真实 Chromium→controller→IPC→synthetic ACP 的集成。
 
-这些自动化不是在线provider、真实Extension Host/剪贴板/Bot的证明；剩余任务与验收要求统一见[下一版重构计划](workbench-next-rewrite-plan.md)。
+这些自动化不是在线provider、真实Extension Host/剪贴板/Bot的证明；历史真实环境验收范围见[P6 矩阵](workbench-p6-validation.md)，长期约束见[架构与重构范围](workbench-next-rewrite-plan.md)。

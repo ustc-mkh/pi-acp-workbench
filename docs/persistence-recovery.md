@@ -1,6 +1,6 @@
 # 持久化提交与恢复契约（workbench format 3 / IPC v3）
 
-本页描述当前单宿主与 SQLite 增量存储，不描述旧 JSON reader、双 daemon 或 native 数据自动迁移。剩余功能差异与验收要求统一见[下一版重构计划](workbench-next-rewrite-plan.md)。
+本页描述当前单宿主与 SQLite 增量存储，不描述旧 JSON reader、双 daemon 或 native 数据自动迁移。长期设计约束见[架构与重构范围](workbench-next-rewrite-plan.md)，历史验收范围见[P6 矩阵](workbench-p6-validation.md)。
 
 P2：prompt 为有序 text/context/image parts；operation 指纹覆盖原始 parts 身份与顺序。图片输入在 writer 外有界完整解码并重编码为静态 PNG，归档使用清理后的描述符及原 asset ID；每个有限输入 part 都有正确 entry/seq 的不可变 input delivery intent，输入/归档/Accepted 同事务。草稿仅在原 operation + generation 接受且未改变时清除。通用 select 设置持久 prepare/restore，观察确认后才提交偏好；失败/未知不保存，显式 discovery 可恢复旧 baseline，但不重发原操作。`provider_preferences` 与成功观察/settle 同事务，只含最近 model/thinking，Fast 不成为全局默认，新会话读取、已有会话优先。当前 root 必须含该新表，旧实验 root 明确拒绝，禁止隐式迁移/清空。
 
@@ -34,7 +34,7 @@ IPC numeric request ID 只关联连接响应；durable operation 才负责跨连
 
 ACP stdio 的普通 JSON payload 上限 2 MiB（不含换行），仅 `session/update` 的 agent image chunk 可使用 `ceil(4 MiB / 3) * 4 + 64 KiB` 大帧；大帧还需满足 raw image ≤4 MiB、有效 base64/媒体身份及非 data envelope ≤64 KiB。IPC 仍为 8 MiB。普通文本/tool 不借图片通道放大；100,000 Unicode scalar prompt（包括中文、emoji、JSON 转义）可落入普通帧。出站超限在入 worker mailbox 前拒绝，不写 stdio 或杀 worker；入站超限作为明确 provider 任务失败。完整解码/像素与帧数 sanitization 仍属后续媒体安全工作，不以 signature/hash 验证替代。worker capacity、mailbox full、mailbox closed、provider unsupported 分别诊断，容量周转另在 P1 实现。
 
-业务表位于 `workbench.sqlite3`，启用 WAL、外键与 `synchronous=FULL`；format marker 和 schema version 不兼容时拒绝。当前数据库使用一个专用 writer 和两个固定只读线程；writer 队列 256，每 reader 队列 128。list/history/tools/content/image、attach、dispatch snapshot 与 operation status 走 reader；原子 admission、状态、receipt 和投递确认仍走 writer。attach 的 view+page、dispatch 的 heads+binding 各自使用短事务快照。所有 SQLite 工作均在这些专用线程执行；关闭先停止接受，再 drain 并物理 join 全部线程后释放 lease。完整发布性能与资源门槛见[下一版计划](workbench-next-rewrite-plan.md)，读写隔离本身不是SLO已通过的证据。
+业务表位于 `workbench.sqlite3`，启用 WAL、外键与 `synchronous=FULL`；format marker 和 schema version 不兼容时拒绝。当前数据库使用一个专用 writer 和两个固定只读线程；writer 队列 256，每 reader 队列 128。list/history/tools/content/image、attach、dispatch snapshot 与 operation status 走 reader；原子 admission、状态、receipt 和投递确认仍走 writer。attach 的 view+page、dispatch 的 heads+binding 各自使用短事务快照。所有 SQLite 工作均在这些专用线程执行；关闭先停止接受，再 drain 并物理 join 全部线程后释放 lease。历史性能与资源验收范围见[P6 矩阵](workbench-p6-validation.md)，读写隔离本身不是SLO已通过的证据。
 
 List/history/tools 分页、正文 UTF-8 slices 和冷查询均已实现，不需全历史载入内存。attach 的 view + recent page、delivery dispatch 的 heads + binding 使用短事务快照。普通页/批完整 JSON envelope ≤1 MiB，view ≤512 KiB，inline text ≤16 KiB，content slice ≤64 KiB；单正文 ≤64 MiB。可见 UI 条目窗口不等于全部历史范围。超大 metadata 返回 typed TooLarge，不用空页无限循环。数字必须是 JS safe integer。
 
@@ -56,4 +56,4 @@ Multipart 投递为 at-least-once：部分发送成功、取消或响应未知�
 - `npm run test:workbench:storage`：实际 binary 的确认、flock、私有 byte export、symlink/overlap、marker-only reset、corrupt-state refusal。
 - `npm run test:workbench:process-loss`：实际宿主 SIGKILL + synthetic peers；fixture 只显式移除自己隔离 root 的死 socket。不是在线 provider 测试，也不证明任意 descendants 清理。
 - `npm run test:contract:workbench` / `npm run test:contract:workbench:telegram`：真实 daemon + synthetic ACP/local mock Bot，不替代真实模型/Bot。
-- [下一版重构计划](workbench-next-rewrite-plan.md)统一定义mixed benchmark、长期故障与真实环境验收要求；原始运行证据放 `.test-results/`，不以历史通过结果代替当前源码验证。
+- [发布指南](workbench-release.md)列出专项验证命令，[P6 矩阵](workbench-p6-validation.md)记录历史验收范围；原始运行证据放 `.test-results/`，不以历史通过结果代替当前源码验证。

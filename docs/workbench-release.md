@@ -1,20 +1,64 @@
-# Single-host Linux artifact
+# Linux 服务构建与部署
 
-This guide describes the current source-built artifact, not historical published releases. No repository script installs, enables or restarts a real service. Perform deployment only with operator authorization and a separate backup/recovery policy. Local artifact verification is not proof of live provider/Bot compatibility. See the [P6 validation record and outstanding blockers](workbench-p6-validation.md) for the current evidence boundary.
+服务包包含一个控制程序 `pi-acp-workbenchd`；ACP workers 需单独安装。支持 Linux x86_64 的 GNU/musl 目标。扩展、宿主、Pi adapter 使用配套版本，更新前阅读[升级与回退](workbench-cutover.md)。
 
-## Build and verify locally
+## 从源码构建
 
-In the source checkout, with Node 22+, Cargo/Rust and Linux x86_64 tooling:
+需要 Node.js 22+、Rust/Cargo 和 Linux x86_64 工具链：
 
 ```sh
 npm ci
 npm run build
+npm run build:services
+npm run package:services
+npm run package
+```
+
+- `service-dist/`：binary 和 `manifest.json`。
+- `service-artifacts/`：`pi-acp-services-VERSION-TARGET.tar.gz`、`.sha256`。
+- 仓库根目录：`pi-acp-workbench-VERSION.vsix`。
+
+`build:services` 可传 `--target x86_64-unknown-linux-musl` 或 `--target x86_64-unknown-linux-gnu`；跨编译需安装对应 Rust target 和 linker。GNU 验证不能替代 musl 验证。manifest 记录 ELF/ABI、SHA-256、Rust 源码 hash、Git 来源、dirty 状态及 IPC/storage 合同。
+
+归档仅收集固定清单中的 binary、manifest、许可证、公开文档和两个 `examples/` 配置示例，不包含业务数据或凭据。Rustls 使用 bundled roots；Node 仅在使用 Node-based adapter 时需要。
+
+## 校验与安装
+
+从可信发布来源取得匹配版本的服务包和校验和，核对 `.sha256`，查看归档内容后解压到新的私有目录。校验和用于检查字节一致性，来源可信性需单独确认。在解压目录执行：
+
+```sh
+sha256sum -c SHA256SUMS
+./pi-acp-workbenchd --version
+./pi-acp-workbenchd --help
+```
+
+将 `examples/workbench.json` 复制到自己的配置目录，修改绝对 `storage.root`、各 worker 的 executable/args/env。首次启动使用空 root；兼容的已验证 2.0.x root 支持有限的新增设置字段升级，旧格式转换边界见[数据迁移](workbench-data-migration.md)。备份停止后的完整 root 及关联 Pi profile（包含 context checkpoint）。
+
+默认示例使用 PATH 中的 `pi-acp`。需要本仓库增强功能时，将 worker command 设为 Node 的绝对路径，args 指向配套构建的 `dist/pi-adapter.mjs`。provider 登录由各 CLI 管理；禁用的 worker 配置为 `null`。
+
+```sh
+./pi-acp-workbenchd --config /absolute/path/workbench.json
+```
+
+VS Code 安装配套 VSIX，将 `piAcp.workbenchSocket` 指向 `<storage.root>/workbench.sock`；扩展不会启动 daemon。连接和 workspace trust 规则见 [VS Code](workbench-vscode.md)。
+
+Telegram 为可选项：设置 workspace、chat/user allowlist，以及 `bot_token_env` 环境变量名，token 不写入 JSON。配置方法见 [Telegram](workbench-telegram.md)。
+
+### systemd 用户服务
+
+编辑包内 `examples/pi-acp-workbenchd.service`，将 `ExecStart` 的 binary/config 替换为实际绝对路径，再安装到用户 unit 目录并启动。服务账户需能访问 workspace、storage 和 worker；单独注入 Bot token 环境变量。仓库构建脚本只生成制品，不执行安装或 `systemctl`。
+
+## 验证
+
+源码统一门禁：
+
+```sh
 npm run test:rewrite
 ```
 
-The unified gate builds the production Rust workspace with `--release --locked`, packages it, and runs the actual `pi-acp-workbenchd` with an isolated synthetic ACP peer. The directory manifest includes target/ELF ABI, binary SHA-256, Rust source hash, git provenance and production/features metadata. A dirty worktree is explicitly recorded, not represented as a clean commit.
+该门禁涵盖类型检查、构建、格式、Clippy、Rust/TS、IPC/Telegram contracts、Chromium 和生产制品 smoke。默认使用 synthetic ACP peers 与本地 mock Bot；真实 provider、Telegram 和 Extension Host 需要各自验证。
 
-P6 diagnostics are separate from that gate:
+性能与生命周期专项按变更选择运行：
 
 ```sh
 npm run test:workbench:startup
@@ -23,61 +67,20 @@ npm run test:workbench:mixed
 npm run test:workbench:diff-benchmark
 npm run test:workbench:host-mixed -- --binary "$PWD/service-dist/pi-acp-workbenchd" --dataset full
 npm run test:workbench:soak -- --duration-seconds 600
-# Requires an explicitly available graphical test environment.
 npm run test:extension-host:full
 ```
 
-The full dataset uses a stopped, test-owned temporary root for 10k sessions and 100k history entries, then runs actual IPC, a 4 MiB PNG, eight local mock HTTP lanes, 2048 deferred topics and concurrent headless Chromium display work. It never writes fixtures into a running or real root. Per-request timings include capture/physical stop where labelled; they do not provide internal durable-fence spans or live provider certification. The default five runs and raw distributions are retained under `.test-results/`; an interrupted/failed run stays failed. Use `--backlog-seconds 7200` with short samples to retain the two-hour delivery backlog rather than shrinking it with sampling time. The two-hour same-PID run is separately selected with `--runs 1 --duration-seconds 7200`; `--dataset small` retains the smaller IPC diagnostic workload and must be reported as such. Graphical Extension Host, authorized online providers/Bot and each production target still require their own evidence. For installed VSIX acceptance, package the client first and run `WORKBENCH_TEST_BINARY=/absolute/path/to/pi-acp-workbenchd node scripts/workbench-extension-host.mjs --full --vsix /absolute/path/to/candidate.vsix` in the isolated graphical test environment.
+`host-mixed` 的 full 工作集包含 10k 会话、100k history entries、4 MiB 图片、模拟 Telegram 多 lane 和 Chromium workload。默认五轮报告位于 `.test-results/`；两小时同宿主测试使用 `--runs 1 --duration-seconds 7200`。保留两小时 delivery backlog 使用 `--backlog-seconds 7200`。small 结果不能替代 full，短测不能替代长测。Extension Host 需要图形环境；安装候选 VSIX 可使用 `WORKBENCH_TEST_BINARY=/absolute/path/to/pi-acp-workbenchd node scripts/workbench-extension-host.mjs --full --vsix /absolute/path/to/candidate.vsix`。
 
-Default output:
+历史有限验收范围见 [P6 矩阵](workbench-p6-validation.md)，后续版本需验证自己的实际制品。
 
-- `service-dist/pi-acp-workbenchd`, `manifest.json` (one control binary).
-- `service-artifacts/pi-acp-services-VERSION-TARGET.tar.gz` and `.sha256`.
-- Archive content: binary/manifest (including matching IPC/storage/root policy contracts), `SHA256SUMS`, licenses/notices, the fixed public documentation allowlist including current usage/contracts, the next rewrite plan and cutover checklist (with package-local links checked), and only `examples/pi-acp-workbenchd.service` + `examples/workbench.json`.
+## 更新、备份与回退
 
-`build:services` supports GNU and musl x86_64 target flags. Building or testing the GNU artifact locally does **not** establish musl/cross-target acceptance; verify each actual target separately. Provider workers remain separately installed external executables. Rustls uses bundled roots; Node is needed for Node-based provider adapters, not for native maintenance itself.
-
-## Inspect an archive before manual installation
-
-Verify the `.sha256` file against an independently trusted release digest, list the archive, then extract into a new private staging directory. Do not extract over configuration, credentials or data. Inside the extracted directory:
-
-```sh
-sha256sum -c SHA256SUMS
-./pi-acp-workbenchd --version
-./pi-acp-workbenchd --help
-```
-
-Checksums detect corruption, not publisher authenticity. Verify source provenance against the artifact manifest and independently verify the release source/signer for an externally obtained archive; a local package hash alone is not publisher authentication.
-
-## Configure the only control process
-
-Edit `examples/workbench.json`: substitute the absolute storage root and explicit per-provider worker executable/args/env. Use a separate empty root on first start; do not point a new incompatible build at historical live storage. A disabled provider is `null`, never a silent fallback.
-
-For Telegram, add the merged optional Telegram section as described in [Telegram](workbench-telegram.md): canonical workspace, allowed chat/user IDs, and the **name** of the token environment variable. Token bytes never belong in JSON, archive, CLI arguments or repository. Provider/Bot credentials are operator-managed and are not included in an artifact.
-
-The single unit example has an absolute `ExecStart` placeholder. Configure it to this artifact and a private operator-owned config file before manually installing/enabling it. The service account needs access to its workspace/storage and configured provider executable, not root privileges. There is no second Telegram unit, relay or internal session socket. The desktop Telegram setup wizard only creates a new config with explicit user/chat allowlists; it does not collect token bytes or install/start a service.
-
-For a manual foreground check after configuration:
-
-```sh
-./pi-acp-workbenchd --config /absolute/path/workbench.json
-```
-
-VS Code must use the matching current-source VSIX and [IPC v3](workbench-ipc.md) socket `<storage.root>/workbench.sock`. The extension does not start the daemon. See [VS Code](workbench-vscode.md) for trust/canonical-workspace checks and UI limits.
-
-Before any authorized switch, follow the [release/cutover checklist](workbench-cutover.md), including unresolved parity/live/SLO blockers and whole-combination rollback. Passing local artifact smoke does not approve deployment.
-
-## Stop, inspect and back up before replacement
-
-Normal shutdown stops admission, joins provider/adapter/file transactions and retains the storage lease until physical cleanup. Killing a process may leave uncertain remote effects; never infer rollback from a lost socket or replay tools using a fresh operation ID.
-
-Maintenance is built into the **same binary**:
+按[切换清单](workbench-cutover.md)停止接受新任务、查明未决 operation，等待物理 join 后备份。离线维护由同一 binary 提供，并与宿主争用同一独占锁：
 
 ```sh
 ./pi-acp-workbenchd storage export --root /canonical/absolute/data \
   --destination /absolute/existing-parent/new-backup --confirm
 ```
 
-It must obtain the host flock and refuses a leftover socket until independently inspected. Never delete `.workbench.lock` to bypass a lease. Export does not migrate formats; reset accepts only marker-only roots. Confirmed GC performs typed Telegram compaction and removes at most 500 unreferenced content rows per pass; `gc --dry-run` reports orphan candidates without mutation. It deliberately retains entries, receipts, delivery identities and high-water marks. Read [storage maintenance](workbench-storage.md) before any mutation.
-
-Upgrade/downgrade requires matching binary/client/storage formats. Incompatible, corrupt or unversioned nonempty roots fail closed; there is no automatic migration or rollback reader. Retain old artifacts and independently validated backups, and use an isolated root to evaluate a replacement. This documentation does not authorize touching real services or user data.
+export 不转换格式，也不包含 root 外的 native 文件、Pi profile 或 workspace。不要删除 `.workbench.lock` 绕过占用；reset/GC 的适用条件见[存储维护](workbench-storage.md)。不兼容、损坏或未版本化非空 root 拒绝启动。回退必须恢复匹配的 binary、VSIX、配置与数据组合，不会撤销已发生的文件修改、费用或 Telegram 发送。

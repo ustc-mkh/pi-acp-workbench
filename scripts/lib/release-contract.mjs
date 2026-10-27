@@ -12,6 +12,7 @@ export const releaseDocuments = Object.freeze([
   'workbench-cutover.md',
   'workbench-data-migration.md',
   'workbench-vscode.md',
+  'workbench-classic-ui.md',
   'workbench-ipc.md',
   'workbench-telegram.md',
   'workbench-storage.md',

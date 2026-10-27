@@ -12,7 +12,7 @@
 - `src/workbench-*.ts`：typed IPC decoder/client、cold authoritative view、controller、VS Code entry。TS UI 不是第二套领域 reducer。
 - `webview/workbench-main.ts`：生产 browser bundle；Markdown renderer 只提供显示，不授权文件/URL/terminal 执行。
 
-后续功能差异、架构调整和验收要求只维护在[下一版重构计划](docs/workbench-next-rewrite-plan.md)。当前行为维护在 `docs/` 对应使用/协议说明，原始运行日志放 `.test-results/`，不再新增阶段 checkpoint 或执行流水。不要重建旧 daemon/client/readers 来恢复 UI 功能。
+长期设计约束维护在[架构与重构范围](docs/workbench-next-rewrite-plan.md)，候选验收范围见[P6 历史记录](docs/workbench-p6-validation.md)。当前行为维护在 `docs/` 对应使用/协议说明，原始运行日志放 `.test-results/`，不再新增阶段 checkpoint 或执行流水。不要重建旧 daemon/client/readers 来恢复 UI 功能。
 
 ## 本地验证
 

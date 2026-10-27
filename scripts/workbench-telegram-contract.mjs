@@ -434,17 +434,23 @@ try {
     'a later same-topic control notice cannot overtake a deferred image, including across restart',
   );
   await client.call({ method: 'load', session });
-  const envText = client.waitFor((batch) =>
-    batch.entries.some((entry) => inlineText(entry) === 'bot-env-hidden'),
-  );
-  finished = client.waitFor((batch) => turnFinished(batch, session));
+  // This security check concerns the committed response, not whether a
+  // particular transient batch contained an inline body. Read it after the
+  // accepted prompt settles, so chunking/subscription timing cannot lose it.
   await client.call({
     method: 'prompt',
     session,
     prompt: { parts: [{ type: 'text', text: 'check-bot-env' }] },
   });
-  await envText;
-  await finished;
+  await until(async () => {
+    const view = await client.call({ method: 'inspect', session });
+    return view.status === 'Idle' && !view.active_turn;
+  }, 'bot environment probe completes');
+  const envHistory = await client.call({ method: 'history', session });
+  const envReplies = envHistory.entries.filter((entry) =>
+    ['bot-env-hidden', 'bot-env-visible'].includes(inlineText(entry)),
+  );
+  assert.deepEqual(envReplies.map(inlineText), ['bot-env-hidden']);
   check('actual ACP child cannot inherit the bot token environment variable');
   finished = client.waitFor((batch) => turnFinished(batch, session));
   text('plan-report', thread);

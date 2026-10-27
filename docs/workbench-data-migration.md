@@ -4,13 +4,15 @@
 
 ## 当前能做什么
 
-当前发布合同是 `ipc:3`、`storage:3`、`rootPolicy:new-root-no-migration`，没有旧格式 reader、`storage import` 或自动 schema 升级。即使两个版本都标为 storage 3，缺少必需表/列或 payload 格式不同仍不兼容；不要修改 version marker、`PRAGMA user_version` 或手工补几列来强行启动。
+当前发布合同是 `ipc:3`、`storage:3`、`rootPolicy:new-root-no-migration`，没有旧格式 reader、`storage import` 或通用跨格式迁移。通过完整现有 v3 schema 与完整性校验的 2.0.x root，启动时可事务性新增模型价格倍率、context override/投影表及已删除会话标题列，保留历史、operation 和 Telegram 状态；这不代表任意早期 storage 3 root 都兼容。即使两个版本都标为 storage 3，缺少必需表/列或 payload 格式不同仍不兼容；不要修改 version marker、`PRAGMA user_version` 或手工补几列来强行启动。
 
 - **只换机器/目录、继续使用完全相同的旧组合**：停机后完整备份，并在隔离副本验证。这是旧环境搬迁，不是向新版转换；还要核对绝对路径、账号权限和 provider native 路径。
 - **开始使用新版，旧历史允许留在旧环境**：采用“新 root 启用、旧环境归档保留”。这是目前可执行的切换方式，旧会话不会自动出现在新版列表里。
 - **要求旧会话、历史、统计、Telegram 绑定等进入新版**：需要先开发并验收一个针对确定旧版本的离线转换器。当前不能直接完成这种完整迁移，不能把 export、Markdown 或复制 native 文件当成导入器。
 
 切换与回退的通用检查见[发布切换清单](workbench-cutover.md)，维护命令约束见[离线存储维护](workbench-storage.md)。
+
+兼容 2.0.x 升级应先停止宿主，备份完整 root 及关联 Pi profile，再整体更新扩展、宿主与 adapter；不要主动清空历史。以下新 root/转换器流程针对不兼容的旧格式。
 
 ## 数据逐项处理
 
@@ -26,7 +28,7 @@
 | provider/Bot 凭据                                          | 按原有凭据管理方式保留、核验权限；配置只记录环境变量名等引用    | 不打进源码、归档、迁移报告或聊天记录；不把凭据复制给不受信任目录                       |
 | 未完成任务、待授权、Started/uncertain operation            | 原样保存证据，在旧环境查原 operation；确认外部效果后人工决定    | 不自动续跑，不换 ID 重发，不把丢失连接当回滚                                           |
 
-## 现阶段推荐流程：新 root 切换，旧历史保留
+## 旧格式切换流程：新 root 启用，旧历史保留
 
 ### 1. 盘点并确定是否接受历史分开保存
 
