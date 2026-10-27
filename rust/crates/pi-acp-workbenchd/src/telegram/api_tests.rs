@@ -183,6 +183,46 @@ async fn text_silent_policy_uses_the_typed_telegram_flag_without_hiding_message_
     }
 }
 #[tokio::test]
+async fn markdown_send_and_preview_edits_use_safe_html_and_cards_can_be_deleted() {
+    let response =
+        r#"{"ok":true,"result":{"message_id":7,"chat":{"id":-100},"message_thread_id":2}}"#;
+    let message = SendMessage {
+        chat_id: ChatId::new(-100).unwrap(),
+        message_thread_id: Some(TopicId::new(2).unwrap()),
+        text: "**确认** `a < b` 😀".into(),
+        disable_notification: false,
+        reply_markup: None,
+    };
+    for edit in [false, true] {
+        let (base, request) = peer("200 OK", "", response.into()).await;
+        let api = BotClient::new(&base, "123:SECRET").unwrap();
+        if edit {
+            api.edit_message(MessageId::new(7).unwrap(), &message)
+                .await
+                .unwrap();
+        } else {
+            api.send_message(&message).await.unwrap();
+        }
+        let request = String::from_utf8(request.await.unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["parse_mode"], "HTML");
+        assert_eq!(body["text"], "<b>确认</b> <code>a &lt; b</code> 😀");
+    }
+    let (base, request) = peer("200 OK", "", r#"{"ok":true,"result":true}"#.into()).await;
+    BotClient::new(&base, "123:SECRET")
+        .unwrap()
+        .delete_message(message.chat_id, MessageId::new(7).unwrap())
+        .await
+        .unwrap();
+    let request = String::from_utf8(request.await.unwrap()).unwrap();
+    assert!(request.starts_with("POST /bot123:SECRET/deleteMessage "));
+    let body: serde_json::Value =
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body, serde_json::json!({"chat_id": -100, "message_id": 7}));
+}
+
+#[tokio::test]
 async fn verified_media_uploads_binary_multipart_with_typed_topic_and_correct_endpoint() {
     use crate::domain::image::{ImageAsset, ImageMime};
     use base64::{engine::general_purpose::STANDARD, Engine};

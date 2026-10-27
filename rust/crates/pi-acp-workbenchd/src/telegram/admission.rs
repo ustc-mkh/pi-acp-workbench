@@ -39,6 +39,7 @@ pub async fn admit_update(
             IncomingContent::Callback {
                 key,
                 query: callback_query,
+                message,
             } => {
                 query = Some(callback_query);
                 let callback_binding = store.callback(&key).await?;
@@ -70,6 +71,7 @@ pub async fn admit_update(
                             TelegramAction::Answer {
                                 session: snapshot.id.clone(),
                                 answer,
+                                card: message,
                             }
                         }
                         CallbackAction::Control {

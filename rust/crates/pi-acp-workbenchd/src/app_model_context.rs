@@ -78,7 +78,7 @@ impl CommandCore {
             ));
         }
         let stage = (!matches!(action, ManagementAction::RefreshModels)).then_some(action);
-        let refreshed = self.sync_model_context(session, stage).await?;
+        let refreshed = self.sync_model_context(session, stage, true).await?;
         if matches!(action, ManagementAction::RefreshModels) && !refreshed {
             let response = self.provider_models(session, action.clone(), None).await?;
             self.database
@@ -104,7 +104,26 @@ impl CommandCore {
         if view.harness != crate::domain::Harness::Pi {
             return Ok(());
         }
-        self.sync_model_context(session, None).await.map(|_| ())
+        self.sync_model_context(session, None, false)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn discover_model_context(
+        &self,
+        session: &SessionId,
+    ) -> Result<(), DomainError> {
+        let view = self
+            .database
+            .view(session.clone())
+            .await
+            .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        if view.harness != crate::domain::Harness::Pi {
+            return Ok(());
+        }
+        self.sync_model_context(session, None, true)
+            .await
+            .map(|_| ())
     }
 
     /// Returns true if a worker refresh was performed. Only file projections
@@ -113,6 +132,7 @@ impl CommandCore {
         &self,
         session: &SessionId,
         stage: Option<&ManagementAction>,
+        initialize_defaults: bool,
     ) -> Result<bool, DomainError> {
         let mut snapshot = self
             .database
@@ -139,7 +159,10 @@ impl CommandCore {
                 .map_err(|e| DomainError::Persistence(e.to_string()))?;
             self.project_pending_context(session, &snapshot).await?;
         }
-        if snapshot.revision == 0 {
+        // Initial metadata discovery belongs to explicit discovery/settings, not
+        // prompt admission: a read-only refresh must not interfere with replay
+        // recovery or turn startup on peers without the Pi metadata extension.
+        if snapshot.revision == 0 && !initialize_defaults {
             return Ok(false);
         }
         let observed = self
@@ -148,15 +171,22 @@ impl CommandCore {
             .lock()
             .await
             .get(session)
-            .map(|h| h.context_revision);
+            .and_then(|h| h.context_revision);
         if observed == Some(snapshot.revision) {
             return Ok(false);
         }
         // No profile lock is held across this read-only RPC. A slow worker
         // cannot prevent another workspace from using an up-to-date worker.
-        let response = self
+        let response = match self
             .provider_models(session, ManagementAction::RefreshModels, None)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            // Plain ACP peers may offer a selector without Pi's metadata extension.
+            // Do not block initial discovery, but never ignore projection failures.
+            Err(DomainError::UnsupportedFeature(_)) if snapshot.revision == 0 => return Ok(false),
+            Err(error) => return Err(error),
+        };
         let latest = self
             .database
             .context_snapshot()
@@ -178,7 +208,7 @@ impl CommandCore {
             .await
             .map_err(|e| DomainError::Persistence(e.to_string()))?;
         if let Some(handle) = self.coordinator.adapters.lock().await.get_mut(session) {
-            handle.context_revision = snapshot.revision;
+            handle.context_revision = Some(snapshot.revision);
         }
         Ok(true)
     }

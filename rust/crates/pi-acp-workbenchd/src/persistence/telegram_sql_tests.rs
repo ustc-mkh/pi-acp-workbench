@@ -65,6 +65,7 @@ async fn telegram_sql_admission_rolls_back_consumed_callback_offset_and_record_t
             action: TelegramAction::Answer {
                 session: session.clone(),
                 answer: answer.clone(),
+                card: None,
             },
         }),
         callback: Some(key.clone()),

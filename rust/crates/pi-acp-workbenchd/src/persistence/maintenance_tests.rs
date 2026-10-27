@@ -89,6 +89,7 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
                     action: TelegramAction::Answer {
                         session: session.clone(),
                         answer,
+                        card: None,
                     },
                 }),
                 callback: Some(key),

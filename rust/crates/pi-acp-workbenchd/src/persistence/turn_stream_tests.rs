@@ -136,13 +136,7 @@ async fn frozen_turn_stream_matches_legacy_oracle_across_pages_unicode_images_an
             .into_iter()
             .map(|message| format!("text:{}", message.text)),
     );
-    if expected.is_empty() {
-        expected.push("text:Turn completed.".into());
-    } else {
-        expected.push(
-            "text:Turn completed. Workspace Diff unavailable; +0 / -0 lines; 0 files.".into(),
-        );
-    }
+    expected.push("text:✅ 任务完成".into());
     let mut stream = TurnStream::new(delivery, turn, topic);
     let mut actual = vec![];
     while let Some(part) = stream.next(&payloads).await.unwrap() {

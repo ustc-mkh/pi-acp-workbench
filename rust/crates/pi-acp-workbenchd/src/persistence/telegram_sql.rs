@@ -376,6 +376,7 @@ fn admit(
                 TelegramAction::Answer {
                     session: actual,
                     answer: response,
+                    ..
                 },
             ) => session == actual && answer == response,
             (

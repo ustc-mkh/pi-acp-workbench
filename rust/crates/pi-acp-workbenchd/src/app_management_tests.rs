@@ -149,6 +149,36 @@ async fn history_search_cursor_is_filter_bound_and_clear_jobs_resume_in_bounded_
 }
 
 #[tokio::test]
+async fn discovery_loads_default_prices_and_context_before_any_profile_save() {
+    let root =
+        std::env::temp_dir().join(format!("initial-model-defaults-{}", uuid::Uuid::new_v4()));
+    let app = app_at_with_env(
+        &root,
+        HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]),
+    );
+    let session = create(&app).await;
+    assert_eq!(app.database().context_snapshot().await.unwrap().revision, 0);
+    app.command(DomainCommand::Discover {
+        session: session.clone(),
+    })
+    .await
+    .unwrap();
+    let settings = data(&app, query("model")).await;
+    let model = settings
+        .models
+        .iter()
+        .find(|m| m.model == "default")
+        .unwrap();
+    assert_eq!(model.default_context_window, Some(200000));
+    assert_eq!(model.context_window, Some(200000));
+    assert_eq!(model.default_price.as_ref().unwrap().input, 1.0);
+    assert_eq!(model.default_price.as_ref().unwrap().output, 2.0);
+    assert_eq!(app.database().context_snapshot().await.unwrap().revision, 0);
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn management_prices_stats_missing_usage_filters_and_restart_are_cold_and_durable() {
     let root = std::env::temp_dir().join(format!("management-{}", uuid::Uuid::new_v4()));
     let env = HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]);
@@ -959,7 +989,7 @@ async fn context_saves_from_two_workspaces_are_serialized_before_file_effects() 
             .get(&sessions[0])
             .unwrap()
             .context_revision,
-        2
+        Some(2)
     );
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();
@@ -1028,7 +1058,7 @@ async fn blocked_context_refresh_does_not_hold_profile_lock_or_confirm_a_stale_r
         .await
         .get_mut(&sessions[0])
         .unwrap()
-        .context_revision = 0;
+        .context_revision = None;
     fs::write(
         gate.with_extension("workspace"),
         root.join("a").to_string_lossy().as_bytes(),
@@ -1080,7 +1110,7 @@ async fn blocked_context_refresh_does_not_hold_profile_lock_or_confirm_a_stale_r
             .get(&sessions[0])
             .unwrap()
             .context_revision,
-        0
+        None
     );
     app.core.ensure_model_context(&sessions[0]).await.unwrap();
     assert_eq!(
@@ -1092,7 +1122,7 @@ async fn blocked_context_refresh_does_not_hold_profile_lock_or_confirm_a_stale_r
             .get(&sessions[0])
             .unwrap()
             .context_revision,
-        2
+        Some(2)
     );
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();

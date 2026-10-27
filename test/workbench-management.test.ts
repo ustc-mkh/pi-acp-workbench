@@ -36,6 +36,47 @@ it('persists bounded rows/follow preferences without accepting malformed values'
   expect(new Preferences(p.snapshot()).sessionRows).toBe(16);
   expect(new Preferences({ preferences: { sessionRows: 10000 } }).sessionRows).toBe(4);
 });
+it('reloads model metadata after discovery completes even when an early settings read was empty', () => {
+  const dom = new JSDOM('<main></main>');
+  vi.stubGlobal('document', dom.window.document);
+  const sent: UiCommand[] = [];
+  const panel = new ManagementPanel(
+    (m) => sent.push(m),
+    () => {},
+  );
+  const view = emptyView();
+  view.catalogue.models = [{ id: 'vendor/model' as never, name: 'Model' }];
+  panel.setView(view, [], []);
+  const first = sent.at(-1)!;
+  panel.receive({
+    type: 'management',
+    request_id: 'request_id' in first ? first.request_id : 0,
+    data: {
+      models: [],
+      naming_policy: 'follow',
+      title_model: null,
+      groups: [],
+      totals: null,
+      next_cursor: null,
+    },
+  });
+  const operations = [
+    {
+      operation: 'discovery' as never,
+      method: 'discover',
+      session: view.id,
+      status: 'completed' as const,
+    },
+  ];
+  const before = sent.length;
+  panel.setView(view, [], operations);
+  expect(sent).toHaveLength(before + 1);
+  expect(sent.at(-1)?.type).toBe('read_management');
+  panel.setView(view, [], operations);
+  expect(sent).toHaveLength(before + 1);
+  expect(sent.some((m) => m.type === 'execute')).toBe(false);
+});
+
 it('renders searchable grouped models, four prices, explicit context, titles and paged statistics as actual user actions', () => {
   const dom = new JSDOM('<main></main>');
   vi.stubGlobal('document', dom.window.document);

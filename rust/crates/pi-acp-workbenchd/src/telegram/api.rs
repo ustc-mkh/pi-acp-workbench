@@ -6,6 +6,8 @@ use std::{future::Future, sync::Arc, time::Duration};
 pub enum ApiError {
     #[error("Telegram topic title is unchanged")]
     TopicNotModified,
+    #[error("Telegram message text is unchanged")]
+    MessageNotModified,
     #[error("Telegram transport failed")]
     Transport,
     #[error("invalid Telegram API response")]
@@ -80,6 +82,7 @@ impl WireUpdate {
                 Some(key) => IncomingContent::Callback {
                     key,
                     query: callback.id,
+                    message: Some(message.message_id),
                 },
                 None => IncomingContent::Unsupported,
             };
@@ -159,6 +162,13 @@ pub trait BotApi: Clone + Send + Sync + 'static {
         &self,
         _media: &SendMedia,
     ) -> impl Future<Output = Result<WireMessage, ApiError>> + Send {
+        async { Err(ApiError::Protocol) }
+    }
+    fn delete_message(
+        &self,
+        _chat: ChatId,
+        _id: MessageId,
+    ) -> impl Future<Output = Result<(), ApiError>> + Send {
         async { Err(ApiError::Protocol) }
     }
     fn answer_callback(
@@ -267,6 +277,14 @@ impl BotClient {
                 && response
                     .description
                     .as_deref()
+                    .is_some_and(|s| s.contains("message is not modified"))
+            {
+                return Err(ApiError::MessageNotModified);
+            }
+            if response.error_code == Some(400)
+                && response
+                    .description
+                    .as_deref()
                     .is_some_and(|s| s.contains("TOPIC_NOT_MODIFIED"))
             {
                 return Err(ApiError::TopicNotModified);
@@ -309,7 +327,29 @@ impl BotApi for BotClient {
         .await
     }
     async fn send_message(&self, message: &SendMessage) -> Result<WireMessage, ApiError> {
-        self.call("sendMessage", message).await
+        #[derive(Serialize)]
+        struct HtmlMessage<'a> {
+            #[serde(flatten)]
+            message: &'a SendMessage,
+            parse_mode: &'static str,
+        }
+        let mut formatted = message.clone();
+        formatted.text = super::markdown::to_telegram_html(&message.text);
+        match self
+            .call(
+                "sendMessage",
+                &HtmlMessage {
+                    message: &formatted,
+                    parse_mode: "HTML",
+                },
+            )
+            .await
+        {
+            // A definite API rejection did not send a message. Unsupported or
+            // over-budget formatting must not strand an authorization request.
+            Err(ApiError::Response { code: 400, .. }) => self.call("sendMessage", message).await,
+            result => result,
+        }
     }
     async fn edit_message(
         &self,
@@ -321,16 +361,33 @@ impl BotApi for BotClient {
             chat_id: ChatId,
             message_id: MessageId,
             text: &'a str,
+            parse_mode: &'static str,
         }
-        self.call(
-            "editMessageText",
-            &Edit {
-                chat_id: message.chat_id,
+        let text = super::markdown::to_telegram_html(&message.text);
+        let result = self
+            .call(
+                "editMessageText",
+                &Edit {
+                    chat_id: message.chat_id,
+                    message_id: id,
+                    text: &text,
+                    parse_mode: "HTML",
+                },
+            )
+            .await;
+        match result {
+            Err(ApiError::MessageNotModified) => Ok(WireMessage {
                 message_id: id,
-                text: &message.text,
-            },
-        )
-        .await
+                chat: WireChat {
+                    id: message.chat_id,
+                    is_forum: message.message_thread_id.is_some(),
+                },
+                message_thread_id: message.message_thread_id,
+                from: None,
+                text: Some(message.text.clone()),
+            }),
+            other => other,
+        }
     }
     async fn send_media(&self, media: &SendMedia) -> Result<WireMessage, ApiError> {
         use crate::domain::image::ImageMime;
@@ -363,6 +420,27 @@ impl BotApi for BotClient {
             .await
             .map_err(|_| ApiError::Transport)?;
         Self::receive(response).await
+    }
+    async fn delete_message(&self, chat_id: ChatId, message_id: MessageId) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Delete {
+            chat_id: ChatId,
+            message_id: MessageId,
+        }
+        if self
+            .call::<_, bool>(
+                "deleteMessage",
+                &Delete {
+                    chat_id,
+                    message_id,
+                },
+            )
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(ApiError::Protocol)
+        }
     }
     async fn answer_callback(&self, query: &str, text: &str) -> Result<(), ApiError> {
         #[derive(Serialize)]

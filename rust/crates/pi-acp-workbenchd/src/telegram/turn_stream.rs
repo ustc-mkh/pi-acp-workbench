@@ -12,6 +12,18 @@ use crate::{
 };
 use std::collections::VecDeque;
 
+pub(super) fn completion_text(summary: &str) -> String {
+    if summary.starts_with("Turn completed.") {
+        "✅ 任务完成".into()
+    } else if summary.starts_with("Turn cancelled.") {
+        "⏹ 任务已停止".into()
+    } else if summary.starts_with("Turn failed.") {
+        "❌ 任务失败".into()
+    } else {
+        summary.to_owned()
+    }
+}
+
 struct TextCursor {
     reference: Option<crate::domain::query::ContentRef>,
     next: Option<SafeInteger>,
@@ -141,9 +153,10 @@ impl HistoryStream {
             current: None,
         })
     }
-    pub fn into_input(mut self, session: &crate::domain::SessionId) -> Self {
-        if self.prefix.is_some() {
-            self.prefix = Some(format!("User input · session {session}"));
+    pub fn into_input(mut self, _session: &crate::domain::SessionId) -> Self {
+        self.prefix = None;
+        if let Some(first) = self.remaining.front_mut() {
+            first.text.buffer.insert_str(0, "你（VS Code）：\n");
         }
         self
     }
@@ -383,9 +396,10 @@ impl TurnStream {
             if !self.fragment.is_empty() {
                 return Ok(Some(self.flush()));
             }
-            if let Some(mut summary) = self.completion.take() {
+            if let Some(summary) = self.completion.take() {
+                let mut summary = completion_text(&summary);
                 if self.history_skipped && !self.emitted {
-                    summary.push_str(" Output already exported in this topic.");
+                    summary.push_str("\n本轮回复已在此话题中显示。");
                 }
                 self.completion_emitted = true;
                 return Ok(Some(DeliveryPart::Message(SendMessage {
@@ -398,10 +412,11 @@ impl TurnStream {
             }
             self.finished = true;
             if !self.emitted && !self.completion_emitted {
+                self.completion_emitted = true;
                 self.fragment = if self.history_skipped {
-                    "Turn completed. Output already exported in this topic."
+                    "✅ 任务完成\n本轮回复已在此话题中显示。"
                 } else {
-                    "Turn completed."
+                    "✅ 任务完成"
                 }
                 .into();
                 return Ok(Some(self.flush()));

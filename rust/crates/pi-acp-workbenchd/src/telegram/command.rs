@@ -20,6 +20,8 @@ pub enum TelegramAction {
     Answer {
         session: SessionId,
         answer: InteractionAnswer,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card: Option<super::types::MessageId>,
     },
     Control(ControlCommand),
     Rejected(RejectionReason),
@@ -145,6 +147,7 @@ fn answer(
     Ok(TelegramAction::Answer {
         session: snapshot.id.clone(),
         answer,
+        card: None,
     })
 }
 fn preference_value(args: &str) -> Result<Option<bool>, RejectionReason> {
@@ -290,6 +293,7 @@ pub fn parse_text(
                     return Ok(TelegramAction::Answer {
                         session: snapshot.id.clone(),
                         answer,
+                        card: None,
                     });
                 }
                 return answer(snapshot, interaction, value.trim().into(), now);

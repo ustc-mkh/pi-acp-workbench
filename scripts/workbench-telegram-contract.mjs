@@ -151,6 +151,8 @@ const server = createServer(async (request, response) => {
   } else if (method === 'createForumTopic') {
     topicNames.push(body.name);
     result = { message_thread_id: 100 + 1000 * ++topics };
+  } else if (method === 'deleteMessage') {
+    result = true;
   } else if (method === 'sendMessage') {
     if (rateLimit) {
       rateLimit = false;
@@ -336,11 +338,7 @@ try {
     'IPC permission → Telegram UI → typed response; wrong-topic/unauthorized callbacks cannot consume it',
   );
   await until(
-    () =>
-      sent.some(
-        (message) =>
-          message.text.startsWith('Turn completed.') && message.text.includes('Workspace Diff'),
-      ),
+    () => sent.some((message) => message.text.startsWith('✅ 任务完成')),
     'permission completion delivery',
   );
   rateLimit = true;
@@ -416,16 +414,17 @@ try {
   assert.equal(mediaSent[0].method, 'sendPhoto');
   assert.equal(mediaSent[0].file.filename, `${imageRow.image.id}.png`);
   await until(
-    () => sent.some((message) => message.text === laterNotice),
+    () => sent.some((message) => message.text.includes(laterNotice.slice(0, 24))),
     'later notice follows image after restart',
   );
+  const laterSent = sent.find((message) => message.text.includes(laterNotice.slice(0, 24)));
+  assert(laterSent);
   assert.deepEqual(sendOrder.slice(imageOrderStart), [
-    'text:User input · session ' + session,
-    'text:image-output',
+    'text:你（VS Code）：\nimage-output',
     'image',
     'text:image caption',
-    'text:Turn completed. Workspace Diff partial; +0 / -0 lines; 0 files.',
-    `text:${laterNotice}`,
+    'text:✅ 任务完成',
+    `text:${laterSent.text}`,
   ]);
   assert.equal((await trace()).filter((record) => record.text === 'image-output').length, 1);
   check(
@@ -534,20 +533,24 @@ try {
     () =>
       sent
         .slice(mediaStart)
-        .some((message) => message.message_thread_id === thread && message.text === laterNotice),
+        .some(
+          (message) =>
+            message.message_thread_id === thread && message.text.includes(laterNotice.slice(0, 24)),
+        ),
     'same-topic notice after held upload completes',
   );
-  assert.deepEqual(
-    sent
-      .slice(mediaStart)
-      .filter(
-        (message) =>
-          message.message_thread_id === thread &&
-          [laterNotice, 'image caption'].includes(message.text),
-      )
-      .map((message) => message.text),
-    ['image caption', laterNotice],
-  );
+  const heldOrder = sent
+    .slice(mediaStart)
+    .filter(
+      (message) =>
+        message.message_thread_id === thread &&
+        [laterNotice, 'image caption'].some(
+          (text) => text && message.text.includes(text.slice(0, 24)),
+        ),
+    )
+    .map((message) => message.text);
+  assert.equal(heldOrder[0], 'image caption');
+  assert(heldOrder[1].includes(laterNotice.slice(0, 24)));
   check(
     'an in-flight image HTTP request does not block another topic, while later same-topic output remains FIFO',
   );
@@ -1369,8 +1372,8 @@ try {
     sent.some(
       (message) =>
         message.message_thread_id === historyThread &&
-        message.text.startsWith('Turn completed. Workspace Diff') &&
-        message.text.includes('Output already exported in this topic.'),
+        message.text.startsWith('✅ 任务完成') &&
+        message.text.includes('本轮回复已在此话题中显示。'),
     ),
   );
   await stop(daemon);
@@ -1602,13 +1605,15 @@ try {
     () =>
       sent.some(
         (message) =>
-          message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+          message.message_thread_id === flowThread &&
+          message.text === '你（VS Code）：\ndesktop input mirror',
       ) && flowEcho('desktop input mirror'),
     'S4 automatic desktop input and output synchronization',
   );
   const mirrorCount = sent.filter(
     (message) =>
-      message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+      message.message_thread_id === flowThread &&
+      message.text === '你（VS Code）：\ndesktop input mirror',
   ).length;
   flowStart = sent.length;
   text('/history all', flowThread);
@@ -1626,7 +1631,8 @@ try {
   assert.equal(
     sent.filter(
       (message) =>
-        message.message_thread_id === flowThread && message.text === 'desktop input mirror',
+        message.message_thread_id === flowThread &&
+        message.text === '你（VS Code）：\ndesktop input mirror',
     ).length,
     mirrorCount,
   );

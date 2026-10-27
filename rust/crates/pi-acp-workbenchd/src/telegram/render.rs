@@ -123,11 +123,15 @@ pub fn status(snapshot: &SessionView) -> String {
     text
 }
 fn interaction_view(interaction: &Interaction) -> (String, Vec<(String, InteractionResponse)>) {
-    let mut body = format!("{}\n{}\n", interaction.title, interaction.detail);
+    let heading = if interaction.kind == InteractionKind::Permission {
+        "🔐 需要授权"
+    } else {
+        "❓ 需要你回答"
+    };
+    let mut body = format!("{heading}：{}\n{}\n", interaction.title, interaction.detail);
     let mut choices = vec![];
     if interaction.kind == InteractionKind::Permission {
         for option in &interaction.options {
-            body.push_str(&format!("\n{}: {}", option.id, option.label));
             choices.push((
                 option.label.clone(),
                 InteractionResponse::Permission {
@@ -165,7 +169,7 @@ fn interaction_view(interaction: &Interaction) -> (String, Vec<(String, Interact
                 FieldKind::Boolean if interaction.fields.len() == 1 => {
                     for value in [true, false] {
                         choices.push((
-                            value.to_string(),
+                            if value { "是".into() } else { "否".into() },
                             InteractionResponse::Form {
                                 fields: BTreeMap::from([(
                                     field.name.clone(),
@@ -180,9 +184,18 @@ fn interaction_view(interaction: &Interaction) -> (String, Vec<(String, Interact
             }
         }
     }
-    body.push_str(&format!("\n\nInteraction: {}\n单字段可直接回复；多字段/多选用 /answer {} {{\"Form\":{{\"fields\":...}}}}。", interaction.id, interaction.id));
-    choices.push(("Decline".into(), InteractionResponse::Decline));
-    choices.push(("Cancel".into(), InteractionResponse::Cancel));
+    if interaction.kind == InteractionKind::Permission || !choices.is_empty() {
+        body.push_str("\n请选择下方按钮。");
+    } else if interaction.fields.len() == 1 {
+        body.push_str("\n直接发送回复即可。");
+    } else {
+        body.push_str(&format!(
+            "\n多字段/多选请用 /answer {} {{\"Form\":{{\"fields\":...}}}} 回复。",
+            interaction.id
+        ));
+    }
+    choices.push(("拒绝".into(), InteractionResponse::Decline));
+    choices.push(("取消".into(), InteractionResponse::Cancel));
     (body, choices)
 }
 #[derive(Clone, Debug)]
@@ -227,7 +240,7 @@ pub async fn render(
             {
                 if let Some(summary) = payloads.completion(session.clone(), event.revision).await? {
                     text.push_str("\n\n");
-                    text.push_str(&summary);
+                    text.push_str(&super::turn_stream::completion_text(&summary));
                 }
             }
             Ok(text_parts(topic, &text))

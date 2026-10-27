@@ -162,7 +162,9 @@ pub(crate) async fn dispatch(
             submit_prompt(context, record, session, prompt, record.operation.clone()).await?;
             return Ok(None);
         }
-        TelegramAction::Answer { session, answer } => {
+        TelegramAction::Answer {
+            session, answer, ..
+        } => {
             domain(
                 context,
                 record,
@@ -594,6 +596,46 @@ pub(crate) async fn execute_record(
         // Keep the durable classification pending. Accepted domain operations
         // settle in the host; restart can recover their immutable receipts.
         return Err(DomainError::Backpressure);
+    }
+    // Cleanup is presentation, only after an accepted answer. The source card
+    // ID is durably frozen with the answer. If cleanup is transiently rejected,
+    // keep the inbox pending; replay reads the immutable domain receipt rather
+    // than submitting the answer a second time.
+    if dispatched.is_ok() {
+        if let TelegramAction::Answer {
+            card: Some(card), ..
+        } = &record.command.action
+        {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                context.api.delete_message(record.command.topic.chat, *card),
+            )
+            .await;
+            match result {
+                Ok(Ok(()))
+                | Ok(Err(super::api::ApiError::Response {
+                    code: 400 | 403, ..
+                }))
+                | Ok(Err(super::api::ApiError::Protocol)) => {}
+                result => {
+                    let delay = match result {
+                        Ok(Err(error)) => error.retry_after(),
+                        _ => 5,
+                    };
+                    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(delay);
+                    while tokio::time::Instant::now() < until {
+                        if context.app.is_closing() {
+                            return Err(DomainError::Backpressure);
+                        }
+                        tokio::time::sleep_until(until.min(
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+                        ))
+                        .await;
+                    }
+                    return Ok(());
+                }
+            }
+        }
     }
     let menu = matches!(
         &record.command.action,

@@ -416,6 +416,25 @@ it('new session subscribes and discovers concurrently and uses the confirmed emp
   expect(peer.requests.map((r) => r.command.method)).toEqual(['create', 'attach', 'discover']);
 });
 
+it('removes an unselected session without loading it or changing selection', async () => {
+  const { peer, controller } = await setup();
+  const action = controller.receive({ type: 'remove_session', session: 'other' });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  expect(peer.requests[2].command).toEqual({ method: 'inspect', session: 'other' });
+  peer.query(peer.requests[2], 'view', { ...emptyView(), id: 'other' });
+  await expect.poll(() => peer.requests.length).toBe(4);
+  expect(peer.requests[3].command).toEqual({ method: 'remove', session: 'other' });
+  peer.reply(peer.requests[3], { Accepted: { session: 'other', revision: 1 } });
+  await action;
+  expect(controller.snapshot.selected).toBe('session');
+  expect(peer.requests.map((x) => x.command.method)).toEqual([
+    'list',
+    'attach',
+    'inspect',
+    'remove',
+  ]);
+});
+
 it('releases an unselected session through its authorized cancel receipt without loading or removing it', async () => {
   const { peer, controller } = await setup();
   const action = controller.receive({ type: 'release_session', session: 'other' });

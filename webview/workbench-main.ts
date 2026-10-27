@@ -250,7 +250,6 @@ historySearch.addEventListener('keydown', (event) => {
 const clearProgress = element('section');
 const undoSelections = new Map<string, Set<string>>();
 let historyReleaseConfirm: string | undefined;
-let historyRemoveConfirm: string | undefined;
 const sessions = element('div');
 sessions.id = 'history-items';
 sessions.setAttribute('role', 'listbox');
@@ -1658,26 +1657,13 @@ function render() {
     const removeHistory = button(
       '删除会话',
       () => {
-        if (historyRemoveConfirm === session.id && selected === session.id) {
-          historyRemoveConfirm = undefined;
-          mutate({ method: 'remove', session: session.id });
-        } else {
-          historyRemoveConfirm = session.id;
-          if (selected !== session.id) send({ type: 'select', session: session.id });
-          else schedule();
-        }
+        send({ type: 'remove_session', session: session.id });
       },
       !state.trusted,
     );
     removeHistory.className = 'history-delete';
-    removeHistory.setAttribute(
-      'aria-label',
-      historyRemoveConfirm === session.id
-        ? `确认删除会话：${session.title || session.id}`
-        : `删除会话：${session.title || session.id}`,
-    );
-    removeHistory.title =
-      historyRemoveConfirm === session.id ? '再次点击确认删除（保留原生数据）' : '删除会话';
+    removeHistory.setAttribute('aria-label', `删除会话：${session.title || session.id}`);
+    removeHistory.title = '删除会话（保留原生数据）';
     removeHistory.innerHTML =
       '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M7 5.5V3h6v2.5M5 5.5l.8 11h8.4l.8-11M8 8v5.5M12 8v5.5"/></svg>';
     const running = ['Running', 'Waiting', 'Cancelling'].includes(

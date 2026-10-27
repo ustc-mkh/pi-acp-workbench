@@ -83,7 +83,11 @@ export class ManagementPanel {
     this.sessions = sessions;
     let updated = false;
     for (const op of operations)
-      if (op.method === 'manage' && op.status === 'completed' && !this.seen.has(op.operation)) {
+      if (
+        ['manage', 'discover'].includes(op.method) &&
+        op.status === 'completed' &&
+        !this.seen.has(op.operation)
+      ) {
         this.seen.add(op.operation);
         while (this.seen.size > 64) this.seen.delete(this.seen.values().next().value!);
         updated = true;

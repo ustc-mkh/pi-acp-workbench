@@ -462,6 +462,7 @@ async fn menu_payload_is_frozen_for_retry_bounded_and_expired_rendering_has_no_b
             content: IncomingContent::Callback {
                 key: first_key.clone(),
                 query: "expired-menu".into(),
+                message: None,
             },
         },
         None,

@@ -68,6 +68,7 @@ export const uiCommand = tagged('type', {
   clear_history_batch: object({ type: literal('clear_history_batch'), job: operationId }),
   create: object({ type: literal('create'), command: clientCommand }),
   select: object({ type: literal('select'), session: sessionId }),
+  remove_session: object({ type: literal('remove_session'), session: sessionId }),
   release_session: object({
     type: literal('release_session'),
     session: sessionId,

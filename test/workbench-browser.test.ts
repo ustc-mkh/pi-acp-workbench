@@ -1080,20 +1080,15 @@ it('restores the offline Markdown preview without starting a host task, and keep
   expect(b.sent).toHaveLength(before);
 });
 
-it('uses the history trash control to select first and require a second explicit deletion click', async () => {
+it('deletes a history session with one click without selecting it first', async () => {
   const b = await browser();
+  b.state.selected = undefined;
+  b.state.view = undefined;
   b.update();
   await expect.poll(() => b.document.querySelectorAll('.history-delete').length).toBe(1);
   b.document.querySelector<HTMLButtonElement>('.history-delete')!.click();
-  expect(b.sent.some((m) => m.type === 'execute')).toBe(false);
-  await expect
-    .poll(() => b.document.querySelector('.history-delete')?.getAttribute('aria-label'))
-    .toMatch(/^确认删除会话/);
-  b.document.querySelector<HTMLButtonElement>('.history-delete')!.click();
-  expect(b.sent.at(-1)).toMatchObject({
-    type: 'execute',
-    command: { method: 'remove', session: 'session' },
-  });
+  expect(b.sent.at(-1)).toEqual({ type: 'remove_session', session: 'session' });
+  expect(b.sent.some((m) => m.type === 'select')).toBe(false);
 });
 
 it('folds settled intermediate narration but keeps final text and output images in the conversation', async () => {

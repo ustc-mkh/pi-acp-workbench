@@ -59,7 +59,7 @@ struct AdapterHandle {
     last_used: Arc<std::sync::atomic::AtomicU64>,
     last_user_input_at: u64,
     resident_since: u64,
-    context_revision: u64,
+    context_revision: Option<u64>,
 }
 impl AdapterHandle {
     async fn cancel_and_stop(self) -> Result<(), DomainError> {
@@ -1181,7 +1181,7 @@ impl CommandCore {
                 "provider discovery did not become ready".into(),
             ));
         }
-        self.ensure_model_context(&session).await?;
+        self.discover_model_context(&session).await?;
         // Discovery must show the same inherited choices that the next prompt
         // will use, rather than the provider's fresh native defaults.
         let observed = self
@@ -1412,7 +1412,7 @@ impl CommandCore {
                 pins,
                 last_used: Arc::new(std::sync::atomic::AtomicU64::new(activity.1)),
                 last_user_input_at: activity.0,
-                context_revision: 0,
+                context_revision: None,
                 resident_since: worker_retention::now(),
             },
         );

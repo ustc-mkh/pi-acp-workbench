@@ -304,6 +304,16 @@ export class WorkbenchController {
           this.emit();
           break;
         }
+        case 'remove_session': {
+          const view = await this.client.call({ method: 'inspect', session: message.session });
+          const token = await this.authorize(view.cwd);
+          this.assertAuthorization(token);
+          await this.execute({ method: 'remove', session: message.session });
+          if (this.selected?.id === message.session) await this.ports.saveSelection?.(undefined);
+          this.invalidateList();
+          this.state.sessions = this.state.sessions.filter((row) => row.id !== message.session);
+          break;
+        }
         case 'release_session': {
           const view = await this.client.call({ method: 'inspect', session: message.session });
           const token = await this.authorize(view.cwd);

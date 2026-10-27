@@ -7,6 +7,7 @@ mod delivery;
 mod delivery_scheduler;
 mod directories;
 mod execution;
+mod markdown;
 mod menu;
 mod polling;
 mod preview;

@@ -68,6 +68,18 @@ The complete mobile path has a synthetic binary/Bot contract, including pre-task
 
 The pre-release schema now additionally requires `telegram_callbacks.action_kind` and typed `Answer`/`Control` callback bodies. Older experimental roots are rejected, not migrated or reset. Preserve their binary/root together and validate this build with a fresh isolated root.
 
+## Conversation presentation
+
+Telegram presents Agent output as one coalesced message per turn: while the turn is running, preview edits update that message; the durable final turn delivery edits it to the beginning of the complete archived reply and sends any remaining UTF-16-bounded parts in order, then sends a short Chinese completion/stop/failure notice. Preview tails are bounded and disposable; the durable archive, not the preview cache, supplies the full final reply. A preview edit that Telegram can no longer apply falls back to a new message. User input mirrored from VS Code carries its speaker label in the same message as its content, rather than as a separate header-only message. Authorization questions remain a single actionable card with contextual choices and cancellation controls.
+
+This follows the v1.0.0 conversation shape while retaining the current durable outbox, topic scoping, retries and deduplication. It does not expose internal Thought/tool traces as user dialogue; archived Agent text and images remain in transcript order. Completion status is a separate notification, not appended to the Agent's Markdown reply.
+
+## Message formatting and interaction cards
+
+Outgoing text (including questions, final replies and preview edits) renders CommonMark bold/italic/strikethrough, inline/fenced code, headings, lists, links, and pipe-delimited Markdown tables. Since Telegram's HTML message format has no native table element, tables become readable per-row key/value lines (header labels followed by each cell); inline formatting in cells is preserved. Raw HTML and link attributes are escaped; only HTTP(S)/mailto links are clickable. A definite `sendMessage` formatting rejection falls back to the original plain text, so formatting cannot hide a question or authorization request. Existing UTF-16 chunking is unchanged; a very large table may be split across messages, and formatting spanning chunk boundaries may be incomplete. This is not a full desktop Markdown/table renderer.
+
+An accepted interaction-button answer deletes its originating card message, not just the callback spinner. The message ID is frozen in the durable classified answer. Cleanup happens only after the host accepts the answer; transient deletion failures keep that inbox record pending and reuse the original answer receipt on retry (including after restart). Rate limits delay cleanup retries, without re-running the Agent or answering twice. Telegram may prohibit deletion of old messages or messages without adequate permissions; permanent 400/403 responses do not undo the accepted answer. Free-text answers and responses submitted outside Telegram do not currently remove earlier Telegram cards; menu/navigation cards are unchanged.
+
 ## Explicit history batches
 
 `/history` and `/history all` reassemble adjacent same-role entries into a provider message only when the provider message identity matches; absent/changed IDs remain separate. The recent window stays bounded to 200 raw committed records, so unusually many Thought/tool records may yield fewer than 20 messages. Thoughts and raw tool text are excluded; tool image captions are not copied as raw tool text.

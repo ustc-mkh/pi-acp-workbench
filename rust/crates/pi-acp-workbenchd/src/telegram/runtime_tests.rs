@@ -37,6 +37,8 @@ struct FakeState {
     topic_edits: Vec<(TopicId, String)>,
     forum: bool,
     answers: usize,
+    deleted: Vec<(ChatId, MessageId)>,
+    fail_delete: bool,
     lose_topic_response: bool,
     fail_send: bool,
     fail_text: Option<String>,
@@ -108,6 +110,17 @@ impl BotApi for Fake {
             request.message_thread_id,
             Some(request.text.clone()),
         ))
+    }
+    async fn delete_message(&self, chat: ChatId, id: MessageId) -> Result<(), ApiError> {
+        let mut state = self.0.lock().await;
+        if std::mem::take(&mut state.fail_delete) {
+            return Err(ApiError::Response {
+                code: 429,
+                retry_after: Some(1),
+            });
+        }
+        state.deleted.push((chat, id));
+        Ok(())
     }
     async fn send_media(&self, request: &SendMedia) -> Result<WireMessage, ApiError> {
         let mut state = self.0.lock().await;
@@ -295,7 +308,22 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
         }),
     });
     poll_once(&context).await.unwrap();
+    assert!(api.0.lock().await.deleted.is_empty());
+    assert!(matches!(
+        &context.store.pending(32).await.unwrap()[0].command.action,
+        super::command::TelegramAction::Answer { card: Some(card), .. } if card.get() == 3
+    ));
+    api.0.lock().await.fail_delete = true;
     execute(&context).await;
+    assert!(api.0.lock().await.deleted.is_empty());
+    assert_eq!(context.store.pending(32).await.unwrap().len(), 1);
+    // Cleanup retries use the accepted answer receipt, not a second answer.
+    execute(&context).await;
+    assert_eq!(
+        api.0.lock().await.deleted,
+        vec![(topic.chat, MessageId::new(3).unwrap())]
+    );
+    assert!(context.store.pending(32).await.unwrap().is_empty());
     finished(&mut events).await;
     let before = context
         .inspect(&session)
@@ -332,7 +360,7 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
         .await
         .sent
         .iter()
-        .any(|message| message.text.starts_with("Turn completed.")));
+        .any(|message| message.text.starts_with("✅ 任务完成")));
     api.0
         .lock()
         .await
@@ -439,9 +467,7 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
     ));
     assert_eq!(api.0.lock().await.media_attempts, 1);
     let input_sequence = api.0.lock().await.sequence.clone();
-    assert_eq!(input_sequence.len(), 2);
-    assert!(input_sequence[0].starts_with("text:User input · session"));
-    assert_eq!(input_sequence[1], "text:image-output");
+    assert_eq!(input_sequence, ["text:你（VS Code）：\nimage-output"]);
     delivery_tests::notice(&first, &topic, "later notice".into(), 0).await;
     first.shutdown_checked().await.unwrap();
     let peer_before = tokio::fs::read(&trace).await.unwrap();
@@ -483,11 +509,11 @@ async fn image_delivery_retries_after_restart_from_immutable_archive_in_order_wi
     assert_eq!(state.media[0].asset.bytes(), original);
     assert_eq!(state.media[0].message_thread_id, topic.thread);
     assert_eq!(
-        &state.sequence[2..],
+        &state.sequence[input_sequence.len()..],
         [
             "image",
             "text:image caption",
-            "text:Turn completed. Workspace Diff partial; +0 / -0 lines; 0 files.",
+            "text:✅ 任务完成",
             "text:later notice"
         ]
     );

@@ -404,6 +404,7 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
     let callback = || IncomingContent::Callback {
         key: key.clone(),
         query: "query".into(),
+        message: None,
     };
     let mut wrong_topic = incoming(1, callback());
     wrong_topic.topic = topic(2);

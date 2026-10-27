@@ -221,7 +221,11 @@ pub struct IncomingUpdate {
 #[derive(Clone, Debug)]
 pub enum IncomingContent {
     Text(String),
-    Callback { key: CallbackKey, query: String },
+    Callback {
+        key: CallbackKey,
+        query: String,
+        message: Option<MessageId>,
+    },
     Unsupported,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

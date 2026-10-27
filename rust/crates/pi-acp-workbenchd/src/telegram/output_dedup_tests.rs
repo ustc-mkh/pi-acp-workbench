@@ -166,7 +166,7 @@ async fn prior_history_ack_filters_multiple_full_automatic_pages_but_keeps_relia
     assert_eq!(state.sent.len(), before + 1);
     assert_eq!(
         state.sent[before].text,
-        "Turn completed. Output already exported in this topic."
+        "✅ 任务完成\n本轮回复已在此话题中显示。"
     );
     drop(state);
     assert!(app
