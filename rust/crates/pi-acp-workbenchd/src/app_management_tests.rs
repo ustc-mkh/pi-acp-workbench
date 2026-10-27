@@ -149,20 +149,71 @@ async fn history_search_cursor_is_filter_bound_and_clear_jobs_resume_in_bounded_
 }
 
 #[tokio::test]
-async fn discovery_loads_default_prices_and_context_before_any_profile_save() {
+async fn profile_metadata_refresh_preserves_overrides_and_a_running_session() {
+    let root = std::env::temp_dir().join(format!("profile-model-live-{}", uuid::Uuid::new_v4()));
+    let mut config = config_at(
+        &root,
+        HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]),
+    );
+    config.sessions.max_workers = 1;
+    let app = WorkbenchApp::new(config).unwrap();
+    let session = create(&app).await;
+    manage(
+        &app,
+        &session,
+        ManagementAction::Context {
+            model: "default".into(),
+            context_window: Some(256000),
+        },
+    )
+    .await;
+    manage(
+        &app,
+        &session,
+        ManagementAction::Model {
+            model: "default".into(),
+            hidden: true,
+            price: Some(Price {
+                input: 3.0,
+                output: 4.0,
+                cache_read: 0.2,
+                cache_write: 2.0,
+            }),
+        },
+    )
+    .await;
+    let mut events = app.subscribe();
+    prompt(&app, &session, "permission").await;
+    wait_interaction(&mut events).await;
+    let before = inspect_view(&app, &session).await;
+    app.refresh_model_defaults().await.unwrap();
+    let after = inspect_view(&app, &session).await;
+    assert_eq!(
+        serde_json::to_vec(&before).unwrap(),
+        serde_json::to_vec(&after).unwrap()
+    );
+    let model = data(&app, query("model")).await.models.remove(0);
+    assert_eq!(model.default_price.unwrap().input, 1.0);
+    assert_eq!(model.price.unwrap().input, 3.0);
+    assert_eq!(model.default_context_window, Some(200000));
+    assert_eq!(model.context_window, Some(256000));
+    assert!(model.hidden);
+    assert_eq!(app.database().context_snapshot().await.unwrap().revision, 1);
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn profile_refresh_loads_default_prices_and_context_without_any_session() {
     let root =
         std::env::temp_dir().join(format!("initial-model-defaults-{}", uuid::Uuid::new_v4()));
     let app = app_at_with_env(
         &root,
         HashMap::from([("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into())]),
     );
-    let session = create(&app).await;
-    assert_eq!(app.database().context_snapshot().await.unwrap().revision, 0);
-    app.command(DomainCommand::Discover {
-        session: session.clone(),
-    })
-    .await
-    .unwrap();
+    assert!(app.list(None, Some(10)).await.unwrap().sessions.is_empty());
+    app.refresh_model_defaults().await.unwrap();
+    assert!(app.list(None, Some(10)).await.unwrap().sessions.is_empty());
     let settings = data(&app, query("model")).await;
     let model = settings
         .models
@@ -471,6 +522,162 @@ async fn provider_context_settlement_loss_is_uncertain_and_never_reissued() {
     fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
+async fn removed_session_usage_keeps_last_title_for_single_and_batch_removal_after_upgrade() {
+    use crate::domain::query::SessionFilter;
+    let (app, root) = app();
+    let single = create(&app).await;
+    let batch = create(&app).await;
+    for (session, title) in [
+        (&single, "旧名称"),
+        (&single, "最终名称"),
+        (&batch, "批量保留名称"),
+    ] {
+        manage(
+            &app,
+            session,
+            ManagementAction::Rename {
+                title: title.into(),
+            },
+        )
+        .await;
+    }
+    app.shutdown_checked().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    // An existing 2.0.x root did not retain removal names.
+    sql.execute_batch("ALTER TABLE removed_sessions DROP COLUMN title")
+        .unwrap();
+    for session in [&single, &batch] {
+        sql.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source) VALUES(?1,?1,(SELECT created_seq FROM sessions WHERE id=?1),'Pi','default','inference',10,100,20,0,0,'fixture')",[session.as_str()]).unwrap();
+    }
+    drop(sql);
+    let app = app_at(&root);
+    let before = data(&app, query("session")).await;
+    assert_eq!(before.groups[0].label.as_deref(), Some("#2 批量保留名称"));
+    assert_eq!(before.groups[1].label.as_deref(), Some("#1 最终名称"));
+    app.command_durable(
+        OperationId::generate(),
+        DomainCommand::RemoveSession(single.clone()),
+    )
+    .await
+    .unwrap();
+    let preview = app
+        .command_durable(
+            OperationId::generate(),
+            DomainCommand::PrepareHistoryClear {
+                filter: SessionFilter {
+                    text: "批量保留名称".into(),
+                    harness: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let CommandReceipt::HistoryClear { report } = preview else {
+        panic!("preview");
+    };
+    app.command_durable(
+        OperationId::generate(),
+        DomainCommand::ClearHistoryBatch { job: report.job },
+    )
+    .await
+    .unwrap();
+    assert!(app.list(None, None).await.unwrap().sessions.is_empty());
+    let after = data(&app, query("session")).await;
+    assert_eq!(
+        serde_json::to_vec(&before).unwrap(),
+        serde_json::to_vec(&after).unwrap()
+    );
+    app.shutdown_checked().await.unwrap();
+    let app = app_at(&root);
+    assert_eq!(
+        serde_json::to_vec(&before).unwrap(),
+        serde_json::to_vec(&data(&app, query("session")).await).unwrap()
+    );
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn statistics_sort_before_paging_by_cost_and_numeric_session_number_without_losing_ties() {
+    let (app, root) = app();
+    let mut sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let tx = sql.transaction().unwrap();
+    for i in 0..235 {
+        let model = format!("model-{i:03}");
+        tx.execute(
+            "INSERT INTO model_settings(harness,model,hidden,default_price) VALUES('Pi',?1,0,?2)",
+            rusqlite::params![
+                model,
+                r#"{"input":1,"output":0,"cache_read":0,"cache_write":0}"#
+            ],
+        )
+        .unwrap();
+        // IDs deliberately oppose both the numeric session order and cost order.
+        tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source) VALUES(?1,?2,?3,'Pi',?1,'inference',10,?4,0,0,0,'fixture')", rusqlite::params![model, format!("session-{:03}",234-i), i+1, (i%7)*1_000_000]).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(sql);
+    for dimension in ["model", "session"] {
+        let mut q = query(dimension);
+        let mut rows = vec![];
+        let mut sizes = vec![];
+        loop {
+            let page = data(&app, q.clone()).await;
+            assert_eq!(page.totals.as_ref().unwrap().calls, 235);
+            sizes.push(page.groups.len());
+            rows.extend(page.groups);
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            if q.cursor.is_none() {
+                let mut changed = q.clone();
+                changed.cursor = Some(cursor.clone());
+                changed.from = Some(1);
+                assert!(app
+                    .query(QueryCommand::Management { query: changed })
+                    .await
+                    .is_err());
+            }
+            q.cursor = Some(cursor);
+        }
+        assert_eq!(sizes, [vec![10; 23], vec![5]].concat());
+        assert_eq!(
+            rows.iter()
+                .map(|r| &r.key)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            235
+        );
+        if dimension == "model" {
+            let mut expected: Vec<_> = (0..235).collect();
+            expected.sort_by_key(|i| (std::cmp::Reverse(i % 7), *i));
+            assert_eq!(
+                rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|i| format!("Pi/model-{i:03}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(rows
+                .windows(2)
+                .all(|w| w[0].estimated_usd >= w[1].estimated_usd));
+        } else {
+            for (i, row) in rows.iter().enumerate() {
+                assert_eq!(row.key, format!("session-{i:03}"));
+                assert!(row
+                    .label
+                    .as_ref()
+                    .unwrap()
+                    .starts_with(&format!("#{} ", 235 - i)));
+            }
+        }
+    }
+    assert!(app.core.coordinator.adapters.lock().await.is_empty());
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn statistics_keyset_pages_keep_filtered_totals_without_hydrating_records() {
     let (app, root) = app();
     let session = create(&app).await;
@@ -483,7 +690,7 @@ async fn statistics_keyset_pages_keep_filtered_totals_without_hydrating_records(
     let mut keys = vec![];
     loop {
         let page = data(&app, q.clone()).await;
-        assert!(page.groups.len() <= 100);
+        assert!(page.groups.len() <= 10);
         assert_eq!(page.totals.unwrap().calls, 205);
         keys.extend(page.groups.into_iter().map(|g| g.key));
         if let Some(cursor) = page.next_cursor {

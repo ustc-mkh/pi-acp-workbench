@@ -53,6 +53,7 @@ export const uiCommand = tagged('type', {
     type: literal('read_management'),
     query: managementQuery,
     request_id: uint,
+    refresh_models: optional(boolean),
   }),
   attach_files: object({ type: literal('attach_files'), session: sessionId }),
   export: object({ type: literal('export'), session: sessionId }),
@@ -147,7 +148,12 @@ export interface WorkbenchUiState {
   trusted: boolean;
 }
 export type WorkbenchUiMessage =
-  | { type: 'management'; request_id: number; data: import('./workbench-protocol').ManagementData }
+  | {
+      type: 'management';
+      request_id: number;
+      data: import('./workbench-protocol').ManagementData;
+      warning?: string;
+    }
   | { type: 'management_error'; request_id: number; error: string }
   | { type: 'state'; sequence: number; state: WorkbenchUiState }
   | { type: 'prompt_submitted'; session: string; operation: OperationId; generation?: number }

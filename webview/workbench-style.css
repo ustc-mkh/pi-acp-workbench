@@ -1296,6 +1296,10 @@ body.vscode-high-contrast-light button {
 .stats-tabs button {
   font-size: 12px;
 }
+.stats-pagination {
+  align-items: center;
+  flex-wrap: wrap;
+}
 .stats-tabs button[aria-selected='true'] {
   background: var(--input);
   border-color: var(--border);

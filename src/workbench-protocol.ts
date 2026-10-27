@@ -623,7 +623,11 @@ export const queryCommand = checked(
       offset: uint,
       length: optional(nullable(checked(uint, (n) => n > 0 && n <= CONTENT_SLICE_BYTES))),
     }),
-    management: object({ method: literal('management'), query: managementQuery }),
+    management: object({
+      method: literal('management'),
+      query: managementQuery,
+      refresh_models: optional(boolean),
+    }),
     validate_undo: object({
       method: literal('validate_undo'),
       session: sessionId,

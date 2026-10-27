@@ -21,7 +21,8 @@ CREATE TABLE history_clear_targets (
 CREATE INDEX history_clear_pending ON history_clear_targets(job,state,session);
 CREATE TABLE removed_sessions (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991)
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    title TEXT CHECK (title IS NULL OR length(title)<=320)
 ) STRICT;
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 200),

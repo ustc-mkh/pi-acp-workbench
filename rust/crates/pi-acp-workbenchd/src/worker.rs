@@ -164,6 +164,7 @@ pub struct WorkerSupervisor {
     launches: crate::config::WorkersConfig,
     private_env: Vec<String>,
     capacity: Arc<Semaphore>,
+    metadata_capacity: Arc<Semaphore>,
     total_slots: u32,
     stop: CancellationToken,
     tasks: TaskScope,
@@ -186,6 +187,7 @@ impl WorkerSupervisor {
             launches,
             private_env: vec![],
             capacity: Arc::new(Semaphore::new(max_workers)),
+            metadata_capacity: Arc::new(Semaphore::new(1)),
             total_slots: max_workers.try_into().expect("validated worker limit"),
             stop: CancellationToken::new(),
             tasks: TaskScope::default(),
@@ -228,6 +230,28 @@ impl WorkerSupervisor {
         harness: &crate::domain::Harness,
         events: mpsc::Sender<WorkerEvent>,
     ) -> Result<WorkerHandle, DomainError> {
+        self.spawn_with_capacity(session, harness, events, self.capacity.clone())
+            .await
+    }
+    pub async fn spawn_metadata(
+        &self,
+        events: mpsc::Sender<WorkerEvent>,
+    ) -> Result<WorkerHandle, DomainError> {
+        self.spawn_with_capacity(
+            SessionId::generate(),
+            &crate::domain::Harness::Pi,
+            events,
+            self.metadata_capacity.clone(),
+        )
+        .await
+    }
+    async fn spawn_with_capacity(
+        &self,
+        session: SessionId,
+        harness: &crate::domain::Harness,
+        events: mpsc::Sender<WorkerEvent>,
+        capacity: Arc<Semaphore>,
+    ) -> Result<WorkerHandle, DomainError> {
         if self.stop.is_cancelled() {
             return Err(DomainError::Worker("worker supervisor stopping".into()));
         }
@@ -235,14 +259,10 @@ impl WorkerSupervisor {
             .launches
             .get(harness)
             .ok_or(DomainError::ProviderNotConfigured)?;
-        let permit = self
-            .capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|error| match error {
-                tokio::sync::TryAcquireError::NoPermits => DomainError::WorkerCapacity,
-                tokio::sync::TryAcquireError::Closed => DomainError::MailboxClosed,
-            })?;
+        let permit = capacity.try_acquire_owned().map_err(|error| match error {
+            tokio::sync::TryAcquireError::NoPermits => DomainError::WorkerCapacity,
+            tokio::sync::TryAcquireError::Closed => DomainError::MailboxClosed,
+        })?;
         // Registration and the final stopping check are atomic against the
         // shutdown task snapshot. No await or protocol I/O holds this guard.
         let mut tasks = self.tasks.entry()?;

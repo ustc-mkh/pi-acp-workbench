@@ -46,7 +46,11 @@ pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: St
             models,
             reply,
         } => {
-            let _ = reply.send(super::management::models(connection, &session, &models));
+            let _ = reply.send(super::management::models(
+                connection,
+                session.as_ref(),
+                &models,
+            ));
         }
         StoreRequest::TitleJob { session, reply } => {
             let _ = reply.send(super::management::title_job(connection, &session));

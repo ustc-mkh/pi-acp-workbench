@@ -47,6 +47,7 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
     source,
     args,
     args +
+      '\n    if (params.workbenchMetadata) args.push("--offline", "--no-approve", "--no-session", "--no-tools", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-context-files");' +
       '\n    args.push("--extension", workbenchFastExtension);\n    if (params.workbenchFork) args.push("--no-extensions", "--extension", params.workbenchFork, "--session-dir", params.workbenchForkSessionDir);',
   );
   source = replaceExactlyOnce(

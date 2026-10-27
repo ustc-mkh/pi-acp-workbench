@@ -457,7 +457,7 @@ pub(super) fn remove(
     }
     let revision = current.revision.next()?;
     tx.execute(
-        "INSERT INTO removed_sessions(id,revision) VALUES (?1,?2)",
+        "INSERT INTO removed_sessions(id,revision,title) VALUES (?1,?2,(SELECT title FROM session_metadata WHERE session=?1))",
         params![session.as_str(), revision],
     )?;
     tx.execute("DELETE FROM tools WHERE session=?1", [session.as_str()])?;

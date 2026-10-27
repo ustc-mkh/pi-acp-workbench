@@ -9,6 +9,37 @@ const PROFILE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const PROJECTION_BATCH_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_PROJECTION_BATCH: usize = 16;
 
+impl WorkbenchApp {
+    pub(crate) async fn refresh_model_defaults(&self) -> Result<(), DomainError> {
+        let _refresh = self
+            .core
+            .coordinator
+            .model_metadata
+            .try_lock()
+            .map_err(|_| DomainError::Busy)?;
+        let (events, _updates) = tokio::sync::mpsc::channel(32);
+        // Transport identity only: never create/load a domain or native session.
+        let worker = self
+            .core
+            .coordinator
+            .supervisor
+            .spawn_metadata(events)
+            .await?;
+        let client = crate::acp::client::AcpClient::new(worker);
+        let response = tokio::select! {
+            _ = self.core.coordinator.stop.cancelled() => Err(DomainError::OperationInterrupted),
+            result = tokio::time::timeout(Duration::from_secs(45), client.profile_models()) =>
+                result.map_err(|_| DomainError::OperationInterrupted).and_then(|r| r),
+        };
+        client.stop().await;
+        self.core
+            .database
+            .profile_model_defaults(response?)
+            .await
+            .map_err(|error| DomainError::Persistence(error.to_string()))
+    }
+}
+
 impl CommandCore {
     pub(super) async fn provider_models(
         &self,
@@ -109,23 +140,6 @@ impl CommandCore {
             .map(|_| ())
     }
 
-    pub(super) async fn discover_model_context(
-        &self,
-        session: &SessionId,
-    ) -> Result<(), DomainError> {
-        let view = self
-            .database
-            .view(session.clone())
-            .await
-            .map_err(|e| DomainError::Persistence(e.to_string()))?;
-        if view.harness != crate::domain::Harness::Pi {
-            return Ok(());
-        }
-        self.sync_model_context(session, None, true)
-            .await
-            .map(|_| ())
-    }
-
     /// Returns true if a worker refresh was performed. Only file projections
     /// need global serialization; different workers may refresh concurrently.
     async fn sync_model_context(
@@ -159,9 +173,9 @@ impl CommandCore {
                 .map_err(|e| DomainError::Persistence(e.to_string()))?;
             self.project_pending_context(session, &snapshot).await?;
         }
-        // Initial metadata discovery belongs to explicit discovery/settings, not
-        // prompt admission: a read-only refresh must not interfere with replay
-        // recovery or turn startup on peers without the Pi metadata extension.
+        // Pages initialize defaults through the profile metadata reader. Prompt
+        // admission only synchronizes existing overrides; it must not change
+        // replay recovery or startup ordering to discover initial metadata.
         if snapshot.revision == 0 && !initialize_defaults {
             return Ok(false);
         }

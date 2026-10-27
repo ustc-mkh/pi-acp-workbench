@@ -36,7 +36,7 @@ pub(super) enum StoreRequest {
         reply: Reply<crate::domain::query::CommandReceipt>,
     },
     ModelDefaults {
-        session: SessionId,
+        session: Option<SessionId>,
         models: crate::domain::management::ProviderModels,
         reply: Reply<()>,
     },

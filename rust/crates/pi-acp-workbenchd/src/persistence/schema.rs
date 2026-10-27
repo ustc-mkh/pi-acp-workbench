@@ -249,6 +249,17 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
         tx.pragma_update(None, "application_id", 1346978609u32)?;
         crate::diagnostics::sqlite_commit(tx)?;
     }
+    // Preserve the final display name in the existing durable removal marker.
+    // Older validated roots get a nullable column; already lost names remain unknown.
+    let removed_columns = connection
+        .prepare("PRAGMA table_info(removed_sessions)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !removed_columns.iter().any(|name| name == "title") {
+        let tx = connection.transaction()?;
+        tx.execute_batch("ALTER TABLE removed_sessions ADD COLUMN title TEXT CHECK(title IS NULL OR length(title)<=320)")?;
+        crate::diagnostics::sqlite_commit(tx)?;
+    }
     if initializing {
         format::complete_database(root)?;
     }

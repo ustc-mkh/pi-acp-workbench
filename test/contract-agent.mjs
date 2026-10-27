@@ -289,6 +289,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
             nativeFork: true,
             title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
             models: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+            profileModels: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
             contextProjection:
               !!process.env.WORKBENCH_CONTRACT_MANAGEMENT &&
               process.env.WORKBENCH_CONTRACT_CONTEXT_PROJECTION !== '0',
@@ -831,7 +832,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       });
     }
     reply(r.id, {});
-  } else if (r.method === '_pi_workbench/models') {
+  } else if (['_pi_workbench/models', '_pi_workbench/profile_models'].includes(r.method)) {
     trace({ method: r.method, params: r.params });
     if (!process.env.WORKBENCH_CONTRACT_MANAGEMENT) {
       fail(r.id, 'not negotiated');

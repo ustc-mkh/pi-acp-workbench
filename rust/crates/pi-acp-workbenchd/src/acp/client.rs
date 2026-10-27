@@ -201,6 +201,24 @@ impl AcpClient {
         )
         .await
     }
+    pub async fn profile_models(
+        &self,
+    ) -> Result<crate::domain::management::ProviderModels, DomainError> {
+        let initialized = self.initialize().await?;
+        if !initialized
+            .agent_capabilities
+            .metadata
+            .pi_workbench
+            .as_ref()
+            .is_some_and(|cap| cap.version == 1 && cap.profile_models)
+        {
+            return Err(DomainError::UnsupportedFeature(
+                "update the matching Pi adapter for profile model metadata".into(),
+            ));
+        }
+        self.call("_pi_workbench/profile_models", serde_json::json!({}))
+            .await
+    }
     pub async fn title(
         &self,
         native: &NativeSessionId,

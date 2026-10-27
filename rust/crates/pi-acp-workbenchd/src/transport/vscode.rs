@@ -94,6 +94,8 @@ pub enum ClientCommand {
     },
     Management {
         query: crate::domain::management::ManagementQuery,
+        #[serde(default)]
+        refresh_models: bool,
     },
     Manage {
         session: SessionId,
@@ -245,7 +247,7 @@ impl ClientCommand {
                 offset: *offset,
                 length: *length,
             },
-            Self::Management { query } => QueryCommand::Management {
+            Self::Management { query, .. } => QueryCommand::Management {
                 query: query.clone(),
             },
             Self::ValidateUndo {
@@ -579,10 +581,16 @@ async fn connection(
                         }); continue;
                     }
                     command => {
+                        let refresh_models = matches!(&command, ClientCommand::Management { refresh_models: true, .. });
                         if let Some(query) = command.query() {
                             pending_ids.insert(id); let app = app.clone();
                             replies.spawn(async move {
                                 let _permit = permit;
+                                if refresh_models {
+                                    if let Err(failure) = app.refresh_model_defaults().await {
+                                        return (id, error(id, failure));
+                                    }
+                                }
                                 let message = match app.query(query).await { Ok(result) => IpcMessage::Query { id, result }, Err(failure) => error(id, failure) };
                                 (id, message)
                             }); continue;

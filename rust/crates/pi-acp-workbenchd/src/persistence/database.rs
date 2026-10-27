@@ -390,7 +390,20 @@ impl Database {
     ) -> Result<(), StoreError> {
         let (reply, result) = oneshot::channel();
         self.enqueue(StoreRequest::ModelDefaults {
-            session,
+            session: Some(session),
+            models,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn profile_model_defaults(
+        &self,
+        models: crate::domain::management::ProviderModels,
+    ) -> Result<(), StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ModelDefaults {
+            session: None,
             models,
             reply,
         })

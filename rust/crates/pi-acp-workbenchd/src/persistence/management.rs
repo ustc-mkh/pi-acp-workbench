@@ -176,18 +176,21 @@ pub(super) fn update(
 }
 pub(super) fn models(
     db: &mut Connection,
-    session: &SessionId,
+    session: Option<&SessionId>,
     response: &ProviderModels,
 ) -> Result<(), StoreError> {
     if response.models.len() > 500 {
         return Err(StoreError::Invalid("model catalogue exceeds budget"));
     }
     let tx = db.transaction()?;
-    let view = query::view(&tx, session)?;
+    let provider = match session {
+        Some(session) => query::view(&tx, session)?.harness,
+        None => crate::domain::Harness::Pi,
+    };
     // Defaults are refreshed separately from user overrides/visibility.
     tx.execute(
         "UPDATE model_settings SET default_price=NULL,context_window=NULL WHERE harness=?1",
-        [harness(&view.harness)],
+        [harness(&provider)],
     )?;
     for m in &response.models {
         if m.model.is_empty()
@@ -197,7 +200,7 @@ pub(super) fn models(
         {
             return Err(StoreError::Invalid("invalid provider model"));
         }
-        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![harness(&view.harness),m.model,m.price.as_ref().map(encode).transpose()?,m.context_window.map(|n|n as i64)])?;
+        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![harness(&provider),m.model,m.price.as_ref().map(encode).transpose()?,m.context_window.map(|n|n as i64)])?;
     }
     let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
     if count > 1500 {
@@ -286,6 +289,14 @@ fn group(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageGroup> {
         cache_write: row.get::<_, SafeInteger>(8)?.get(),
         estimated_usd: row.get(9)?,
     })
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageCursor {
+    filter: String,
+    key: String,
+    cost: f64,
+    number: u64,
 }
 fn model_key(model: &str) -> String {
     model
@@ -438,8 +449,8 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             "month" => "strftime('%Y-%m',u.occurred_at/1000,'unixepoch')",
             _ => "date(u.occurred_at/1000,'unixepoch')",
         };
-        let base="FROM usage_facts u LEFT JOIN management_prices m ON m.harness=u.harness AND m.model=u.model LEFT JOIN session_metadata n ON n.session=u.session WHERE u.occurred_at>=?1 AND u.occurred_at<=?2 AND (?3 IS NULL OR u.session=?3) AND (?4 IS NULL OR u.model=?4)";
-        let aggregate="count(*),COALESCE(sum(u.input IS NULL OR u.output IS NULL),0),COALESCE(sum(u.cache_read IS NULL OR u.cache_write IS NULL),0),COALESCE(sum(m.price IS NULL),0),COALESCE(sum(u.input),0),COALESCE(sum(u.output),0),COALESCE(sum(u.cache_read),0),COALESCE(sum(u.cache_write),0),COALESCE(sum((COALESCE(u.input,0)*json_extract(m.price,'$.input')+COALESCE(u.output,0)*json_extract(m.price,'$.output')+COALESCE(u.cache_read,0)*json_extract(m.price,'$.cache_read')+COALESCE(u.cache_write,0)*json_extract(m.price,'$.cache_write'))*COALESCE(m.multiplier,1)/1000000.0),0.0)";
+        let base="FROM usage_facts u LEFT JOIN management_prices m ON m.harness=u.harness AND m.model=u.model LEFT JOIN session_metadata n ON n.session=u.session LEFT JOIN removed_sessions r ON r.id=u.session WHERE u.occurred_at>=?1 AND u.occurred_at<=?2 AND (?3 IS NULL OR u.session=?3) AND (?4 IS NULL OR u.model=?4)";
+        let aggregate="count(*),COALESCE(sum(u.input IS NULL OR u.output IS NULL),0),COALESCE(sum(u.cache_read IS NULL OR u.cache_write IS NULL),0),COALESCE(sum(m.price IS NULL),0),COALESCE(sum(u.input),0),COALESCE(sum(u.output),0),COALESCE(sum(u.cache_read),0),COALESCE(sum(u.cache_write),0),COALESCE(sum((COALESCE(u.input,0)*json_extract(m.price,'$.input')+COALESCE(u.output,0)*json_extract(m.price,'$.output')+COALESCE(u.cache_read,0)*json_extract(m.price,'$.cache_read')+COALESCE(u.cache_write,0)*json_extract(m.price,'$.cache_write'))*COALESCE(m.multiplier,1)/1000000.0),0.0) AS estimated_cost";
         let from = q.from.unwrap_or(0) as i64;
         let to = q.to.unwrap_or(8_640_000_000_000_000) as i64;
         let session = q.session.as_ref().map(|s| s.as_str());
@@ -449,29 +460,71 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             group,
         )?);
         let label = if dimension == "session" {
-            "'#' || max(u.session_number) || ' ' || COALESCE(max(n.title),'Archived session')"
+            "'#' || max(u.session_number) || ' ' || COALESCE(max(n.title),max(r.title),'Archived session')"
         } else {
             "NULL"
         };
-        let sql=format!("{cte} SELECT {key} AS group_key,{aggregate},{label} {base} GROUP BY group_key HAVING group_key>?5 ORDER BY group_key LIMIT 101");
+        let filter = encode(&("usage-v2", &q.group, q.from, q.to, &q.session, &q.model))?;
+        let cursor = q
+            .cursor
+            .as_ref()
+            .map(|raw| {
+                let cursor: UsageCursor = serde_json::from_str(raw)
+                    .map_err(|_| StoreError::Invalid("invalid statistics cursor"))?;
+                if cursor.filter != filter
+                    || !cursor.cost.is_finite()
+                    || cursor.cost < 0.0
+                    || cursor.number > 9_007_199_254_740_991
+                {
+                    return Err(StoreError::Invalid(
+                        "statistics cursor does not match filters",
+                    ));
+                }
+                Ok(cursor)
+            })
+            .transpose()?;
+        let (after, order) = match dimension.as_str() {
+            "model" => (
+                "(estimated_cost<boundary.cost OR (estimated_cost=boundary.cost AND group_key>?5))",
+                "estimated_cost DESC,group_key ASC",
+            ),
+            "session" => (
+                "(session_number<boundary.number OR (session_number=boundary.number AND group_key>?5))",
+                "session_number DESC,group_key ASC",
+            ),
+            _ => ("group_key>?5", "group_key ASC"),
+        };
+        // All sorting and page boundaries apply to the full aggregate in SQL,
+        // before LIMIT. Equal costs/numbers use the stable group key as a tie-break.
+        let sql=format!("{cte}, boundary AS (SELECT ?7 AS cost,?8 AS number), grouped AS (SELECT {key} AS group_key,{aggregate},{label} AS group_label,COALESCE(max(u.session_number),0) AS session_number {base} GROUP BY group_key) SELECT grouped.* FROM grouped CROSS JOIN boundary WHERE (?5 IS NULL OR {after}) ORDER BY {order} LIMIT 11");
         let mut statement = tx.prepare(&sql)?;
-        data.groups = statement
+        let mut groups = statement
             .query_map(
                 params![
                     from,
                     to,
                     session,
                     q.model,
-                    q.cursor.as_deref().unwrap_or(""),
-                    &prices
+                    cursor.as_ref().map(|c| c.key.as_str()),
+                    &prices,
+                    cursor.as_ref().map_or(0.0, |c| c.cost),
+                    cursor.as_ref().map_or(0, |c| c.number) as i64,
                 ],
-                group,
+                |row| Ok((group(row)?, row.get::<_, SafeInteger>(11)?.get())),
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        if data.groups.len() > 100 {
-            data.groups.truncate(100);
-            data.next_cursor = data.groups.last().map(|g| g.key.clone());
+        if groups.len() > 10 {
+            groups.truncate(10);
+            if let Some((last, number)) = groups.last() {
+                data.next_cursor = Some(encode(&UsageCursor {
+                    filter,
+                    key: last.key.clone(),
+                    cost: last.estimated_usd,
+                    number: *number,
+                })?);
+            }
         }
+        data.groups = groups.into_iter().map(|(group, _)| group).collect();
     }
     crate::diagnostics::sqlite_commit(tx)?;
     Ok(data)

@@ -77,6 +77,7 @@ export class WorkbenchController {
   private reconnectAttempt = 0;
   private reconnectFlight?: Promise<void>;
   private recoveryFlight?: Promise<void>;
+  private modelMetadataRefresh?: Promise<unknown>;
   constructor(
     readonly client: WorkbenchClient,
     private ports: WorkbenchPorts,
@@ -187,9 +188,32 @@ export class WorkbenchController {
         }
         case 'read_management': {
           try {
+            let warning: string | undefined;
+            if (message.refresh_models && this.ports.trusted()) {
+              const refresh = (this.modelMetadataRefresh ??= this.client.call(
+                {
+                  method: 'management',
+                  query: {},
+                  refresh_models: true,
+                },
+                { timeoutMs: 60_000 },
+              ));
+              try {
+                await refresh;
+              } catch {
+                warning = '默认模型信息暂时无法刷新，正在显示已保存的数据。';
+              } finally {
+                if (this.modelMetadataRefresh === refresh) this.modelMetadataRefresh = undefined;
+              }
+            }
             const data = await this.client.call({ method: 'management', query: message.query });
             if (!this.closed)
-              this.ports.post({ type: 'management', request_id: message.request_id, data });
+              this.ports.post({
+                type: 'management',
+                request_id: message.request_id,
+                data,
+                warning,
+              });
           } catch {
             if (!this.closed)
               this.ports.post({

@@ -85,6 +85,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           nativeFork: true,
           title: true,
           models: true,
+          profileModels: true,
           contextProjection: true,
           autonomousRuns: true,
         },
@@ -148,6 +149,35 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     ): Promise<Inspection | { sessionId?: string } | ModelResponse> {
       if (!method.startsWith('_pi_workbench/'))
         throw new Error(`Unsupported extension method: ${method}`);
+      if (method === '_pi_workbench/profile_models') {
+        const cwd = await mkdtemp(join(tmpdir(), 'pi-model-metadata-'));
+        let proc: PiProcess | undefined;
+        try {
+          proc = await Process.spawn({
+            cwd,
+            piCommand: process.env.PI_ACP_PI_COMMAND,
+            workbenchMetadata: true,
+          });
+          if (!(await refreshPiModels(proc, undefined, true)))
+            throw new Error('Pi 未提供本地模型元数据。');
+          const models = getPiModelDefaults(proc);
+          if (!models) throw new Error('Pi 未返回本地模型元数据。');
+          return { models };
+        } finally {
+          if (proc) {
+            const child = proc.child;
+            const closed =
+              child.exitCode !== null || child.signalCode !== null
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => child.once('close', () => resolve()));
+            proc.dispose();
+            const kill = setTimeout(() => child.kill('SIGKILL'), 3000);
+            await closed;
+            clearTimeout(kill);
+          }
+          await rm(cwd, { recursive: true, force: true });
+        }
+      }
       const session = this.sessions.get(params.sessionId);
       if (method === '_pi_workbench/cancel_fork') {
         this.forkWorkers.get(params.sessionId)?.dispose();

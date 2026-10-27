@@ -91,3 +91,57 @@ it('negotiated model refresh and explicit context use only the registered intern
   });
   expect(model.contextWindow).toBe(200000);
 });
+
+it('reads profile metadata without consulting sessions or submitting a model task', async () => {
+  const { CONTEXT_COMMAND, MODEL_DEFAULTS } = await import('../src/pi-context-mode');
+  const entries: unknown[] = [];
+  const calls: unknown[] = [];
+  let disposed = false;
+  const models = [
+    {
+      model: 'vendor/model',
+      price: { input: 1, output: 2, cache_read: 0, cache_write: 0 },
+      contextWindow: 200000,
+    },
+  ];
+  const proc = {
+    child: { exitCode: 0, signalCode: null },
+    dispose: () => {
+      disposed = true;
+    },
+    getState: async () => ({ isStreaming: false, isCompacting: false }),
+    request: async ({ type }: { type: string }) =>
+      type === 'get_commands'
+        ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
+        : { success: true, data: { entries } },
+    prompt: async (text: string) => {
+      expect(text.startsWith(`/${CONTEXT_COMMAND} `)).toBe(true);
+      const input = JSON.parse(Buffer.from(text.split(' ')[1], 'base64').toString());
+      expect(input.action).toBe('refresh');
+      expect(input.includeDefaults).toBe(true);
+      expect(input.model).toBeUndefined();
+      entries.push({
+        type: 'custom',
+        customType: MODEL_DEFAULTS,
+        data: { requestId: input.requestId, models },
+      });
+    },
+  };
+  class Base {
+    get sessions(): never {
+      throw new Error('Profile refresh must not consult sessions');
+    }
+  }
+  const Agent = enhancePiAgent(Base, {
+    spawn: async (options: unknown) => {
+      calls.push(options);
+      return proc;
+    },
+  });
+  expect(await new Agent().extMethod('_pi_workbench/profile_models', { sessionId: '' })).toEqual({
+    models,
+  });
+  expect(calls).toEqual([expect.objectContaining({ workbenchMetadata: true })]);
+  expect(calls[0]).not.toHaveProperty('sessionPath');
+  expect(disposed).toBe(true);
+});

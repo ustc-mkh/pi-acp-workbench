@@ -152,7 +152,13 @@ it('renders searchable grouped models, four prices, explicit context, titles and
     command: { action: { action: 'naming', policy: 'model', model: 'vendor/model' } },
   });
   click('刷新模型配置');
-  expect(sent.at(-1)).toMatchObject({ command: { action: { action: 'refresh_models' } } });
+  expect(sent.at(-1)).toMatchObject({ type: 'read_management', refresh_models: true });
+  const metadataRequest = sent.at(-1)!;
+  panel.receive({
+    type: 'management',
+    request_id: 'request_id' in metadataRequest ? metadataRequest.request_id : 0,
+    data,
+  });
   expect(
     [...dom.window.document.querySelectorAll('button')].some(
       (n) => (n.getAttribute('aria-label') || n.textContent) === '应用上下文设置',
@@ -364,5 +370,124 @@ it('shares Pi defaults across model aliases, preserves explicit overrides and sa
   click('保存模型设置');
   expect(sent).toHaveLength(before);
   expect(dom.window.document.body.textContent).toContain('价格倍率必须');
+  dom.window.close();
+});
+
+it('refreshes shared defaults on either page without a selected session, never on selection or pagination', () => {
+  const dom = new JSDOM('<main></main>');
+  vi.stubGlobal('document', dom.window.document);
+  const sent: UiCommand[] = [];
+  const panel = new ManagementPanel(
+    (m) => sent.push(m),
+    () => {},
+  );
+  panel.setView(undefined, [], []);
+  expect(sent).toHaveLength(0);
+  for (const open of [() => panel.openModels(), () => panel.openStatistics()]) {
+    open();
+    const request = sent.at(-1)!;
+    expect(request).toMatchObject({ type: 'read_management', refresh_models: true });
+    panel.receive({
+      type: 'management',
+      request_id: 'request_id' in request ? request.request_id : 0,
+      data: {
+        models: [
+          {
+            harness: 'Pi',
+            model: 'vendor/model',
+            hidden: false,
+            price: null,
+            default_price: { input: 1, output: 2, cache_read: 0, cache_write: 0 },
+            context_window: 200000,
+          },
+        ],
+        naming_policy: 'follow',
+        title_model: null,
+        groups: [],
+        totals: null,
+        next_cursor: null,
+      },
+    });
+    expect(panel.root.textContent).not.toContain('请先选择');
+  }
+  expect(sent.some((m) => m.type === 'execute')).toBe(false);
+});
+
+it('pages statistics forwards and backwards without accumulating rows, and resets when grouping changes', () => {
+  const dom = new JSDOM('<main></main>');
+  vi.stubGlobal('document', dom.window.document);
+  const sent: UiCommand[] = [];
+  const panel = new ManagementPanel(
+    (m) => sent.push(m),
+    () => {},
+  );
+  dom.window.document.body.append(panel.root);
+  panel.openStatistics();
+  const click = (label: string) =>
+    [...panel.root.querySelectorAll('button')].find((b) => b.textContent === label)!.click();
+  const reply = (key: string, next: string | null) => {
+    const request = sent.at(-1)!;
+    const row = {
+      key,
+      calls: 1,
+      missing: 0,
+      cache_missing: 0,
+      unpriced: 0,
+      input: 1,
+      output: 1,
+      cache_read: 0,
+      cache_write: 0,
+      estimated_usd: 2,
+    };
+    panel.receive({
+      type: 'management',
+      request_id: 'request_id' in request ? request.request_id : 0,
+      data: {
+        models: [],
+        naming_policy: 'follow',
+        title_model: null,
+        groups: [row],
+        totals: { ...row, key: 'total' },
+        next_cursor: next,
+      },
+    });
+  };
+  reply('first-model', 'cursor-2');
+  expect(panel.root.querySelector<HTMLButtonElement>('nav button')!.disabled).toBe(true);
+  click('下一页统计');
+  expect(sent.at(-1)).toMatchObject({ query: { group: 'model', cursor: 'cursor-2' } });
+  expect(sent.at(-1)).not.toHaveProperty('refresh_models');
+  const failedPage = sent.at(-1)!;
+  panel.receive({
+    type: 'management_error',
+    request_id: 'request_id' in failedPage ? failedPage.request_id : 0,
+  });
+  expect(panel.root.textContent).toContain('第 1 页');
+  expect(panel.root.querySelector<HTMLButtonElement>('nav button')!.disabled).toBe(true);
+  click('下一页统计');
+  reply('second-model', 'cursor-3');
+  expect(panel.root.textContent).toContain('第 2 页');
+  expect(panel.root.textContent).not.toContain('first-model');
+  click('下一页统计');
+  reply('third-model', null);
+  expect(panel.root.textContent).toContain('第 3 页');
+  expect([...panel.root.querySelectorAll('nav button')].at(-1)!.hasAttribute('disabled')).toBe(
+    true,
+  );
+  click('上一页统计');
+  expect(sent.at(-1)).toMatchObject({ query: { cursor: 'cursor-2' } });
+  reply('second-model', 'cursor-3');
+  expect(panel.root.textContent).toContain('第 2 页');
+  click('上一页统计');
+  expect(sent.at(-1)).toMatchObject({ query: { group: 'model' } });
+  expect((sent.at(-1) as { query: { cursor?: string } }).query.cursor).toBeUndefined();
+  reply('first-model', 'cursor-2');
+  click('下一页统计');
+  reply('second-model', 'cursor-3');
+  click('按会话');
+  expect(sent.at(-1)).toMatchObject({ query: { group: 'session' } });
+  expect((sent.at(-1) as { query: { cursor?: string } }).query.cursor).toBeUndefined();
+  reply('session-last', null);
+  expect(panel.root.textContent).toContain('第 1 页');
   dom.window.close();
 });

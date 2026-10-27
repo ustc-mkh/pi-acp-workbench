@@ -26,6 +26,8 @@ pub struct PiWorkbenchCapabilities {
     #[serde(default)]
     pub models: bool,
     #[serde(default)]
+    pub profile_models: bool,
+    #[serde(default)]
     pub context_projection: bool,
     /// Explicit true means background wakeups may exist; false is affirmative
     /// evidence that the provider may be suspended when otherwise idle.

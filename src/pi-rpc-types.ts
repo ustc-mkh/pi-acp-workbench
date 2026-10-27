@@ -43,10 +43,11 @@ export interface PiProcess {
 export interface PiProcessFactory {
   spawn(options: {
     cwd: string;
-    sessionPath: string;
+    sessionPath?: string;
     piCommand?: string;
-    workbenchFork: string;
-    workbenchForkSessionDir: string;
+    workbenchFork?: string;
+    workbenchForkSessionDir?: string;
+    workbenchMetadata?: boolean;
   }): Promise<PiProcess>;
 }
 export interface PiSession {

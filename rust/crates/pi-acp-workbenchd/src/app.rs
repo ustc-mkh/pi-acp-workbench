@@ -103,6 +103,7 @@ struct SessionCoordinator {
     adapters: Arc<Mutex<HashMap<SessionId, AdapterHandle>>>,
     admission: Mutex<()>,
     model_settings: Mutex<()>,
+    model_metadata: Mutex<()>,
     stop: CancellationToken,
     forks: Arc<fork_control::ForkControls>,
     reviews: Arc<crate::workspace_reviews::Reviews>,
@@ -115,6 +116,7 @@ impl SessionCoordinator {
             adapters: Arc::new(Mutex::new(HashMap::new())),
             admission: Mutex::new(()),
             model_settings: Mutex::new(()),
+            model_metadata: Mutex::new(()),
             stop: CancellationToken::new(),
             forks: Arc::new(fork_control::ForkControls::default()),
             reviews: crate::workspace_reviews::Reviews::new(database),
@@ -1181,7 +1183,7 @@ impl CommandCore {
                 "provider discovery did not become ready".into(),
             ));
         }
-        self.discover_model_context(&session).await?;
+        self.ensure_model_context(&session).await?;
         // Discovery must show the same inherited choices that the next prompt
         // will use, rather than the provider's fresh native defaults.
         let observed = self

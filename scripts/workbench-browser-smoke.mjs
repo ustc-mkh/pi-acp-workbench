@@ -134,6 +134,7 @@ try {
   const editorDiffs = [],
     externalLinks = [];
   let confirmations = 0;
+  let managementReplies = 0;
   controller = new WorkbenchController(client, {
     openLink: async (url) => {
       externalLinks.push(url);
@@ -146,6 +147,7 @@ try {
       return true;
     },
     post: (message) => {
+      if (message.type === 'management') managementReplies++;
       void page.evaluate((value) => window.postMessage(value, '*'), message).catch(() => {});
     },
     trusted: () => true,
@@ -511,22 +513,21 @@ try {
   check(
     'S5 Chromium: shell net diff, lazy text slices, single/total editor ports and confirmed durable undo',
   );
-  const manageClick = async (name) => {
-    const before = controller.snapshot.operations.filter(
-      (op) => op.method === 'manage' && op.status === 'completed',
-    ).length;
-    await page.getByRole('button', { name, exact: true }).click();
-    await wait(
-      () =>
-        controller.snapshot.operations.filter(
-          (op) => op.method === 'manage' && op.status === 'completed',
-        ).length > before,
-      `S6 ${name}`,
-    );
-  };
+  const beforeOpen = managementReplies;
+  const beforeModelPage = controller.snapshot.operations.length;
   await page.getByRole('button', { name: '模型设置', exact: true }).first().click();
+  await wait(() => managementReplies > beforeOpen, 'S6 automatic profile metadata on page entry');
   assert.equal(await page.locator('#management .additional-settings').count(), 0);
-  await manageClick('刷新模型配置');
+  const profileTrace = (await readFile(join(root, 'trace'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  assert(profileTrace.some((row) => row.method === '_pi_workbench/profile_models'));
+  assert.equal(controller.snapshot.operations.length, beforeModelPage);
+  const beforeRefresh = managementReplies;
+  await page.getByRole('button', { name: '刷新模型配置', exact: true }).click();
+  await wait(() => managementReplies > beforeRefresh, 'S6 manual profile metadata refresh');
+  assert.equal(controller.snapshot.operations.length, beforeModelPage);
   const modelCard = page
     .locator('#management [data-model]')
     .filter({ has: page.locator('h3', { hasText: 'Other' }) });

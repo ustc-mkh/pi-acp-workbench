@@ -804,3 +804,83 @@ it('opens and initializes a new session without waiting for the previous session
   peer.send(detach.socket, { type: 'detached', id: detach.id, session: 'session' });
   expect(peer.requests.filter((r) => r.command.method === 'attach')).toHaveLength(2);
 });
+
+it('coalesces page metadata refreshes without a selected session and reads each statistics query afterwards', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const messages: WorkbenchUiMessage[] = [];
+  const controller = new WorkbenchController(peer.client(), {
+    post: (m) => messages.push(m),
+    trusted: () => true,
+    workspace: () => undefined,
+    authorize: async () => {
+      throw new Error('No session authorization should be requested');
+    },
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const data = {
+    models: [],
+    naming_policy: 'follow',
+    title_model: null,
+    groups: [],
+    totals: null,
+    next_cursor: null,
+  };
+  const first = controller.receive({
+    type: 'read_management',
+    request_id: 1,
+    query: {},
+    refresh_models: true,
+  });
+  const second = controller.receive({
+    type: 'read_management',
+    request_id: 2,
+    query: { group: 'model' },
+    refresh_models: true,
+  });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  expect(peer.requests[0].command).toEqual({
+    method: 'management',
+    query: {},
+    refresh_models: true,
+  });
+  peer.query(peer.requests[0], 'management', data);
+  await expect.poll(() => peer.requests.length).toBe(3);
+  for (const request of peer.requests.slice(1)) peer.query(request, 'management', data);
+  await Promise.all([first, second]);
+  expect(messages.filter((m) => m.type === 'management')).toHaveLength(2);
+  expect(peer.requests.every((r) => r.command.method === 'management')).toBe(true);
+});
+
+it('keeps cached statistics available in an untrusted workspace without starting metadata workers', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const messages: WorkbenchUiMessage[] = [];
+  const controller = new WorkbenchController(peer.client(), {
+    post: (m) => messages.push(m),
+    trusted: () => false,
+    workspace: () => undefined,
+    authorize: async () => {
+      throw new Error('No authorization expected');
+    },
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  const action = controller.receive({
+    type: 'read_management',
+    request_id: 1,
+    query: { group: 'model' },
+    refresh_models: true,
+  });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  expect(peer.requests[0].command).toEqual({ method: 'management', query: { group: 'model' } });
+  peer.query(peer.requests[0], 'management', {
+    models: [],
+    naming_policy: 'follow',
+    title_model: null,
+    groups: [],
+    totals: null,
+    next_cursor: null,
+  });
+  await action;
+  expect(messages.some((m) => m.type === 'management')).toBe(true);
+});

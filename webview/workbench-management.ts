@@ -45,6 +45,10 @@ export class ManagementPanel {
   >();
   private focusSearch = false;
   private statisticsFiltersOpen = false;
+  private statisticsPage = 0;
+  private statisticsCursors: (string | undefined)[] = [undefined];
+  private requestedPage = 0;
+  private requestedCursor?: string;
   private expanded = new Set<string>();
   constructor(
     private send: (m: UiCommand) => void,
@@ -61,8 +65,7 @@ export class ManagementPanel {
     heading.append(
       el('h2', '模型设置'),
       button('刷新模型配置', () => {
-        if (this.mode === 'models') this.mutate({ action: 'refresh_models' });
-        else this.load();
+        this.load(undefined, true);
       }),
       back,
     );
@@ -96,8 +99,10 @@ export class ManagementPanel {
     // Read-only account preferences, never discovery or native configuration.
     if (!this.data && !this.pending && view?.catalogue.models.length) this.load();
   }
-  private load(cursor?: string) {
+  private load(cursor?: string, refreshModels = false, page = 0) {
     this.pending = ++this.request;
+    this.requestedPage = page;
+    this.requestedCursor = cursor;
     for (const input of this.body.querySelectorAll<
       HTMLInputElement | HTMLSelectElement | HTMLButtonElement
     >('input,select,button'))
@@ -107,11 +112,18 @@ export class ManagementPanel {
       type: 'read_management',
       request_id: this.pending,
       query: { ...this.filter, cursor },
+      ...(refreshModels ? { refresh_models: true } : {}),
     });
   }
   receive(raw: unknown) {
     if (!raw || typeof raw !== 'object' || !('type' in raw)) return false;
-    const m = raw as { type: string; request_id?: number; data?: unknown; error?: unknown };
+    const m = raw as {
+      type: string;
+      request_id?: number;
+      data?: unknown;
+      error?: unknown;
+      warning?: string;
+    };
     if (!['management', 'management_error'].includes(m.type)) return false;
     if (m.request_id !== this.pending) return true;
     this.pending = 0;
@@ -120,11 +132,19 @@ export class ManagementPanel {
     >('input,select,button'))
       input.disabled = false;
     if (m.type === 'management_error') {
+      this.render();
       this.status.textContent = '暂时无法读取设置与用量，请手动刷新。';
+      this.changed();
       return true;
     }
     try {
       this.data = managementData.parse(m.data);
+      if (this.mode === 'statistics') {
+        this.statisticsPage = this.requestedPage;
+        if (this.statisticsPage === 0) this.statisticsCursors = [undefined];
+        this.statisticsCursors[this.statisticsPage] = this.requestedCursor;
+        this.statisticsCursors.length = this.statisticsPage + 1;
+      }
       for (const [key, submitted] of this.submittedDrafts) {
         const a = submitted.action;
         const saved = this.data.models.find(
@@ -153,9 +173,10 @@ export class ManagementPanel {
         }
       }
       this.status.textContent =
-        this.mode === 'models'
+        m.warning ??
+        (this.mode === 'models'
           ? ''
-          : '费用按模型设置中的单价 × 倍率估算；缺失用量单独统计，不按零计算。';
+          : '费用按模型设置中的单价 × 倍率估算；缺失用量单独统计，不按零计算。');
       this.render();
       this.changed();
     } catch {
@@ -173,7 +194,7 @@ export class ManagementPanel {
     this.root.className = 'statistics-page';
     this.root.querySelector('h2')!.textContent = '用量统计';
     this.filter = { group: 'model' };
-    this.load();
+    this.load(undefined, true);
   }
   openModels() {
     this.root.open = true;
@@ -183,7 +204,7 @@ export class ManagementPanel {
     this.root.className = 'prices-page';
     this.root.querySelector('h2')!.textContent = '模型设置';
     this.filter = {};
-    this.load();
+    this.load(undefined, true);
   }
   private mutate(action: ManagementAction) {
     if (!this.view) {
@@ -217,14 +238,16 @@ export class ManagementPanel {
     this.body.replaceChildren();
     this.root.insertBefore(this.status, this.body);
     this.status.className = 'stats-caption';
-    if (!this.view) {
-      this.body.append(el('p', '请先选择或新建会话，再管理模型。'));
-      return;
-    }
     if (this.mode === 'statistics') {
       this.statistics();
       return;
     }
+    const harness = this.view?.harness ?? 'Pi';
+    const models =
+      this.view?.catalogue.models ??
+      (this.data?.models ?? [])
+        .filter((m) => m.harness === harness)
+        .map((m) => ({ id: m.model, name: m.model }));
     const titleSettings = el('label');
     titleSettings.className = 'title-model-setting';
     const titleChoice = el('select');
@@ -232,12 +255,13 @@ export class ManagementPanel {
     for (const [value, label] of [
       ['', '跟随当前会话模型'],
       ['off', '关闭自动命名'],
-      ...this.view.catalogue.models.map((m) => [m.id, m.name]),
+      ...models.map((m) => [m.id, m.name]),
     ]) {
       const option = el('option', label);
       option.value = value;
       titleChoice.append(option);
     }
+    titleChoice.disabled = !this.view;
     titleChoice.value = this.data?.naming_policy === 'off' ? 'off' : this.data?.title_model || '';
     titleChoice.onchange = () =>
       this.mutate({
@@ -261,9 +285,9 @@ export class ManagementPanel {
     const render = () => {
       list.replaceChildren();
       const known = new Map<string, string>();
-      for (const m of this.view!.catalogue.models) known.set(m.id, m.name);
+      for (const m of models) known.set(m.id, m.name);
       for (const m of this.data?.models ?? [])
-        if (m.harness === this.view!.harness && !known.has(m.model)) known.set(m.model, m.model);
+        if (m.harness === harness && !known.has(m.model)) known.set(m.model, m.model);
       const groups = new Map<string, [string, string][]>();
       for (const row of known) {
         const provider = row[0].includes('/') ? row[0].split('/')[0] : '当前供应商';
@@ -309,12 +333,10 @@ export class ManagementPanel {
           );
         for (const [model, name] of matching) {
           if (++shown > 100) break;
-          const saved = this.data?.models.find(
-            (m) => m.harness === this.view!.harness && m.model === model,
-          );
+          const saved = this.data?.models.find((m) => m.harness === harness && m.model === model);
           const card = el('section');
           card.className = 'model-price-card model-row';
-          card.dataset.model = `${this.view!.harness}:${model}`;
+          card.dataset.model = `${harness}:${model}`;
           const modelHeading = el('div');
           modelHeading.className = 'model-card-heading';
           modelHeading.append(el('h3', name));
@@ -378,7 +400,7 @@ export class ManagementPanel {
           context.placeholder = defaultContext
             ? `默认 ${defaultContext / 1000}`
             : 'Pi 未提供默认值';
-          context.disabled = this.view!.harness !== 'Pi';
+          context.disabled = harness !== 'Pi';
           context.setAttribute('aria-label', `${model} context k tokens`);
           const footer = el('div');
           footer.className = 'model-settings-footer';
@@ -463,7 +485,7 @@ export class ManagementPanel {
                 multiplier: factor,
                 context_window: tokens,
                 apply_context:
-                  this.view!.harness === 'Pi' &&
+                  harness === 'Pi' &&
                   (tokens !== (effectiveContext ?? null) || saved?.context_state === 'pending'),
               });
             }),
@@ -475,12 +497,12 @@ export class ManagementPanel {
                 price: null,
                 multiplier: 1,
                 context_window: null,
-                apply_context: this.view!.harness === 'Pi',
+                apply_context: harness === 'Pi',
               }),
             ),
           );
           modelsBody.append(card);
-          const draftKey = `${this.view!.id}:${model}`;
+          const draftKey = `${this.view?.id ?? 'profile'}:${model}`;
           const fields = [...card.querySelectorAll<HTMLInputElement>('input')];
           const draft = this.modelDrafts.get(draftKey);
           if (draft)
@@ -515,10 +537,7 @@ export class ManagementPanel {
         '单价：USD / 百万 token；费用按单价 × 价格倍率估算（默认 1）。价格和 context 默认取自 Pi，同型号跨渠道共用默认值；用户设置优先。统一点击保存；context 留空恢复默认。其他 Agent 暂不支持修改 context。',
       ),
     );
-    const count = el(
-      'p',
-      `${this.view.catalogue.models.length} / ${this.view.catalogue.models.length} 个模型`,
-    );
+    const count = el('p', `${models.length} / ${models.length} 个模型`);
     count.className = 'stats-caption';
     this.body.append(search, count, list);
     render();
@@ -711,8 +730,7 @@ export class ManagementPanel {
         chart.append(column);
       }
       this.body.append(intervals, chart, advanced);
-      if (this.data?.next_cursor)
-        this.body.append(button('下一页统计', () => this.load(this.data!.next_cursor!)));
+      this.statisticsPagination();
       return;
     }
     const table = el('table');
@@ -786,7 +804,25 @@ export class ManagementPanel {
         '仅记录 Workbench 接受的调用，加载原生会话和分支继承历史不重复计费。缺失用量单独统计，不按零计算；推理和独立命名各记录一次。',
       ),
     );
-    if (this.data?.next_cursor)
-      this.body.append(button('下一页统计', () => this.load(this.data!.next_cursor!)));
+    this.statisticsPagination();
+  }
+  private statisticsPagination() {
+    const pagination = el('nav');
+    pagination.className = 'stats-tabs stats-pagination';
+    pagination.setAttribute('aria-label', '统计分页');
+    const page = this.statisticsPage;
+    const next = this.data?.next_cursor;
+    const previousButton = button('上一页统计', () =>
+      this.load(this.statisticsCursors[page - 1], false, page - 1),
+    );
+    previousButton.disabled = page === 0;
+    const nextButton = button('下一页统计', () => this.load(next!, false, page + 1));
+    nextButton.disabled = !next;
+    pagination.append(
+      previousButton,
+      el('span', `第 ${page + 1} 页 · 本页 ${this.data?.groups.length ?? 0} 项`),
+      nextButton,
+    );
+    this.body.append(pagination);
   }
 }
