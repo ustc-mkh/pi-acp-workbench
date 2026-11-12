@@ -798,8 +798,22 @@ impl CommandCore {
         | DomainCommand::SetMode { session, .. }
         | DomainCommand::SetOption { session, .. } = &command
         {
-            if matches!(&command, DomainCommand::SetOption { .. }) {
-                self.discover(session.clone()).await?;
+            let observe = matches!(&command, DomainCommand::SetOption { .. })
+                || self
+                    .coordinator
+                    .adapters
+                    .lock()
+                    .await
+                    .get(session)
+                    .is_some_and(|adapter| {
+                        !adapter.stop.is_cancelled()
+                            && !adapter.task.is_finished()
+                            && !adapter.tx.is_closed()
+                    });
+            if observe {
+                // Observe offerings without reapplying saved preferences: the
+                // explicit edit may be correcting a value no longer offered.
+                self.observe_provider(session.clone()).await?;
             }
             let events = self
                 .runtime
@@ -813,6 +827,26 @@ impl CommandCore {
                 return Err(DomainError::Busy);
             }
             let mut config = snapshot.config.clone();
+            if observe {
+                // Rebase old overrides on the current offering before applying
+                // the explicit edit. A withdrawn, unrelated setting must not
+                // lock every control. The edit itself is validated below and
+                // cleanup is persisted only with a successful provider commit.
+                config.options.retain(|id, value| {
+                    let Some(setting) = snapshot.catalogue.selects.iter().find(|s| {
+                        &s.id == id
+                            && !matches!(s.category.as_deref(), Some("model" | "mode"))
+                            && s.id != "model"
+                            && s.id != "mode"
+                    }) else {
+                        return false;
+                    };
+                    if !setting.choices.iter().any(|choice| &choice.value == value) {
+                        *value = setting.current_value.clone();
+                    }
+                    true
+                });
+            }
             match &command {
                 DomainCommand::SetModel { model, .. } => config.model = Some(model.clone()),
                 DomainCommand::SetMode { mode, .. } => config.mode = Some(mode.clone()),
@@ -851,15 +885,15 @@ impl CommandCore {
                             .map(|s| (s.id.clone(), s.current_value.clone()))
                             .collect(),
                         model: snapshot
-                            .config
-                            .model
+                            .catalogue
+                            .current_model
                             .clone()
-                            .or_else(|| snapshot.catalogue.current_model.clone()),
+                            .or_else(|| snapshot.config.model.clone()),
                         mode: snapshot
-                            .config
-                            .mode
+                            .catalogue
+                            .current_mode
                             .clone()
-                            .or_else(|| snapshot.catalogue.current_mode.clone()),
+                            .or_else(|| snapshot.config.mode.clone()),
                     },
                 };
                 // Durable intent precedes the remote side effect. A failed or
@@ -1158,7 +1192,16 @@ impl CommandCore {
         self.runtime.registry.command_admitted(terminal).await?;
         Ok(())
     }
-    async fn discover(&self, session: SessionId) -> Result<CommandReceipt, DomainError> {
+    async fn observe_provider(
+        &self,
+        session: SessionId,
+    ) -> Result<
+        (
+            mpsc::Sender<AdapterCommand>,
+            crate::domain::session::SessionConfig,
+        ),
+        DomainError,
+    > {
         self.runtime
             .registry
             .command_admitted(DomainCommand::LoadSession(session.clone()))
@@ -1184,6 +1227,10 @@ impl CommandCore {
             ));
         }
         self.ensure_model_context(&session).await?;
+        Ok((sender, config))
+    }
+    async fn discover(&self, session: SessionId) -> Result<CommandReceipt, DomainError> {
+        let (sender, config) = self.observe_provider(session.clone()).await?;
         // Discovery must show the same inherited choices that the next prompt
         // will use, rather than the provider's fresh native defaults.
         let observed = self

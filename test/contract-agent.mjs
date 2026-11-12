@@ -80,6 +80,37 @@ if (process.env.WORKBENCH_CONTRACT_TYPED_SETTINGS === '1')
     },
   );
 const modelState = process.env.WORKBENCH_CONTRACT_MODEL_STATE;
+function refreshDependentThinking() {
+  if (process.env.WORKBENCH_CONTRACT_DEPENDENT_THINKING !== '1') return;
+  const thinking = configOptions.find((c) => c.id === 'thought_level');
+  if (!thinking) return;
+  thinking.options =
+    configOptions[0].currentValue === 'other'
+      ? [
+          { value: 'low', name: 'Low' },
+          { value: 'high', name: 'High' },
+        ]
+      : [{ value: 'low', name: 'Low' }];
+  if (!thinking.options.some((o) => o.value === thinking.currentValue))
+    thinking.currentValue = 'low';
+}
+refreshDependentThinking();
+const thinkingLevelsFile = process.env.WORKBENCH_CONTRACT_THINKING_LEVELS_FILE;
+if (thinkingLevelsFile) {
+  const thinking = configOptions.find((c) => c.id === 'thought_level');
+  const levels = JSON.parse(readFileSync(thinkingLevelsFile, 'utf8'));
+  thinking.options = levels.map((value) => ({ value, name: value }));
+  thinking.currentValue = levels[0];
+}
+const hiddenSettingsFile = process.env.WORKBENCH_CONTRACT_HIDDEN_SETTINGS_FILE;
+if (hiddenSettingsFile) {
+  const hidden = JSON.parse(readFileSync(hiddenSettingsFile, 'utf8'));
+  for (let i = configOptions.length - 1; i >= 0; i--)
+    if (hidden.includes(configOptions[i].id)) configOptions.splice(i, 1);
+}
+if (process.env.WORKBENCH_CONTRACT_THINKING_ID)
+  configOptions.find((c) => c.id === 'thought_level').id =
+    process.env.WORKBENCH_CONTRACT_THINKING_ID;
 if (modelState && existsSync(modelState))
   configOptions[0].currentValue = readFileSync(modelState, 'utf8');
 const modes = {
@@ -805,6 +836,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     }
     if (config) {
       config.currentValue = r.params.value;
+      refreshDependentThinking();
       if (modelState && config.id === 'model') writeFileSync(modelState, config.currentValue);
       nativeFixture?.configure(sessionId, configOptions[0].currentValue, modes.currentModeId);
     }

@@ -58,7 +58,7 @@ fn entry(
         image,
     })
 }
-fn validate_config(view: &SessionView, config: &SessionConfig) -> Result<(), DomainError> {
+fn validate_model_and_mode(view: &SessionView, config: &SessionConfig) -> Result<(), DomainError> {
     if config.model.as_ref().is_some_and(|id| {
         !view.catalogue.models.is_empty()
             && !view.catalogue.models.iter().any(|choice| &choice.id == id)
@@ -75,6 +75,17 @@ fn validate_config(view: &SessionView, config: &SessionConfig) -> Result<(), Dom
             "mode is not in provider catalogue".into(),
         ));
     }
+    Ok(())
+}
+fn validate_config(view: &SessionView, config: &SessionConfig) -> Result<(), DomainError> {
+    validate_model_and_mode(view, config)?;
+    // Thinking choices can depend on the model. The adapter applies the model
+    // first and validates each value against the resulting provider catalogue;
+    // CommitConfiguration then requires confirmation of every requested value.
+    let changing_model = config
+        .model
+        .as_ref()
+        .is_some_and(|model| view.catalogue.current_model.as_ref() != Some(model));
     for (id, value) in &config.options {
         if !view.catalogue.selects.iter().any(|s| {
             &s.id == id
@@ -82,11 +93,15 @@ fn validate_config(view: &SessionView, config: &SessionConfig) -> Result<(), Dom
                 && s.category.as_deref() != Some("mode")
                 && s.id != "model"
                 && s.id != "mode"
-                && s.choices.iter().any(|c| &c.value == value)
+                && (changing_model || s.choices.iter().any(|c| &c.value == value))
         }) {
-            return Err(DomainError::Protocol(
-                "setting is not offered by provider".into(),
-            ));
+            return Err(DomainError::Protocol(format!(
+                "setting is not offered by provider: {id:?}={value:?} (observed model: {:?})",
+                view.catalogue
+                    .current_model
+                    .as_ref()
+                    .map(|model| model.as_str())
+            )));
         }
     }
     Ok(())
@@ -326,7 +341,9 @@ pub fn transition(
             }
             let mut config = view.config.clone();
             config.model = Some(model);
-            validate_config(view, &config)?;
+            // Cold changes save preferences before provider discovery. Existing
+            // inherited options have no catalogue to validate against yet.
+            validate_model_and_mode(view, &config)?;
             change.next.config = config;
         }
         DomainCommand::SetOption { .. } => {
@@ -340,7 +357,7 @@ pub fn transition(
             }
             let mut config = view.config.clone();
             config.mode = Some(mode);
-            validate_config(view, &config)?;
+            validate_model_and_mode(view, &config)?;
             change.next.config = config;
         }
         DomainCommand::Agent { event, .. } => match event {

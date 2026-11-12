@@ -210,13 +210,17 @@ pub(super) fn apply_commit(
             .clone()
             .or_else(|| commit.next.catalogue.current_model.clone())
             .or(defaults.model);
-        for setting in &commit.next.catalogue.selects {
-            if setting.category.as_deref() == Some("thought_level") {
-                defaults
-                    .options
-                    .insert(setting.id.clone(), setting.current_value.clone());
-            }
-        }
+        // A confirmed offering replaces old thinking IDs as well as values.
+        // Merging would seed every new session with withdrawn overrides after
+        // a provider/adapter change, even after an existing session was fixed.
+        defaults.options = commit
+            .next
+            .catalogue
+            .selects
+            .iter()
+            .filter(|setting| setting.category.as_deref() == Some("thought_level"))
+            .map(|setting| (setting.id.clone(), setting.current_value.clone()))
+            .collect();
         tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![harness_name(&commit.next.harness), encode(&defaults)?])?;
     }
     if let Some(turn) = old
