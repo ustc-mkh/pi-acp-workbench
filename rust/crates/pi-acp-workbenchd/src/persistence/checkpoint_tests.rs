@@ -88,7 +88,7 @@ fn pinned_reader_checkpoint_is_bounded_then_reuses_wal_without_losing_commits() 
 #[test]
 fn checkpoint_error_restores_normal_write_timeout_and_does_not_erase_facts() {
     let root = Root::new();
-    let db = fixture(&root);
+    let mut db = fixture(&root);
     fill(&db);
     db.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Pragma {
@@ -121,7 +121,7 @@ fn checkpoint_error_restores_normal_write_timeout_and_does_not_erase_facts() {
 #[test]
 fn small_wal_does_not_run_sql_checkpoint() {
     let root = Root::new();
-    let db = fixture(&root);
+    let mut db = fixture(&root);
     db.execute("INSERT INTO facts VALUES(1,x'02')", []).unwrap();
     db.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Pragma {
