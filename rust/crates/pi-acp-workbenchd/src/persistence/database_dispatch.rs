@@ -275,6 +275,17 @@ pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: St
         } => {
             let _ = reply.send(query::history(connection, &session, cursor, limit));
         }
+        StoreRequest::HistoryTurns {
+            session,
+            cursor,
+            turns,
+            reply,
+        } => {
+            let _ = reply.send(query::history_turns(connection, &session, cursor, turns));
+        }
+        StoreRequest::ContentBatch { reads, reply } => {
+            let _ = reply.send(super::content::batch(connection, reads));
+        }
         StoreRequest::ContentSlice {
             content,
             offset,

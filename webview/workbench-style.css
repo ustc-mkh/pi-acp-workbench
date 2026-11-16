@@ -143,6 +143,12 @@ header {
   max-height: 140px;
   overflow: auto;
 }
+#earlier-status {
+  flex: 0 0 auto;
+  padding: 3px 18px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 .transcript-area {
   position: relative;
   flex: 1;

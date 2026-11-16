@@ -1,13 +1,14 @@
 import type { WorkbenchClient } from './workbench-client';
 import {
   jsonBytes,
+  MAX_HISTORY_TURNS,
   type EntryHeader,
   type HistoryPage,
   type SessionId,
 } from './workbench-protocol';
 
 export const INITIAL_HISTORY_TURNS = 3;
-export const EARLIER_HISTORY_TURNS = 20;
+export const EARLIER_HISTORY_TURNS = MAX_HISTORY_TURNS;
 export const MAX_DISPLAY_ENTRIES = 20_000;
 export const MAX_DISPLAY_BYTES = 8 * 1024 * 1024;
 export function historyFits(entries: readonly EntryHeader[]) {

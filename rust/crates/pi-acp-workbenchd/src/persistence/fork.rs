@@ -24,7 +24,9 @@ const JOINS: &str = "session_entries se JOIN entries e ON e.entry_id=se.entry_id
 fn feed(db: &Connection, row: &EntryHeader, hash: &mut Sha256) -> Result<(), StoreError> {
     match &row.text {
         TextBody::Inline { text } => hash.update(text.as_bytes()),
-        TextBody::Archived { content: reference } => {
+        TextBody::Archived {
+            content: reference, ..
+        } => {
             let mut offset = SafeInteger::default();
             let mut whole = Sha256::new();
             loop {
@@ -46,7 +48,7 @@ fn feed(db: &Connection, row: &EntryHeader, hash: &mut Sha256) -> Result<(), Sto
 fn row_hash(row: &EntryHeader) -> ContentHash {
     match &row.text {
         TextBody::Inline { text } => ContentHash::of(text),
-        TextBody::Archived { content } => content.sha256.clone(),
+        TextBody::Archived { content, .. } => content.sha256.clone(),
     }
 }
 fn finish(hash: Sha256) -> ContentHash {

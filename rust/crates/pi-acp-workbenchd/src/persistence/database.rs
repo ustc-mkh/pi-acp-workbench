@@ -2,8 +2,9 @@
 use super::{database_dispatch::execute_request, format::StorageLease, schema};
 use crate::domain::{
     query::{
-        CommitBatch, ContentRef, HistoryCursor, HistoryPage, ListCursor, ListPage, QueryError,
-        SafeInteger, SessionSummary, SessionView,
+        CommitBatch, ContentBatch, ContentRead, ContentRef, HistoryCursor, HistoryPage,
+        HistoryTurnPage, ListCursor, ListPage, QueryError, SafeInteger, SessionSummary,
+        SessionView,
     },
     transition::Transition,
     SessionId,
@@ -689,6 +690,28 @@ impl Database {
             reply,
         })
         .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn history_turns(
+        &self,
+        session: SessionId,
+        cursor: HistoryCursor,
+        turns: usize,
+    ) -> Result<HistoryTurnPage, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::HistoryTurns {
+            session,
+            cursor,
+            turns,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
+    pub async fn content_batch(&self, reads: Vec<ContentRead>) -> Result<ContentBatch, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(StoreRequest::ContentBatch { reads, reply })
+            .await?;
         result.await.map_err(|_| StoreError::Closed)?
     }
     pub async fn content(&self, content: ContentRef) -> Result<String, StoreError> {

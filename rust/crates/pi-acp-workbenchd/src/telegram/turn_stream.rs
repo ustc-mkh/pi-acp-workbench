@@ -39,7 +39,7 @@ impl TextCursor {
                 buffer: text,
                 position: 0,
             },
-            TextBody::Archived { content } => Self {
+            TextBody::Archived { content, .. } => Self {
                 reference: Some(content),
                 next: Some(SafeInteger::default()),
                 buffer: String::new(),

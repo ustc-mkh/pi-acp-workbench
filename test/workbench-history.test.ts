@@ -122,30 +122,60 @@ it('joins UTF-8 archived slices and checks the whole text hash before displaying
   });
   let reads = 0;
   const client = {
-    call: async (q: { offset: number }) => {
+    call: async (q: { reads: { offset: number }[] }) => {
       reads++;
-      let end = Math.min(bytes.length, q.offset + 60000);
+      const { offset } = q.reads[0];
+      let end = Math.min(bytes.length, offset + 60000);
       while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
       return {
-        text: bytes.subarray(q.offset, end).toString(),
-        total_bytes: bytes.length,
-        sha256: ref.sha256,
-        next_offset: end < bytes.length ? end : null,
+        slices: [
+          {
+            text: bytes.subarray(offset, end).toString(),
+            total_bytes: bytes.length,
+            sha256: ref.sha256,
+            next_offset: end < bytes.length ? end : null,
+          },
+        ],
       };
     },
   } as unknown as WorkbenchClient;
   const cache = new HistoryText();
-  expect(await cache.resolve(client, [row], () => true)).toEqual({ archive: text });
+  const snapshots: Record<string, string>[] = [];
+  await cache.resolve(
+    client,
+    [row],
+    () => true,
+    () => snapshots.push(cache.snapshot([row])),
+  );
+  expect(snapshots).toEqual([{ archive: text }]);
   expect(reads).toBe(2);
-  await cache.resolve(client, [row], () => true);
+  await cache.resolve(
+    client,
+    [row],
+    () => true,
+    () => {},
+  );
   expect(reads).toBe(2);
   const corrupt = {
     call: async () => ({
-      text: 'wrong',
-      total_bytes: ref.bytes,
-      sha256: ref.sha256,
-      next_offset: null,
+      slices: [
+        {
+          text: 'wrong',
+          total_bytes: ref.bytes,
+          sha256: ref.sha256,
+          next_offset: null,
+        },
+      ],
     }),
   } as unknown as WorkbenchClient;
-  expect(await new HistoryText().resolve(corrupt, [row], () => true)).toEqual({});
+  const rejected = new HistoryText();
+  await rejected.resolve(
+    corrupt,
+    [row],
+    () => true,
+    () => {
+      throw new Error('Published incomplete text');
+    },
+  );
+  expect(rejected.snapshot([row])).toEqual({});
 });

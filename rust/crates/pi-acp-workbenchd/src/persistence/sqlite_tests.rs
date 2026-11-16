@@ -826,6 +826,78 @@ async fn sqlite_100k_indexed_pagination_no_duplicates_or_missing_rows() {
     assert_eq!(count(&sql, "deliveries"), 1);
 }
 #[tokio::test]
+async fn history_turn_pages_publish_whole_turns_and_continue_an_oversized_turn() {
+    use crate::domain::query::{HistoryCursor, ProtocolVersion, TextBody};
+
+    let root = Root::new();
+    let (_lease, db) = open(&root.data()).await;
+    let session = initial().id;
+    db.create(initial()).await.unwrap();
+    db.shutdown().await.unwrap();
+    let mut conn = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
+    let tx = conn.transaction().unwrap();
+    // A near-full page can fit the newest small turn or part of the large
+    // turn. It should return only the small one and preserve the boundary.
+    let escaped = "\"".repeat(8000);
+    for (seq, turn, body) in std::iter::once((1, "oldest", "first"))
+        .chain((2..=210).map(|seq| (seq, "large", escaped.as_str())))
+        .chain([(211, "complete", "small"), (212, "latest", "visible")])
+    {
+        let mut entry = entry(&format!("test-{seq}"), body);
+        entry.turn = TurnId::new(turn).unwrap();
+        if seq == 211 {
+            let archived = format!("{}🌏tail", "a".repeat(383)) + &"z".repeat(20_000);
+            entry.text.content.bytes = SafeInteger::new(archived.len() as u64).unwrap();
+            entry.text.content.sha256 = ContentHash::of(&archived);
+            entry.text.text = archived;
+        }
+        super::content::put_entry(&tx, &entry).unwrap();
+        tx.execute(
+            "INSERT INTO session_entries(session,seq,entry_id) VALUES(?1,?2,?3)",
+            params![session.as_str(), seq, entry.id.as_str()],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "UPDATE sessions SET last_entry_seq=212 WHERE id=?1",
+        [session.as_str()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let cursor = HistoryCursor {
+        version: ProtocolVersion,
+        session: session.clone(),
+        max_entry_seq: SafeInteger::new(212).unwrap(),
+        before_seq: SafeInteger::new(212).unwrap(),
+    };
+    let first = query::history_turns(&conn, &session, cursor, 20).unwrap();
+    assert!(!first.partial);
+    assert_eq!(first.entries.len(), 1);
+    assert_eq!(first.entries[0].seq.get(), 211);
+    assert!(
+        matches!(&first.entries[0].text, TextBody::Archived { preview: Some(text), .. }
+        if text == &"a".repeat(383))
+    );
+
+    let mut cursor = first.next_cursor.unwrap();
+    let mut large = Vec::new();
+    loop {
+        let part = query::history_turns(&conn, &session, cursor, 1).unwrap();
+        assert!(part.entries.iter().all(|row| row.turn.as_str() == "large"));
+        large.splice(..0, part.entries.into_iter().map(|row| row.seq.get()));
+        cursor = part.next_cursor.unwrap();
+        if !part.partial {
+            break;
+        }
+    }
+    assert_eq!(large, (2..=210).collect::<Vec<_>>());
+    let last = query::history_turns(&conn, &session, cursor, 1).unwrap();
+    assert_eq!(last.entries[0].seq.get(), 1);
+    assert!(last.next_cursor.is_none());
+    assert!(!last.partial);
+}
+
+#[tokio::test]
 async fn sqlite_pagination_freezes_append_boundary_and_lists_only_summaries() {
     let root = Root::new();
     let (_lease, db) = open(&root.data()).await;

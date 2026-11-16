@@ -2,8 +2,8 @@
 use super::database::StoreError;
 use crate::domain::{
     query::{
-        CommitBatch, ContentRef, HistoryCursor, HistoryPage, ListCursor, ListPage, SafeInteger,
-        SessionSummary, SessionView,
+        CommitBatch, ContentBatch, ContentRead, ContentRef, HistoryCursor, HistoryPage,
+        HistoryTurnPage, ListCursor, ListPage, SafeInteger, SessionSummary, SessionView,
     },
     transition::Transition,
     SessionId,
@@ -154,6 +154,16 @@ pub(super) enum StoreRequest {
         limit: Option<usize>,
         reply: Reply<HistoryPage>,
     },
+    HistoryTurns {
+        session: SessionId,
+        cursor: HistoryCursor,
+        turns: usize,
+        reply: Reply<HistoryTurnPage>,
+    },
+    ContentBatch {
+        reads: Vec<ContentRead>,
+        reply: Reply<ContentBatch>,
+    },
     ContentSlice {
         content: ContentRef,
         offset: SafeInteger,
@@ -196,6 +206,8 @@ impl StoreRequest {
             | Self::List { .. }
             | Self::Search { .. }
             | Self::History { .. }
+            | Self::HistoryTurns { .. }
+            | Self::ContentBatch { .. }
             | Self::ContentSlice { .. }
             | Self::Content { .. }
             | Self::Image { .. } => true,
@@ -240,6 +252,8 @@ impl StoreRequest {
             Self::WorkerActivity { .. } => "worker_activity",
             Self::List { .. } | Self::Search { .. } | Self::ActivityList { .. } => "list",
             Self::History { .. } => "history",
+            Self::HistoryTurns { .. } => "history_turns",
+            Self::ContentBatch { .. } => "content_batch",
             Self::ContentSlice { .. } => "content_slice",
             Self::Content { .. } => "content",
             Self::Delivery(_) => "delivery",

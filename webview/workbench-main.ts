@@ -23,6 +23,7 @@ import {
   type ImageRef,
   type SessionView,
   type ContentRef,
+  contentId,
   contentRef,
   contentSlice,
 } from '../src/workbench-protocol';
@@ -277,6 +278,7 @@ const status = element('p'),
   transcript = element('main');
 let previewActive = false;
 let jumpToLatest = false;
+let scrollOnPrompt: { session: string; revision: number } | undefined;
 const messages = element('div');
 messages.id = 'messages';
 const working = element('div');
@@ -326,6 +328,59 @@ const diffObserver =
       )
     : undefined;
 
+const observedHistoryText = new Set<HTMLElement>();
+const visibleHistoryText = new Set<HTMLElement>();
+let historyTextFrame: number | undefined;
+let lastHistoryTextRequest = '';
+function reportVisibleHistoryText() {
+  if (historyTextFrame !== undefined) return;
+  historyTextFrame = requestAnimationFrame(() => {
+    historyTextFrame = undefined;
+    const session = current()?.id;
+    if (!session || state?.view?.status !== 'ready') return;
+    const ids = new Set<ReturnType<typeof contentId.parse>>();
+    for (const node of visibleHistoryText) {
+      if (node.isConnected && node.dataset.historyText)
+        ids.add(contentId.parse(node.dataset.historyText));
+      if (ids.size === 128) break;
+    }
+    const visible = [...ids];
+    const key = JSON.stringify([session, visible]);
+    if (key === lastHistoryTextRequest || (!lastHistoryTextRequest && !visible.length)) return;
+    lastHistoryTextRequest = key;
+    send({ type: 'visible_history_text', session, ids: visible });
+  });
+}
+const historyTextObserver =
+  typeof window.IntersectionObserver === 'function'
+    ? new window.IntersectionObserver(
+        (entries) => {
+          for (const { target, isIntersecting } of entries) {
+            const node = target as HTMLElement;
+            if (isIntersecting && observedHistoryText.has(node)) visibleHistoryText.add(node);
+            else visibleHistoryText.delete(node);
+          }
+          reportVisibleHistoryText();
+        },
+        { root: transcript, rootMargin: '150px' },
+      )
+    : undefined;
+function observeHistoryText() {
+  if (!historyTextObserver) return;
+  const nodes = new Set(messages.querySelectorAll<HTMLElement>('[data-history-text]'));
+  for (const node of observedHistoryText) {
+    if (nodes.has(node)) continue;
+    historyTextObserver.unobserve(node);
+    observedHistoryText.delete(node);
+    if (visibleHistoryText.delete(node)) reportVisibleHistoryText();
+  }
+  for (const node of nodes) {
+    if (observedHistoryText.has(node)) continue;
+    historyTextObserver.observe(node);
+    observedHistoryText.add(node);
+  }
+}
+
 planPanel.id = 'plan';
 planPanel.setAttribute('aria-label', '待办清单');
 error.id = 'error-message';
@@ -359,6 +414,10 @@ new window.MutationObserver(refreshErrorBanner).observe(error, {
 });
 status.id = 'status';
 status.setAttribute('role', 'status');
+const earlierStatus = element('small');
+earlierStatus.id = 'earlier-status';
+earlierStatus.setAttribute('role', 'status');
+earlierStatus.hidden = true;
 transcript.id = 'transcript';
 const interactions = element('section'),
   operations = element('section');
@@ -681,6 +740,7 @@ composer.addEventListener('submit', (event) => {
     new Set(state?.operations.map((operation) => operation.operation)),
   );
   submit.disabled = true;
+  classic.scrollToBottom();
   send({
     type: 'execute',
     session: snapshot.id,
@@ -739,6 +799,7 @@ const classic = buildClassicShell({
   history: historyPanel,
   status,
   error: errorBanner,
+  historyStatus: earlierStatus,
   management: management.root,
   settings,
   plan: planPanel,
@@ -750,7 +811,7 @@ const classic = buildClassicShell({
   historyOpen: preferences.historyOpen,
   onLatest: () => {
     const snapshot = current();
-    if (snapshot && state?.view?.historical) {
+    if (snapshot && (state?.view?.historical || state?.view?.loadingEarlier)) {
       jumpToLatest = true;
       send({ type: 'latest', session: snapshot.id });
     }
@@ -833,7 +894,7 @@ const contentPages = new Map<
   string,
   { ref: ContentRef; offset: number; text: string; next: number | null }
 >();
-function contentNode(ref: ContentRef, session: SessionView['id']) {
+function contentNode(ref: ContentRef, session: SessionView['id'], preview?: string) {
   const box = element('section');
   const page = contentPages.get(ref.id);
   box.append(element('small', `Archived ${ref.kind} · ${ref.bytes} bytes`));
@@ -842,6 +903,7 @@ function contentNode(ref: ContentRef, session: SessionView['id']) {
       send({ type: 'read_content', session, ref, offset: 0 }),
     ),
   );
+  if (!page && preview) box.append(element('pre', preview + '…'));
   if (page) {
     // Replace, never concatenate content pages. Each response is <=64KiB;
     // at most four open pages remain, below 256KiB per item and bounded overall.
@@ -886,9 +948,15 @@ function hasIntermediateAnswers(
 }
 function renderTranscript(snapshot: SessionView, busy: boolean) {
   const rows = state?.view?.entries || [];
+  const oldest = rows[0]?.seq;
+  const previousOldest = Number(messages.dataset.oldestSeq);
+  const prepended = Boolean(
+    state?.view?.historical && oldest !== undefined && oldest < previousOldest,
+  );
+  if (oldest === undefined) delete messages.dataset.oldestSeq;
+  else messages.dataset.oldestSeq = String(oldest);
   const streaming = snapshot.status === 'Running';
-  const scroll = transcript.scrollTop,
-    bottom = transcript.scrollHeight - transcript.clientHeight - scroll < 80;
+  const scroll = transcript.scrollTop;
   const anchor = [...transcript.querySelectorAll<HTMLElement>('[data-entry]')].find(
     (node) => node.getBoundingClientRect().bottom >= transcript.getBoundingClientRect().top,
   );
@@ -910,15 +978,9 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       button(
         '加载更早消息（20 轮）',
         () => send({ type: 'earlier', session: snapshot.id }),
-        !state?.view?.earlier,
+        !!state.view.loadingEarlier || state.view.status !== 'ready',
       ),
     );
-  output.append(
-    element(
-      'small',
-      state?.view?.earlier ? '更早的消息尚未加载；可继续加载、复制或导出完整历史。' : '',
-    ),
-  );
   const projected = messageProjection.update(rows);
   const lastAnswers = new Map<string, string>();
   for (const message of projected)
@@ -1358,9 +1420,12 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       }
     } else
       for (const part of message.entries) {
-        if ('Archived' in part.text)
-          content.append(contentNode(part.text.Archived.content, snapshot.id));
-        else content.append(element('pre', part.text.Inline.text));
+        if ('Archived' in part.text) {
+          const { content: ref, preview } = part.text.Archived;
+          const node = contentNode(ref, snapshot.id, preview);
+          if (!contentPages.has(ref.id)) node.dataset.historyText = ref.id;
+          content.append(node);
+        } else content.append(element('pre', part.text.Inline.text));
       }
     if (row.role === 'Thought') {
       const details = disclosure(`${snapshot.id}:thought:${row.id}`);
@@ -1529,6 +1594,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     }
   }
   reconcile(messages, output);
+  observeHistoryText();
   diffObserver?.disconnect();
   for (const turn of messages.querySelectorAll<HTMLElement>('section.turn[data-turn]'))
     diffObserver?.observe(turn);
@@ -1539,19 +1605,30 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     (node) => node.dataset.entry === anchorId,
   );
   transcript.scrollTop =
-    (bottom && preferences.autoScroll) ||
-    (jumpToLatest && !state?.view?.historical && state?.view?.status === 'ready')
-      ? transcript.scrollHeight
-      : restored && anchorOffset !== undefined
-        ? scroll + restored.getBoundingClientRect().top - anchorOffset
-        : scroll;
-  if (jumpToLatest && !state?.view?.historical && state?.view?.status === 'ready')
-    jumpToLatest = false;
+    restored && anchorOffset !== undefined
+      ? transcript.scrollTop + restored.getBoundingClientRect().top - anchorOffset
+      : scroll;
+  return prepended;
 }
 function render() {
   if (!state) return;
+  const earlierLoaded = state.view?.earlierLoaded;
+  const historyFeedback =
+    state.view?.earlierError ??
+    (state.view?.loadingEarlier
+      ? earlierLoaded
+        ? `正在加载更早消息，已加载 ${earlierLoaded} 轮…`
+        : '正在加载更早消息…'
+      : earlierLoaded === undefined
+        ? ''
+        : earlierLoaded > 0
+          ? `已加载 ${earlierLoaded} 轮更早消息，向上滚动查看。`
+          : '没有更早的消息了。');
+  if (earlierStatus.textContent !== historyFeedback) earlierStatus.textContent = historyFeedback;
+  earlierStatus.hidden = !historyFeedback;
   if (selected !== state.selected) {
     jumpToLatest = false;
+    if (scrollOnPrompt?.session !== state.selected) scrollOnPrompt = undefined;
     saveDraft();
     selected = state.selected;
     prompt.value = drafts.get(selected || '');
@@ -1559,6 +1636,11 @@ function render() {
     for (const image of images.values()) URL.revokeObjectURL(image.url);
     images.clear();
     contentPages.clear();
+    lastHistoryTextRequest = '';
+    historyTextObserver?.disconnect();
+    observedHistoryText.clear();
+    visibleHistoryText.clear();
+    delete messages.dataset.oldestSeq;
     turnDiffs.clear();
     diffReads.clear();
     attemptedDiffs.clear();
@@ -1765,7 +1847,7 @@ function render() {
     retentionDays: summary?.retention_days,
     entries: state.view?.entries.length || 0,
     preview: previewActive && !snapshot,
-    historical: state.view?.historical,
+    historical: state.view?.historical || state.view?.loadingEarlier,
     hasActivity: Boolean(
       state.view?.entries.some((row) => row.role === 'Thought') ||
         hasIntermediateAnswers(state.view?.entries || [], snapshot?.active_turn) ||
@@ -1816,14 +1898,19 @@ function render() {
     renderContextUsage(snapshot);
     working.hidden = !snapshot.active_turn;
     workingLabel.textContent = `${snapshot.harness === 'Pi' ? 'Pi Agent' : snapshot.harness} 正在处理…`;
-    const follow =
-      preferences.autoScroll &&
-      transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop < 80;
-    renderTranscript(snapshot, busy);
+    const follow = preferences.autoScroll && classic.nearBottom();
+    const prepended = renderTranscript(snapshot, busy);
     renderInteractions(interactions, snapshot, mutate);
-    // Question cards change the transcript viewport after its own render. Apply
-    // follow again so the last message/spinner stays visible above the card.
-    if (follow) transcript.scrollTop = transcript.scrollHeight;
+    const promptArrived =
+      scrollOnPrompt?.session === snapshot.id && snapshot.revision >= scrollOnPrompt.revision;
+    const latestArrived =
+      jumpToLatest &&
+      !state.view?.historical &&
+      !state.view?.loadingEarlier &&
+      state.view?.status === 'ready';
+    if (promptArrived || latestArrived || (follow && !prepended)) classic.scrollToBottom();
+    if (promptArrived) scrollOnPrompt = undefined;
+    if (latestArrived) jumpToLatest = false;
   } else {
     modelControls.show(false);
     renderContextUsage();
@@ -1834,6 +1921,7 @@ function render() {
     delete planPanel.dataset.definition;
     working.hidden = true;
     messages.replaceChildren();
+    observeHistoryText();
     if (previewActive) {
       const article = element('article');
       article.className = 'message assistant';
@@ -1865,6 +1953,7 @@ function render() {
       );
     operations.append(row);
   }
+  classic.updateBottom();
 }
 document.querySelector('#workbench')!.addEventListener('workbench-preview', () => {
   previewActive = true;
@@ -1879,6 +1968,10 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       const message = uiStateMessage.parse(raw);
       if (message.sequence <= sequence) return;
       const previousTurn = state?.view?.view?.active_turn;
+      const historyFeedbackChanged =
+        state?.view?.loadingEarlier !== message.state.view?.loadingEarlier ||
+        state?.view?.earlierLoaded !== message.state.view?.earlierLoaded ||
+        state?.view?.earlierError !== message.state.view?.earlierError;
       sequence = message.sequence;
       state = message.state;
       if (previousTurn && !state.view?.view?.active_turn) {
@@ -1902,7 +1995,11 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
           )
         )
           pendingPrompts.delete(session);
-      schedule(state.view?.status === 'ready' && state.view.view?.status === 'Running');
+      schedule(
+        !historyFeedbackChanged &&
+          state.view?.status === 'ready' &&
+          state.view.view?.status === 'Running',
+      );
     } else if (
       raw.type === 'prompt_submitted' &&
       'session' in raw &&
@@ -1934,6 +2031,13 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         return;
       pendingPrompts.delete(raw.session);
       promptOperations.delete(raw.session);
+      if (
+        raw.session === state?.selected &&
+        'revision' in raw &&
+        typeof raw.revision === 'number' &&
+        Number.isSafeInteger(raw.revision)
+      )
+        scrollOnPrompt = { session: raw.session, revision: raw.revision };
       const text = raw.session === selected ? prompt.value : drafts.get(raw.session);
       try {
         if (

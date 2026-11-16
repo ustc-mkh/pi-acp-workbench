@@ -18,7 +18,7 @@ import {
 
 export const WORKBENCH_LIMITS = {
   frameBytes: MAX_FRAME_BYTES,
-  pools: [16, 4, 4] as const,
+  pools: [16, 4, 4, 1] as const,
   connectMs: 5000,
   partialMs: 10000,
 };
@@ -50,7 +50,7 @@ interface Pending {
   operation?: OperationId;
   sent: boolean;
   settled: boolean;
-  pool: 0 | 1 | 2;
+  pool: ReturnType<typeof commandPool>;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer?: NodeJS.Timeout;
@@ -160,7 +160,7 @@ export class WorkbenchClient {
   private closed = false;
   private nextId = 0;
   private pending = new Map<number, Pending>();
-  private pools = [0, 0, 0];
+  private pools = WORKBENCH_LIMITS.pools.map(() => 0);
   private observers = new Set<WorkbenchObserver>();
   constructor(
     readonly path: string,
@@ -288,6 +288,8 @@ export class WorkbenchClient {
           search: 'list',
           inspect: 'view',
           history: 'history',
+          history_turns: 'history_turns',
+          content_batch: 'content_batch',
           tools: 'tools',
           content: 'content',
           management: 'management',

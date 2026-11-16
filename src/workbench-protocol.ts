@@ -245,6 +245,10 @@ export const MAX_VIEW_BYTES = 512 * 1024;
 export const INLINE_TEXT_BYTES = 16 * 1024;
 export const MAX_CONTENT_BYTES = 64 * 1024 * 1024;
 export const CONTENT_SLICE_BYTES = 64 * 1024;
+export const MAX_HISTORY_TURNS = 20;
+export const MAX_CONTENT_BATCH_ITEMS = 8;
+const CONTENT_BATCH_SLICE_BYTES = 128 * 1024;
+const HISTORY_PREVIEW_BYTES = 384;
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 100;
 export const DEFAULT_HISTORY_LIMIT = 100;
@@ -260,8 +264,9 @@ export function queryLimit(value: number | undefined, fallback: number, maximum:
   return n > 0 && n <= maximum ? n : invalid();
 }
 export const contentKind = oneOf('Text', 'ToolText', 'ToolDiff', 'ToolResource');
+export const contentId = id('content');
 export const contentRef = object({
-  id: id('content'),
+  id: contentId,
   sha256: digest,
   bytes: checked(uint, (n) => n <= MAX_CONTENT_BYTES),
   kind: contentKind,
@@ -269,7 +274,10 @@ export const contentRef = object({
 export type ContentRef = Infer<typeof contentRef>;
 export const textBody = variants({
   Inline: object({ text: checked(string, (s) => byteLength(s) <= INLINE_TEXT_BYTES) }),
-  Archived: object({ content: checked(contentRef, (r) => r.kind === 'Text') }),
+  Archived: object({
+    content: checked(contentRef, (r) => r.kind === 'Text'),
+    preview: optional(checked(string, (s) => byteLength(s) <= HISTORY_PREVIEW_BYTES)),
+  }),
 });
 export type TextBody = Infer<typeof textBody>;
 export const turnDiff = object({
@@ -570,19 +578,40 @@ export const historyPage = checked(
   object({ entries: array(entryHeader), next_cursor: nullable(historyCursor) }),
   (v) => v.entries.length <= MAX_HISTORY_LIMIT && jsonBytes(v) <= MAX_QUERY_BYTES,
 );
+export const historyTurnPage = checked(
+  object({ entries: array(entryHeader), next_cursor: nullable(historyCursor), partial: boolean }),
+  (v) =>
+    v.entries.length <= MAX_HISTORY_LIMIT &&
+    (!v.partial || (v.next_cursor !== null && v.entries.length > 0)) &&
+    jsonBytes(v) <= MAX_QUERY_BYTES,
+);
+export type HistoryTurnPage = Infer<typeof historyTurnPage>;
 export const toolPage = checked(
   object({ tools: array(toolHeader), next_cursor: nullable(toolCursor) }),
   (v) => v.tools.length <= MAX_HISTORY_LIMIT && jsonBytes(v) <= MAX_QUERY_BYTES,
 );
-export const contentSlice = checked(
-  object({
-    text: checked(string, (s) => byteLength(s) <= CONTENT_SLICE_BYTES),
-    next_offset: nullable(uint),
-    sha256: digest,
-    total_bytes: checked(uint, (n) => n <= MAX_CONTENT_BYTES),
-  }),
-  (v) => v.next_offset === null || v.next_offset <= v.total_bytes,
+const contentSliceWithLimit = (limit: number) =>
+  checked(
+    object({
+      text: checked(string, (s) => byteLength(s) <= limit),
+      next_offset: nullable(uint),
+      sha256: digest,
+      total_bytes: checked(uint, (n) => n <= MAX_CONTENT_BYTES),
+    }),
+    (v) => v.next_offset === null || v.next_offset <= v.total_bytes,
+  );
+export const contentSlice = contentSliceWithLimit(CONTENT_SLICE_BYTES);
+const contentRead = checked(
+  object({ ref: checked(contentRef, (ref) => ref.kind === 'Text'), offset: uint }),
+  (v) => v.offset <= v.ref.bytes,
 );
+export type ContentRead = Infer<typeof contentRead>;
+const contentBatch = object({
+  slices: checked(
+    array(nullable(contentSliceWithLimit(CONTENT_BATCH_SLICE_BYTES))),
+    (slices) => slices.length > 0 && slices.length <= MAX_CONTENT_BATCH_ITEMS,
+  ),
+});
 export const attached = checked(
   object({ view: sessionView, recent_page: historyPage }),
   (v) => jsonBytes(v) <= MAX_QUERY_BYTES,
@@ -609,6 +638,19 @@ export const queryCommand = checked(
       session: sessionId,
       cursor: optional(nullable(historyCursor)),
       limit: historyLimit,
+    }),
+    history_turns: object({
+      method: literal('history_turns'),
+      session: sessionId,
+      cursor: historyCursor,
+      turns: checked(uint, (n) => n > 0 && n <= MAX_HISTORY_TURNS),
+    }),
+    content_batch: object({
+      method: literal('content_batch'),
+      reads: checked(
+        array(contentRead),
+        (reads) => reads.length > 0 && reads.length <= MAX_CONTENT_BATCH_ITEMS,
+      ),
     }),
     tools: object({
       method: literal('tools'),
@@ -744,6 +786,8 @@ const queryMethods = new Set([
   'list',
   'inspect',
   'history',
+  'history_turns',
+  'content_batch',
   'tools',
   'content',
   'attach',
@@ -768,6 +812,8 @@ export const queryResult = tagged('kind', {
   list: object({ kind: literal('list'), value: listPage }),
   view: object({ kind: literal('view'), value: sessionView }),
   history: object({ kind: literal('history'), value: historyPage }),
+  history_turns: object({ kind: literal('history_turns'), value: historyTurnPage }),
+  content_batch: object({ kind: literal('content_batch'), value: contentBatch }),
   tools: object({ kind: literal('tools'), value: toolPage }),
   content: object({ kind: literal('content'), value: contentSlice }),
   turn_diff_content: object({
@@ -793,7 +839,14 @@ export const ipcMessage = checked(
   (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
 );
 export type IpcMessage = Infer<typeof ipcMessage>;
-export type CommandResult<C extends ClientCommand> = C extends { method: 'validate_undo' }
+type HistoryQueryResults = {
+  history_turns: Infer<typeof historyTurnPage>;
+  content_batch: Infer<typeof contentBatch>;
+};
+export type CommandResult<C extends ClientCommand> = C extends { method: keyof HistoryQueryResults }
+  ? HistoryQueryResults[C['method']]
+  : ExistingCommandResult<C>;
+type ExistingCommandResult<C extends ClientCommand> = C extends { method: 'validate_undo' }
   ? UndoReport
   : C extends { method: 'management' }
     ? ManagementData
@@ -822,11 +875,12 @@ export type CommandResult<C extends ClientCommand> = C extends { method: 'valida
                           : C extends { method: 'detach' }
                             ? SessionId
                             : CommandReceipt;
-export function commandPool(command: ClientCommand): 0 | 1 | 2 {
+export function commandPool(command: ClientCommand): 0 | 1 | 2 | 3 {
+  if (command.method === 'history_turns') return 3;
   if (queryMethods.has(command.method) || command.method === 'detach') return 2;
   if (['cancel', 'cancel_fork', 'answer', 'remove', 'undo_turn'].includes(command.method)) return 1;
   return 0;
 }
 export function durableCommand(command: ClientCommand) {
-  return commandPool(command) !== 2;
+  return commandPool(command) < 2;
 }

@@ -45,3 +45,44 @@ fn content_slice_reads_bounded_bytes_and_enforces_utf8_offsets_and_endings() {
     assert!(slice(&db, &item.content, SafeInteger::default(), None).is_ok());
     assert!(read_text(&db, &item.content).is_err());
 }
+
+#[test]
+fn content_batch_stops_at_the_encoded_budget_and_keeps_item_order() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("schema.sql")).unwrap();
+    let text = "\0".repeat(CONTENT_BATCH_SLICE_BYTES + 1);
+    let reference = ContentRef {
+        id: crate::domain::ContentId::generate(),
+        sha256: ContentHash::of(&text),
+        bytes: SafeInteger::new(text.len() as u64).unwrap(),
+        kind: ContentKind::Text,
+    };
+    put_text(
+        &db,
+        &NewContent {
+            content: reference.clone(),
+            text,
+        },
+    )
+    .unwrap();
+    let mut unavailable = reference.clone();
+    unavailable.sha256 = ContentHash::of("wrong identity");
+    let read = |r#ref, offset| ContentRead { r#ref, offset };
+    let offset = SafeInteger::default();
+    let first = batch(
+        &db,
+        vec![
+            read(unavailable, offset),
+            read(reference.clone(), offset),
+            read(reference.clone(), offset),
+        ],
+    )
+    .unwrap();
+    assert_eq!(first.slices.len(), 2);
+    assert!(first.slices[0].is_none());
+    let wide = first.slices[1].as_ref().unwrap();
+    assert_eq!(wide.text.len(), CONTENT_BATCH_SLICE_BYTES);
+    let last = batch(&db, vec![read(reference, wide.next_offset.unwrap())]).unwrap();
+    assert_eq!(last.slices[0].as_ref().unwrap().text, "\0");
+    assert!(last.slices[0].as_ref().unwrap().next_offset.is_none());
+}

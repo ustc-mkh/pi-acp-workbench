@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { HistoryText } from './workbench-history-text';
 import {
   loadHistoryTurns,
@@ -11,6 +12,7 @@ import {
   type CommitBatch,
   type EntryHeader,
   type HistoryCursor,
+  type HistoryTurnPage,
   type SessionId,
   type SessionView,
   type ToolHeader,
@@ -26,6 +28,9 @@ export interface WorkbenchSessionView {
   readonly toolCursor?: ToolCursor;
   readonly earlier?: HistoryCursor;
   readonly historical: boolean;
+  readonly loadingEarlier?: boolean;
+  readonly earlierLoaded?: number;
+  readonly earlierError?: string;
   readonly error?: string;
 }
 /** Bounded confirmed page projection. No provisional rows, domain reducer or
@@ -38,6 +43,8 @@ export class WorkbenchSession {
   private historyRequest = 0;
   private text = new HistoryText();
   private resolvingText = false;
+  private visibleText: readonly string[] = [];
+  private textDemand = 0;
   private toolsRequest = 0;
   private toolsReadSequence = 0;
   private toolTurnRequests = new Map<string, number>();
@@ -118,6 +125,10 @@ export class WorkbenchSession {
         this.pendingBytes = 0;
         this.publish({
           status: 'disconnected',
+          loadingEarlier: false,
+          earlierError: this.current.loadingEarlier
+            ? '连接中断，历史加载已停止。恢复连接后可重试。'
+            : this.current.earlierError,
           error: 'Workbench disconnected; restoring observation without resending requests',
         });
       },
@@ -131,7 +142,14 @@ export class WorkbenchSession {
     this.toolsRequest++;
     this.pending = [];
     this.pendingBytes = 0;
-    this.publish({ status: 'stale', error });
+    this.publish({
+      status: 'stale',
+      loadingEarlier: false,
+      earlierError: this.current.loadingEarlier
+        ? '会话正在重新同步，历史加载已停止。同步完成后可重试。'
+        : this.current.earlierError,
+      error,
+    });
   }
   private batch(batch: CommitBatch) {
     if (!this.active || batch.session !== this.id || this.current.status === 'removed') return;
@@ -158,6 +176,10 @@ export class WorkbenchSession {
         entries: [],
         tools: [],
         earlier: undefined,
+        loadingEarlier: false,
+        earlierError: undefined,
+        earlierLoaded: undefined,
+        resolvedText: undefined,
         toolCursor: undefined,
         historical: false,
       });
@@ -203,25 +225,54 @@ export class WorkbenchSession {
     const boundedTools = [...tools.values()];
     while (boundedTools.length > 200 || jsonBytes(boundedTools) > 1024 * 1024) boundedTools.shift();
     this.publish({ view: batch.view, entries, tools: boundedTools, earlier, error: undefined });
+    if (batch.entries.some((row) => 'Archived' in row.text)) this.requestText();
+  }
+  setVisibleHistoryText(ids: readonly string[]) {
+    if (ids.length === this.visibleText.length && ids.every((id, i) => id === this.visibleText[i]))
+      return;
+    this.visibleText = ids;
+    this.requestText();
+  }
+  private requestText() {
+    this.textDemand++;
     void this.resolveCurrentText();
   }
   private async resolveCurrentText() {
-    if (this.resolvingText || !this.current.entries.some((row) => 'Archived' in row.text)) return;
+    const ready = () => this.active && this.current.status === 'ready';
+    if (this.resolvingText || !ready()) return;
     this.resolvingText = true;
-    const generation = this.generation;
+    let handled = this.textDemand;
     try {
-      while (this.active && generation === this.generation) {
+      do {
+        handled = this.textDemand;
+        const generation = this.generation;
+        const valid = () => ready() && generation === this.generation;
         const entries = this.current.entries;
-        const resolvedText = await this.text.resolve(
-          this.client,
-          entries,
-          () => this.active && generation === this.generation,
-        );
-        if (!this.active || generation !== this.generation) return;
-        if (this.current.entries !== entries) continue;
-        if (resolvedText) this.publish({ resolvedText });
-        return;
-      }
+        const archiveRows = new Map<string, EntryHeader>();
+        for (const row of entries)
+          if ('Archived' in row.text) archiveRows.set(row.text.Archived.content.id, row);
+        const prioritized: EntryHeader[] = [];
+        for (const id of this.visibleText) {
+          const row = archiveRows.get(id);
+          if (row) {
+            prioritized.push(row);
+            archiveRows.delete(id);
+          }
+        }
+        if (!this.current.historical) prioritized.push(...[...archiveRows.values()].reverse());
+        try {
+          await this.text.resolve(
+            this.client,
+            prioritized,
+            valid,
+            () => this.publish({ resolvedText: this.text.snapshot(this.current.entries) }),
+            (id) => !this.current.historical || this.visibleText.includes(id),
+          );
+        } catch {
+          // A transient query failure leaves the preview and explicit read available.
+          // Subsequent viewport/live changes can retry the batch.
+        }
+      } while (ready() && handled !== this.textDemand);
     } finally {
       this.resolvingText = false;
     }
@@ -235,7 +286,8 @@ export class WorkbenchSession {
     this.attaching = true;
     this.pending = [];
     this.pendingBytes = 0;
-    this.publish({ status: 'syncing', error: undefined });
+    this.visibleText = [];
+    this.publish({ status: 'syncing', loadingEarlier: false, error: undefined });
     const task = (async () => {
       try {
         const attached = await this.client.call(
@@ -257,14 +309,8 @@ export class WorkbenchSession {
           () => this.active && generation === this.generation,
         );
         if (!recent || !this.active || generation !== this.generation) return;
-        const resolvedText = await this.text.resolve(
-          this.client,
-          recent.entries,
-          () => this.active && generation === this.generation,
-        );
-        if (!this.active || generation !== this.generation) return;
         this.publish({
-          resolvedText,
+          resolvedText: this.text.snapshot(recent.entries),
           view: attached.view,
           entries: recent.entries,
           tools: [],
@@ -278,6 +324,7 @@ export class WorkbenchSession {
         this.pending = [];
         this.pendingBytes = 0;
         for (const batch of buffered) this.batch(batch);
+        this.requestText();
       } catch (error) {
         if (this.active && generation === this.generation)
           this.publish({
@@ -295,39 +342,111 @@ export class WorkbenchSession {
     return task;
   }
   async earlier() {
-    const cursor = this.current.earlier;
-    if (!cursor || !this.active || this.current.status !== 'ready') return;
+    let cursor = this.current.earlier;
+    if (!this.active || this.current.status === 'removed' || this.current.loadingEarlier) return;
+    if (this.current.status !== 'ready') {
+      this.publish({ earlierError: '会话正在重新连接或同步，请稍后重试。' });
+      return;
+    }
+    if (!cursor) {
+      this.publish({ earlierError: undefined, earlierLoaded: 0 });
+      return;
+    }
     const generation = this.generation;
     const request = ++this.historyRequest;
-    const page = await loadHistoryTurns(
-      this.client,
-      this.id,
-      { entries: [], next_cursor: cursor },
-      cursor.max_entry_seq,
-      EARLIER_HISTORY_TURNS,
-      () => this.active && generation === this.generation && request === this.historyRequest,
-    );
-    if (!page || !this.active || generation !== this.generation || request !== this.historyRequest)
-      return;
-    const resolvedText = await this.text.resolve(
-      this.client,
-      [...page.entries, ...this.current.entries],
-      () => this.active && generation === this.generation && request === this.historyRequest,
-    );
-    if (!this.active || generation !== this.generation || request !== this.historyRequest) return;
-    const entries = [...page.entries, ...this.current.entries];
-    if (!historyFits(entries))
-      throw new Error('历史显示已达上限，请使用箭头回到最近 3 轮，或导出完整历史。');
-    this.publish({
-      entries,
-      resolvedText,
-      earlier: page.next_cursor ?? undefined,
-      historical: true,
-      error: undefined,
-    });
+    const valid = () =>
+      this.active &&
+      this.current.status === 'ready' &&
+      generation === this.generation &&
+      request === this.historyRequest;
+    let remaining = EARLIER_HISTORY_TURNS;
+    let pending: EntryHeader[] = [];
+    let boundary = cursor.before_seq;
+    let retries = 0;
+    this.publish({ loadingEarlier: true, earlierLoaded: 0, earlierError: undefined });
+    try {
+      while (cursor && remaining > 0 && valid()) {
+        const before = cursor.before_seq;
+        let page: HistoryTurnPage;
+        try {
+          page = await this.client.call(
+            {
+              method: 'history_turns',
+              session: this.id,
+              cursor,
+              turns: pending.length ? 1 : remaining,
+            },
+            { timeoutMs: 10_000 },
+          );
+        } catch (error) {
+          if (
+            valid() &&
+            error instanceof WorkbenchError &&
+            error.code === 'backpressure' &&
+            retries < 3
+          ) {
+            await delay(100 * 2 ** retries++);
+            continue;
+          }
+          throw error;
+        }
+        retries = 0;
+        if (!valid()) return;
+        const next = page.next_cursor;
+        const turns = new Set(page.entries.map((row) => row.turn));
+        if (
+          page.entries.some(
+            (row, i) => row.seq >= before || (i > 0 && row.seq <= page.entries[i - 1].seq),
+          ) ||
+          (next &&
+            (next.session !== this.id ||
+              next.max_entry_seq !== cursor.max_entry_seq ||
+              next.before_seq !== page.entries[0]?.seq)) ||
+          ((page.partial || pending.length > 0) &&
+            (turns.size !== 1 || (pending.length > 0 && !turns.has(pending[0].turn)))) ||
+          turns.size > remaining
+        )
+          throw new Error('历史分页未向前推进，请重新加载会话。');
+
+        cursor = next ?? undefined;
+        const older = pending.length ? [...page.entries, ...pending] : page.entries;
+        const entries = [...older, ...this.current.entries];
+        if (this.current.entries[0]?.seq !== boundary || !historyFits(entries))
+          throw new Error('历史显示已达上限，请使用箭头回到最近 3 轮，或导出完整历史。');
+        if (page.partial) {
+          pending = older;
+          continue;
+        }
+
+        pending = [];
+        remaining -= turns.size;
+        boundary = entries[0].seq;
+        this.publish({
+          entries,
+          earlier: cursor,
+          earlierLoaded: EARLIER_HISTORY_TURNS - remaining,
+          historical: this.current.historical || older.length > 0,
+        });
+      }
+    } catch (error) {
+      if (valid()) {
+        const message =
+          error instanceof WorkbenchError && error.code === 'backpressure'
+            ? '历史查询繁忙，请重试。'
+            : error instanceof WorkbenchError && error.code === 'timeout'
+              ? '加载更早消息超时，请重试。'
+              : error instanceof Error
+                ? error.message
+                : '加载更早消息失败，请重试。';
+        this.publish({ earlierError: message });
+      }
+    } finally {
+      if (valid()) this.publish({ loadingEarlier: false });
+    }
   }
   async latest() {
     if (!this.active || this.current.status === 'removed') return;
+    this.publish({ earlierError: undefined, earlierLoaded: undefined });
     await this.refresh();
   }
   async loadTools(turn: EntryHeader['turn'], cursor?: ToolCursor) {

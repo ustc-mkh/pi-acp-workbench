@@ -149,16 +149,64 @@ it('earlier browsing preserves current messages and keeps receiving complete liv
   });
   await view.start();
   const earlier = view.earlier();
-  await expect
-    .poll(() => peer.requests.filter((request) => request.command.method === 'history').length)
-    .toBe(1);
-  const request = peer.requests.at(-1)!;
-  expect(request.command).toMatchObject({ method: 'history', cursor, limit: 200 });
-  peer.query(request, 'history', { entries: [batch(5, 1).entries[0]], next_cursor: null });
-  await earlier;
+  const pages = () => peer.requests.filter((request) => request.command.method === 'history_turns');
+  const archived = entryHeader.parse({
+    ...batch(5, 100).entries[0],
+    turn: 'older-complete',
+    text: {
+      Archived: {
+        preview: 'preview',
+        content: {
+          id: 'preview-body',
+          kind: 'Text',
+          bytes: 20000,
+          sha256: 'a'.repeat(64),
+        },
+      },
+    },
+  });
+  await expect.poll(() => pages().length).toBe(1);
+  expect(pages()[0].command).toMatchObject({ method: 'history_turns', cursor, turns: 20 });
+  const before = (seq: number) => ({ ...cursor, before_seq: seq });
+  peer.query(pages()[0], 'history_turns', {
+    entries: [archived],
+    next_cursor: before(100),
+    partial: false,
+  });
+  await expect.poll(() => pages().length).toBe(2);
+  expect(view.view.entries.map((entry) => entry.seq)).toEqual([100, 201, 202, 203]);
+  expect(view.view.loadingEarlier).toBe(true);
+  await view.earlier();
+  expect(pages()).toHaveLength(2);
+  expect(view.view.resolvedText).toEqual({});
+  expect(peer.requests.some((request) => request.command.method === 'content_batch')).toBe(false);
+  view.setVisibleHistoryText(['preview-body', 'unrelated']);
+  const bodies = () =>
+    peer.requests.filter((request) => request.command.method === 'content_batch');
+  await expect.poll(() => bodies().length).toBe(1);
+  expect(bodies()[0].command).toMatchObject({
+    reads: [{ ref: { id: 'preview-body' }, offset: 0 }],
+  });
+  peer.query(bodies()[0], 'content_batch', { slices: [null] });
+
+  peer.query(pages()[1], 'history_turns', {
+    entries: [batch(5, 80).entries[0]],
+    next_cursor: before(80),
+    partial: true,
+  });
+  await expect.poll(() => pages().length).toBe(3);
+  expect(pages()[2].command).toMatchObject({ cursor: before(80), turns: 1 });
+  expect(view.view.entries[0].seq).toBe(100);
   send(peer, attaches()[0], batch(6, 401));
   await expect.poll(() => view.view.view?.revision).toBe(6);
-  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1, 201, 202, 203, 401]);
+  peer.query(pages()[2], 'history_turns', {
+    entries: [batch(5, 1).entries[0]],
+    next_cursor: null,
+    partial: false,
+  });
+  await earlier;
+  expect(view.view.entries.map((entry) => entry.seq)).toEqual([1, 80, 100, 201, 202, 203, 401]);
+  expect(view.view.loadingEarlier).toBe(false);
   expect(view.view.historical).toBe(true);
   const latest = view.latest();
   await expect
@@ -171,6 +219,75 @@ it('earlier browsing preserves current messages and keeps receiving complete liv
   await latest;
   expect(view.view.entries.map((entry) => entry.seq)).toEqual([401]);
   expect(view.view.historical).toBe(false);
+});
+
+it('ignores an earlier page and stops pulling when going back to latest', async () => {
+  const { peer, view, attaches, starting } = await setup(false);
+  const snapshot = { ...emptyView(5), last_entry_seq: 4 };
+  peer.query(attaches()[0], 'attached', {
+    view: snapshot,
+    recent_page: {
+      entries: [1, 2, 3, 4].map((seq) => ({ ...batch(5, seq).entries[0], turn: 'turn-' + seq })),
+      next_cursor: null,
+    },
+  });
+  await starting;
+  const earlier = view.earlier();
+  await expect.poll(() => peer.requests.length).toBe(2);
+  const latest = view.latest();
+  await expect.poll(() => attaches().length).toBe(2);
+  peer.query(peer.requests[1], 'history_turns', {
+    entries: [batch(5, 1).entries[0]],
+    next_cursor: null,
+    partial: false,
+  });
+  peer.query(attaches()[1], 'attached', {
+    view: snapshot,
+    recent_page: { entries: [batch(5, 4).entries[0]], next_cursor: null },
+  });
+  await Promise.all([earlier, latest]);
+  expect(view.view.entries.map((entry) => entry.seq)).toEqual([4]);
+  expect(view.view.historical).toBe(false);
+  expect(view.view.loadingEarlier).toBe(false);
+  expect(peer.requests).toHaveLength(3);
+});
+
+it('retries a busy history page and keeps the failure visible across live updates', async () => {
+  const { peer, view, attaches, starting } = await setup(false);
+  const snapshot = { ...emptyView(5), last_entry_seq: 4 };
+  peer.query(attaches()[0], 'attached', {
+    view: snapshot,
+    recent_page: {
+      entries: [1, 2, 3, 4].map((seq) => ({ ...batch(5, seq).entries[0], turn: 'turn-' + seq })),
+      next_cursor: null,
+    },
+  });
+  await starting;
+  const earlier = view.earlier();
+  const pages = () => peer.requests.filter(({ command }) => command.method === 'history_turns');
+  await expect.poll(() => pages().length).toBe(1);
+  const request = pages()[0];
+  peer.send(request.socket, {
+    type: 'error',
+    id: request.id,
+    code: 'backpressure',
+    message: 'busy',
+  });
+  await expect.poll(() => pages().length).toBe(2);
+  expect(view.view.loadingEarlier).toBe(true);
+  expect(pages()[1].command).toEqual(request.command);
+  peer.send(request.socket, {
+    type: 'error',
+    id: pages()[1].id,
+    code: 'timeout',
+    message: 'query timed out',
+  });
+  await earlier;
+  expect(view.view.loadingEarlier).toBe(false);
+  expect(view.view.earlierError).toContain('超时');
+  send(peer, attaches()[0], batch(6, 5));
+  await expect.poll(() => view.view.view?.revision).toBe(6);
+  expect(view.view.earlierError).toContain('超时');
 });
 
 it('retains tools from other turns across concurrent history reads and appends subsequent pages', async () => {

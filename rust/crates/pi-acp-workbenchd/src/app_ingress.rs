@@ -8,6 +8,9 @@ use std::collections::VecDeque;
 use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
+const HISTORY_POOL: usize = 3;
+const POOL_LIMITS: [usize; 4] = [64, 16, 16, 2];
+
 type Events = Result<CommandReceipt, DomainError>;
 type Lookup = Result<Option<Events>, DomainError>;
 type Outcome = Result<(), DomainError>;
@@ -93,6 +96,10 @@ impl Request {
                 ..
             } => 1,
             Self::Command { command, .. } if command.is_query() => 2,
+            Self::Query {
+                command: crate::domain::query::QueryCommand::HistoryTurns { .. },
+                ..
+            } => HISTORY_POOL,
             Self::Lookup { .. }
             | Self::Query { .. }
             | Self::Dispatch { .. }
@@ -180,7 +187,7 @@ struct Lifecycle {
 #[derive(Clone)]
 pub(super) struct IngressHandle {
     tx: mpsc::Sender<Envelope>,
-    pools: [Arc<Semaphore>; 3],
+    pools: [Arc<Semaphore>; POOL_LIMITS.len()],
     stop: CancellationToken,
     closed: Arc<AtomicBool>,
     completion: watch::Receiver<Option<Outcome>>,
@@ -198,14 +205,10 @@ pub(super) fn interrupted() -> DomainError {
 }
 impl IngressHandle {
     pub(super) fn start(core: Arc<CommandCore>) -> Self {
-        // Separate control/query reserves remain available when ordinary callers
-        // fill all 64 regular slots. Permits bound active plus queued operations.
-        let pools = [
-            Arc::new(Semaphore::new(64)),
-            Arc::new(Semaphore::new(16)),
-            Arc::new(Semaphore::new(16)),
-        ];
-        let (tx, rx) = mpsc::channel(96);
+        // The same permits bound both queued and active work. Foreground
+        // history has its own reserve even when background queries fill up.
+        let pools = POOL_LIMITS.map(|limit| Arc::new(Semaphore::new(limit)));
+        let (tx, rx) = mpsc::channel(POOL_LIMITS.iter().sum());
         let stop = CancellationToken::new();
         let run_stop = stop.clone();
         let closed = core.closed.clone();
@@ -421,6 +424,20 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                         .history(session, cursor, limit)
                         .await
                         .map(R::History),
+                    Q::HistoryTurns {
+                        session,
+                        cursor,
+                        turns,
+                    } => core
+                        .database
+                        .history_turns(session, cursor, turns)
+                        .await
+                        .map(R::HistoryTurns),
+                    Q::ContentBatch { reads } => core
+                        .database
+                        .content_batch(reads)
+                        .await
+                        .map(R::ContentBatch),
                     Q::Tools {
                         session,
                         turn,

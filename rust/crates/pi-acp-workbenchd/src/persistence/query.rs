@@ -10,7 +10,7 @@ use crate::domain::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-pub(super) const HISTORY_SQL: &str = "SELECT se.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes <= 16384 THEN c.data ELSE NULL END FROM session_entries se JOIN entries e ON e.entry_id = se.entry_id JOIN contents c ON c.id = e.content_id WHERE se.session = ?1 AND se.seq <= ?2 AND se.seq < ?3 ORDER BY se.seq DESC LIMIT ?4";
+pub(super) const HISTORY_SQL: &str = "SELECT se.seq,e.entry_id,e.turn,e.role,e.message,e.content_id,e.image_id,e.metadata_json,c.kind,c.sha256,c.bytes,CASE WHEN c.bytes <= 16384 THEN c.data ELSE NULL END,c.rowid FROM session_entries se JOIN entries e ON e.entry_id = se.entry_id JOIN contents c ON c.id = e.content_id WHERE se.session = ?1 AND se.seq <= ?2 AND se.seq < ?3 ORDER BY se.seq DESC LIMIT ?4";
 // Reuse durable input/usage records: no new schema or timestamp written by reads.
 // Native-fork inherited rows and autonomous turns have no local user inference.
 pub(super) fn worker_activity(
@@ -708,6 +708,39 @@ pub(super) fn history(
     }
     .validate()?;
     let limit = limit(requested, DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT)?;
+    let result = history_rows(db, session, cursor, limit, None)?;
+    let page = HistoryPage {
+        entries: result.entries,
+        next_cursor: result.next_cursor,
+    };
+    page.validate()?;
+    Ok(page)
+}
+
+pub(super) fn history_turns(
+    db: &Connection,
+    session: &SessionId,
+    cursor: HistoryCursor,
+    turns: usize,
+) -> Result<HistoryTurnPage, StoreError> {
+    QueryCommand::HistoryTurns {
+        session: session.clone(),
+        cursor: cursor.clone(),
+        turns,
+    }
+    .validate()?;
+    let page = history_rows(db, session, Some(cursor), MAX_HISTORY_LIMIT, Some(turns))?;
+    query_bytes("history_turns", &page)?;
+    Ok(page)
+}
+
+fn history_rows(
+    db: &Connection,
+    session: &SessionId,
+    cursor: Option<HistoryCursor>,
+    limit: usize,
+    turns: Option<usize>,
+) -> Result<HistoryTurnPage, StoreError> {
     let high: SafeInteger = db
         .query_row(
             "SELECT last_entry_seq FROM sessions WHERE id=?1",
@@ -724,50 +757,107 @@ pub(super) fn history(
     let before = cursor
         .as_ref()
         .map_or(MAX_SAFE_INTEGER + 1, |c| c.before_seq.get());
-    let mut statement = db.prepare(HISTORY_SQL)?;
+    let mut statement = db.prepare_cached(HISTORY_SQL)?;
     let mut rows = statement.query(params![
         session.as_str(),
         max,
         before as i64,
         (limit + 1) as i64
     ])?;
-    let mut page = HistoryPage {
-        entries: vec![],
-        next_cursor: None,
+    let page_cursor = |seq| HistoryCursor {
+        version: ProtocolVersion,
+        session: session.clone(),
+        max_entry_seq: max,
+        before_seq: seq,
     };
-    let mut more = false;
-    while let Some(row) = rows.next()? {
-        if page.entries.len() == limit {
-            more = true;
-            break;
-        }
-        page.entries.push(content::header(row)?);
-        page.next_cursor = Some(HistoryCursor {
-            version: ProtocolVersion,
-            session: session.clone(),
-            max_entry_seq: max,
-            before_seq: page.entries.last().expect("pushed row").seq,
-        });
-        if page.validate().is_err() {
-            page.entries.pop();
-            if page.entries.is_empty() {
-                return Err(QueryError::TooLarge.into());
-            }
-            more = true;
-            break;
-        }
-    }
-    page.next_cursor = if more {
-        Some(HistoryCursor {
-            version: ProtocolVersion,
-            session: session.clone(),
-            max_entry_seq: max,
-            before_seq: page.entries.last().expect("nonempty page").seq,
-        })
+    // Reserve space for the longest possible cursor and boolean. Each entry
+    // is encoded once for its exact JSON size, plus the array separator.
+    let reserve = Some(page_cursor(max));
+    let mut bytes = if turns.is_some() {
+        query_bytes(
+            "history_turns",
+            &HistoryTurnPage {
+                entries: vec![],
+                next_cursor: reserve,
+                partial: false,
+            },
+        )?
     } else {
-        None
-    };
-    page.entries.reverse();
-    page.validate()?;
-    Ok(page)
+        query_bytes(
+            "history",
+            &HistoryPage {
+                entries: vec![],
+                next_cursor: reserve,
+            },
+        )?
+    }
+    .len();
+    let mut entries: Vec<EntryHeader> = vec![];
+    let mut more = false;
+    let mut partial = false;
+    let mut turn_start = 0;
+    let mut turn_count = 0;
+    while let Some(row) = rows.next()? {
+        if let Some(max_turns) = turns {
+            let turn: String = row.get(2)?;
+            if entries
+                .last()
+                .is_none_or(|entry| entry.turn.as_str() != turn)
+            {
+                turn_start = entries.len();
+                turn_count += 1;
+            }
+            if turn_count > max_turns {
+                more = true;
+                break;
+            }
+        }
+        let entry = if entries.len() < limit {
+            let mut entry = content::header(row)?;
+            if let TextBody::Archived {
+                content: reference,
+                preview,
+            } = &mut entry.text
+            {
+                if turns.is_some() {
+                    *preview = match content::preview(db, row.get(12)?, reference.bytes) {
+                        Ok(text) => Some(text),
+                        Err(StoreError::Invalid(_)) => None,
+                        Err(error) => return Err(error),
+                    };
+                }
+            }
+            Some(entry)
+        } else {
+            None
+        };
+        if let Some(entry) = entry {
+            let size =
+                json_bytes(&entry, MAX_QUERY_BYTES)?.len() + usize::from(!entries.is_empty());
+            if bytes + size <= MAX_QUERY_BYTES {
+                bytes += size;
+                entries.push(entry);
+                continue;
+            }
+        }
+        if entries.is_empty() {
+            return Err(QueryError::TooLarge.into());
+        }
+        if turns.is_some() && turn_start < entries.len() {
+            if turn_start == 0 {
+                partial = true;
+            } else {
+                entries.truncate(turn_start);
+            }
+        }
+        more = true;
+        break;
+    }
+    let next_cursor = more.then(|| page_cursor(entries.last().expect("nonempty page").seq));
+    entries.reverse();
+    Ok(HistoryTurnPage {
+        entries,
+        next_cursor,
+        partial,
+    })
 }

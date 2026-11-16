@@ -2,6 +2,7 @@
 import {
   array,
   boolean,
+  checked,
   literal,
   nullable,
   object,
@@ -33,6 +34,7 @@ import {
   sessionFilter,
   historyClearReport,
   contentRef,
+  contentId,
   type ContentRef,
   type ContentSlice,
   type ImageAsset,
@@ -118,6 +120,11 @@ export const uiCommand = tagged('type', {
     request_id: optional(uint),
   }),
   earlier: object({ type: literal('earlier'), session: sessionId }),
+  visible_history_text: object({
+    type: literal('visible_history_text'),
+    session: sessionId,
+    ids: checked(array(contentId), (ids) => ids.length <= 128),
+  }),
   latest: object({ type: literal('latest'), session: sessionId }),
   read_image: object({
     type: literal('read_image'),
@@ -164,6 +171,7 @@ export type WorkbenchUiMessage =
       prompt: import('./workbench-input').TypedPrompt;
       generation?: number;
       pi_after_seq?: number;
+      revision?: number;
     }
   | { type: 'attachments'; session: string; files: import('./workbench-input').TextAttachment[] }
   | {
@@ -240,6 +248,9 @@ export const uiState = object({
       toolCursor: optional(toolCursor),
       earlier: optional(historyCursor),
       historical: boolean,
+      loadingEarlier: optional(boolean),
+      earlierLoaded: optional(uint),
+      earlierError: optional(string),
       error: optional(string),
     }),
   ),

@@ -119,6 +119,61 @@ async fn blocked_provider_configuration_keeps_other_sessions_queries_and_owned_d
 }
 
 #[tokio::test]
+async fn foreground_history_is_admitted_when_background_query_reserve_is_full() {
+    use crate::domain::query::{HistoryCursor, ProtocolVersion, QueryCommand, QueryResult};
+
+    let (app, root) = app();
+    let session = create(&app).await;
+    let mut events = app.subscribe();
+    prompt(&app, &session, "history fixture").await;
+    wait_finished(&mut events).await;
+    let max_entry_seq = inspect(&app, &session).await.last_entry_seq;
+
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        let (release, wait) = oneshot::channel::<()>();
+        held.push(release);
+        app.ingress
+            .submit(Request::Test {
+                lane: None,
+                pool: 2,
+                job: Box::pin(async move {
+                    let _ = wait.await;
+                }),
+            })
+            .unwrap();
+    }
+    assert!(matches!(
+        app.query(QueryCommand::Inspect {
+            session: session.clone()
+        })
+        .await,
+        Err(DomainError::Backpressure)
+    ));
+    let history = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.query(QueryCommand::HistoryTurns {
+            session: session.clone(),
+            cursor: HistoryCursor {
+                version: ProtocolVersion,
+                session,
+                max_entry_seq,
+                before_seq: max_entry_seq,
+            },
+            turns: 20,
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(history, QueryResult::HistoryTurns(page) if !page.entries.is_empty()));
+
+    drop(held);
+    app.shutdown().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn normal_pool_saturation_preserves_query_and_control_reserves_and_fifo_lanes() {
     let (app, root) = app();
     let first = create(&app).await;

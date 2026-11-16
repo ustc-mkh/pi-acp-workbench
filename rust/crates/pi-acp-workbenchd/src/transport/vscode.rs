@@ -32,7 +32,9 @@ use tokio_util::sync::CancellationToken;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_SUBSCRIPTIONS: usize = 32;
-const MAX_IN_FLIGHT: usize = 24;
+const QUERY_POOL: usize = 2;
+const HISTORY_POOL: usize = 3;
+const POOL_LIMITS: [usize; 4] = [16, 4, 4, 1];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcRequest {
@@ -77,6 +79,14 @@ pub enum ClientCommand {
         session: SessionId,
         cursor: Option<query::HistoryCursor>,
         limit: Option<usize>,
+    },
+    HistoryTurns {
+        session: SessionId,
+        cursor: query::HistoryCursor,
+        turns: usize,
+    },
+    ContentBatch {
+        reads: Vec<query::ContentRead>,
     },
     Tools {
         session: SessionId,
@@ -175,11 +185,13 @@ pub enum ClientCommand {
 impl ClientCommand {
     fn pool(&self) -> usize {
         match self {
+            Self::HistoryTurns { .. } => HISTORY_POOL,
             Self::Operation { .. }
             | Self::List { .. }
             | Self::Search { .. }
             | Self::Inspect { .. }
             | Self::History { .. }
+            | Self::ContentBatch { .. }
             | Self::Tools { .. }
             | Self::Content { .. }
             | Self::Image { .. }
@@ -188,7 +200,7 @@ impl ClientCommand {
             | Self::TurnDiff { .. }
             | Self::TurnDiffContent { .. }
             | Self::Attach { .. }
-            | Self::Detach { .. } => 2,
+            | Self::Detach { .. } => QUERY_POOL,
             Self::Cancel { .. }
             | Self::UndoTurn { .. }
             | Self::CancelFork { .. }
@@ -226,6 +238,18 @@ impl ClientCommand {
                 session: session.clone(),
                 cursor: cursor.clone(),
                 limit: *limit,
+            },
+            Self::HistoryTurns {
+                session,
+                cursor,
+                turns,
+            } => QueryCommand::HistoryTurns {
+                session: session.clone(),
+                cursor: cursor.clone(),
+                turns: *turns,
+            },
+            Self::ContentBatch { reads } => QueryCommand::ContentBatch {
+                reads: reads.clone(),
             },
             Self::Tools {
                 session,
@@ -536,14 +560,16 @@ async fn connection(
     // attach buffer; lag is fatal/resync, never silently dropped.
     let mut events = app.subscribe();
     let mut subscriptions: BTreeMap<SessionId, SafeInteger> = BTreeMap::new();
+    // Hold admission until each completed task is collected so queued replies
+    // count against their own pool and cannot consume another pool's reserve.
     let mut replies = JoinSet::new();
     let mut pending_ids = BTreeSet::new();
-    let pools = [16, 4, 4].map(|size| Arc::new(Semaphore::new(size)));
+    let pools = POOL_LIMITS.map(|size| Arc::new(Semaphore::new(size)));
     loop {
         let message = tokio::select! {
             _ = stop.cancelled() => return Ok(()),
             completed = replies.join_next(), if !replies.is_empty() => {
-                let (id, message) = completed.expect("nonempty observers").map_err(|_| io::Error::other("IPC reply observer failed"))?;
+                let (id, message, _permit) = completed.expect("nonempty observers").map_err(|_| io::Error::other("IPC reply observer failed"))?;
                 pending_ids.remove(&id); message
             },
             result = read_frame(&mut reader, &stop, &mut frame, &mut frame_deadline) => {
@@ -552,10 +578,10 @@ async fn connection(
                 let id = request.id;
                 if pending_ids.contains(&id) { return Err(io::Error::other("duplicate in-flight IPC request id")); }
                 let command = request.command;
-                let permit = pools[command.pool()].clone().try_acquire_owned();
+                let pool = command.pool();
+                let permit = pools[pool].clone().try_acquire_owned();
                 let Ok(permit) = permit else { write_message(&mut write, &error(id, DomainError::Backpressure)).await?; continue; };
-                if replies.len() >= MAX_IN_FLIGHT { error(id, DomainError::Backpressure) }
-                else if command.pool() == 2 && request.operation.is_some() { error(id, DomainError::InvalidAnswer("queries cannot carry an operation id".into())) }
+                if matches!(pool, QUERY_POOL | HISTORY_POOL) && request.operation.is_some() { error(id, DomainError::InvalidAnswer("queries cannot carry an operation id".into())) }
                 else { match command {
                     ClientCommand::Attach { session } => {
                         if subscriptions.len() >= MAX_SUBSCRIPTIONS && !subscriptions.contains_key(&session) { error(id, DomainError::Backpressure) }
@@ -575,9 +601,8 @@ async fn connection(
                     ClientCommand::Image { image } => {
                         pending_ids.insert(id); let app = app.clone();
                         replies.spawn(async move {
-                            let _permit = permit;
                             let message = match app.image(&image).await { Ok(asset) => IpcMessage::Image { id, asset }, Err(failure) => error(id, failure) };
-                            (id, message)
+                            (id, message, permit)
                         }); continue;
                     }
                     command => {
@@ -585,14 +610,13 @@ async fn connection(
                         if let Some(query) = command.query() {
                             pending_ids.insert(id); let app = app.clone();
                             replies.spawn(async move {
-                                let _permit = permit;
                                 if refresh_models {
                                     if let Err(failure) = app.refresh_model_defaults().await {
-                                        return (id, error(id, failure));
+                                        return (id, error(id, failure), permit);
                                     }
                                 }
                                 let message = match app.query(query).await { Ok(result) => IpcMessage::Query { id, result }, Err(failure) => error(id, failure) };
-                                (id, message)
+                                (id, message, permit)
                             }); continue;
                         }
                         let command = command.into_domain().expect("all queries handled");
@@ -601,9 +625,8 @@ async fn connection(
                             Ok(ticket) => {
                                 pending_ids.insert(id);
                                 replies.spawn(async move {
-                                    let _permit = permit;
                                     let message = match ticket.wait().await { Ok(receipt) => IpcMessage::Reply { id, receipt }, Err(failure) => error(id, failure) };
-                                    (id, message)
+                                    (id, message, permit)
                                 }); continue;
                             }
                         }

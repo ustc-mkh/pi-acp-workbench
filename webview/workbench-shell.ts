@@ -36,6 +36,7 @@ export function buildClassicShell(options: {
   history: HTMLElement;
   status: HTMLElement;
   error: HTMLElement;
+  historyStatus: HTMLElement;
   management: HTMLElement;
   settings: HTMLElement;
   plan: HTMLElement;
@@ -122,19 +123,21 @@ export function buildClassicShell(options: {
   bottom.title = '回到最新消息';
   bottom.hidden = true;
   let historical = false;
-  bottom.onclick = () => {
-    if (historical) options.onLatest?.();
+  const nearBottom = () =>
+    options.transcript.scrollHeight -
+      options.transcript.scrollTop -
+      options.transcript.clientHeight <
+    80;
+  const updateBottom = () => {
+    bottom.hidden = nearBottom();
+  };
+  const scrollToBottom = () => {
     options.transcript.scrollTop = options.transcript.scrollHeight;
     updateBottom();
   };
-  const updateBottom = () => {
-    bottom.hidden =
-      !historical &&
-      (!options.transcript.children.length ||
-        options.transcript.scrollHeight -
-          options.transcript.scrollTop -
-          options.transcript.clientHeight <
-          80);
+  bottom.onclick = () => {
+    if (historical) options.onLatest?.();
+    scrollToBottom();
   };
   options.transcript.addEventListener('scroll', updateBottom, { passive: true });
   area.append(bottom);
@@ -176,14 +179,22 @@ export function buildClassicShell(options: {
     options.plan,
     connection,
     options.error,
+    options.historyStatus,
     area,
     options.interactions,
     resizer,
     footer,
   );
   options.root.replaceChildren(options.header, chat, options.management);
+  if (typeof window.ResizeObserver === 'function') {
+    const observer = new window.ResizeObserver(updateBottom);
+    observer.observe(options.transcript);
+    for (const node of options.transcript.children) observer.observe(node);
+  }
   return {
     showHistory,
+    nearBottom,
+    scrollToBottom,
     updateBottom,
     update(view: {
       hasSession: boolean;
@@ -235,7 +246,6 @@ export function buildClassicShell(options: {
           );
       }
       start.disabled = options.newSession.disabled;
-      updateBottom();
     },
   };
 }

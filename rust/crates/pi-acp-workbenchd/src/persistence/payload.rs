@@ -497,7 +497,9 @@ pub(super) fn entry(db: &Connection, id: &EntryId) -> Result<TranscriptEntry, St
     let header = content::header(rows.next()?.ok_or(StoreError::NotFound)?)?;
     let text = match header.text {
         TextBody::Inline { text } => text,
-        TextBody::Archived { content: reference } => content::read_text(db, &reference)?,
+        TextBody::Archived {
+            content: reference, ..
+        } => content::read_text(db, &reference)?,
     };
     Ok(TranscriptEntry {
         id: header.id,

@@ -1,10 +1,10 @@
 # Workbench external IPC v3
 
-The single production `pi-acp-workbenchd` exposes `<storage.root>/workbench.sock` (0600, same-UID peer credentials). This is a trusted local-account API, not remote authentication or Telegram authorization. Clients and daemon must use the same protocol; v2 is rejected, not translated. The extension never starts a daemon or falls back to another socket.
+The single production `pi-acp-workbenchd` exposes `<storage.root>/workbench.sock` (0600, same-UID peer credentials). This is a trusted local-account API, not remote authentication or Telegram authorization. Clients and daemon must use the same protocol; v2 is rejected, not translated. The desktop extension that uses `history_turns` and `content_batch` requires a daemon with both queries. The extension never starts a daemon or falls back to another socket.
 
 ## Frames and ownership
 
-Requests are UTF-8 NDJSON with `version: 3`, a non-reused safe-integer `id`, `command` and, for mutations, an independent durable string `operation`. Unknown fields, internal Agent commands, malformed UTF-8 and unsupported versions fail closed. Frames are capped at 8 MiB; incomplete frames have a ten-second deadline. Connections have bounded ordinary/control/query admission (16/4/4), output buffering and subscriptions. Dropping a request observer does not roll back accepted work or release transaction ownership early.
+Requests are UTF-8 NDJSON with `version: 3`, a non-reused safe-integer `id`, `command` and, for mutations, an independent durable string `operation`. Unknown fields, internal Agent commands, malformed UTF-8 and unsupported versions fail closed. Frames are capped at 8 MiB; incomplete frames have a ten-second deadline. Connections have bounded ordinary, control, background query and foreground history admission (16/4/4/1 per connection), output buffering and subscriptions. Dropping a request observer does not roll back accepted work or release transaction ownership early.
 
 ```json
 {"version":3,"id":1,"command":{"method":"create","harness":"Pi","cwd":"/absolute/workspace"},"operation":"example-create"}
@@ -31,6 +31,8 @@ The schema now requires `provider_preferences`; older roots without this table a
 - `inspect {session}` returns only the validated hot SessionView, not history or tool bodies. Cold inspect does not create an actor.
 - `list {cursor?,limit?}` defaults to 50, maximum 100 summaries. Descending created sequence/keyset cursors freeze the initial maximum.
 - `history {session,cursor?,limit?}` defaults to 100, maximum 200 headers, descending sequence pages returned in ascending order within each page. Cursors bind protocol version, session and immutable maximum boundary.
+- `history_turns {session,cursor,turns}` reads up to 20 older turns against the cursor's fixed high-water mark. Pages contain up to 200 entries and end at a turn boundary. When a single turn exceeds a page, `partial: true` indicates that the older prefix follows at `next_cursor`. Request one turn at a time while assembling that prefix. Archived text can include a plain-text UTF-8 preview of at most 384 bytes.
+- `content_batch {reads:[{ref,offset},...]}` accepts up to 8 message-text reads. It returns an ordered prefix in `slices`, with each available slice capped at 128 KiB before encoding. A null item marks one unavailable body. Use each slice's next offset or retry a read omitted by the frame budget. Verify the assembled body against the original hash.
 - `tools {session,turn,cursor?,limit?}` reads a bounded page of typed headers. Text/diff/resource bodies remain ContentRefs.
 - `content {ref,offset,length?}` reads at most 64 KiB directly from the archive. Offset is a UTF-8 byte boundary; the end is trimmed to a valid boundary. The whole-content hash identifies the content; it does **not** independently authenticate an isolated slice. Full archive reads/writes and fork proof verify full identity/hash.
 - `image {image: IMAGE_REF}` explicitly retrieves immutable archive bytes. Descriptor, hash, MIME signature, canonical base64 and decoded size are validated. Images have a 4 MiB raw limit; only dedicated asset responses and typed image-input parts contain base64. This is not a complete image decoder/sanitizer. No path, URI, remote URL or file-ID fallback exists.

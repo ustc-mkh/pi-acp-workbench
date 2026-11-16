@@ -127,7 +127,7 @@ async fn history_text(app: &WorkbenchApp, id: &SessionId) -> Vec<String> {
     for entry in page.entries {
         result.push(match entry.text {
             TextBody::Inline { text } => text,
-            TextBody::Archived { content } => {
+            TextBody::Archived { content, .. } => {
                 app.delivery_payloads().content(&content).await.unwrap()
             }
         });

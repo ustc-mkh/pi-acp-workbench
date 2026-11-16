@@ -24,6 +24,10 @@ pub const MAX_VIEW_BYTES: usize = 512 * 1024;
 pub const INLINE_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 pub const CONTENT_SLICE_BYTES: usize = 64 * 1024;
+pub const CONTENT_BATCH_SLICE_BYTES: usize = 128 * 1024;
+pub const MAX_CONTENT_BATCH_ITEMS: usize = 8;
+pub const MAX_HISTORY_TURNS: usize = 20;
+pub const HISTORY_PREVIEW_BYTES: usize = 384;
 pub const DEFAULT_LIST_LIMIT: usize = 50;
 pub const MAX_LIST_LIMIT: usize = 100;
 pub const DEFAULT_HISTORY_LIMIT: usize = 100;
@@ -227,8 +231,14 @@ impl ContentRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum TextBody {
-    Inline { text: String },
-    Archived { content: ContentRef },
+    Inline {
+        text: String,
+    },
+    Archived {
+        content: ContentRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
 }
 impl TextBody {
     /// Caller persists the immutable text even when the wire representation is inline.
@@ -243,17 +253,24 @@ impl TextBody {
         if text.len() <= INLINE_TEXT_BYTES {
             Ok(Self::Inline { text: text.into() })
         } else {
-            Ok(Self::Archived { content })
+            Ok(Self::Archived {
+                content,
+                preview: None,
+            })
         }
     }
     pub fn validate(&self) -> Result<(), QueryError> {
         match self {
             Self::Inline { text } if text.len() > INLINE_TEXT_BYTES => Err(QueryError::TooLarge),
             Self::Inline { .. } => Ok(()),
-            Self::Archived { content } if content.kind != ContentKind::Text => {
+            Self::Archived { content, .. } if content.kind != ContentKind::Text => {
                 Err(QueryError::InvalidInput)
             }
-            Self::Archived { content } => content.validate(),
+            Self::Archived {
+                preview: Some(preview),
+                ..
+            } if preview.len() > HISTORY_PREVIEW_BYTES => Err(QueryError::TooLarge),
+            Self::Archived { content, .. } => content.validate(),
         }
     }
 }
@@ -544,6 +561,26 @@ pub struct HistoryPage {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HistoryTurnPage {
+    pub entries: Vec<EntryHeader>,
+    pub next_cursor: Option<HistoryCursor>,
+    /// The page contains only one turn and the older prefix is on the next page.
+    pub partial: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRead {
+    pub r#ref: ContentRef,
+    pub offset: SafeInteger,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentBatch {
+    /// Ordered prefix of the request. Null means the corresponding item is unavailable.
+    pub slices: Vec<Option<ContentSlice>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolPage {
     pub tools: Vec<ToolHeader>,
     pub next_cursor: Option<ToolCursor>,
@@ -587,8 +624,10 @@ pub enum QueryResult {
     List(ListPage),
     View(Box<SessionView>),
     History(HistoryPage),
+    HistoryTurns(HistoryTurnPage),
     Tools(ToolPage),
     Content(ContentSlice),
+    ContentBatch(ContentBatch),
     Attached(Box<Attached>),
     Management(super::management::ManagementData),
     ValidateUndo(crate::workspace_undo::UndoReport),
@@ -625,6 +664,14 @@ pub enum QueryCommand {
         session: SessionId,
         cursor: Option<HistoryCursor>,
         limit: Option<usize>,
+    },
+    HistoryTurns {
+        session: SessionId,
+        cursor: HistoryCursor,
+        turns: usize,
+    },
+    ContentBatch {
+        reads: Vec<ContentRead>,
     },
     Tools {
         session: SessionId,
@@ -726,6 +773,32 @@ impl QueryCommand {
                         || c.before_seq.get() == 0
                 }) {
                     return Err(QueryError::InvalidInput);
+                }
+            }
+            Self::HistoryTurns {
+                session,
+                cursor,
+                turns,
+            } => {
+                limit(Some(*turns), MAX_HISTORY_TURNS, MAX_HISTORY_TURNS)?;
+                if &cursor.session != session
+                    || cursor.before_seq > cursor.max_entry_seq
+                    || cursor.before_seq.get() == 0
+                {
+                    return Err(QueryError::InvalidInput);
+                }
+            }
+            Self::ContentBatch { reads } => {
+                limit(
+                    Some(reads.len()),
+                    MAX_CONTENT_BATCH_ITEMS,
+                    MAX_CONTENT_BATCH_ITEMS,
+                )?;
+                for read in reads {
+                    read.r#ref.validate()?;
+                    if read.r#ref.kind != ContentKind::Text || read.offset > read.r#ref.bytes {
+                        return Err(QueryError::InvalidInput);
+                    }
                 }
             }
             Self::Tools {

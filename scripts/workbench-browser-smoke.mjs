@@ -617,8 +617,10 @@ try {
     '历史公式正文\n' +
     '保留完整内容。'.repeat(3000) +
     '\n$$\n\\int_0^1 x^2 dx = \\frac{1}{3}\n$$\n公式末尾已完整恢复';
+  const oldArchiveTail = '仅在滚动到归档消息后载入的结尾';
+  const olderArchive = '旧归档预览' + '只在可见时补正文。'.repeat(1500) + oldArchiveTail;
   for (let i = 0; i < 20; i++) {
-    await prompt(i === 19 ? historyMath : `bounded history ${i}`);
+    await prompt(i === 19 ? historyMath : i === 5 ? olderArchive : `bounded history ${i}`);
     await wait(() => controller.snapshot.view?.view?.status === 'Idle', `history fixture ${i}`);
   }
   const beforeOlderReview = (await client.call({ method: 'history', session: branch })).entries;
@@ -635,7 +637,17 @@ try {
   assert.equal(new Set(controller.snapshot.view.entries.map((r) => r.turn)).size, 3);
   await page.locator('.assistant .katex').waitFor();
   await page.locator('.assistant').filter({ hasText: '公式末尾已完整恢复' }).waitFor();
-  await page.getByRole('button', { name: '加载更早消息（20 轮）', exact: true }).click();
+  const earlierButton = page.getByRole('button', { name: '加载更早消息（20 轮）', exact: true });
+  await earlierButton.scrollIntoViewIfNeeded();
+  const anchor = await page.evaluate(() => {
+    const transcript = document.querySelector('#transcript');
+    const top = transcript.getBoundingClientRect().top;
+    const node = [...transcript.querySelectorAll('article[data-entry]')].find(
+      (node) => node.getBoundingClientRect().bottom >= top,
+    );
+    return { id: node.dataset.entry, offset: node.getBoundingClientRect().top - top };
+  });
+  await earlierButton.click();
   await wait(
     () => new Set(controller.snapshot.view.entries.map((r) => r.turn)).size === 23,
     'prepend twenty complete turns',
@@ -643,6 +655,33 @@ try {
   await page.waitForFunction(
     () => document.querySelectorAll('section.turn[data-turn]').length === 23,
   );
+  const restored = await page.evaluate(
+    (id) =>
+      document.querySelector(`article[data-entry="${CSS.escape(id)}"]`).getBoundingClientRect()
+        .top - document.querySelector('#transcript').getBoundingClientRect().top,
+    anchor.id,
+  );
+  assert(
+    Math.abs(restored - anchor.offset) < 3,
+    `history prepend moved the anchor by ${restored - anchor.offset}px`,
+  );
+  const oldPreview = page
+    .locator('.assistant [data-history-text]')
+    .filter({ hasText: '旧归档预览' });
+  await oldPreview.waitFor();
+  assert.equal(
+    await page.locator('.assistant .markdown').filter({ hasText: oldArchiveTail }).count(),
+    0,
+  );
+  await oldPreview.scrollIntoViewIfNeeded();
+  await page.locator('.assistant .markdown').filter({ hasText: oldArchiveTail }).waitFor();
+  const transcript = page.locator('#transcript');
+  const latestArrow = page.locator('#bottom');
+  await transcript.evaluate((node) => (node.scrollTop = node.scrollHeight));
+  await latestArrow.waitFor({ state: 'hidden' });
+  assert.equal(controller.snapshot.view.historical, true);
+  await transcript.evaluate((node) => (node.scrollTop = 0));
+  await latestArrow.waitFor();
   assert.equal(await page.getByRole('button', { name: '回到最新消息', exact: true }).count(), 1);
   await page.locator('#bottom').click();
   await wait(
@@ -669,6 +708,22 @@ try {
   );
   check(
     'scrolling back beyond the recent diff cache automatically restores the older card without a button or provider input',
+  );
+  await transcript.evaluate((node) => (node.scrollTop = 0));
+  await latestArrow.waitFor();
+  await prompt('new local message scrolls to the end');
+  await page.waitForFunction(() => {
+    const node = document.querySelector('#transcript');
+    const sent = [...node.querySelectorAll('article.user')].at(-1);
+    return (
+      sent?.textContent.includes('new local message scrolls to the end') &&
+      node.scrollHeight - node.clientHeight - node.scrollTop <= 1 &&
+      document.querySelector('#bottom').hidden
+    );
+  });
+  await wait(() => controller.snapshot.view.view.status === 'Idle', 'scroll test settles');
+  check(
+    'local input scrolls to the bottom from a historical viewport; the arrow hides at the physical bottom',
   );
   // Visual fixture from the user's four-file reference, after functional checks.
   // This is display-only evidence, not a claim that those repository files changed.

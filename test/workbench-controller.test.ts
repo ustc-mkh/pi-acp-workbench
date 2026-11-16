@@ -58,13 +58,23 @@ async function setup(
   peer.query(peer.requests[1], 'attached', attached(5, entries));
   if (archiveText !== undefined) {
     await expect.poll(() => peer.requests.length).toBe(3);
-    expect(peer.requests[2].command).toMatchObject({ method: 'content', offset: 0 });
-    peer.query(peer.requests[2], 'content', {
-      text: archiveText,
-      total_bytes: Buffer.byteLength(archiveText),
-      sha256: createHash('sha256').update(archiveText).digest('hex'),
-      next_offset: null,
+    expect(peer.requests[2].command).toMatchObject({
+      method: 'content_batch',
+      reads: [{ offset: 0 }],
     });
+    peer.query(peer.requests[2], 'content_batch', {
+      slices: [
+        {
+          text: archiveText,
+          total_bytes: Buffer.byteLength(archiveText),
+          sha256: createHash('sha256').update(archiveText).digest('hex'),
+          next_offset: null,
+        },
+      ],
+    });
+    await expect
+      .poll(() => Object.values(controller.snapshot.view?.resolvedText ?? {}))
+      .toEqual([archiveText]);
   }
   await selecting;
   return {
@@ -521,6 +531,7 @@ it('selection is cold, typed state reaches the webview, and only user mutation e
     generation: undefined,
     operation: expect.any(String),
     pi_after_seq: 0,
+    revision: 6,
   });
 });
 it('rejects untrusted, stale-session and arbitrary command/operation injection before side effects', async () => {

@@ -76,7 +76,7 @@ it('correlates out-of-order replies, live events and resync without a legacy env
   expect(first.operation).toBe(operation);
 });
 
-it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quotas', async () => {
+it('reserves a foreground history slot under saturation and retains abandoned sent quotas', async () => {
   const peer = await fixture(),
     client = peer.client();
   const ordinary = Array.from({ length: 16 }, () =>
@@ -89,6 +89,19 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
   const control = Array.from({ length: 4 }, () => client.request({ method: 'cancel', session }));
   const queries = Array.from({ length: 4 }, () => client.request(query));
   await expect.poll(() => peer.requests.length).toBe(24);
+  const history = {
+    method: 'history_turns' as const,
+    session,
+    cursor: { version: 3 as const, session, max_entry_seq: 2, before_seq: 2 },
+    turns: 20,
+  };
+  expect(() => client.request(history, { operation: operationId.parse('history') })).toThrow(
+    'cannot have a durable operation',
+  );
+  const foreground = client.request(history);
+  await expect.poll(() => peer.requests.length).toBe(25);
+  expect(peer.requests[24].command).toEqual(history);
+  expect(peer.requests[24].operation).toBeUndefined();
   for (const command of [
     {
       method: 'prompt' as const,
@@ -97,8 +110,19 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
     },
     { method: 'cancel' as const, session },
     query,
+    history,
   ])
     expect(() => client.request(command)).toThrow('pool is full');
+  peer.query(peer.requests[24], 'history_turns', {
+    entries: [],
+    next_cursor: null,
+    partial: false,
+  });
+  await foreground.result;
+  const nextPage = client.request(history);
+  await expect.poll(() => peer.requests.length).toBe(26);
+  expect(peer.requests[25].id).toBe(nextPage.id);
+
   const abandoned = expect(ordinary[0].result).rejects.toMatchObject({
     code: 'abandoned',
     sideEffectPossible: true,
@@ -131,10 +155,13 @@ it('reserves 16 ordinary/4 control/4 query slots and retains abandoned sent quot
   // Old response IDs cannot consume the replacement's observer.
   peer.reply(peer.requests[0], accepted);
   for (const request of peer.requests.slice(1)) {
+    if (request.id === foreground.id) continue;
     if (request.command.method === 'inspect') peer.query(request, 'view', emptyView());
+    else if (request.command.method === 'history_turns')
+      peer.query(request, 'history_turns', { entries: [], next_cursor: null, partial: false });
     else peer.reply(request, accepted);
   }
-  await Promise.all([...ordinary.slice(1), ...control, ...queries].map((t) => t.result));
+  await Promise.all([...ordinary.slice(1), ...control, ...queries, nextPage].map((t) => t.result));
 });
 
 it('abandonment before connection sends nothing and does not generate cancellation', async () => {

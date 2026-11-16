@@ -4,8 +4,9 @@ use crate::domain::{
     fork::ContentHash,
     image::{ImageAsset, ImageRef},
     query::{
-        ContentKind, ContentRef, ContentSlice, EntryHeader, QueryError, SafeInteger, TextBody,
-        CONTENT_SLICE_BYTES, INLINE_TEXT_BYTES,
+        json_bytes, query_bytes, ContentBatch, ContentKind, ContentRead, ContentRef, ContentSlice,
+        EntryHeader, QueryError, SafeInteger, TextBody, CONTENT_BATCH_SLICE_BYTES,
+        CONTENT_SLICE_BYTES, HISTORY_PREVIEW_BYTES, INLINE_TEXT_BYTES, MAX_QUERY_BYTES,
     },
     transcript::EntryRole,
     transition::{NewContent, NewEntry},
@@ -172,35 +173,37 @@ pub(super) fn slice(
     offset: SafeInteger,
     requested: Option<usize>,
 ) -> Result<ContentSlice, StoreError> {
-    content.validate()?;
     let length = requested.unwrap_or(CONTENT_SLICE_BYTES);
-    if length == 0 || length > CONTENT_SLICE_BYTES || offset > content.bytes {
+    if length == 0 || length > CONTENT_SLICE_BYTES {
         return Err(QueryError::InvalidInput.into());
     }
-    type Stored = (String, String, SafeInteger, SafeInteger, Vec<u8>);
-    let found: Option<Stored> = db
-        .query_row(
-            "SELECT kind,sha256,bytes,length(data),substr(data,?2,?3) FROM contents WHERE id=?1",
-            params![content.id.as_str(), offset.get() as i64 + 1, length as i64],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let (kind, sha, bytes, actual_bytes, mut data) = found.ok_or(StoreError::NotFound)?;
-    if kind != kind_name(content.kind)
-        || sha != content.sha256.as_str()
-        || bytes != content.bytes
-        || actual_bytes != bytes
-    {
+    read_slice(db, content, offset, length)
+}
+
+fn read_slice(
+    db: &Connection,
+    content: &ContentRef,
+    offset: SafeInteger,
+    length: usize,
+) -> Result<ContentSlice, StoreError> {
+    content.validate()?;
+    if offset > content.bytes {
+        return Err(QueryError::InvalidInput.into());
+    }
+    // Keep the SELECT active through the BLOB read so both observe the same
+    // SQLite snapshot even if a concurrent write removes an archive row.
+    let mut statement =
+        db.prepare_cached("SELECT rowid,kind,sha256,bytes FROM contents WHERE id=?1")?;
+    let mut rows = statement.query([content.id.as_str()])?;
+    let row = rows.next()?.ok_or(StoreError::NotFound)?;
+    let rowid = row.get(0)?;
+    let kind: String = row.get(1)?;
+    let sha: String = row.get(2)?;
+    let bytes: SafeInteger = row.get(3)?;
+    if kind != kind_name(content.kind) || sha != content.sha256.as_str() || bytes != content.bytes {
         return Err(StoreError::Invalid("content reference identity mismatch"));
     }
+    let mut data = blob_bytes(db, rowid, bytes, offset.get() as usize, length)?;
     match std::str::from_utf8(&data) {
         Ok(_) => {}
         Err(error)
@@ -224,6 +227,60 @@ pub(super) fn slice(
         sha256: content.sha256.clone(),
         total_bytes: bytes,
     })
+}
+
+fn blob_bytes(
+    db: &Connection,
+    rowid: i64,
+    bytes: SafeInteger,
+    offset: usize,
+    length: usize,
+) -> Result<Vec<u8>, StoreError> {
+    let blob = db.blob_open("main", "contents", "data", rowid, true)?;
+    if blob.len() as u64 != bytes.get() {
+        return Err(StoreError::Invalid("content reference identity mismatch"));
+    }
+    let mut data = vec![0; length.min(blob.len() - offset)];
+    if !data.is_empty() {
+        blob.read_at_exact(&mut data, offset)?;
+    }
+    Ok(data)
+}
+
+pub(super) fn preview(
+    db: &Connection,
+    rowid: i64,
+    bytes: SafeInteger,
+) -> Result<String, StoreError> {
+    let mut data = blob_bytes(db, rowid, bytes, 0, HISTORY_PREVIEW_BYTES)?;
+    match std::str::from_utf8(&data) {
+        Ok(_) => {}
+        Err(error) if error.error_len().is_none() => data.truncate(error.valid_up_to()),
+        Err(_) => return Err(StoreError::Invalid("content preview is not UTF-8")),
+    }
+    String::from_utf8(data).map_err(|_| StoreError::Invalid("content preview is not UTF-8"))
+}
+
+pub(super) fn batch(db: &Connection, reads: Vec<ContentRead>) -> Result<ContentBatch, StoreError> {
+    let mut batch = ContentBatch { slices: vec![] };
+    let mut bytes = query_bytes("content_batch", &batch)?.len();
+    for read in reads {
+        let slice = match read_slice(db, &read.r#ref, read.offset, CONTENT_BATCH_SLICE_BYTES) {
+            Ok(slice) => Some(slice),
+            Err(StoreError::NotFound | StoreError::Invalid(_) | StoreError::Query(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let size =
+            json_bytes(&slice, MAX_QUERY_BYTES)?.len() + usize::from(!batch.slices.is_empty());
+        if bytes + size > MAX_QUERY_BYTES {
+            break;
+        }
+        bytes += size;
+        batch.slices.push(slice);
+    }
+    debug_assert!(!batch.slices.is_empty());
+    query_bytes("content_batch", &batch)?;
+    Ok(batch)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,6 +367,7 @@ pub(super) fn header(row: &Row<'_>) -> Result<EntryHeader, StoreError> {
     } else {
         TextBody::Archived {
             content: metadata.text,
+            preview: None,
         }
     };
     Ok(EntryHeader {

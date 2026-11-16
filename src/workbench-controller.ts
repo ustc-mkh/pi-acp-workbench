@@ -519,6 +519,10 @@ export class WorkbenchController {
               prompt: message.command.prompt,
               // Last-mile Pi busy rejection is a turn fact, not an acceptance rollback.
               pi_after_seq: snapshot.harness === 'Pi' ? snapshot.last_entry_seq : undefined,
+              revision:
+                result && typeof result === 'object' && 'Accepted' in result
+                  ? result.Accepted.revision
+                  : undefined,
               generation: message.generation,
               operation: promptOperation!,
             });
@@ -557,6 +561,10 @@ export class WorkbenchController {
           });
           break;
         }
+        case 'visible_history_text':
+          if (this.selected?.id === message.session)
+            this.selected.setVisibleHistoryText(message.ids);
+          break;
         case 'earlier':
         case 'latest': {
           if (this.selected?.id !== message.session) throw new Error('Session selection changed');

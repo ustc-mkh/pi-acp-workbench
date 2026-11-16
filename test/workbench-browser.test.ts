@@ -58,7 +58,7 @@ async function browser(saved?: unknown, silentIntersectionObserver = false) {
     state,
     post,
     document: dom.window.document,
-    accept(session: string, prompt: unknown, piAfter?: number) {
+    accept(session: string, prompt: unknown, piAfter?: number, revision?: number) {
       const request = [...sent]
         .reverse()
         .find((m) => m.type === 'execute' && m.command.method === 'prompt');
@@ -71,6 +71,7 @@ async function browser(saved?: unknown, silentIntersectionObserver = false) {
         generation,
         operation: 'prompt-operation',
         pi_after_seq: piAfter,
+        revision,
       });
     },
     update(sequence = 1) {
@@ -78,6 +79,23 @@ async function browser(saved?: unknown, silentIntersectionObserver = false) {
     },
   };
 }
+function transcriptGeometry(document: Document) {
+  const transcript = document.querySelector<HTMLElement>('#transcript')!;
+  const edge = { height: 1000, viewport: 400 };
+  let scrollTop = 0;
+  Object.defineProperties(transcript, {
+    scrollHeight: { get: () => edge.height },
+    clientHeight: { get: () => edge.viewport },
+    scrollTop: {
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.min(Math.max(0, edge.height - edge.viewport), Math.max(0, value));
+      },
+    },
+  });
+  return { transcript, edge };
+}
+
 it('disables session creation until initial authorized workspace state arrives and again after trust revocation', async () => {
   const b = await browser();
   const create = [...b.document.querySelectorAll('button')].find(
@@ -1386,6 +1404,7 @@ it('reads the newly finished turn without an intersection callback and displays 
 
 it('renders a whole archived formula and exposes only the arrow for returning to latest turns', async () => {
   const b = await browser();
+  const { transcript } = transcriptGeometry(b.document);
   const text = '\\frac{a}{b} = x^2';
   const ref = {
     id: 'math-content',
@@ -1447,7 +1466,106 @@ it('renders a whole archived formula and exposes only the arrow for returning to
   expect(arrow.hidden).toBe(false);
   arrow.click();
   expect(b.sent.at(-1)).toEqual({ type: 'latest', session: 'session' });
+  expect(transcript.scrollTop).toBe(600);
+  expect(arrow.hidden).toBe(true);
 });
+
+it('shows earlier-history feedback outside the scrolled transcript', async () => {
+  const b = await browser();
+  transcriptGeometry(b.document);
+  const cursor = {
+    version: 3 as const,
+    session: 'session' as never,
+    max_entry_seq: 4,
+    before_seq: 2,
+  };
+  const status = b.document.querySelector<HTMLElement>('#earlier-status')!;
+  b.state.view = { ...b.state.view!, earlier: cursor, loadingEarlier: true, earlierLoaded: 2 };
+  b.update();
+  await expect.poll(() => status.textContent).toContain('已加载 2 轮');
+  expect(b.document.querySelector('#transcript')?.contains(status)).toBe(false);
+  const latest = b.document.querySelector<HTMLButtonElement>('#bottom')!;
+  expect(latest.hidden).toBe(false);
+  latest.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'latest', session: 'session' });
+  b.state.view = {
+    ...b.state.view,
+    loadingEarlier: false,
+    earlierError: '加载更早消息超时，请重试。',
+  };
+  b.update(2);
+  await expect.poll(() => status.textContent).toContain('超时');
+  b.state.view = { ...b.state.view, earlierError: undefined };
+  b.update(3);
+  await expect.poll(() => status.textContent).toContain('向上滚动查看');
+  b.state.view = { ...b.state.view, status: 'syncing' };
+  b.update(4);
+  await expect
+    .poll(
+      () =>
+        [...b.document.querySelectorAll<HTMLButtonElement>('button')].find(
+          (node) => node.textContent === '加载更早消息（20 轮）',
+        )?.disabled,
+    )
+    .toBe(true);
+});
+
+it.each([true, false])(
+  'scrolls for a submitted user message with passive follow off (receipt before paint: %s)',
+  async (receiptFirst) => {
+    const b = await browser({ preferences: { autoScroll: false } });
+    const { transcript, edge } = transcriptGeometry(b.document);
+    const previous = {
+      seq: 1,
+      id: entryId.parse('previous-user'),
+      turn: 'previous-turn' as never,
+      role: 'User' as const,
+      message: null,
+      image: null,
+      text: { Inline: { text: 'Previous message' } },
+    };
+    b.state.view = { ...b.state.view!, view: emptyView(5), entries: [previous], historical: true };
+    b.update();
+    await expect
+      .poll(() => transcript.querySelector('article')?.textContent)
+      .toContain('Previous message');
+    const arrow = b.document.querySelector<HTMLButtonElement>('#bottom')!;
+    expect(arrow.hidden).toBe(false);
+    const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+    prompt.value = 'New local message';
+    prompt.dispatchEvent(new dom!.window.Event('input', { bubbles: true }));
+    b.document.querySelector<HTMLButtonElement>('#send')!.click();
+    expect(b.sent.at(-1)).toMatchObject({ type: 'execute', command: { method: 'prompt' } });
+    expect(transcript.scrollTop).toBe(600);
+    expect(arrow.hidden).toBe(true);
+
+    const accept = () =>
+      b.accept('session', { parts: [{ type: 'text', text: prompt.value }] }, undefined, 6);
+    if (receiptFirst) accept();
+    edge.height = 1500;
+    b.state.view = {
+      ...b.state.view,
+      view: emptyView(6),
+      entries: [
+        previous,
+        {
+          ...previous,
+          seq: 2,
+          id: entryId.parse('own-send'),
+          turn: 'own-turn' as never,
+          text: { Inline: { text: 'New local message' } },
+        },
+      ],
+    };
+    b.update(2);
+    await expect
+      .poll(() => transcript.querySelector('article[data-entry="own-send"]'))
+      .toBeTruthy();
+    if (!receiptFirst) accept();
+    await expect.poll(() => transcript.scrollTop).toBe(1100);
+    expect(arrow.hidden).toBe(true);
+  },
+);
 
 it('copies the selected transcript text through the host on Ctrl/Cmd+C and keeps composer copy native', async () => {
   const b = await browser();
