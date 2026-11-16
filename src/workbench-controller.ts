@@ -1,15 +1,13 @@
-import { randomUUID, createHash } from 'node:crypto';
+import { WorkbenchDiffReader } from './workbench-diff-reader';
+import { WorkbenchOperations } from './workbench-operations';
 import { exportMarkdown } from './workbench-export';
 import { copyLogicalMessage } from './workbench-copy';
 import { externalDestination } from './workbench-messages';
-import { WorkbenchClient, WorkbenchError, type RequestTicket } from './workbench-client';
+import { WorkbenchClient } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
 import {
-  durableCommand,
-  operationId,
   sessionId,
   type ClientCommand,
-  type OperationId,
   type SessionId,
   type SessionSummary,
   type ContentRef,
@@ -17,8 +15,8 @@ import {
 } from './workbench-protocol';
 import {
   uiCommand,
-  uiOperation,
   type UiOperation,
+  type UiCommand,
   type WorkbenchUiMessage,
   type WorkbenchUiState,
 } from './workbench-ui';
@@ -46,7 +44,7 @@ export interface WorkbenchPorts {
 }
 /** UI owns only selection/display/workflow observers. The Rust actor owns all domain state. */
 export class WorkbenchController {
-  private turnDiffCache = new Map<string, import('./workbench-protocol').TurnDiff>();
+  private diffs: WorkbenchDiffReader;
   private selected?: WorkbenchSession;
   private selection = 0;
   private closed = false;
@@ -58,12 +56,7 @@ export class WorkbenchController {
   private authorizationGeneration = 0;
   private uiRequest = 0;
   private emitTimer?: NodeJS.Timeout;
-  private operations: UiOperation[] = [];
-  private persistence: Promise<void> = Promise.resolve();
-  private workflows = new Map<
-    OperationId,
-    { command: ClientCommand; ticket: RequestTicket<ClientCommand> }
-  >();
+  private receipts: WorkbenchOperations;
   private state: WorkbenchUiState = { sessions: [], operations: [], trusted: false };
   private unobserve: () => void;
   private selecting = false;
@@ -76,7 +69,6 @@ export class WorkbenchController {
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectAttempt = 0;
   private reconnectFlight?: Promise<void>;
-  private recoveryFlight?: Promise<void>;
   private modelMetadataRefresh?: Promise<unknown>;
   constructor(
     readonly client: WorkbenchClient,
@@ -88,18 +80,24 @@ export class WorkbenchController {
     } catch {
       // Local display preferences never authorize a mutation.
     }
-    const saved = ports.loadOperations?.();
-    if (Array.isArray(saved) && saved.length <= 64) {
-      for (const value of saved) {
-        try {
-          const row = uiOperation.parse(value);
-          if (row.status === 'pending') row.status = 'uncertain';
-          this.operations.push(row);
-        } catch {
-          /* Invalid local preferences never authorize a command. */
-        }
-      }
-    }
+    this.receipts = new WorkbenchOperations(
+      client,
+      ports.loadOperations?.(),
+      ports.saveOperations?.bind(ports),
+      () => this.closed,
+      () => this.emit(),
+      () => {
+        if (this.state.sessions.some((s) => s.retention_days !== undefined))
+          this.scheduleResidencyRefresh();
+      },
+    );
+    this.diffs = new WorkbenchDiffReader(
+      client,
+      () => this.selected,
+      () => this.closed,
+      (message) => ports.post(message),
+      ports.openDiff?.bind(ports),
+    );
     this.unobserve = client.observe({
       lost: () => {
         this.state.error =
@@ -120,7 +118,7 @@ export class WorkbenchController {
       selected: this.selected?.id,
       preparing: this.preparing,
       view: this.selected?.view,
-      operations: this.operations,
+      operations: this.receipts.rows,
       trusted: this.ports.trusted(),
       workspace: this.ports.workspace(),
     };
@@ -186,44 +184,9 @@ export class WorkbenchController {
           await this.ports.configureTelegram();
           break;
         }
-        case 'read_management': {
-          try {
-            let warning: string | undefined;
-            if (message.refresh_models && this.ports.trusted()) {
-              const refresh = (this.modelMetadataRefresh ??= this.client.call(
-                {
-                  method: 'management',
-                  query: {},
-                  refresh_models: true,
-                },
-                { timeoutMs: 60_000 },
-              ));
-              try {
-                await refresh;
-              } catch {
-                warning = '默认模型信息暂时无法刷新，正在显示已保存的数据。';
-              } finally {
-                if (this.modelMetadataRefresh === refresh) this.modelMetadataRefresh = undefined;
-              }
-            }
-            const data = await this.client.call({ method: 'management', query: message.query });
-            if (!this.closed)
-              this.ports.post({
-                type: 'management',
-                request_id: message.request_id,
-                data,
-                warning,
-              });
-          } catch {
-            if (!this.closed)
-              this.ports.post({
-                type: 'management_error',
-                request_id: message.request_id,
-                error: 'Statistics/settings unavailable',
-              });
-          }
+        case 'read_management':
+          await this.readManagement(message);
           break;
-        }
         case 'attach_files': {
           const selected = this.selected;
           const snapshot = selected?.view.view;
@@ -275,11 +238,11 @@ export class WorkbenchController {
           if (!cwd) throw new Error('Open a trusted workspace first');
           const token = await this.authorize(cwd);
           this.assertAuthorization(token);
-          await this.execute({ method: 'prepare_history_clear', filter: message.filter });
+          await this.receipts.execute({ method: 'prepare_history_clear', filter: message.filter });
           break;
         }
         case 'clear_history_batch': {
-          const report = [...this.operations]
+          const report = [...this.receipts.rows]
             .reverse()
             .find((op) => op.historyClear?.job === message.job)?.historyClear;
           if (!report) throw new Error('Recover the original preview receipt before continuing');
@@ -289,7 +252,7 @@ export class WorkbenchController {
           if (!this.ports.confirmHistoryClear || !(await this.ports.confirmHistoryClear(report)))
             break;
           this.assertAuthorization(token);
-          await this.execute({ method: 'clear_history_batch', job: message.job });
+          await this.receipts.execute({ method: 'clear_history_batch', job: message.job });
           await this.refresh();
           await this.selected?.refresh();
           break;
@@ -298,11 +261,11 @@ export class WorkbenchController {
           await this.refresh();
           break;
         case 'recover_operations':
-          await this.recoverOperations();
+          await this.receipts.recover();
           break;
         case 'ready':
         case 'refresh':
-          await this.recoverOperations();
+          await this.receipts.recover();
           if (message.type === 'refresh' && message.filter) {
             this.listFilter = message.filter;
             this.invalidateList();
@@ -321,7 +284,7 @@ export class WorkbenchController {
           const previous = this.selected;
           this.selected = undefined;
           this.restoredSelection = undefined;
-          this.turnDiffCache.clear();
+          this.diffs.clear();
           // Detach observation only: harness navigation never stops or resumes work.
           await previous?.stop();
           await this.ports.saveSelection?.(undefined);
@@ -332,7 +295,7 @@ export class WorkbenchController {
           const view = await this.client.call({ method: 'inspect', session: message.session });
           const token = await this.authorize(view.cwd);
           this.assertAuthorization(token);
-          await this.execute({ method: 'remove', session: message.session });
+          await this.receipts.execute({ method: 'remove', session: message.session });
           if (this.selected?.id === message.session) await this.ports.saveSelection?.(undefined);
           this.invalidateList();
           this.state.sessions = this.state.sessions.filter((row) => row.id !== message.session);
@@ -352,7 +315,11 @@ export class WorkbenchController {
             !message.confirmed
           )
             throw new Error('会话正在运行或等待授权，请再次确认释放。');
-          await this.execute({ method: 'cancel', session: message.session, release: true });
+          await this.receipts.execute({
+            method: 'cancel',
+            session: message.session,
+            release: true,
+          });
           await this.refresh();
           if (this.selected?.id === message.session) await this.selected.refresh();
           break;
@@ -364,7 +331,7 @@ export class WorkbenchController {
           if (message.command.method !== 'create') throw new Error('Only create is allowed here');
           const token = await this.authorize(message.command.cwd);
           this.assertAuthorization(token);
-          const result = await this.execute(message.command);
+          const result = await this.receipts.execute(message.command);
           if (!result || typeof result !== 'object' || !('Created' in result))
             throw new Error('Created session missing');
           this.upsert(result.Created.summary);
@@ -441,7 +408,7 @@ export class WorkbenchController {
           }
           if (['prompt', 'set_model', 'set_mode'].includes(message.command.method)) {
             // Inspect remains cold. Only an explicit authorized user mutation loads a peer.
-            await this.execute({ method: 'load', session: selected.id });
+            await this.receipts.execute({ method: 'load', session: selected.id });
             this.assertAuthorization(token);
             if (this.closed || this.selected !== selected)
               throw new Error('Session selection changed during load');
@@ -493,7 +460,7 @@ export class WorkbenchController {
             }
           }
           let promptOperation: import('./workbench-protocol').OperationId | undefined;
-          const result = await this.execute(message.command, (operation) => {
+          const result = await this.receipts.execute(message.command, (operation) => {
             promptOperation = operation;
             if (message.command.method === 'prompt')
               this.ports.post({
@@ -546,17 +513,17 @@ export class WorkbenchController {
           break;
         }
         case 'cancel_fork': {
-          const workflow = this.workflows.get(message.operation);
-          if (!workflow || workflow.command.method !== 'fork')
+          const workflow = this.receipts.active(message.operation);
+          if (!workflow || workflow.method !== 'fork')
             throw new Error('Fork workflow is not active');
-          const source = workflow.command.session;
+          const source = workflow.session;
           const snapshot = this.state.sessions.find((session) => session.id === source);
           if (!snapshot) throw new Error('Fork source is unavailable');
           const token = await this.authorize(snapshot.cwd);
           this.assertAuthorization(token);
-          await this.execute({
+          await this.receipts.execute({
             method: 'cancel_fork',
-            session: workflow.command.session,
+            session: workflow.session,
             operation: message.operation,
           });
           break;
@@ -572,154 +539,15 @@ export class WorkbenchController {
           else await this.selected.latest();
           break;
         }
-        case 'open_turn_diff': {
-          const selected = this.selected;
-          if (
-            !selected ||
-            selected.id !== message.session ||
-            !selected.view.entries.some((row) => row.turn === message.turn)
-          )
-            throw new Error('Turn is not in the confirmed view');
-          if (!this.ports.openDiff) throw new Error('Editor diff is unavailable');
-          const files: { path: string; before: string; after: string }[] = [];
-          let offset = 0;
-          let used = 0;
-          do {
-            const page = await this.client.call({
-              method: 'turn_diff',
-              session: selected.id,
-              turn: message.turn,
-              offset,
-            });
-            for (const [i, file] of page.files.entries()) {
-              const index = offset + i;
-              if (message.file !== undefined && message.file !== index) continue;
-              if (file.omitted && file.omitted !== 'Diff content can be loaded in bounded slices.')
-                continue;
-              const text: string[] = [];
-              for (const after of [false, true]) {
-                let position = 0;
-                let value = '';
-                do {
-                  const slice = await this.client.call({
-                    method: 'turn_diff_content',
-                    session: selected.id,
-                    turn: message.turn,
-                    file: index,
-                    after,
-                    offset: position,
-                  });
-                  used += Buffer.byteLength(slice.bytes);
-                  if (used > 4 * 1024 * 1024) throw new Error('Editor diff exceeds 4 MiB budget');
-                  value += slice.bytes;
-                  if (slice.next_offset == null) break;
-                  if (slice.next_offset <= position) throw new Error('Invalid diff cursor');
-                  position = slice.next_offset;
-                } while (true);
-                text.push(value);
-              }
-              files.push({ path: file.path, before: text[0], after: text[1] });
-            }
-            if (page.next_offset == null) break;
-            if (page.next_offset <= offset || page.next_offset > 5000)
-              throw new Error('Invalid diff page');
-            offset = page.next_offset;
-          } while (true);
-          if (this.selected !== selected || this.closed) break;
-          if (!files.length)
-            throw new Error(
-              'No complete text snapshots available; review partial reasons in the card',
-            );
-          await this.ports.openDiff(message.turn, files);
+        case 'open_turn_diff':
+          await this.diffs.openTurnDiff(message);
           break;
-        }
-        case 'read_turn_diff': {
-          const selected = this.selected;
-          if (
-            !selected ||
-            selected.id !== message.session ||
-            !selected.view.entries.some((row) => row.turn === message.turn)
-          )
-            throw new Error('Turn is not in the confirmed view');
-          try {
-            const diff = await this.client.call({
-              method: 'turn_diff',
-              session: selected.id,
-              turn: message.turn,
-              offset: message.offset,
-            });
-            if (this.selected !== selected || this.closed) break;
-            const key = `${selected.id}:${message.turn}`;
-            const previous = this.turnDiffCache.get(key);
-            const start = message.offset ?? 0;
-            if (start > 0 && (!previous || previous.files.length !== start))
-              throw new Error('Diff page is out of order');
-            const merged =
-              start > 0 && previous ? { ...diff, files: [...previous.files, ...diff.files] } : diff;
-            if (merged.files.length > 5000) throw new Error('Diff exceeds file budget');
-            this.turnDiffCache.set(key, merged);
-            while (this.turnDiffCache.size > 16)
-              this.turnDiffCache.delete(this.turnDiffCache.keys().next().value!);
-            if (this.selected === selected && !this.closed)
-              this.ports.post({
-                type: 'turn_diff',
-                session: selected.id,
-                turn: message.turn,
-                offset: message.offset,
-                diff,
-              });
-          } catch {
-            if (this.selected === selected && !this.closed)
-              this.ports.post({
-                type: 'turn_diff_error',
-                session: selected.id,
-                turn: message.turn,
-                error: message.automatic ? '' : 'Workspace diff unavailable',
-              });
-          }
+        case 'read_turn_diff':
+          await this.diffs.readTurnDiff(message);
           break;
-        }
-        case 'read_turn_diff_content': {
-          const selected = this.selected;
-          const diff = this.turnDiffCache.get(`${message.session}:${message.turn}`);
-          if (
-            !selected ||
-            selected.id !== message.session ||
-            !selected.view.entries.some((row) => row.turn === message.turn) ||
-            !diff ||
-            message.file >= diff.files.length
-          )
-            throw new Error('Diff file is not in the confirmed view');
-          try {
-            const content = await this.client.call({
-              method: 'turn_diff_content',
-              session: selected.id,
-              turn: message.turn,
-              file: message.file,
-              after: message.after,
-              offset: message.offset,
-            });
-            if (this.selected === selected && !this.closed)
-              this.ports.post({
-                type: 'turn_diff_content',
-                session: selected.id,
-                turn: message.turn,
-                file: message.file,
-                after: message.after,
-                offset: message.offset,
-                ...content,
-              });
-          } catch {
-            if (this.selected === selected && !this.closed)
-              this.ports.post({
-                type: 'turn_diff_error',
-                session: selected.id,
-                turn: message.turn,
-                error: 'Diff content unavailable',
-              });
-          }
+        case 'read_turn_diff_content':
+          await this.diffs.readTurnDiffContent(message);
           break;
-        }
         case 'read_tools': {
           if (
             this.selected?.id !== message.session ||
@@ -822,6 +650,43 @@ export class WorkbenchController {
     this.emit();
   }
   /** One bounded observer-recovery task, never a command replay or provider load. */
+  private async readManagement(message: Extract<UiCommand, { type: 'read_management' }>) {
+    try {
+      let warning: string | undefined;
+      if (message.refresh_models && this.ports.trusted()) {
+        const refresh = (this.modelMetadataRefresh ??= this.client.call(
+          {
+            method: 'management',
+            query: {},
+            refresh_models: true,
+          },
+          { timeoutMs: 60_000 },
+        ));
+        try {
+          await refresh;
+        } catch {
+          warning = '默认模型信息暂时无法刷新，正在显示已保存的数据。';
+        } finally {
+          if (this.modelMetadataRefresh === refresh) this.modelMetadataRefresh = undefined;
+        }
+      }
+      const data = await this.client.call({ method: 'management', query: message.query });
+      if (!this.closed)
+        this.ports.post({
+          type: 'management',
+          request_id: message.request_id,
+          data,
+          warning,
+        });
+    } catch {
+      if (!this.closed)
+        this.ports.post({
+          type: 'management_error',
+          request_id: message.request_id,
+          error: 'Statistics/settings unavailable',
+        });
+    }
+  }
   private scheduleReconnect() {
     if (this.closed || this.reconnectTimer) return;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempt++, 5));
@@ -842,7 +707,7 @@ export class WorkbenchController {
     const selected = this.selected;
     const task = (async () => {
       try {
-        await this.recoverOperations();
+        await this.receipts.recover();
         if (this.closed || selected !== this.selected) return;
         if (selected) await selected.refresh();
         else {
@@ -947,7 +812,7 @@ export class WorkbenchController {
     try {
       const previous = this.selected;
       this.selected = undefined;
-      this.turnDiffCache.clear();
+      this.diffs.clear();
       this.emit();
       // stop() synchronously drops the old observer before awaiting its detach
       // acknowledgement. An unrelated old socket reply must not block the new view.
@@ -978,54 +843,6 @@ export class WorkbenchController {
       if (!this.closed) void this.refresh().catch(() => {});
     }, 300);
   }
-  private persistOperations() {
-    const saved = this.operations.map((row) => ({ ...row }));
-    const task = this.persistence.catch(() => {}).then(() => this.ports.saveOperations?.(saved));
-    this.persistence = task;
-    return task;
-  }
-  private recoverOperations(): Promise<void> {
-    if (this.recoveryFlight) return this.recoveryFlight;
-    const task = this.queryOperations();
-    this.recoveryFlight = task;
-    void task
-      .finally(() => {
-        if (this.recoveryFlight === task) this.recoveryFlight = undefined;
-      })
-      .catch(() => {});
-    return task;
-  }
-  private async queryOperations() {
-    for (const row of this.operations) {
-      if (!['pending', 'uncertain'].includes(row.status) || this.workflows.has(row.operation))
-        continue;
-      const result = await this.client.call(
-        { method: 'operation', operation: row.operation },
-        { timeoutMs: 10_000 },
-      );
-      if (this.closed) return;
-      row.status =
-        result.status === 'completed'
-          ? 'completed'
-          : result.status === 'failed' || result.status === 'expired'
-            ? 'failed'
-            : 'uncertain';
-      if (result.status === 'completed' && 'HistoryClear' in result.receipt)
-        row.historyClear = result.receipt.HistoryClear.report;
-      row.code = result.status;
-      row.error =
-        result.status === 'failed'
-          ? result.message
-          : result.status === 'unknown'
-            ? 'No durable receipt found. No request was resent.'
-            : result.status === 'uncertain'
-              ? 'Acceptance or external outcome is uncertain. Inspect the session; no request was resent.'
-              : result.status === 'expired'
-                ? 'Receipt expired; this operation cannot execute again.'
-                : undefined;
-    }
-    await this.persistOperations();
-  }
   private async prepareNewSession(id: SessionId, cwd: string) {
     const selected = this.selected;
     if (!selected || selected.id !== id) return;
@@ -1034,7 +851,7 @@ export class WorkbenchController {
       const token = await this.authorize(cwd);
       this.assertAuthorization(token);
       if (this.selected !== selected || this.closed) return false;
-      const result = await this.execute(command);
+      const result = await this.receipts.execute(command);
       await selected.start();
       if (this.selected !== selected || this.closed) return false;
       if (!result || !('Loaded' in result) || !selected.confirmEmptyView(result.Loaded.view))
@@ -1046,64 +863,6 @@ export class WorkbenchController {
       return true;
     };
     if (!(await run({ method: 'discover', session: id }))) return;
-  }
-  private async execute(
-    command: ClientCommand,
-    admitted?: (operation: import('./workbench-protocol').OperationId) => void,
-  ) {
-    if (!durableCommand(command)) throw new Error('Expected a mutation');
-    // Bound both retained receipt display and concurrent long-running workflows.
-    if (this.operations.filter((row) => row.status === 'pending').length >= 16)
-      throw new Error('Too many UI workflows are active');
-    const unresolved = this.operations.filter((row) =>
-      ['pending', 'uncertain'].includes(row.status),
-    );
-    const control = ['cancel', 'answer', 'remove', 'cancel_fork'].includes(command.method);
-    if (unresolved.length >= (control ? 64 : 48))
-      throw new Error('Resolve uncertain operation receipts before starting more workflows');
-    const operation = operationId.parse(randomUUID());
-    admitted?.(operation);
-    const row: UiOperation = {
-      operation,
-      method: command.method,
-      ...('session' in command ? { session: command.session } : {}),
-      status: 'pending',
-    };
-    const terminal = this.operations.filter(
-      (row) => !['pending', 'uncertain'].includes(row.status),
-    );
-    const terminalSlots = Math.min(47, 63 - unresolved.length);
-    this.operations = [
-      ...unresolved,
-      ...(terminalSlots ? terminal.slice(-terminalSlots) : []),
-      row,
-    ];
-    this.emit();
-    try {
-      // Persist only a handle before bytes can leave this process, never a
-      // command body. Reload may query this identity but cannot replay it.
-      await this.persistOperations();
-      if (this.closed) throw new Error('Workbench view closed before dispatch');
-      const ticket = this.client.request(command, { operation });
-      this.workflows.set(operation, { command, ticket });
-      const result = await ticket.result;
-      row.status = 'completed';
-      if (result && typeof result === 'object' && 'HistoryClear' in result)
-        row.historyClear = result.HistoryClear.report;
-      return result;
-    } catch (error) {
-      row.status =
-        error instanceof WorkbenchError && error.sideEffectPossible ? 'uncertain' : 'failed';
-      row.error = error instanceof Error ? error.message : 'Operation failed';
-      if (error instanceof WorkbenchError) row.code = error.code;
-      throw error;
-    } finally {
-      this.workflows.delete(operation);
-      if (this.state.sessions.some((s) => s.retention_days !== undefined))
-        this.scheduleResidencyRefresh();
-      await this.persistOperations();
-      this.emit();
-    }
   }
   dispose() {
     if (this.closed) return;
@@ -1117,7 +876,7 @@ export class WorkbenchController {
     this.unobserve();
     void this.selected?.stop();
     this.selected = undefined;
-    this.turnDiffCache.clear();
+    this.diffs.clear();
     // Drop observers, not host operations. No implicit cancel/remove/retry.
     this.client.dispose();
   }

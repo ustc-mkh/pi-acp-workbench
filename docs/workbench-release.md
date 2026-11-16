@@ -1,10 +1,27 @@
-# Linux 服务构建与部署
+# 安装与部署
 
-服务包包含一个控制程序 `pi-acp-workbenchd`；ACP workers 需单独安装。支持 Linux x86_64 的 GNU/musl 目标。扩展、宿主、Pi adapter 使用配套版本，更新前阅读[升级与回退](workbench-cutover.md)。
+支持 Linux x86_64 的 GNU/musl 目标。VS Code 需要 1.96+；Remote SSH/WSL 中，扩展、服务和 Agent 在同一扩展宿主机器、同一账户运行。
+
+## 安装与启动
+
+1. 从 [Releases](https://github.com/ustc-mkh/pi-acp-workbench/releases) 下载同版本 VSIX 和适合系统的服务包，核对发布校验和后解压。
+2. 单独安装所需 ACP Agent，并按各 CLI 的方式完成 provider 登录。
+3. 复制服务包中的 `examples/workbench.json`，修改绝对 `storage.root` 和 `workers` 的 `command`、`args`、`env`；禁用的 worker 设为 `null`。首次安装使用空数据目录。
+4. 启动服务：
+
+```sh
+./pi-acp-workbenchd --config /absolute/path/workbench.json
+```
+
+5. 在 VS Code 执行 **Install from VSIX…**，安装扩展并信任工作区。设置 `piAcp.workbenchSocket` 为 `<storage.root>/workbench.sock`；留空默认使用 `~/.pi/pi-acp-workbench/workbench.sock`。修改后执行 **Developer: Reload Window**。
+
+扩展连接已有服务，不自动启动 daemon。默认配置使用 PATH 中的 `pi-acp`；需要本仓库 Pi 增强功能时，将 command 设为 Node 的绝对路径，args 指向配套构建的 `dist/pi-adapter.mjs`。Node adapter 需要 Node.js 22+。详见 [VS Code](workbench-vscode.md) 与 [Telegram](workbench-telegram.md)。
+
+长期运行可编辑包内 `examples/pi-acp-workbenchd.service`，替换 `ExecStart` 的程序和配置绝对路径，安装为 systemd 用户服务。服务账户需要访问工作区、存储和 Agent 程序；Telegram token 通过环境变量注入。
 
 ## 从源码构建
 
-需要 Node.js 22+、Rust/Cargo 和 Linux x86_64 工具链：
+需要 Node.js 22+ 和 Rust/Cargo：
 
 ```sh
 npm ci
@@ -14,73 +31,24 @@ npm run package:services
 npm run package
 ```
 
-- `service-dist/`：binary 和 `manifest.json`。
-- `service-artifacts/`：`pi-acp-services-VERSION-TARGET.tar.gz`、`.sha256`。
-- 仓库根目录：`pi-acp-workbench-VERSION.vsix`。
+| 输出                 | 内容                                  |
+| -------------------- | ------------------------------------- |
+| `dist/`              | VS Code 扩展、浏览器资源和 Pi adapter |
+| `service-dist/`      | 服务 binary、manifest                 |
+| `service-artifacts/` | 服务归档及校验和                      |
+| 仓库根目录的 `.vsix` | VS Code 安装包                        |
 
-`build:services` 可传 `--target x86_64-unknown-linux-musl` 或 `--target x86_64-unknown-linux-gnu`；跨编译需安装对应 Rust target 和 linker。GNU 验证不能替代 musl 验证。manifest 记录 ELF/ABI、SHA-256、Rust 源码 hash、Git 来源、dirty 状态及 IPC/storage 合同。
+`build:services` 支持 `--target x86_64-unknown-linux-gnu` 或 `--target x86_64-unknown-linux-musl`，跨编译需要对应 target 和 linker。服务包只包含程序、manifest、许可证、公开文档和配置示例，不包含业务数据或凭据。manifest 记录目标平台、文件哈希、源码来源及协议/存储版本。
 
-归档仅收集固定清单中的 binary、manifest、许可证、公开文档和两个 `examples/` 配置示例，不包含业务数据或凭据。Rustls 使用 bundled roots；Node 仅在使用 Node-based adapter 时需要。
+发布候选验证入口是 `npm run test:rewrite`；GNU 与 musl 需验证各自制品。默认测试使用模拟 ACP/Bot，真实 provider 和 VS Code Extension Host 需在相应环境验证。
 
-## 校验与安装
+## 升级与回退
 
-从可信发布来源取得匹配版本的服务包和校验和，核对 `.sha256`，查看归档内容后解压到新的私有目录。校验和用于检查字节一致性，来源可信性需单独确认。在解压目录执行：
+1. 停止接收新任务，处理或明确停止未完成任务，关闭宿主并等待进程退出。
+2. 用匹配旧数据的 binary 做[离线备份](workbench-storage.md)，另行备份 Pi profile、provider 原生会话和工作区。
+3. 配套更新 VSIX、宿主、Pi adapter 和配置，先在隔离副本验证，再使用原数据目录启动兼容版本。
+4. 保留旧程序、配置和数据的匹配备份；回退时停止新宿主，保存新数据后恢复整套旧组合。
 
-```sh
-sha256sum -c SHA256SUMS
-./pi-acp-workbenchd --version
-./pi-acp-workbenchd --help
-```
+当前 IPC/storage 合同均为 3，但相同版本数字不保证任意早期开发 schema 兼容。已验证的兼容 2.0.x 数据可保留历史并新增所需设置字段；不兼容、损坏或未版本化的非空目录会拒绝启动。当前没有旧格式导入器：不兼容数据需保留旧环境，新版本使用独立空目录，旧历史不会自动出现。
 
-将 `examples/workbench.json` 复制到自己的配置目录，修改绝对 `storage.root`、各 worker 的 executable/args/env。首次启动使用空 root；兼容的已验证 2.0.x root 支持有限的新增设置字段升级，旧格式转换边界见[数据迁移](workbench-data-migration.md)。备份停止后的完整 root 及关联 Pi profile（包含 context checkpoint）。
-
-默认示例使用 PATH 中的 `pi-acp`。需要本仓库增强功能时，将 worker command 设为 Node 的绝对路径，args 指向配套构建的 `dist/pi-adapter.mjs`。provider 登录由各 CLI 管理；禁用的 worker 配置为 `null`。
-
-```sh
-./pi-acp-workbenchd --config /absolute/path/workbench.json
-```
-
-VS Code 安装配套 VSIX，将 `piAcp.workbenchSocket` 指向 `<storage.root>/workbench.sock`；扩展不会启动 daemon。连接和 workspace trust 规则见 [VS Code](workbench-vscode.md)。
-
-Telegram 为可选项：设置 workspace、chat/user allowlist，以及 `bot_token_env` 环境变量名，token 不写入 JSON。配置方法见 [Telegram](workbench-telegram.md)。
-
-### systemd 用户服务
-
-编辑包内 `examples/pi-acp-workbenchd.service`，将 `ExecStart` 的 binary/config 替换为实际绝对路径，再安装到用户 unit 目录并启动。服务账户需能访问 workspace、storage 和 worker；单独注入 Bot token 环境变量。仓库构建脚本只生成制品，不执行安装或 `systemctl`。
-
-## 验证
-
-源码统一门禁：
-
-```sh
-npm run test:rewrite
-```
-
-该门禁涵盖类型检查、构建、格式、Clippy、Rust/TS、IPC/Telegram contracts、Chromium 和生产制品 smoke。默认使用 synthetic ACP peers 与本地 mock Bot；真实 provider、Telegram 和 Extension Host 需要各自验证。
-
-性能与生命周期专项按变更选择运行：
-
-```sh
-npm run test:workbench:startup
-npm run test:workbench:scale
-npm run test:workbench:mixed
-npm run test:workbench:diff-benchmark
-npm run test:workbench:host-mixed -- --binary "$PWD/service-dist/pi-acp-workbenchd" --dataset full
-npm run test:workbench:soak -- --duration-seconds 600
-npm run test:extension-host:full
-```
-
-`host-mixed` 的 full 工作集包含 10k 会话、100k history entries、4 MiB 图片、模拟 Telegram 多 lane 和 Chromium workload。默认五轮报告位于 `.test-results/`；两小时同宿主测试使用 `--runs 1 --duration-seconds 7200`。保留两小时 delivery backlog 使用 `--backlog-seconds 7200`。small 结果不能替代 full，短测不能替代长测。Extension Host 需要图形环境；安装候选 VSIX 可使用 `WORKBENCH_TEST_BINARY=/absolute/path/to/pi-acp-workbenchd node scripts/workbench-extension-host.mjs --full --vsix /absolute/path/to/candidate.vsix`。
-
-历史有限验收范围见 [P6 矩阵](workbench-p6-validation.md)，后续版本需验证自己的实际制品。
-
-## 更新、备份与回退
-
-按[切换清单](workbench-cutover.md)停止接受新任务、查明未决 operation，等待物理 join 后备份。离线维护由同一 binary 提供，并与宿主争用同一独占锁：
-
-```sh
-./pi-acp-workbenchd storage export --root /canonical/absolute/data \
-  --destination /absolute/existing-parent/new-backup --confirm
-```
-
-export 不转换格式，也不包含 root 外的 native 文件、Pi profile 或 workspace。不要删除 `.workbench.lock` 绕过占用；reset/GC 的适用条件见[存储维护](workbench-storage.md)。不兼容、损坏或未版本化非空 root 拒绝启动。回退必须恢复匹配的 binary、VSIX、配置与数据组合，不会撤销已发生的文件修改、费用或 Telegram 发送。
+不要修改版本标记、删除锁文件或清空数据来绕过检查。新数据目录也不继承旧 Telegram offset、待发送队列和话题绑定，不能默认无缝接续同一 Bot。回退不会撤销已经发生的文件修改、费用或 Telegram 发送。

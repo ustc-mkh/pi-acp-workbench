@@ -1,3 +1,4 @@
+//! Raw JSON boundary: Wire JSON encoding and decoding.
 //! The raw JSON-RPC boundary. Domain and actor code must not inspect these values.
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 use serde_json::Value;

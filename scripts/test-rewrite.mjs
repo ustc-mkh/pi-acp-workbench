@@ -2,20 +2,13 @@ import { spawnSync } from 'node:child_process';
 
 // Keep each gate visible and fail at the first unsuccessful verification.
 const checks = [
-  ['npm', ['run', 'check']],
   ['npm', ['run', 'audit:workbench']],
-  ['npm', ['run', 'build']],
   ['npm', ['run', 'format:check']],
   ['npm', ['run', 'clippy']],
-  ['cargo', ['test', '--manifest-path', 'rust/Cargo.toml', '--workspace']],
-  ['npm', ['run', 'test:contract:workbench']],
-  ['npm', ['run', 'test:contract:workbench:telegram']],
-  ['npm', ['run', 'test:workbench:capacity']],
-  ['npm', ['run', 'test:workbench:process-loss']],
-  ['npm', ['run', 'test:workbench:image-race']],
-  ['npm', ['run', 'test:workbench:provider-barriers']],
-  ['npm', ['run', 'test:browser']],
   ['npm', ['run', 'test:full']],
+  ['node', ['scripts/workbench-idle-worker-repro.mjs']],
+  ['node', ['scripts/workbench-image-race.mjs']],
+  ['node', ['scripts/workbench-provider-barriers.mjs']],
   ['node', ['scripts/build-services.mjs']],
   ['npm', ['run', 'package:services']],
   ['npm', ['run', 'test:service:artifact', '--', '--dir', 'service-dist']],

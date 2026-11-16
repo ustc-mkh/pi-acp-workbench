@@ -373,8 +373,7 @@ it('offers full Markdown export as a distinct user action for the selected sessi
 });
 
 it('renders committed rows without merging group deltas, never fetching markdown/tool URIs', async () => {
-  const b = await browser(),
-    snapshot = b.state.view!.view!;
+  const b = await browser();
   expect(b.sent).toEqual([{ type: 'ready' }]);
   b.state.view = {
     ...b.state.view!,

@@ -15,7 +15,7 @@ export class Preferences {
     const value = saved.preferences;
     if (!value || typeof value !== 'object') return;
     const record = value as Record<string, unknown>;
-    for (const key of ['historyOpen', 'activityExpanded'] as const)
+    for (const key of ['historyOpen', 'activityExpanded', 'showThoughts', 'autoScroll'] as const)
       if (typeof record[key] === 'boolean') this[key] = record[key];
     if ('harness' in value && ['Pi', 'Codex', 'Claude'].includes(String(value.harness)))
       this.harness = String(value.harness);
@@ -24,17 +24,8 @@ export class Preferences {
         const id = (value.lastSessions as Record<string, unknown>)[name];
         if (typeof id === 'string' && id.length <= 1000) this.lastSessions[name] = id;
       }
-    if ('showThoughts' in value && typeof value.showThoughts === 'boolean')
-      this.showThoughts = value.showThoughts;
-    if ('autoScroll' in value && typeof value.autoScroll === 'boolean')
-      this.autoScroll = value.autoScroll;
-    if (
-      'sessionRows' in value &&
-      Number.isInteger(value.sessionRows) &&
-      Number(value.sessionRows) >= 1 &&
-      [4, 10, 16].includes(Number(value.sessionRows))
-    )
-      this.sessionRows = Number(value.sessionRows);
+    if (typeof record.sessionRows === 'number' && [4, 10, 16].includes(record.sessionRows))
+      this.sessionRows = record.sessionRows;
     if (
       'composerHeight' in value &&
       typeof value.composerHeight === 'number' &&

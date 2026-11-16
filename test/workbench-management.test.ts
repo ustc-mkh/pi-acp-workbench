@@ -50,7 +50,7 @@ it('reloads model metadata after discovery completes even when an early settings
   const first = sent.at(-1)!;
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in first ? first.request_id : 0,
+    request_id: first.type === 'read_management' ? first.request_id : 0,
     data: {
       models: [],
       naming_policy: 'follow',
@@ -125,14 +125,14 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   };
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in request ? request.request_id : 0,
+    request_id: request.type === 'read_management' ? request.request_id : 0,
     data,
   });
   panel.openModels();
   const again = sent.at(-1)!;
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in again ? again.request_id : 0,
+    request_id: again.type === 'read_management' ? again.request_id : 0,
     data,
   });
   expect(dom.window.document.querySelector('script')).toBeNull();
@@ -156,7 +156,7 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   const metadataRequest = sent.at(-1)!;
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in metadataRequest ? metadataRequest.request_id : 0,
+    request_id: metadataRequest.type === 'read_management' ? metadataRequest.request_id : 0,
     data,
   });
   expect(
@@ -202,7 +202,7 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   const refreshed = sent.at(-1)!;
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in refreshed ? refreshed.request_id : 0,
+    request_id: refreshed.type === 'read_management' ? refreshed.request_id : 0,
     data,
   });
   expect(
@@ -226,7 +226,7 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   };
   panel.receive({
     type: 'management',
-    request_id: 'request_id' in stats ? stats.request_id : 0,
+    request_id: stats.type === 'read_management' ? stats.request_id : 0,
     data: {
       ...data,
       groups: [row],
@@ -278,7 +278,11 @@ it('shares Pi defaults across model aliases, preserves explicit overrides and sa
   };
   const receive = (data: ManagementData) => {
     const q = sent.at(-1)!;
-    panel.receive({ type: 'management', request_id: 'request_id' in q ? q.request_id : 0, data });
+    panel.receive({
+      type: 'management',
+      request_id: q.type === 'read_management' ? q.request_id : 0,
+      data,
+    });
   };
   receive(base);
   const input = (label: string) =>
@@ -389,7 +393,7 @@ it('refreshes shared defaults on either page without a selected session, never o
     expect(request).toMatchObject({ type: 'read_management', refresh_models: true });
     panel.receive({
       type: 'management',
-      request_id: 'request_id' in request ? request.request_id : 0,
+      request_id: request.type === 'read_management' ? request.request_id : 0,
       data: {
         models: [
           {
@@ -441,7 +445,7 @@ it('pages statistics forwards and backwards without accumulating rows, and reset
     };
     panel.receive({
       type: 'management',
-      request_id: 'request_id' in request ? request.request_id : 0,
+      request_id: request.type === 'read_management' ? request.request_id : 0,
       data: {
         models: [],
         naming_policy: 'follow',
@@ -460,7 +464,8 @@ it('pages statistics forwards and backwards without accumulating rows, and reset
   const failedPage = sent.at(-1)!;
   panel.receive({
     type: 'management_error',
-    request_id: 'request_id' in failedPage ? failedPage.request_id : 0,
+    error: 'Statistics unavailable',
+    request_id: failedPage.type === 'read_management' ? failedPage.request_id : 0,
   });
   expect(panel.root.textContent).toContain('第 1 页');
   expect(panel.root.querySelector<HTMLButtonElement>('nav button')!.disabled).toBe(true);

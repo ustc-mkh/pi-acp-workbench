@@ -16,17 +16,21 @@ const priority = (provider?: string) => {
   return index < 0 ? 100 : index;
 };
 export function piModelDefaults(models: PiModel[], catalogue: PiModel[] = models) {
-  return models
-    .filter((m) => m.provider && m.id)
-    .map((model) => {
-      const key = modelDefaultKey(model.id!);
-      const candidates = catalogue
-        .filter((m) => m.id && modelDefaultKey(m.id) === key)
-        .sort(
-          (a, b) =>
-            priority(a.provider) - priority(b.provider) ||
-            `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
-        );
+  const groups = new Map<string, PiModel[]>();
+  for (const model of catalogue) {
+    if (!model.id) continue;
+    const key = modelDefaultKey(model.id);
+    const group = groups.get(key) ?? [];
+    group.push(model);
+    groups.set(key, group);
+  }
+  const defaults = new Map(
+    [...groups].map(([key, candidates]) => {
+      candidates.sort(
+        (a, b) =>
+          priority(a.provider) - priority(b.provider) ||
+          `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
+      );
       const priced =
         candidates.find((m) => priority(m.provider) < 100 && validPrice(m.cost)) ??
         candidates.find(
@@ -41,17 +45,26 @@ export function piModelDefaults(models: PiModel[], catalogue: PiModel[] = models
           m.contextWindow! > 0 &&
           m.contextWindow! <= 100000000,
       );
-      return {
-        model: `${model.provider}/${model.id}`,
-        price: priced
-          ? {
-              input: priced.cost!.input,
-              output: priced.cost!.output,
-              cache_read: priced.cost!.cacheRead,
-              cache_write: priced.cost!.cacheWrite,
-            }
-          : null,
-        contextWindow: context?.contextWindow ?? null,
-      };
-    });
+      return [
+        key,
+        {
+          price: priced
+            ? {
+                input: priced.cost!.input,
+                output: priced.cost!.output,
+                cache_read: priced.cost!.cacheRead,
+                cache_write: priced.cost!.cacheWrite,
+              }
+            : null,
+          contextWindow: context?.contextWindow ?? null,
+        },
+      ] as const;
+    }),
+  );
+  return models
+    .filter((model) => model.provider && model.id)
+    .map((model) => ({
+      model: `${model.provider}/${model.id}`,
+      ...(defaults.get(modelDefaultKey(model.id!)) ?? { price: null, contextWindow: null }),
+    }));
 }

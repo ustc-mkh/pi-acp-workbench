@@ -1,8 +1,11 @@
 //! SQLite request execution. Runs only on the fixed writer/reader threads.
 use super::{database::StoreError, database_request::StoreRequest, query};
-use rusqlite::OptionalExtension;
 
-pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: StoreRequest) {
+pub(super) fn execute_request(
+    connection: &mut rusqlite::Connection,
+    diffs: &mut super::diff_archive::DiffArchive,
+    request: StoreRequest,
+) {
     match request {
         StoreRequest::ContextStage {
             session,
@@ -87,24 +90,9 @@ pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: St
             offset,
             reply,
         } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|v| {
-                    v.map(|j| {
-                        serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
-                            .map_err(|_| StoreError::Invalid("turn diff corrupt"))
-                    })
-                    .transpose()
-                })
-                .and_then(|d| {
-                    crate::workspace_review::summary(d, offset).map_err(StoreError::Query)
-                });
+            let result = diffs.read(connection, &session, &turn).and_then(|diff| {
+                crate::workspace_review::summary(diff.as_deref(), offset).map_err(StoreError::Query)
+            });
             let _ = reply.send(result);
         }
         StoreRequest::TurnDiffContent {
@@ -115,21 +103,11 @@ pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: St
             offset,
             reply,
         } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|v| v.ok_or(StoreError::NotFound))
-                .and_then(|j| {
-                    serde_json::from_str::<crate::workspace_review::TurnDiff>(&j)
-                        .map_err(|_| StoreError::Invalid("turn diff corrupt"))
-                })
-                .and_then(|d| {
-                    crate::workspace_review::content(&d, file, after, offset.get() as usize)
+            let result = diffs
+                .read(connection, &session, &turn)
+                .and_then(|diff| diff.ok_or(StoreError::NotFound))
+                .and_then(|diff| {
+                    crate::workspace_review::content(&diff, file, after, offset.get() as usize)
                         .map_err(StoreError::Query)
                 });
             let _ = reply.send(result);
@@ -139,22 +117,9 @@ pub(super) fn execute_request(connection: &mut rusqlite::Connection, request: St
             turn,
             reply,
         } => {
-            let result = connection
-                .query_row(
-                    "SELECT diff_json FROM turn_diffs WHERE session=?1 AND turn=?2",
-                    rusqlite::params![session.as_str(), turn.as_str()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(StoreError::from)
-                .and_then(|value| {
-                    value
-                        .map(|json| {
-                            serde_json::from_str(&json)
-                                .map_err(|_| StoreError::Invalid("turn diff archive is corrupt"))
-                        })
-                        .transpose()
-                });
+            let result = diffs
+                .read(connection, &session, &turn)
+                .map(|diff| diff.map(|diff| (*diff).clone()));
             let _ = reply.send(result);
         }
         StoreRequest::Attached { session, reply } => {

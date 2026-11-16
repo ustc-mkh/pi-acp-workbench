@@ -1,10 +1,9 @@
-import { createHash } from 'node:crypto';
+import { ContentVerifier } from './workbench-content';
 import type { WorkbenchClient } from './workbench-client';
 import {
   MAX_CONTENT_BATCH_ITEMS,
   type ContentRead,
   type ContentRef,
-  type ContentSlice,
   type EntryHeader,
 } from './workbench-protocol';
 
@@ -13,27 +12,8 @@ const MAX_TOTAL = 8 * 1024 * 1024;
 const MAX_ITEMS = 128;
 
 interface PendingText {
-  ref: ContentRef;
-  offset: number;
+  verifier: ContentVerifier;
   parts: string[];
-}
-
-function appendSlice(read: PendingText, page: ContentSlice) {
-  const end = read.offset + Buffer.byteLength(page.text);
-  if (
-    page.sha256 !== read.ref.sha256 ||
-    page.total_bytes !== read.ref.bytes ||
-    end > read.ref.bytes ||
-    (page.next_offset !== null && (page.next_offset !== end || end <= read.offset))
-  )
-    throw new Error('Invalid archived text slice');
-  read.parts.push(page.text);
-  read.offset = end;
-  if (page.next_offset !== null) return;
-  const text = read.parts.join('');
-  if (end !== read.ref.bytes || createHash('sha256').update(text).digest('hex') !== read.ref.sha256)
-    throw new Error('Incomplete archived text');
-  return text;
 }
 
 /** A bounded per-session cache of verified immutable message text. */
@@ -74,12 +54,14 @@ export class HistoryText {
       if (cached) {
         this.cache.delete(ref.id);
         this.cache.set(ref.id, cached);
-      } else pending.set(ref.id, { ref, offset: 0, parts: [] });
+      } else pending.set(ref.id, { verifier: new ContentVerifier(ref), parts: [] });
     }
 
     while (valid() && pending.size) {
       const reads: ContentRead[] = [];
-      for (const { ref, offset } of pending.values()) {
+      for (const {
+        verifier: { ref, offset },
+      } of pending.values()) {
         if (!wanted(ref.id)) {
           pending.delete(ref.id);
           continue;
@@ -98,9 +80,10 @@ export class HistoryText {
         const read = pending.get(id)!;
         try {
           if (!page) throw new Error('Unavailable archived text');
-          const text = appendSlice(read, page);
-          if (text === undefined) continue;
-          this.remember(read.ref, text);
+          const complete = read.verifier.append(page);
+          read.parts.push(page.text);
+          if (!complete) continue;
+          this.remember(read.verifier.ref, read.parts.join(''));
           updated = true;
         } catch {
           this.failed.add(id);

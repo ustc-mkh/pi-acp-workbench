@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { WorkbenchController } from '../src/workbench-controller';
 import { uiStateMessage, type WorkbenchUiMessage } from '../src/workbench-ui';
-import { entryId, imageRef, operationId, sessionId } from '../src/workbench-protocol';
+import { entryId, imageRef } from '../src/workbench-protocol';
 import { emptyView, workbenchPeer } from './helpers/workbench-peer';
 function summary(revision = 5) {
   const view = emptyView(revision);

@@ -88,7 +88,7 @@ async function runTests() {
     [
       node('typecheck', 'node_modules/typescript/bin/tsc', '--noEmit'),
       cargo('build-debug', 'build', '--workspace'),
-      cargo('build-contract', 'build', '-p', 'pi-acp-workbenchd'),
+      command('build-ui', 'npm', ['run', 'build']),
     ],
     jobs,
   );
@@ -98,7 +98,6 @@ async function runTests() {
     process.exitCode = 1;
   } else {
     const suites = [
-      node('protocol-types', 'node_modules/typescript/bin/tsc', '--noEmit'),
       node(
         'typescript',
         'node_modules/vitest/vitest.mjs',
@@ -109,7 +108,7 @@ async function runTests() {
         // Other service suites share the CPU/memory budget with Vitest.
         String(Math.min(jobs, 4, availableParallelism())),
       ),
-      cargo('rust-unit', 'test'),
+      cargo('rust-unit', 'test', '--workspace'),
       node('workbench-contract', 'scripts/workbench-contract.mjs'),
       node('workbench-telegram-contract', 'scripts/workbench-telegram-contract.mjs'),
       node('workbench-process-loss', 'scripts/workbench-process-loss.mjs'),

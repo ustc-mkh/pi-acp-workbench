@@ -4,20 +4,20 @@ import {
   boolean,
   checked,
   literal,
-  nullable,
   object,
   optional,
+  nullable,
   string,
   record,
   tagged,
   uint,
   variants,
   type Infer,
+  type Schema,
 } from './workbench-schema';
 import {
   clientCommand,
   managementQuery,
-  managementData,
   imageRef,
   operationId,
   sessionId,
@@ -27,7 +27,6 @@ import {
   entryId,
   toolHeader,
   toolCursor,
-  undoReport,
   turnId,
   historyCursor,
   listCursor,
@@ -35,14 +34,13 @@ import {
   historyClearReport,
   contentRef,
   contentId,
-  type ContentRef,
-  type ContentSlice,
-  type ImageAsset,
-  type OperationId,
-  type SessionSummary,
-  type ListCursor,
+  contentSlice,
+  imageAsset,
+  typedPrompt,
+  turnDiff,
+  undoReport,
+  managementData,
 } from './workbench-protocol';
-import type { WorkbenchSessionView } from './workbench-session';
 
 // Only user-originated commands; no internal event/ACP request or caller-selected operation ID.
 export const uiCommand = tagged('type', {
@@ -134,89 +132,6 @@ export const uiCommand = tagged('type', {
   }),
 });
 export type UiCommand = Infer<typeof uiCommand>;
-export interface UiOperation {
-  operation: OperationId;
-  method: string;
-  session?: string;
-  status: 'pending' | 'completed' | 'failed' | 'uncertain';
-  code?: string;
-  error?: string;
-  historyClear?: import('./workbench-protocol').HistoryClearReport;
-}
-export interface WorkbenchUiState {
-  sessions: SessionSummary[];
-  sessionsCursor?: ListCursor;
-  selected?: string;
-  preparing?: string;
-  view?: WorkbenchSessionView;
-  operations: UiOperation[];
-  error?: string;
-  workspace?: string;
-  trusted: boolean;
-}
-export type WorkbenchUiMessage =
-  | {
-      type: 'management';
-      request_id: number;
-      data: import('./workbench-protocol').ManagementData;
-      warning?: string;
-    }
-  | { type: 'management_error'; request_id: number; error: string }
-  | { type: 'state'; sequence: number; state: WorkbenchUiState }
-  | { type: 'prompt_submitted'; session: string; operation: OperationId; generation?: number }
-  | {
-      type: 'prompt_accepted';
-      session: string;
-      operation: OperationId;
-      prompt: import('./workbench-input').TypedPrompt;
-      generation?: number;
-      pi_after_seq?: number;
-      revision?: number;
-    }
-  | { type: 'attachments'; session: string; files: import('./workbench-input').TextAttachment[] }
-  | {
-      type: 'turn_diff';
-      session: string;
-      turn: string;
-      offset?: number;
-      diff: import('./workbench-protocol').TurnDiff;
-    }
-  | { type: 'turn_diff_error'; session: string; turn: string; error: string }
-  | {
-      type: 'turn_diff_content';
-      session: string;
-      turn: string;
-      file: number;
-      after: boolean;
-      offset: number;
-      bytes: string;
-      total_bytes: number;
-      next_offset?: number | null;
-    }
-  | {
-      type: 'undo_result';
-      session: string;
-      turn: string;
-      report: import('./workbench-protocol').UndoReport;
-    }
-  | { type: 'image'; session: string; request_id?: number; asset: ImageAsset }
-  | {
-      type: 'content';
-      session: string;
-      request_id?: number;
-      ref: ContentRef;
-      offset: number;
-      slice: ContentSlice;
-    }
-  | { type: 'image_error'; session: string; request_id?: number; image: string; error: string }
-  | {
-      type: 'content_error';
-      session: string;
-      request_id?: number;
-      ref: ContentRef;
-      offset: number;
-      error: string;
-    };
 // Shared output validation keeps the browser from trusting partial/old extension state.
 export const uiOperation = object({
   operation: operationId,
@@ -227,6 +142,7 @@ export const uiOperation = object({
   error: optional(string),
   historyClear: optional(historyClearReport),
 });
+const readonlyArray = <T>(item: Schema<T>): Schema<readonly T[]> => array(item);
 export const uiState = object({
   sessions: array(sessionSummary),
   sessionsCursor: optional(listCursor),
@@ -242,9 +158,9 @@ export const uiState = object({
         disconnected: null,
       }),
       view: optional(sessionView),
-      entries: array(entryHeader),
+      entries: readonlyArray(entryHeader),
       resolvedText: optional(record(string)),
-      tools: array(toolHeader),
+      tools: readonlyArray(toolHeader),
       toolCursor: optional(toolCursor),
       earlier: optional(historyCursor),
       historical: boolean,
@@ -260,3 +176,97 @@ export const uiState = object({
   trusted: boolean,
 });
 export const uiStateMessage = object({ type: literal('state'), sequence: uint, state: uiState });
+
+const attachment = object({ id: string, name: string, text: string });
+/** One runtime contract for every host-to-webview message. */
+export const uiMessage = tagged('type', {
+  state: uiStateMessage,
+  management: object({
+    type: literal('management'),
+    request_id: uint,
+    data: managementData,
+    warning: optional(string),
+  }),
+  management_error: object({ type: literal('management_error'), request_id: uint, error: string }),
+  prompt_submitted: object({
+    type: literal('prompt_submitted'),
+    session: string,
+    operation: operationId,
+    generation: optional(uint),
+  }),
+  prompt_accepted: object({
+    type: literal('prompt_accepted'),
+    session: string,
+    operation: operationId,
+    prompt: typedPrompt,
+    generation: optional(uint),
+    pi_after_seq: optional(uint),
+    revision: optional(uint),
+  }),
+  attachments: object({ type: literal('attachments'), session: string, files: array(attachment) }),
+  selection_context: object({ type: literal('selection_context'), file: attachment }),
+  draft: object({ type: literal('draft'), text: checked(string, (s) => s.length <= 200000) }),
+  turn_diff: object({
+    type: literal('turn_diff'),
+    session: string,
+    turn: string,
+    offset: optional(uint),
+    diff: turnDiff,
+  }),
+  turn_diff_error: object({
+    type: literal('turn_diff_error'),
+    session: string,
+    turn: string,
+    error: string,
+  }),
+  turn_diff_content: object({
+    type: literal('turn_diff_content'),
+    session: string,
+    turn: string,
+    file: uint,
+    after: boolean,
+    offset: uint,
+    bytes: string,
+    total_bytes: uint,
+    next_offset: optional(nullable(uint)),
+  }),
+  undo_result: object({
+    type: literal('undo_result'),
+    session: string,
+    turn: string,
+    report: undoReport,
+  }),
+  image: object({
+    type: literal('image'),
+    session: string,
+    request_id: optional(uint),
+    asset: imageAsset,
+  }),
+  image_error: object({
+    type: literal('image_error'),
+    session: string,
+    request_id: optional(uint),
+    image: string,
+    error: string,
+  }),
+  content: object({
+    type: literal('content'),
+    session: string,
+    request_id: optional(uint),
+    ref: contentRef,
+    offset: uint,
+    slice: contentSlice,
+  }),
+  content_error: object({
+    type: literal('content_error'),
+    session: string,
+    request_id: optional(uint),
+    ref: contentRef,
+    offset: uint,
+    error: string,
+  }),
+});
+export type WorkbenchUiMessage = Infer<typeof uiMessage>;
+
+export type UiOperation = Infer<typeof uiOperation>;
+export type WorkbenchUiState = Infer<typeof uiState>;

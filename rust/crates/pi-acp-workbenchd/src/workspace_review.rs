@@ -451,7 +451,7 @@ pub fn snapshot_from_workspace(p: &crate::domain::WorkspacePath) -> Result<Snaps
     Snapshot::capture(Path::new(p.as_str()))
 }
 pub fn summary(
-    diff: Option<TurnDiff>,
+    diff: Option<&TurnDiff>,
     offset: usize,
 ) -> Result<TurnDiff, crate::domain::query::QueryError> {
     let Some(d) = diff else {
@@ -469,23 +469,39 @@ pub fn summary(
     }
     let count = d.files.len();
     let end = (offset + 16).min(count);
-    let mut out = TurnDiff {
-        status: d.status,
-        files: d.files.into_iter().skip(offset).take(16).collect(),
-        warnings: d.warnings,
+    let out = TurnDiff {
+        status: d.status.clone(),
+        files: d
+            .files
+            .iter()
+            .skip(offset)
+            .take(16)
+            .map(|file| {
+                let mut metadata = FileDiff {
+                    path: file.path.clone(),
+                    status: file.status.clone(),
+                    before_hash: file.before_hash.clone(),
+                    after_hash: file.after_hash.clone(),
+                    before: None,
+                    after: None,
+                    old_mode: file.old_mode,
+                    new_mode: file.new_mode,
+                    added: file.added,
+                    removed: file.removed,
+                    patch: file.patch.clone(),
+                    omitted: file.omitted.clone(),
+                };
+                if (file.before.is_some() || file.after.is_some()) && metadata.omitted.is_none() {
+                    metadata.omitted = Some("Diff content can be loaded in bounded slices.".into());
+                }
+                metadata
+            })
+            .collect(),
+        warnings: d.warnings.clone(),
         added: d.added,
         removed: d.removed,
         next_offset: (end < count).then_some(end),
     };
-    for f in &mut out.files {
-        if f.before.is_some() || f.after.is_some() {
-            f.before = None;
-            f.after = None;
-            if f.omitted.is_none() {
-                f.omitted = Some("Diff content can be loaded in bounded slices.".into());
-            }
-        }
-    }
     Ok(out)
 }
 pub fn content(

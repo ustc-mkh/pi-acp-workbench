@@ -1,14 +1,13 @@
 import { modelDefaultKey } from '../src/workbench-model-defaults';
 import { uiLabel } from './workbench-labels';
 import {
-  managementData,
   type ManagementData,
   type ManagementQuery,
   type ManagementAction,
   type SessionView,
   type SessionSummary,
 } from '../src/workbench-protocol';
-import type { UiCommand, UiOperation } from '../src/workbench-ui';
+import type { UiCommand, UiOperation, WorkbenchUiMessage } from '../src/workbench-ui';
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
   const n = document.createElement(tag);
   if (text !== undefined) n.textContent = text;
@@ -115,16 +114,8 @@ export class ManagementPanel {
       ...(refreshModels ? { refresh_models: true } : {}),
     });
   }
-  receive(raw: unknown) {
-    if (!raw || typeof raw !== 'object' || !('type' in raw)) return false;
-    const m = raw as {
-      type: string;
-      request_id?: number;
-      data?: unknown;
-      error?: unknown;
-      warning?: string;
-    };
-    if (!['management', 'management_error'].includes(m.type)) return false;
+  receive(m: WorkbenchUiMessage) {
+    if (m.type !== 'management' && m.type !== 'management_error') return false;
     if (m.request_id !== this.pending) return true;
     this.pending = 0;
     for (const input of this.body.querySelectorAll<
@@ -138,7 +129,7 @@ export class ManagementPanel {
       return true;
     }
     try {
-      this.data = managementData.parse(m.data);
+      this.data = m.data;
       if (this.mode === 'statistics') {
         this.statisticsPage = this.requestedPage;
         if (this.statisticsPage === 0) this.statisticsCursors = [undefined];

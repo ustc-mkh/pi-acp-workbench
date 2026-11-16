@@ -102,11 +102,12 @@ impl ReaderWorker {
                         return Err(error);
                     }
                 };
+                let mut diffs = super::diff_archive::DiffArchive::default();
                 while let Some(queued) = requests.blocking_recv() {
                     let began = Instant::now();
                     let wait = queued.enqueued.elapsed();
                     let kind = queued.request.kind();
-                    execute_request(&mut connection, queued.request);
+                    execute_request(&mut connection, &mut diffs, queued.request);
                     metrics.record(
                         kind,
                         queued.enqueue_wait,
@@ -215,11 +216,12 @@ impl Database {
                 let _ = started.send(Ok(reader_senders));
                 let mut checkpoint = super::checkpoint::Checkpoint::new(&root);
                 // A reply is an observer, not ownership of an accepted transaction.
+                let mut diffs = super::diff_archive::DiffArchive::default();
                 while let Some(queued) = requests.blocking_recv() {
                     let execution = Instant::now();
                     let queue_wait = queued.enqueued.elapsed();
                     let kind = queued.request.kind();
-                    execute_request(&mut connection, queued.request);
+                    execute_request(&mut connection, &mut diffs, queued.request);
                     worker_metrics.record(
                         kind,
                         queued.enqueue_wait,
@@ -304,6 +306,15 @@ impl Database {
         });
         Ok(())
     }
+    /// Construct a typed request here; execution stays on the fixed database threads.
+    async fn request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, StoreError>>) -> StoreRequest,
+    ) -> Result<T, StoreError> {
+        let (reply, result) = oneshot::channel();
+        self.enqueue(make(reply)).await?;
+        result.await.map_err(|_| StoreError::Closed)?
+    }
     pub fn metrics(&self) -> std::collections::BTreeMap<&'static str, super::RequestMetrics> {
         self.inner.metrics.snapshot()
     }
@@ -313,24 +324,20 @@ impl Database {
         offset: SafeInteger,
         length: Option<usize>,
     ) -> Result<crate::domain::query::ContentSlice, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ContentSlice {
+        self.request(|reply| StoreRequest::ContentSlice {
             content,
             offset,
             length,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn management(
         &self,
         query: crate::domain::management::ManagementQuery,
     ) -> Result<crate::domain::management::ManagementData, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ManagementRead { query, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::ManagementRead { query, reply })
+            .await
     }
     pub async fn manage(
         &self,
@@ -338,98 +345,82 @@ impl Database {
         action: crate::domain::management::ManagementAction,
         ticket: Option<crate::domain::operation::OperationTicket>,
     ) -> Result<crate::domain::query::CommandReceipt, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ManagementUpdate {
+        self.request(|reply| StoreRequest::ManagementUpdate {
             session,
             action,
             ticket,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn context_stage(
         &self,
         session: SessionId,
         action: crate::domain::management::ManagementAction,
     ) -> Result<crate::domain::management::ContextIntent, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ContextStage {
+        self.request(|reply| StoreRequest::ContextStage {
             session,
             action,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn context_snapshot(
         &self,
     ) -> Result<crate::domain::management::ContextSnapshot, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ContextSnapshot { reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::ContextSnapshot { reply })
+            .await
     }
     pub async fn context_settle(
         &self,
         revision: u64,
         error: Option<String>,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ContextSettle {
+        self.request(|reply| StoreRequest::ContextSettle {
             revision,
             error,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn model_defaults(
         &self,
         session: SessionId,
         models: crate::domain::management::ProviderModels,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ModelDefaults {
+        self.request(|reply| StoreRequest::ModelDefaults {
             session: Some(session),
             models,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn profile_model_defaults(
         &self,
         models: crate::domain::management::ProviderModels,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ModelDefaults {
+        self.request(|reply| StoreRequest::ModelDefaults {
             session: None,
             models,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn title_job(&self, session: SessionId) -> Result<Option<String>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::TitleJob { session, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::TitleJob { session, reply })
+            .await
     }
     pub async fn title_result(
         &self,
         session: SessionId,
         result: crate::domain::management::TitleResponse,
     ) -> Result<(), StoreError> {
-        let (reply, wait) = oneshot::channel();
-        self.enqueue(StoreRequest::TitleResult {
+        self.request(|reply| StoreRequest::TitleResult {
             session,
             result,
             reply,
         })
-        .await?;
-        wait.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn save_turn_diff(
         &self,
@@ -437,15 +428,13 @@ impl Database {
         turn: crate::domain::TurnId,
         diff: crate::workspace_review::TurnDiff,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::TurnDiffSave {
+        self.request(|reply| StoreRequest::TurnDiffSave {
             session,
             turn,
             diff: Box::new(diff),
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn turn_diff_page(
         &self,
@@ -453,15 +442,13 @@ impl Database {
         turn: crate::domain::TurnId,
         offset: usize,
     ) -> Result<crate::workspace_review::TurnDiff, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::TurnDiffPage {
+        self.request(|reply| StoreRequest::TurnDiffPage {
             session,
             turn,
             offset,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn turn_diff_content(
         &self,
@@ -471,8 +458,7 @@ impl Database {
         after: bool,
         offset: SafeInteger,
     ) -> Result<crate::workspace_review::DiffContent, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::TurnDiffContent {
+        self.request(|reply| StoreRequest::TurnDiffContent {
             session,
             turn,
             file,
@@ -480,31 +466,26 @@ impl Database {
             offset,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn turn_diff(
         &self,
         session: SessionId,
         turn: crate::domain::TurnId,
     ) -> Result<Option<crate::workspace_review::TurnDiff>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::TurnDiffGet {
+        self.request(|reply| StoreRequest::TurnDiffGet {
             session,
             turn,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn attached(
         &self,
         session: SessionId,
     ) -> Result<crate::domain::query::Attached, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Attached { session, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::Attached { session, reply })
+            .await
     }
     pub async fn tools(
         &self,
@@ -513,30 +494,26 @@ impl Database {
         cursor: Option<crate::domain::query::ToolCursor>,
         limit: Option<usize>,
     ) -> Result<crate::domain::query::ToolPage, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Tools {
+        self.request(|reply| StoreRequest::Tools {
             session,
             turn,
             cursor,
             limit,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn remove(
         &self,
         session: SessionId,
         operation: Option<crate::domain::operation::OperationTicket>,
     ) -> Result<CommitBatch, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Remove {
+        self.request(|reply| StoreRequest::Remove {
             session,
             operation,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn tool(
         &self,
@@ -544,15 +521,13 @@ impl Database {
         turn: crate::domain::TurnId,
         tool: crate::domain::ToolCallId,
     ) -> Result<Option<crate::domain::query::ToolHeader>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Tool {
+        self.request(|reply| StoreRequest::Tool {
             session,
             turn,
             tool,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn prepare_fork(
         &self,
@@ -560,77 +535,62 @@ impl Database {
         request: crate::domain::fork::ForkRequest,
         candidates: Vec<crate::domain::fork::ForkCandidate>,
     ) -> Result<crate::domain::fork::ForkPlan, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::PrepareFork {
+        self.request(|reply| StoreRequest::PrepareFork {
             view: Box::new(view),
             request,
             candidates,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn adopt_fork(
         &self,
         plan: crate::domain::fork::ForkPlan,
         native: crate::domain::ProviderSessionId,
     ) -> Result<(SessionView, SessionSummary), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::AdoptFork {
+        self.request(|reply| StoreRequest::AdoptFork {
             plan: Box::new(plan),
             native,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     #[cfg(test)]
     pub(crate) async fn create(&self, view: SessionView) -> Result<SessionSummary, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Create {
+        self.request(|reply| StoreRequest::Create {
             view: Box::new(view),
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn commit(&self, commit: Transition) -> Result<CommitBatch, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Commit {
+        self.request(|reply| StoreRequest::Commit {
             commit: Box::new(commit),
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub(crate) async fn summary(&self, session: SessionId) -> Result<SessionSummary, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Summary { session, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::Summary { session, reply })
+            .await
     }
     pub(crate) async fn worker_activity(
         &self,
         session: SessionId,
     ) -> Result<(u64, u64), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::WorkerActivity { session, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::WorkerActivity { session, reply })
+            .await
     }
     pub async fn view(&self, session: SessionId) -> Result<SessionView, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::View { session, reply }).await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::View { session, reply })
+            .await
     }
     pub(crate) async fn history_clear(
         &self,
         request: super::history_clear::Request,
     ) -> Result<super::history_clear::Output, StoreError> {
-        let (reply, wait) = oneshot::channel();
-        self.enqueue(StoreRequest::HistoryClear { request, reply })
-            .await?;
-        wait.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::HistoryClear { request, reply })
+            .await
     }
     pub async fn search(
         &self,
@@ -638,43 +598,37 @@ impl Database {
         cursor: Option<ListCursor>,
         limit: Option<usize>,
     ) -> Result<ListPage, StoreError> {
-        let (reply, wait) = oneshot::channel();
-        self.enqueue(StoreRequest::Search {
+        self.request(|reply| StoreRequest::Search {
             filter,
             cursor,
             limit,
             reply,
         })
-        .await?;
-        wait.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn list(
         &self,
         cursor: Option<ListCursor>,
         limit: Option<usize>,
     ) -> Result<ListPage, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::List {
+        self.request(|reply| StoreRequest::List {
             cursor,
             limit,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn activity_list(
         &self,
         cursor: Option<ListCursor>,
         limit: Option<usize>,
     ) -> Result<ListPage, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ActivityList {
+        self.request(|reply| StoreRequest::ActivityList {
             cursor,
             limit,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn history(
         &self,
@@ -682,15 +636,13 @@ impl Database {
         cursor: Option<HistoryCursor>,
         limit: Option<usize>,
     ) -> Result<HistoryPage, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::History {
+        self.request(|reply| StoreRequest::History {
             session,
             cursor,
             limit,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn history_turns(
         &self,
@@ -698,39 +650,34 @@ impl Database {
         cursor: HistoryCursor,
         turns: usize,
     ) -> Result<HistoryTurnPage, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::HistoryTurns {
+        self.request(|reply| StoreRequest::HistoryTurns {
             session,
             cursor,
             turns,
             reply,
         })
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        .await
     }
     pub async fn content_batch(&self, reads: Vec<ContentRead>) -> Result<ContentBatch, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ContentBatch { reads, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::ContentBatch { reads, reply })
+            .await
     }
     pub async fn content(&self, content: ContentRef) -> Result<String, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Content { content, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::Content { content, reply })
+            .await
     }
     #[cfg(test)]
     pub(crate) async fn reject_journal_admission(
         &self,
         operation: crate::domain::OperationId,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Test(
-            super::sqlite_tests::TestRequest::RejectJournalAdmission { operation, reply },
-        ))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Test(super::sqlite_tests::TestRequest::RejectJournalAdmission {
+                operation,
+                reply,
+            })
+        })
+        .await
     }
     #[cfg(test)]
     pub(crate) async fn pause_executor(
@@ -754,43 +701,36 @@ impl Database {
         session: SessionId,
         fail: bool,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Test(
-            super::sqlite_tests::TestRequest::SessionCommitFailure {
+        self.request(|reply| {
+            StoreRequest::Test(super::sqlite_tests::TestRequest::SessionCommitFailure {
                 session,
                 fail,
                 reply,
-            },
-        ))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+            })
+        })
+        .await
     }
     #[cfg(test)]
     pub(crate) async fn corrupt_image(&self, id: crate::domain::ImageId) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Test(
-            super::sqlite_tests::TestRequest::CorruptImage { id, reply },
-        ))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Test(super::sqlite_tests::TestRequest::CorruptImage { id, reply })
+        })
+        .await
     }
     #[cfg(test)]
     pub(crate) async fn archive_image(
         &self,
         asset: crate::domain::image::ImageAsset,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::ArchiveImage { asset, reply })
-            .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::ArchiveImage { asset, reply })
+            .await
     }
     pub async fn image_by_id(
         &self,
         id: crate::domain::ImageId,
     ) -> Result<crate::domain::image::ImageAsset, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Image { id, reply }).await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| StoreRequest::Image { id, reply })
+            .await
     }
     pub async fn image(
         &self,
@@ -806,12 +746,13 @@ impl Database {
         &self,
         intent: crate::domain::transition::DeliveryIntent,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::Enqueue { intent, reply },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::Enqueue {
+                intent,
+                reply,
+            }))
+        })
+        .await
     }
     /// Heads for immutable persisted targets, including deferred heads when
     /// now=MAX_SAFE_INTEGER. Dynamic Telegram binding resolution stays with
@@ -822,12 +763,14 @@ impl Database {
         now: SafeInteger,
         limit: usize,
     ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::Heads { now, limit, reply },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::Heads {
+                now,
+                limit,
+                reply,
+            }))
+        })
+        .await
     }
     #[cfg(test)]
     pub async fn pending_delivery_records(
@@ -835,24 +778,28 @@ impl Database {
         now: SafeInteger,
         limit: usize,
     ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::All { now, limit, reply },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::All {
+                now,
+                limit,
+                reply,
+            }))
+        })
+        .await
     }
     pub async fn dispatch_snapshot(
         &self,
         bot: i64,
         limit: usize,
     ) -> Result<super::delivery::DispatchSnapshot, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::DispatchSnapshot { bot, limit, reply },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::DispatchSnapshot {
+                bot,
+                limit,
+                reply,
+            }))
+        })
+        .await
     }
     #[cfg(test)]
     pub async fn delivery_topic_heads(
@@ -862,18 +809,16 @@ impl Database {
         bindings: Vec<(SessionId, i64, i64)>,
         bot_id: i64,
     ) -> Result<Vec<super::delivery::PendingDelivery>, StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::TopicHeads {
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::TopicHeads {
                 now,
                 limit,
                 bindings,
                 bot_id,
                 reply,
-            },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+            }))
+        })
+        .await
     }
     pub async fn ack_delivery(&self, id: crate::domain::DeliveryId) -> Result<(), StoreError> {
         self.ack_sent_delivery(id, None).await
@@ -883,16 +828,14 @@ impl Database {
         id: crate::domain::DeliveryId,
         destination: Option<(i64, crate::telegram::types::TopicKey)>,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::Ack {
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::Ack {
                 id,
                 destination,
                 reply,
-            },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+            }))
+        })
+        .await
     }
     pub async fn fail_delivery(
         &self,
@@ -900,17 +843,15 @@ impl Database {
         failure: super::delivery::Failure,
         retry_at: SafeInteger,
     ) -> Result<(), StoreError> {
-        let (reply, result) = oneshot::channel();
-        self.enqueue(StoreRequest::Delivery(Box::new(
-            super::delivery::Request::Fail {
+        self.request(|reply| {
+            StoreRequest::Delivery(Box::new(super::delivery::Request::Fail {
                 id,
                 failure,
                 retry_at,
                 reply,
-            },
-        )))
-        .await?;
-        result.await.map_err(|_| StoreError::Closed)?
+            }))
+        })
+        .await
     }
     pub async fn shutdown(&self) -> Result<(), StoreError> {
         let _shutdown = self.inner.shutdown.lock().await;

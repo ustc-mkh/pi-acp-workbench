@@ -1,76 +1,47 @@
-# Explicit offline storage maintenance
+# 存储与离线维护
 
-The **same `pi-acp-workbenchd` binary** provides maintenance subcommands. They do not start the runtime, provider workers, IPC listener or Telegram/network client, and do not read account configuration. All require `--confirm`, a canonical absolute non-root directory, an existing exact format-3 marker and the **same exclusive `flock` lease** as the host. A persistent `.workbench.lock` is normal: **never remove it to bypass a lock**. A live host is excluded even before its socket exists. An unlocked persistent lock file does not prevent maintenance.
+数据目录由 `storage.root` 指定，当前使用 format 3 SQLite。会话、不可变消息与正文、操作回执、模型设置、用量和 Telegram 收发状态存于同一数据库。数据可能包含源代码和敏感对话，应限制目录访问。
 
-Maintenance refuses any socket, symlink (including dangling links), FIFO or other special file in the source tree. A leftover `workbench.sock` after process loss requires independent operator inspection; it is not silently deleted. These checks protect against accidental path traversal, not a hostile process running as the same Unix account and rewriting directories concurrently. Stop the service, prevent automatic restarts and restrict access before maintenance.
+## 兼容性与锁
 
-Usage/model management requires `usage_facts` (stable per-turn/title identity, date/model/session indexes, NULL means missing), `model_settings` (at most 1500 rows of overrides/defaults/visibility/context), `session_metadata` (title/source/attempted), and singleton `naming_settings`. These are in the same SQLite file. Local settings changes and terminal receipts commit in one transaction; readers return SQL aggregates, not all records. Single-session removal cascades its live title/Diff but intentionally retains usage/number facts and operation/delivery identities; it is not an account-wide statistics purge. No native-history usage backfill, dual-write preferences file, or automatic old-root migration is added. Startup validates the required columns, including `usage_facts.session_number`; the development format-3 label does not authorize an earlier schema shape. Preserve binary/root together. Details: [model/usage management](workbench-management.md).
+宿主和维护命令共用 `.workbench.lock` 的独占锁。锁文件持续存在是正常现象，不要删除它绕过占用。离线维护前停止服务及自动重启入口；异常退出残留的 socket 需先确认没有持有者。
 
-Workspace reviews also require `turn_diffs(session,turn,diff_json)`: immutable bounded workspace snapshots, independent of provider tool patches. Summary/content queries use the fixed readers. The row belongs to its live session and is removed by an SQL foreign-key cascade when that session is explicitly removed; it is not needed for retained Telegram delivery manifests. No pending/incomplete snapshot is reconstructed after host loss. Saved text may contain sensitive source; SQLite/WAL deletion is not secure erasure. See [workspace Diff/undo](turn-diff.md).
+格式标记和必需 schema 都会校验；相同 format 数字不保证任意开发版目录兼容。当前没有旧格式导入命令，不兼容或损坏的非空目录会拒绝打开。升级步骤见[安装与部署](workbench-release.md)。
 
-The current pre-release schema includes required `telegram_topic_preferences(bot_id,chat,thread,notifications,silent)` and `telegram_callbacks.action_kind` columns, plus typed Answer/Control callback bodies and `telegram_history_cursors(bot_id,chat,thread,session,last_seq)` / `telegram_turn_receipts(delivery_id,bot_id,chat,thread,session)`. Roots created before that schema shape are rejected, not upgraded or reset, despite sharing the development format-3 envelope. Preserve the previous binary/root together; use an isolated fresh root for current acceptance. Typed Telegram GC does not remove topic preferences; resetting both preferences to their defaults releases their bounded row explicitly.
+所有维护操作使用同一个 `pi-acp-workbenchd`，不启动 provider、Telegram 或 IPC，不读取账户配置。root 必须是规范化的绝对路径；拒绝源目录中的符号链接、socket 和其他特殊文件。写操作需要 `--confirm`，GC 预览使用 `--dry-run`。
 
-Explicit history exports atomically freeze their request receipt, reserve existing outbox intents and advance a bounded per-topic/session cursor. Cursor rows are capped at 4096 per bot and cascade only when their owning session is explicitly removed; immutable archives, already accepted export intents and delivery tombstones remain. Typed GC does not reset live history cursors or remove export dedup identities. These cursors track **durably planned**, not remotely confirmed, exports; Pending outbox work remains responsible for retry. Completed Turn ack and its actual Telegram destination commit atomically as one small receipt row. It references the existing immutable manifest, not a new per-entry/per-part ledger; muted/skipped acknowledgements are not delivery evidence. These receipts survive source removal and remain with delivery tombstones. History reservation and sending both check completed same-topic Turn evidence; Turn rendering checks explicit history acks in batches of at most 100 indexed IDs. Missing required history/receipt tables or columns fail closed without migration/reset.
-
-## Invocation
-
-Build the daemon first for source-tree use:
-
-```sh
-npm run build:workbenchd
-npm run workbench:storage -- export --root /absolute/canonical/data \
-  --destination /absolute/existing-parent/new-export --confirm
-```
-
-The npm script is only a launcher. Its default is `rust/target/debug/pi-acp-workbenchd`; set `WORKBENCH_STORAGE_BINARY=/absolute/path/pi-acp-workbenchd` for another build. Production packages need no Node maintenance helper:
+## 备份
 
 ```sh
 ./pi-acp-workbenchd storage export --root /absolute/canonical/data \
-  --destination /absolute/existing-parent/new-export --confirm
+  --destination /absolute/existing-parent/new-backup --confirm
 ```
 
-## Export
+目标父目录必须存在，备份目标必须是新路径且与源分离。export 复制原始字节并生成 `EXPORT-MANIFEST.json`，包含文件清单、大小和 SHA-256；不覆盖现有目录，失败的部分输出保留供检查。
 
-Export copies exact bytes, excludes the lease inode, and creates `EXPORT-MANIFEST.json` containing source, format version, file paths, sizes and SHA-256 hashes. Files are copied with bounded buffers, private directories/files and no overwrite. The destination parent must exist. Canonical overlap checks reject aliases into the source. Symlinks and special files are rejected before destination creation. The lease is held until copy, manifest and fsync complete. A failed export is left for inspection and is not reported successful; no recursive failure cleanup deletes operator-added files.
+这是数据备份，不是格式转换。备份包含停机时的数据库/WAL 等文件，不包含 root 外的 provider 原生文件、Pi profile 或工作区。恢复时使用匹配版本；Pi context 需同时恢复 profile 的 `models.json` 和 checkpoint，见[模型设置](workbench-management.md)。
 
-Export is a byte-level backup, not a format migration or a guarantee that every stored record is valid. Keep exports private: they contain conversations and may contain user-supplied sensitive content.
-
-GC supports a read-only preview and a bounded repeatable execution:
+## 垃圾回收
 
 ```sh
 ./pi-acp-workbenchd storage gc --root /absolute/canonical/data --dry-run
 ./pi-acp-workbenchd storage gc --root /absolute/canonical/data --confirm
 ```
 
-The preview requires the same exclusive lease and reports eligible object/byte counts; it does not compact Telegram records or delete data. Confirmed runs compact typed Telegram state and delete at most 500 orphan `contents` rows in one bounded SQLite transaction. Re-run until `removed_contents` is zero; `orphan_contents`/`orphan_bytes` report the pre-run estimate, not a promise that all candidates were removed in one pass.
+预览只报告候选数量与字节数，仍需独占锁。执行在一个 SQLite 事务内：
 
-GC uses the database executor and one SQLite transaction to compact typed Telegram tables under the storage lease:
+- 清理已完成的 Telegram inbox，保留 update offset。
+- 清理过期且不被待处理 inbox 引用的 callback；未过期和无期限的 callback 保留。
+- 删除最多 500 个无 `entries` 引用、也无 `archive_roots` pin 的正文对象。
 
-- Completed inbox records may be removed. The durable update offset remains unchanged, so an old update cannot execute again after restart.
-- Expired callbacks may be removed **only if no pending inbox record references them**.
-- Unexpired consumed callbacks remain to reject repeated clicks. Pending answers retain their exact consumed callback receipt even after expiry.
-- The transaction commits all deletions together; failed writes do not publish a partial state. Repeated GC is idempotent.
+可重复运行至 `removed_contents` 为 0；候选数是执行前估计，并不表示本批全部删除。GC 不删除操作回执、投递去重记录、用量、历史游标或 provider 原生文件。已有 archive pin 仍会保留内容，因此它不是按年龄清空历史或通用磁盘回收策略。
 
-Callbacks with no expiry (`u64::MAX`) are deliberately retained even if consumed. Therefore this GC does **not** eliminate the 4096-binding cap for indefinitely retained interactions. Reclaiming those keys safely requires additional typed session/interaction/outbox liveness evidence; it is still an open retention-policy task, not permission to reset offsets or discard receipts.
-
-Online menu registration separately reclaims at most 128 expired **Control** callbacks per registration, protecting Pending inbox references and leaving Answer callbacks to offline typed GC. Menu controls are limited to 3072 rows within the total 4096 callback budget, preserving authorization headroom; reaching a limit gives a text-command fallback, not a new sender or bypass queue. Immutable menu replies/keys survive delivery retry without rebuilding their command snapshot.
-
-The JSON summary reports `removed_inbox` and `removed_callbacks`. Missing Telegram records are a no-op; corrupt/unknown database or storage versions fail closed.
-
-The new bounded content pass considers only `contents` rows with no `entries.content_id` or `entries.image_id` root. This relationship is enforced by the schema and immutable entry references; a row with any live entry reference is retained. Entries themselves are never collected because delivery manifests and accepted exports can outlive session history. Operations, deliveries, usage facts, session tombstones, high-water marks, export identities, and native files are not compacted. Pending Telegram state continues to use its existing typed compaction rules. Repeating confirmed GC is safe; each transaction removes no more than 500 content objects.
-
-This is deliberately not a universal retention policy. Preview may include an orphan candidate not removed in the first 500-row batch. No age threshold or filename guess authorizes deletion. A future implementation requires typed references for the remaining roots and safe dedup/high-water retention. Export retains all database/WAL sidecars present while the host is offline; do not omit WAL files from a manual backup.
-
-## Reset: marker-only roots
+## 重置空目录标记
 
 ```sh
 ./pi-acp-workbenchd storage reset --root /absolute/canonical/marker-only-data --confirm
 ```
 
-Reset refuses any contents besides `storage-format.json` and the persistent `.workbench.lock`. It removes only the format marker, **retaining the directory and stable lock inode**. Removing/replacing that inode while another process has opened it could create two independent leases; reset must never do that. A later normal host start can initialize the now marker-only root safely. A data-bearing or unversioned directory is never reset or migrated.
+仅允许目录中存在 `storage-format.json` 和锁文件，移除格式标记但保留目录和锁 inode。有数据库、历史或未知文件的目录会被拒绝；reset 不能用于清空用户数据。
 
-All tests use isolated temporary roots. Coverage includes cross-process host-compatible lock exclusion, unlocked persistent locks, byte/hash export, canonical overlap, symlink refusal, marker-only reset, corrupted Telegram state, pending callback protection, offset/restart deduplication and compaction failure preservation. This is not live-provider/Bot acceptance, full image decoding or a complete storage retention policy.
-
-The delivery topic/order index is a required Pending-only covering index. Dispatch chooses it explicitly before grouping immutable target heads, so a deep ready backlog avoids a retry-index table scan and temporary grouping; acknowledged dedup records do not contribute index work. Earlier development roots with the full internal index are rejected without rewriting the root. Preserve their binary/root together.
-
-The writer probes WAL reuse at most once per second between accepted requests. A WAL above 16 MiB is checked for logical frame volume; at that logical threshold it attempts RESTART with a 20 ms busy-wait budget, then restores the normal 5000 ms transaction timeout. Busy readers retain their snapshots and committed receipts; retry is deferred to a later probe. Actual I/O is not bounded by the busy-wait budget, and a permanently pinned external reader can still grow the WAL. Reusable physical high-water allocation is not truncated on every probe. Checkpoint outcomes/failures are logged; this is not GC or an online VACUUM.
+源码使用可先运行 `npm run build:workbenchd`，再通过 `npm run workbench:storage -- ...` 调用相同命令；`WORKBENCH_STORAGE_BINARY` 可指定其他 binary。存储事务实现见[架构说明](workbench-architecture.md)。

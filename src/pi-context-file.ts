@@ -34,19 +34,16 @@ export function updateModelContextLocked(file: string, model: string, value: num
   let config: unknown = {};
   try {
     config = before === null ? {} : JSON.parse(before);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-      throw new Error('Pi models.json 无法读取，未覆盖原文件。');
+  } catch {
+    throw new Error('Pi models.json 格式无效，未覆盖原文件。');
   }
   if (!object(config) || (config.providers !== undefined && !object(config.providers)))
     throw new Error('Pi models.json 格式无效，未覆盖原文件。');
   const providers = config.providers || {};
-  if (!object(providers)) throw new Error('Pi providers 无效。');
   const p = providers[provider] || {};
   if (!object(p) || (p.modelOverrides !== undefined && !object(p.modelOverrides)))
     throw new Error('Pi 模型配置无效。');
   const overrides = p.modelOverrides || {};
-  if (!object(overrides)) throw new Error('Pi 模型覆盖配置无效。');
   const previous = overrides[id] || {};
   if (!object(previous)) throw new Error('Pi 模型覆盖配置无效。');
   const next = { ...previous };

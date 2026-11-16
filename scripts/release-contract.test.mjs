@@ -6,16 +6,19 @@ import {
   releaseDocuments,
 } from './lib/release-contract.mjs';
 import { extensionHostBlocker, extensionHostConfig } from './workbench-extension-host.mjs';
-test('Rust/TS/build contract is one current cutover and packaged documents have no dangling local links', async () => {
+test('Rust/TS/build contract matches current sources and packaged documents have no dangling local links', async () => {
   await verifyReleaseSources();
   await verifyReleaseDocuments();
-  assert(releaseDocuments.includes('workbench-cutover.md'));
+  assert(releaseDocuments.includes('workbench-architecture.md'));
+  assert(releaseDocuments.includes('workbench-release.md'));
   assert(releaseDocuments.includes('turn-diff.md'));
   assert(releaseDocuments.includes('workbench-management.md'));
-  assert(releaseDocuments.includes('workbench-next-rewrite-plan.md'));
-  assert(releaseDocuments.includes('persistence-recovery.md'));
   assert(
-    !releaseDocuments.some((file) => /checkpoint|execution|verification|follow-up/.test(file)),
+    !releaseDocuments.some((file) =>
+      /checkpoint|execution|verification|follow-up|rewrite-plan|p6-validation|classic-ui|cutover|data-migration/.test(
+        file,
+      ),
+    ),
   );
 });
 test('packaging refuses an operator path or missing documentation rather than copying arbitrary files', async () => {

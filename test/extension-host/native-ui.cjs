@@ -116,6 +116,32 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
         },
       };
     }
+    // Alt can be pressed outside the webview and released after returning to it.
+    // Exercise the real workbench key forwarding, without locator.type refocusing
+    // the input between characters and hiding a menu-bar focus transfer.
+    await frame.evaluate(() => {
+      window.__forwardedAltReleases = 0;
+      window.__watchAltRelease = (event) => {
+        if (event.key === 'Alt') window.__forwardedAltReleases++;
+      };
+      window.addEventListener('keyup', window.__watchAltRelease);
+    });
+    await vscode.window.showTextDocument(vscode.Uri.file(join(root, 'review.txt')));
+    await page.keyboard.down('Alt');
+    await vscode.commands.executeCommand('piAcp.open');
+    await frame.locator('#prompt').fill('');
+    await page.keyboard.up('Alt');
+    await page.keyboard.type('fileedit', { delay: 100 });
+    assert.equal(await frame.locator('#prompt').inputValue(), 'fileedit');
+    assert(await frame.locator('#prompt').evaluate((input) => document.activeElement === input));
+    assert.equal(await frame.evaluate(() => window.__forwardedAltReleases), 0);
+    await frame.evaluate(() => {
+      window.removeEventListener('keyup', window.__watchAltRelease);
+      delete window.__watchAltRelease;
+      delete window.__forwardedAltReleases;
+    });
+    checks.push('orphan Alt release after returning to webview does not activate menu bar');
+
     await frame.locator('#prompt').fill('IME enter');
     await frame.locator('#prompt').evaluate((input) => {
       input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));

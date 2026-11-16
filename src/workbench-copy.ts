@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { readContent } from './workbench-content';
 import type { WorkbenchClient } from './workbench-client';
 import type { EntryHeader, EntryId, HistoryCursor, SessionId } from './workbench-protocol';
 import { continuesMessage } from './workbench-messages';
@@ -63,32 +63,9 @@ export async function copyLogicalMessage(
   for (const entry of group.reverse()) {
     guard();
     if ('Inline' in entry.text) text += entry.text.Inline.text;
-    else {
-      const ref = entry.text.Archived.content,
-        hash = createHash('sha256');
-      let offset = 0;
-      for (;;) {
-        const slice = await client.call({ method: 'content', ref, offset });
-        guard();
-        const end = offset + Buffer.byteLength(slice.text);
-        if (
-          slice.sha256 !== ref.sha256 ||
-          slice.total_bytes !== ref.bytes ||
-          end > ref.bytes ||
-          (slice.next_offset !== null && slice.next_offset !== end)
-        )
-          throw new Error('Message identity or content cursor changed');
-        hash.update(slice.text);
-        text += slice.text;
-        if (slice.next_offset === null) {
-          if (end !== ref.bytes || hash.digest('hex') !== ref.sha256)
-            throw new Error('Message checksum mismatch');
-          break;
-        }
-        if (slice.next_offset <= offset) throw new Error('Message cursor made no progress');
-        offset = slice.next_offset;
-      }
-    }
+    else
+      for await (const part of readContent(client, entry.text.Archived.content, guard))
+        text += part;
     if (entry.image)
       text += `${text ? '\n\n' : ''}[Archived image: ${entry.image.id}; ${entry.image.mime}; ${entry.image.bytes} bytes; ${entry.image.sha256}]`;
   }

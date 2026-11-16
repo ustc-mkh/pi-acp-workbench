@@ -22,7 +22,7 @@ import {
 declare const idBrand: unique symbol;
 type Id<K extends string> = string & { readonly [idBrand]: K };
 const byteLength = (s: string) => new TextEncoder().encode(s).length;
-const id = <K extends string>(kind: K, opaque = false) =>
+const id = <K extends string>(_kind: K, opaque = false) =>
   schema((value): Id<K> => {
     const s = string.parse(value);
     if (
@@ -147,7 +147,7 @@ export const imageRef = object({
   sha256: digest,
 });
 export type ImageRef = Infer<typeof imageRef>;
-const imageAsset = object({
+export const imageAsset = object({
   format_version: literal(1),
   image: imageRef,
   data: checked(string, (s) => s.length <= Math.ceil(MAX_IMAGE_BYTES / 3) * 4),

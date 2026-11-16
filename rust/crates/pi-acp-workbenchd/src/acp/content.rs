@@ -1,3 +1,4 @@
+//! Raw JSON boundary: External content conversion.
 //! Opaque content is retained only at the ACP boundary, never in domain state.
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

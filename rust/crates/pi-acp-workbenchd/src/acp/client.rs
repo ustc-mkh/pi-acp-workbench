@@ -1,3 +1,4 @@
+//! Raw JSON boundary: Provider RPC and extension payload conversion.
 //! Typed request API. JSON conversion is confined to this ACP boundary.
 use super::*;
 use crate::{domain::error::DomainError, worker::WorkerHandle};

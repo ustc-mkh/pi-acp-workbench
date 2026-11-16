@@ -1,3 +1,4 @@
+//! Raw JSON boundary: ACP opaque payload conversion.
 //! Typed ACP boundary and provider-to-domain conversion.
 pub mod adapter;
 pub mod client;

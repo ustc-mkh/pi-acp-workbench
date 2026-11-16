@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.18 — 2026-11-16
+
+- 拦截 Alt+Tab 返回聊天页面后的孤立 Alt 松键事件，避免转发到 VS Code 菜单栏抢走输入焦点；保留正常 Alt 操作和快捷键。
+
+- 文档聚焦当前功能与实现：README 改为功能入口，合并部署/升级及架构/恢复说明，移除历史重构、验收和界面对照文档。
+
+- 统一归档文本的增量校验与读取、Diff 归档查询，模型默认值按名称分组计算，拆分控制器查询及界面 Diff/计划渲染职责。
+- 清理无用声明和重复校验，开启 TypeScript 未使用声明检查。
+- 精简开发约定和历史阶段说明；动态 JSON 边界随 ACP 转换文件显式标注。
+- 完整回归统一准备构建并执行共享用例，发布门禁只补充额外检查，避免重复运行同一测试。
+
+- 宿主到 Webview 的消息统一运行时校验并推导类型；分离草稿提交确认、图片资源、Diff 展示、操作回执和 Diff 读取，保留授权、异步回执和原生会话语义。
+- Rust 拆分 prompt 预处理与 worker 生命周期，统一强类型数据库请求封装。
+- Diff 读取增加有界解码缓存，分页只复制当前页元数据；命中时检查归档是否已删除，避免删除后的历史重新出现。首次或缓存淘汰后仍需完整解码，不改变现有存储格式。
+- 配套更新 VSIX、宿主和 Pi adapter；升级前停止服务并备份数据目录与关联 Pi profile。真实 provider、Telegram 群组与安装后 Extension Host 不由模拟回归替代。
+
 ## 2.0.17 — 2026-11-16
 
 - “加载更早消息”按完整回合分批显示，每次最多补充 20 轮，保留滚动位置并继续接收实时输出。界面显示加载进度和失败原因，查询繁忙时短暂重试。
@@ -109,10 +125,10 @@
 - 修复发布审计发现的依赖漏洞：DOMPurify 3.4.17、markdown-it 15.0.3、Zod 4.6.7、rustls-webpki 0.103.16 和 webpki-roots 1.0.10；ACP SDK 保持原版本，实际使用的 Zod v4 路径统一到补丁版并执行回归。
 - v2.0.0 标签的首轮安全审计失败、未产生公开 release；保留该失败记录，本次以新补丁标签发布，不移动历史标签。
 
-- **不兼容升级**：重写为唯一 `pi-acp-workbenchd` 单宿主，统一 SQLite 持久化、IPC v3、会话/worker 生命周期和 Telegram 调度。旧 binary、VSIX、配置与 root 必须成组保留；没有自动旧格式导入器，新版使用独立空 root。升级前阅读 `docs/workbench-data-migration.md` 和切换/回退清单，不直接打开或清空旧业务数据。
+- **不兼容升级**：重写为唯一 `pi-acp-workbenchd` 单宿主，统一 SQLite 持久化、IPC v3、会话/worker 生命周期和 Telegram 调度。旧 binary、VSIX、配置与 root 必须成组保留；没有自动旧格式导入器，新版使用独立空 root。升级前阅读 `docs/workbench-release.md` 的升级与回退说明，不直接打开或清空旧业务数据。
 - 完成 typed 文本/上下文/图片输入、provider 设置与恢复、Pi 自主轮次及标准 Form 交互、Plan 投影、安全 native fork、usage/标题、全历史管理、Diff 与显式撤回、Telegram 独立手机流程。
 - 修复 IPC 半帧取消、provider fork 源 worker 保护、空闲 owner 有界回收、旧 epoch 事件隔离、deferred topic 公平调度、大 outbox 读取及长驻 WAL 复用等问题，保留 receipt 防重与未知外部效果不重放语义。
-- P6 原计划 23 项有限验收完成：两平台生产矩阵、真实 Pi/Codex/Bot、原生 VSIX/Trust、故障切点、同机普通读取 P0 对照、五轮 mixed/600 秒 soak 和 GNU 同宿主两小时；范围和历史负例见 `docs/workbench-p6-validation.md`。本 release 标签的制品另由 CI 干净构建并验证，不将本地候选散列冒充发布散列。
+- P6 原计划 23 项有限验收完成：两平台生产矩阵、真实 Pi/Codex/Bot、原生 VSIX/Trust、故障切点、同机普通读取 P0 对照、五轮 mixed/600 秒 soak 和 GNU 同宿主两小时；范围和历史负例见 该版本 Git 历史中的验收记录。本 release 标签的制品另由 CI 干净构建并验证，不将本地候选散列冒充发布散列。
 - 明确能力边界：Claude 本次真实在线验收由用户排除；Telegram 入站照片尚未实现，terminal:false 不提供终端正文，Pi stable profile 不提供 Fast。不会将这些能力标为成功通过，也不自动部署或迁移数据。
 
 ## 2.0.2 — 2026-10-24（未发布）
@@ -432,7 +448,7 @@
 
 ## 0.8.0 — 2026-10-04
 
-**升级注意：** Pi 现在需要独立的 `pi-sessions.service`。请按 [会话服务部署说明](docs/session-service.md) 将原 Telegram 配置的启动命令、环境变量和并发设置迁移到 `sessions.json`，再更新 Telegram 服务和 VS Code 插件。已有历史与话题绑定保留；旧版待重建上下文记录不再自动转换。
+**升级注意：** Pi 现在需要独立的 `pi-sessions.service`。请按 该版本的会话服务部署说明（见 Git 历史） 将原 Telegram 配置的启动命令、环境变量和并发设置迁移到 `sessions.json`，再更新 Telegram 服务和 VS Code 插件。已有历史与话题绑定保留；旧版待重建上下文记录不再自动转换。
 
 - 修复常驻服务内存累积：任务收据改为磁盘按需读取，释放会话版本/取消缓存，解除原生历史回放闭包和已完成事务对大对象的引用。
 - 慢磁盘保存合并为最新状态；通知积压逐文件读取，预览、授权票据、IPC 与 Telegram 请求队列增加总量和过期限制。

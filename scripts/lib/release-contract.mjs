@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-// One development cutover, not an old-format reader or a migration registry.
+// Current runtime and artifact compatibility contract.
 export const releaseContract = Object.freeze({
   ipc: 3,
   storage: 3,
@@ -9,18 +9,13 @@ export const releaseContract = Object.freeze({
 });
 export const releaseDocuments = Object.freeze([
   'workbench-release.md',
-  'workbench-cutover.md',
-  'workbench-data-migration.md',
+  'workbench-architecture.md',
   'workbench-vscode.md',
-  'workbench-classic-ui.md',
   'workbench-ipc.md',
   'workbench-telegram.md',
   'workbench-storage.md',
   'turn-diff.md',
   'workbench-management.md',
-  'persistence-recovery.md',
-  'workbench-next-rewrite-plan.md',
-  'workbench-p6-validation.md',
 ]);
 export async function verifyReleaseSources() {
   const root = 'rust/crates/pi-acp-workbenchd/src/';

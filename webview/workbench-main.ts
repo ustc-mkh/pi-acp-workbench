@@ -1,6 +1,9 @@
+import { Submissions } from './workbench-submissions';
+import { ImageView } from './workbench-image-view';
+import { DiffView } from './workbench-diff-view';
 import { ModelControls } from './workbench-model-controls';
 import { installTooltips } from './tooltips';
-import { uiLabel } from './workbench-labels';
+import { installAltReleaseGuard } from './workbench-keyboard';
 import { element, button } from './workbench-elements';
 import { renderInteractions } from './workbench-interactions';
 import { renderSettings } from './workbench-settings';
@@ -17,17 +20,16 @@ import { composePrompt } from '../src/workbench-input';
 import { createRenderer } from './markdown';
 import { renderDiagrams } from './diagrams';
 import {
-  ipcMessage,
   type ClientCommand,
   type ImageAsset,
   type ImageRef,
   type SessionView,
   type ContentRef,
   contentId,
-  contentRef,
-  contentSlice,
 } from '../src/workbench-protocol';
-import { uiStateMessage, type UiCommand, type WorkbenchUiState } from '../src/workbench-ui';
+import { uiMessage, type UiCommand, type WorkbenchUiState } from '../src/workbench-ui';
+
+installAltReleaseGuard();
 
 declare function acquireVsCodeApi(): {
   postMessage(message: UiCommand): void;
@@ -59,16 +61,7 @@ document.addEventListener('keydown', (event) => {
 let state: WorkbenchUiState | undefined,
   sequence = 0,
   selected: string | undefined;
-const images = new Map<string, { asset: ImageAsset; url: string }>();
-const imageErrors = new Map<string, string>(),
-  pendingImages = new Map<number, { image: string; session: string }>();
-const diffContents = new Map<string, { text: string; nextOffset?: number | null }>();
-const diffReads = new Set<string>();
-const attemptedDiffs = new Set<string>();
-const turnDiffs = new Map<string, import('../src/workbench-protocol').TurnDiff>();
-let nextUiRequest = 0;
 let titleRefreshTimer: number | undefined;
-let imageBytes = 0;
 const saved = vscode.getState?.();
 const drafts = new Drafts(saved);
 const preferences = new Preferences(saved);
@@ -91,20 +84,7 @@ function disclosure(key: string, fallback = false) {
   });
   return details;
 }
-const pendingPrompts = new Map<string, Set<string>>();
-const draftGenerations = new Map<string, number>();
-const promptOperations = new Map<string, { generation: number; operation: string }>();
-const pendingPiDrafts = new Map<
-  string,
-  {
-    generation: number;
-    after: number;
-    text: string;
-    attachments: ReturnType<AttachmentDrafts['get']>;
-    image?: ImageAsset;
-  }
->();
-let nextDraftGeneration = 0;
+const submissions = new Submissions();
 function clearAcceptedDraft(session: string) {
   inputImages.delete(session);
   attachmentDrafts.set(session, []);
@@ -117,20 +97,9 @@ function clearAcceptedDraft(session: string) {
 }
 function settlePiDraft() {
   if (!selected) return;
-  const pending = pendingPiDrafts.get(selected);
-  if (!pending || !state?.view?.view) return;
-  const turn = state.view.entries.find(
-    (entry) => entry.seq > pending.after && entry.role === 'User',
-  )?.turn;
-  if (!turn) return; // Do not guess across a missing history page.
-  const rows = state.view.entries.filter((entry) => entry.turn === turn);
-  const rejected = rows.some((entry) => entry.message === 'pi-workbench-input-rejected');
-  const observed = rows.some((entry) => entry.role !== 'User');
-  if (!rejected && !observed && state.view.view.active_turn) return;
-  pendingPiDrafts.delete(selected);
-  if (rejected) {
-    const unchanged =
-      pending.generation === (draftGenerations.get(selected) || 0) && !hasDraftContent();
+  const result = submissions.settle(selected, state, hasDraftContent());
+  if (result) {
+    const { draft: pending, restore: unchanged } = result;
     if (unchanged) {
       drafts.set(selected, pending.text);
       prompt.value = pending.text;
@@ -145,9 +114,7 @@ function settlePiDraft() {
   }
 }
 function touchDraft(session = selected || '') {
-  if (!draftGenerations.has(session) && draftGenerations.size >= 64)
-    draftGenerations.delete(draftGenerations.keys().next().value!);
-  draftGenerations.set(session, ++nextDraftGeneration);
+  submissions.touch(session);
 }
 function saveDraft() {
   drafts.set(selected || '', prompt.value);
@@ -249,7 +216,6 @@ historySearch.addEventListener('keydown', (event) => {
     send({ type: 'refresh', filter: historyFilter() });
 });
 const clearProgress = element('section');
-const undoSelections = new Map<string, Set<string>>();
 let historyReleaseConfirm: string | undefined;
 const sessions = element('div');
 sessions.id = 'history-items';
@@ -289,26 +255,6 @@ workingIcon.className = 'session-indicator running';
 const workingLabel = element('span');
 working.append(workingIcon, workingLabel);
 transcript.append(messages, working);
-function requestAutomaticDiff(session: string, turn: string) {
-  const snapshot = state?.view?.view;
-  const entry = state?.view?.entries.find((row) => row.turn === turn);
-  const key = `${session}:${turn}`;
-  if (
-    !snapshot ||
-    session !== state?.selected ||
-    session !== snapshot.id ||
-    !entry ||
-    turn === snapshot.active_turn ||
-    turnDiffs.has(key) ||
-    attemptedDiffs.has(key) ||
-    diffReads.size >= 2
-  )
-    return;
-  attemptedDiffs.add(key);
-  diffReads.add(key);
-  while (attemptedDiffs.size > 64) attemptedDiffs.delete(attemptedDiffs.keys().next().value!);
-  send({ type: 'read_turn_diff', session: snapshot.id, turn: entry.turn, automatic: true });
-}
 const diffObserver =
   typeof window.IntersectionObserver === 'function'
     ? new window.IntersectionObserver(
@@ -321,7 +267,7 @@ const diffObserver =
               node.dataset.sessionId &&
               node.dataset.turn
             )
-              requestAutomaticDiff(node.dataset.sessionId, node.dataset.turn);
+              diffView.requestAutomaticDiff(node.dataset.sessionId, node.dataset.turn);
           }
         },
         { root: transcript, rootMargin: '200px' },
@@ -521,7 +467,7 @@ function updateSend() {
     !!snapshot.active_turn ||
     state?.preparing === snapshot.id ||
     modelControls.busy ||
-    pendingPrompts.has(snapshot.id) ||
+    submissions.has(snapshot.id) ||
     !hasDraftContent();
 }
 function composeDraft(session: string, text: string) {
@@ -713,7 +659,7 @@ prompt.addEventListener('keydown', (event) => {
 composer.addEventListener('submit', (event) => {
   event.preventDefault();
   const snapshot = current();
-  if (!snapshot || submit.disabled || modelControls.busy || pendingPrompts.has(snapshot.id)) return;
+  if (!snapshot || submit.disabled || modelControls.busy || submissions.has(snapshot.id)) return;
   let text: ReturnType<typeof composePrompt>;
   try {
     text = composeDraft(snapshot.id, prompt.value);
@@ -721,31 +667,21 @@ composer.addEventListener('submit', (event) => {
     error.textContent = failure instanceof Error ? failure.message : 'Invalid prompt';
     return;
   }
-  if (
-    snapshot.harness === 'Pi' &&
-    !pendingPiDrafts.has(snapshot.id) &&
-    pendingPiDrafts.size >= 16
-  ) {
-    error.textContent = '仍有输入等待 Agent 确认，请先查看这些会话的状态。';
-    return;
-  }
-  if (pendingPrompts.size >= 16) {
-    error.textContent = 'Too many pending input receipts; check operations before sending.';
+  let generation: number;
+  try {
+    generation = submissions.begin(snapshot.id, snapshot.harness, state?.operations ?? []);
+  } catch (failure) {
+    error.textContent = failure instanceof Error ? failure.message : 'Cannot submit draft';
     return;
   }
   saveDraft();
-  touchDraft(snapshot.id);
-  pendingPrompts.set(
-    snapshot.id,
-    new Set(state?.operations.map((operation) => operation.operation)),
-  );
   submit.disabled = true;
   classic.scrollToBottom();
   send({
     type: 'execute',
     session: snapshot.id,
     command: { method: 'prompt', session: snapshot.id, prompt: text },
-    generation: draftGenerations.get(snapshot.id) || 0,
+    generation,
   });
 });
 const activity = button('展开执行过程', () => {
@@ -823,6 +759,8 @@ const classic = buildClassicShell({
   },
 });
 installTooltips();
+const imageView = new ImageView(() => state, send, schedule);
+const diffView = new DiffView(() => state, send, disclosure, error, schedule);
 function current() {
   return state?.view?.view;
 }
@@ -856,40 +794,6 @@ function renderContextUsage(snapshot?: SessionView) {
   contextUsage.querySelector('#usage-fill')?.setAttribute('stroke-dasharray', `${percent} 100`);
 }
 
-function imageNode(ref: ImageRef, session: SessionView['id']) {
-  const box = element('figure'),
-    cached = images.get(ref.id);
-  if (cached) {
-    images.delete(ref.id);
-    images.set(ref.id, cached);
-    const img = element('img');
-    img.alt = 'Archived agent image';
-    img.src = cached.url;
-    box.append(img);
-  } else {
-    const load = button(
-      [...pendingImages.values()].some((item) => item.image === ref.id)
-        ? 'Loading image…'
-        : 'Load archived image',
-      () => {
-        if (pendingImages.size >= 4) return;
-        const request_id = ++nextUiRequest;
-        pendingImages.set(request_id, { image: ref.id, session });
-        send({ type: 'read_image', session, image: ref, request_id });
-        schedule();
-      },
-      [...pendingImages.values()].some((item) => item.image === ref.id) || pendingImages.size >= 4,
-    );
-    box.append(load);
-  }
-  box.append(
-    element(
-      'figcaption',
-      `${ref.mime} · ${ref.bytes} bytes${imageErrors.has(ref.id) ? ' · ' + imageErrors.get(ref.id) : ''}`,
-    ),
-  );
-  return box;
-}
 const contentPages = new Map<
   string,
   { ref: ContentRef; offset: number; text: string; next: number | null }
@@ -945,6 +849,50 @@ function hasIntermediateAnswers(
       if (ids.size > 1) return true;
     }
   return false;
+}
+function renderPlan(snapshot: SessionView) {
+  const signature = JSON.stringify([snapshot.id, snapshot.plan]);
+  if (planPanel.dataset.definition !== signature) {
+    planPanel.dataset.definition = signature;
+    planPanel.replaceChildren();
+    if (snapshot.plan.items.length) {
+      const plan = disclosure(`${snapshot.id}:plan`, true);
+      planPanel.classList.add('todo-panel');
+      plan.append(
+        element(
+          'summary',
+          `待办清单 · ${snapshot.plan.items.filter((item) => item.status === 'Completed').length}/${snapshot.plan.items.length}`,
+        ),
+      );
+      const list = element('ul');
+      list.className = 'todo-list';
+      list.setAttribute('aria-label', '待办事项');
+      list.tabIndex = 0;
+      for (const item of snapshot.plan.items) {
+        const line = element('li');
+        const status =
+          item.status === 'Completed'
+            ? 'completed'
+            : item.status === 'InProgress'
+              ? 'in_progress'
+              : 'pending';
+        line.className = `todo-item ${status}`;
+        const circle = element('span', status === 'completed' ? '✓' : '');
+        circle.className = 'todo-circle';
+        circle.setAttribute('role', 'img');
+        circle.setAttribute(
+          'aria-label',
+          status === 'completed' ? '已完成' : status === 'in_progress' ? '进行中' : '待处理',
+        );
+        const label = element('span', item.description);
+        label.className = 'todo-label';
+        line.append(circle, label);
+        list.append(line);
+      }
+      plan.append(list);
+      planPanel.append(plan);
+    }
+  }
 }
 function renderTranscript(snapshot: SessionView, busy: boolean) {
   const rows = state?.view?.entries || [];
@@ -1036,269 +984,8 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
           send({ type: 'read_tools', session: snapshot.id, turn: row.turn });
       });
       box.append(process);
-      const savedDiff = turnDiffs.get(`${snapshot.id}:${row.turn}`);
-      if (savedDiff && snapshot.active_turn !== row.turn) {
-        const diffBox = element('article');
-        diffBox.className = 'message turn-diff';
-        diffBox.dataset.turnReview = 'true';
-        const diffHeading = element('div');
-        diffHeading.className = 'turn-diff-header';
-        diffHeading.append(
-          element(
-            'strong',
-            savedDiff.status === 'unavailable'
-              ? '本轮修改 · 未能采集'
-              : `本轮修改 · ${savedDiff.files.length} 个文件 · +${savedDiff.added} −${savedDiff.removed}${savedDiff.status === 'partial' ? '（部分结果）' : ''}`,
-          ),
-        );
-        const diffActions = element('div');
-        diffActions.className = 'turn-diff-actions';
-        if (savedDiff.files.length) {
-          const total = button('查看总 Diff', () =>
-            send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn }),
-          );
-          total.className = 'diff-link';
-          const undo = button(
-            '撤回本轮修改',
-            () =>
-              send({
-                type: 'execute',
-                session: snapshot.id,
-                command: { method: 'undo_turn', session: snapshot.id, turn: row.turn },
-              }),
-            busy ||
-              snapshot.status !== 'Idle' ||
-              savedDiff.status !== 'complete' ||
-              savedDiff.next_offset !== null ||
-              savedDiff.files.length > 256 ||
-              savedDiff.files.reduce((n, f) => n + new TextEncoder().encode(f.path).length, 0) >
-                65536,
-          );
-          undo.className = 'diff-link undo-turn';
-          undo.addEventListener('contextmenu', (event) => {
-            event.preventDefault();
-            const batch = (event.currentTarget as HTMLElement)
-              .closest('[data-turn-review]')
-              ?.querySelector<HTMLDetailsElement>('.turn-diff-batch');
-            if (batch) {
-              batch.hidden = false;
-              batch.open = true;
-            }
-          });
-          undo.title =
-            savedDiff.status !== 'complete'
-              ? '本轮快照不完整，无法安全撤回。'
-              : '确认后撤回本轮修改';
-          diffActions.append(total, undo);
-        }
-        diffHeading.append(diffActions);
-        diffBox.append(diffHeading);
-        const summary = disclosure(`${snapshot.id}:diff:${row.turn}`, false);
-        summary.className = 'turn-diff-files';
-        summary.append(element('summary', `全部修改（${savedDiff.files.length} 个文件）`));
-        if (!savedDiff.files.length) summary.append(element('p', '本轮未检测到文件净变化。'));
-        const selectionKey = `${snapshot.id}:${row.turn}`;
-        const selectedPaths = undoSelections.get(selectionKey) || new Set<string>();
-        undoSelections.set(selectionKey, selectedPaths);
-        while (undoSelections.size > 16) undoSelections.delete(undoSelections.keys().next().value!);
-        const batchTools = disclosure(`${snapshot.id}:diff-batch:${row.turn}`, false);
-        batchTools.className = 'turn-diff-batch';
-        batchTools.append(element('summary', '按文件选择撤回…'));
-        batchTools.hidden = !batchTools.open;
-        if (savedDiff.status === 'complete') {
-          batchTools.append(
-            element(
-              'p',
-              '可按批选择最多 256 个文件（路径共 64 KiB），每批单独确认；冲突逐文件报告，可加载后续页继续选择。',
-            ),
-          );
-          batchTools.append(
-            button(
-              'Undo selected files…',
-              () => {
-                if (selectedPaths.size)
-                  send({
-                    type: 'execute',
-                    session: snapshot.id,
-                    command: {
-                      method: 'undo_turn',
-                      session: snapshot.id,
-                      turn: row.turn,
-                      files: [...selectedPaths],
-                    },
-                  });
-              },
-              busy || snapshot.status !== 'Idle',
-            ),
-          );
-        }
-        for (const [index, file] of savedDiff.files.entries()) {
-          const fileDetails = disclosure(
-            `${snapshot.id}:diff:${row.turn}:file:${file.path}`,
-            false,
-          );
-          fileDetails.className = 'turn-diff-file';
-          const fileHeading = element(
-            'summary',
-            `${({ added: '新增', modified: '修改', deleted: '删除' } as Record<string, string>)[file.status] || file.status} · ${file.path}  +${file.added} −${file.removed}`,
-          );
-          fileDetails.append(fileHeading);
-          const fileBody = element('div');
-          summary.append(fileDetails);
-          if (savedDiff.status === 'complete') {
-            const choice = element('input');
-            choice.type = 'checkbox';
-            choice.checked = selectedPaths.has(file.path);
-            choice.hidden = !batchTools.open;
-            batchTools.addEventListener('toggle', () => {
-              choice.hidden = !batchTools.open;
-            });
-            choice.setAttribute('aria-label', `Select for undo: ${file.path}`);
-            choice.addEventListener('change', () => {
-              if (choice.checked) {
-                const bytes = [...selectedPaths, file.path].reduce(
-                  (n, path) => n + new TextEncoder().encode(path).length,
-                  0,
-                );
-                if (selectedPaths.size >= 256 || bytes > 65536) {
-                  choice.checked = false;
-                  error.textContent =
-                    'Undo batch limit: 256 files / 64 KiB paths. Confirm this batch before selecting more.';
-                  return;
-                }
-                selectedPaths.add(file.path);
-              } else selectedPaths.delete(file.path);
-            });
-            fileHeading.append(choice);
-          }
-          if (file.old_mode !== file.new_mode)
-            fileBody.append(
-              element(
-                'p',
-                `Permissions: ${file.old_mode?.toString(8) ?? 'absent'} → ${file.new_mode?.toString(8) ?? 'absent'}`,
-              ),
-            );
-          fileBody.append(
-            button('Compare file in editor', () =>
-              send({ type: 'open_turn_diff', session: snapshot.id, turn: row.turn, file: index }),
-            ),
-          );
-          if (file.omitted) {
-            fileBody.append(
-              element(
-                'p',
-                file.omitted === 'Diff content can be loaded in bounded slices.'
-                  ? '完整内容已归档，可按需读取或在编辑器中对比。'
-                  : file.omitted,
-              ),
-            );
-            for (const after of [false, true])
-              if ((after ? file.after : file.before) === null)
-                fileBody.append(
-                  button(after ? 'Load after' : 'Load before', () =>
-                    send({
-                      type: 'read_turn_diff_content',
-                      session: snapshot.id,
-                      turn: row.turn,
-                      file: index,
-                      after,
-                      offset: 0,
-                    }),
-                  ),
-                );
-          }
-          for (const after of [false, true]) {
-            const loaded = diffContents.get(`${snapshot.id}:${row.turn}:${index}:${after}`);
-            if (loaded) {
-              const pre = element('pre');
-              pre.textContent = loaded.text.slice(0, 30000).split('\n').slice(0, 400).join('\n');
-              fileBody.append(pre);
-              if (loaded.text.length > 30000 || loaded.text.split('\n').length > 400)
-                fileBody.append(element('p', '预览已截断；在编辑器中查看完整差异。'));
-              if (
-                loaded.text.length < 30000 &&
-                loaded.nextOffset !== null &&
-                loaded.nextOffset !== undefined
-              )
-                fileBody.append(
-                  button('Load next content slice', () =>
-                    send({
-                      type: 'read_turn_diff_content',
-                      session: snapshot.id,
-                      turn: row.turn,
-                      file: index,
-                      after,
-                      offset: loaded.nextOffset!,
-                    }),
-                  ),
-                );
-            }
-          }
-          if (file.patch) {
-            const patch = element('pre');
-            patch.className = 'turn-diff-patch';
-            for (const line of file.patch.slice(0, 30000).split('\n').slice(0, 400)) {
-              const span = element('span', line + '\n');
-              span.className = line.startsWith('+')
-                ? 'diff-add'
-                : line.startsWith('-')
-                  ? 'diff-remove'
-                  : line.startsWith('@@')
-                    ? 'diff-hunk'
-                    : '';
-              patch.append(span);
-            }
-            fileBody.append(patch);
-          }
-          if (!file.patch && file.before !== null) {
-            fileBody.append(element('h4', '修改前'));
-            const pre = element('pre');
-            pre.textContent = file.before ?? '';
-            fileBody.append(pre);
-          }
-          if (!file.patch && file.after !== null) {
-            fileBody.append(element('h4', '修改后'));
-            const pre = element('pre');
-            pre.textContent = file.after ?? '';
-            fileBody.append(pre);
-          }
-          // Native details hides its body while collapsed. Keep the bounded
-          // body reconciled so a lazy content response updates the live node,
-          // rather than an old toggle listener reattaching an obsolete body.
-          fileDetails.append(fileBody);
-        }
-        if (savedDiff.next_offset !== null)
-          summary.append(
-            button('Next diff page', () =>
-              send({
-                type: 'read_turn_diff',
-                session: snapshot.id,
-                turn: row.turn,
-                offset: savedDiff.next_offset!,
-              }),
-            ),
-          );
-        diffBox.append(summary);
-        if (savedDiff.status === 'complete') diffBox.append(batchTools);
-        const notes = element('div');
-        notes.className = 'turn-diff-notes';
-        const omitted = savedDiff.files.filter(
-          (f) => f.omitted && f.omitted !== 'Diff content can be loaded in bounded slices.',
-        ).length;
-        if (omitted)
-          notes.append(
-            element('p', `${omitted} 个文件未采集文本内容（大小限制、二进制、子模块或读取失败）。`),
-          );
-        for (const warning of savedDiff.warnings) notes.append(element('p', warning));
-        notes.append(
-          element(
-            'p',
-            '工作区本轮开始到结束的净变化；不含 Git 忽略文件。并发的手工或其他会话修改也可能计入；不是文件回滚点。',
-          ),
-        );
-        summary.append(notes);
-        box.append(diffBox);
-      }
+      const diff = diffView.render(snapshot, row.turn, busy);
+      if (diff) box.append(diff);
       turn = { box, process, body: activityBody };
       turns.set(row.turn, turn);
       output.append(box);
@@ -1318,14 +1005,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
             ]
           : [],
       ),
-      row.image
-        ? [
-            images.get(row.image.id)?.url,
-            imageErrors.get(row.image.id),
-            [...pendingImages.values()].some((pending) => pending.image === row.image?.id),
-            pendingImages.size >= 4,
-          ]
-        : null,
+      row.image ? [...imageView.status(row.image.id)] : null,
     ]);
     const previous = previousArticles.get(message.key);
     if (previous?.dataset.definition === definition) {
@@ -1434,7 +1114,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
       details.append(element('summary', '思考过程'), content);
       article.append(details);
     } else article.append(content);
-    if (row.image) article.append(imageNode(row.image, snapshot.id));
+    if (row.image) article.append(imageView.node(row.image, snapshot.id));
     if (['Agent', 'User'].includes(row.role) && !row.image) {
       const fork = button('Fork here', () =>
         mutate({
@@ -1460,9 +1140,10 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
   // or before IntersectionObserver reports the new layout. Older turns remain
   // viewport-lazy (a recent window in non-layout renderers).
   const latestFinished = [...rows].reverse().find((row) => row.turn !== snapshot.active_turn);
-  if (latestFinished) requestAutomaticDiff(snapshot.id, latestFinished.turn);
+  if (latestFinished) diffView.requestAutomaticDiff(snapshot.id, latestFinished.turn);
   if (!diffObserver)
-    for (const turn of [...visibleTurns].slice(-16)) requestAutomaticDiff(snapshot.id, turn);
+    for (const turn of [...visibleTurns].slice(-16))
+      diffView.requestAutomaticDiff(snapshot.id, turn);
   for (const turn of visibleTurns) {
     const process = turns.get(turn)!.process;
     process.hidden = !folded.has(turn) && !state?.view?.tools.some((tool) => tool.turn === turn);
@@ -1551,48 +1232,7 @@ function renderTranscript(snapshot: SessionView, busy: boolean) {
     turns.get(tool.turn)!.body.append(details);
   }
   renderCommands();
-  const signature = JSON.stringify([snapshot.id, snapshot.plan]);
-  if (planPanel.dataset.definition !== signature) {
-    planPanel.dataset.definition = signature;
-    planPanel.replaceChildren();
-    if (snapshot.plan.items.length) {
-      const plan = disclosure(`${snapshot.id}:plan`, true);
-      planPanel.classList.add('todo-panel');
-      plan.append(
-        element(
-          'summary',
-          `待办清单 · ${snapshot.plan.items.filter((item) => item.status === 'Completed').length}/${snapshot.plan.items.length}`,
-        ),
-      );
-      const list = element('ul');
-      list.className = 'todo-list';
-      list.setAttribute('aria-label', '待办事项');
-      list.tabIndex = 0;
-      for (const item of snapshot.plan.items) {
-        const line = element('li');
-        const status =
-          item.status === 'Completed'
-            ? 'completed'
-            : item.status === 'InProgress'
-              ? 'in_progress'
-              : 'pending';
-        line.className = `todo-item ${status}`;
-        const circle = element('span', status === 'completed' ? '✓' : '');
-        circle.className = 'todo-circle';
-        circle.setAttribute('role', 'img');
-        circle.setAttribute(
-          'aria-label',
-          status === 'completed' ? '已完成' : status === 'in_progress' ? '进行中' : '待处理',
-        );
-        const label = element('span', item.description);
-        label.className = 'todo-label';
-        line.append(circle, label);
-        list.append(line);
-      }
-      plan.append(list);
-      planPanel.append(plan);
-    }
-  }
+  renderPlan(snapshot);
   reconcile(messages, output);
   observeHistoryText();
   diffObserver?.disconnect();
@@ -1633,21 +1273,15 @@ function render() {
     selected = state.selected;
     prompt.value = drafts.get(selected || '');
     renderAttachments();
-    for (const image of images.values()) URL.revokeObjectURL(image.url);
-    images.clear();
+    imageView.clear();
     contentPages.clear();
     lastHistoryTextRequest = '';
     historyTextObserver?.disconnect();
     observedHistoryText.clear();
     visibleHistoryText.clear();
     delete messages.dataset.oldestSeq;
-    turnDiffs.clear();
-    diffReads.clear();
-    attemptedDiffs.clear();
-    diffContents.clear();
-    imageBytes = 0;
-    imageErrors.clear();
-    pendingImages.clear();
+    diffView.clear();
+
     interactions.replaceChildren();
     planPanel.replaceChildren();
     delete planPanel.dataset.definition;
@@ -1794,10 +1428,7 @@ function render() {
   const visibleImages = new Set<string>(
     (state.view?.entries || []).flatMap((row) => (row.image ? [row.image.id as string] : [])),
   );
-  for (const [request_id, pending] of pendingImages)
-    if (pending.session !== state.selected || !visibleImages.has(pending.image))
-      pendingImages.delete(request_id);
-  for (const id of imageErrors.keys()) if (!visibleImages.has(id)) imageErrors.delete(id);
+  imageView.retain(visibleImages);
   const snapshot = current();
   error.textContent =
     state.error ||
@@ -1864,10 +1495,10 @@ function render() {
     snapshot.active_turn !== null ||
     state.preparing === snapshot.id ||
     modelControls.busy;
-  submit.disabled = busy || pendingPrompts.has(snapshot?.id || '') || !hasDraftContent();
+  submit.disabled = busy || submissions.has(snapshot?.id || '') || !hasDraftContent();
   submit.setAttribute(
     'aria-label',
-    pendingPrompts.has(snapshot?.id || '') ? '正在确认发送…' : '发送消息',
+    submissions.has(snapshot?.id || '') ? '正在确认发送…' : '发送消息',
   );
   prompt.disabled = !snapshot;
   attach.disabled = !snapshot || !state.trusted;
@@ -1960,12 +1591,19 @@ document.querySelector('#workbench')!.addEventListener('workbench-preview', () =
   schedule();
 });
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  const raw = event.data;
-  if (!raw || typeof raw !== 'object' || !('type' in raw)) return;
   try {
+    const raw = uiMessage.parse(event.data);
     if (management.receive(raw)) return;
+    if (raw.type === 'image' || raw.type === 'image_error') {
+      imageView.receive(raw);
+      return;
+    }
+    if (['undo_result', 'turn_diff', 'turn_diff_content', 'turn_diff_error'].includes(raw.type)) {
+      diffView.receive(raw);
+      return;
+    }
     if (raw.type === 'state') {
-      const message = uiStateMessage.parse(raw);
+      const message = raw;
       if (message.sequence <= sequence) return;
       const previousTurn = state?.view?.view?.active_turn;
       const historyFeedbackChanged =
@@ -1983,92 +1621,32 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
             send({ type: 'refresh_names' });
         }, 16000);
       }
-      for (const [session, previous] of pendingPrompts)
-        if (
-          state.error ||
-          state.operations.some(
-            (row) =>
-              row.session === session &&
-              row.method === 'prompt' &&
-              !previous.has(row.operation) &&
-              row.status !== 'pending',
-          )
-        )
-          pendingPrompts.delete(session);
+      submissions.observe(state);
       schedule(
         !historyFeedbackChanged &&
           state.view?.status === 'ready' &&
           state.view.view?.status === 'Running',
       );
-    } else if (
-      raw.type === 'prompt_submitted' &&
-      'session' in raw &&
-      typeof raw.session === 'string' &&
-      'generation' in raw &&
-      typeof raw.generation === 'number' &&
-      'operation' in raw &&
-      typeof raw.operation === 'string'
-    ) {
-      if (raw.generation === draftGenerations.get(raw.session)) {
-        if (promptOperations.size >= 64)
-          promptOperations.delete(promptOperations.keys().next().value!);
-        promptOperations.set(raw.session, { generation: raw.generation, operation: raw.operation });
-      }
-    } else if (
-      raw.type === 'prompt_accepted' &&
-      'session' in raw &&
-      typeof raw.session === 'string' &&
-      'prompt' in raw
-    ) {
-      const submitted = promptOperations.get(raw.session);
-      if (
-        !submitted ||
-        !('operation' in raw) ||
-        raw.operation !== submitted.operation ||
-        !('generation' in raw) ||
-        raw.generation !== submitted.generation
-      )
-        return;
-      pendingPrompts.delete(raw.session);
-      promptOperations.delete(raw.session);
-      if (
-        raw.session === state?.selected &&
-        'revision' in raw &&
-        typeof raw.revision === 'number' &&
-        Number.isSafeInteger(raw.revision)
-      )
+    } else if (raw.type === 'prompt_submitted') {
+      submissions.submitted(raw);
+    } else if (raw.type === 'prompt_accepted') {
+      const result = submissions.accept(raw, () => {
+        const text = raw.session === selected ? prompt.value : drafts.get(raw.session);
+        return {
+          prompt: composeDraft(raw.session, text),
+          draft: {
+            text,
+            attachments: attachmentDrafts.get(raw.session),
+            image: inputImages.get(raw.session),
+          },
+        };
+      });
+      if (!result.matched) return;
+      if (raw.session === state?.selected && raw.revision !== undefined)
         scrollOnPrompt = { session: raw.session, revision: raw.revision };
-      const text = raw.session === selected ? prompt.value : drafts.get(raw.session);
-      try {
-        if (
-          'generation' in raw &&
-          raw.generation === (draftGenerations.get(raw.session) || 0) &&
-          JSON.stringify(raw.prompt) === JSON.stringify(composeDraft(raw.session, text))
-        ) {
-          if ('pi_after_seq' in raw && typeof raw.pi_after_seq === 'number') {
-            pendingPiDrafts.set(raw.session, {
-              generation: raw.generation as number,
-              after: raw.pi_after_seq,
-              text,
-              attachments: attachmentDrafts.get(raw.session),
-              image: inputImages.get(raw.session),
-            });
-            clearAcceptedDraft(raw.session);
-          } else {
-            clearAcceptedDraft(raw.session);
-          }
-        }
-      } catch {
-        /* Changed drafts are never cleared by an older acceptance. */
-      }
+      if (result.clear) clearAcceptedDraft(raw.session);
       schedule();
-    } else if (
-      raw.type === 'attachments' &&
-      'session' in raw &&
-      raw.session === selected &&
-      'files' in raw &&
-      Array.isArray(raw.files)
-    ) {
+    } else if (raw.type === 'attachments' && raw.session === selected) {
       try {
         touchDraft();
         attachmentDrafts.set(selected || '', [
@@ -2080,76 +1658,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       } catch (failure) {
         error.textContent = failure instanceof Error ? failure.message : 'Invalid attachments';
       }
-    } else if (raw.type === 'undo_result' && 'session' in raw && raw.session === state?.selected) {
-      const report = (
-        raw as unknown as {
-          report: { files: { path: string; status: string; error?: string | null }[] };
-        }
-      ).report;
-      const partial = report.files.some(
-        (f) => f.status === 'uncertain' || f.status === 'not_attempted',
-      );
-      error.textContent = partial
-        ? 'Undo partially completed; inspect each file and do not retry automatically.'
-        : `Restored ${report.files.filter((f) => f.status === 'restored').length} files.`;
-      schedule();
-    } else if (raw.type === 'turn_diff' && 'session' in raw && raw.session === state?.selected) {
-      const message = raw as unknown as {
-        session: string;
-        turn: string;
-        offset?: number;
-        diff: import('../src/workbench-protocol').TurnDiff;
-      };
-      diffReads.delete(`${message.session}:${message.turn}`);
-      attemptedDiffs.delete(`${message.session}:${message.turn}`);
-      if (
-        message.session === state?.selected &&
-        state?.view?.entries.some((row) => row.turn === message.turn)
-      ) {
-        const key = `${message.session}:${message.turn}`,
-          previous = turnDiffs.get(key);
-        if (message.offset && (!previous || previous.files.length !== message.offset)) return;
-        const files =
-          previous && message.offset
-            ? [...previous.files, ...message.diff.files]
-            : message.diff.files;
-        if (files.length > 5000) return;
-        turnDiffs.delete(key);
-        turnDiffs.set(key, { ...message.diff, files });
-        while (turnDiffs.size > 16) turnDiffs.delete(turnDiffs.keys().next().value!);
-        schedule();
-      }
-    } else if (
-      raw.type === 'turn_diff_content' &&
-      'session' in raw &&
-      raw.session === state?.selected
-    ) {
-      const m = raw as unknown as {
-        session: string;
-        turn: string;
-        file: number;
-        after: boolean;
-        offset: number;
-        bytes: string;
-        total_bytes: number;
-        next_offset?: number | null;
-      };
-      if (state?.view?.entries.some((row) => row.turn === m.turn)) {
-        const key = `${m.session}:${m.turn}:${m.file}:${m.after}`,
-          previous = diffContents.get(key);
-        if (m.offset > 0 && (!previous || previous.nextOffset !== m.offset)) return;
-        const text = m.offset && previous ? previous.text + m.bytes : m.bytes;
-        if (text.length > 128 * 1024) return;
-        diffContents.delete(key);
-        diffContents.set(key, { text, nextOffset: m.next_offset });
-        while (diffContents.size > 8) diffContents.delete(diffContents.keys().next().value!);
-        schedule();
-      }
-    } else if (raw.type === 'turn_diff_error') {
-      if ('session' in raw && 'turn' in raw) diffReads.delete(`${raw.session}:${raw.turn}`);
-      if ('error' in raw && raw.error) error.textContent = String(raw.error);
-      schedule();
-    } else if (raw.type === 'selection_context' && 'file' in raw && selected) {
+    } else if (raw.type === 'selection_context' && selected) {
       try {
         attachmentDrafts.set(selected, [...attachmentDrafts.get(selected), raw.file]);
         touchDraft();
@@ -2158,12 +1667,7 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
       } catch (failure) {
         error.textContent = failure instanceof Error ? failure.message : 'Invalid selection';
       }
-    } else if (
-      raw.type === 'draft' &&
-      'text' in raw &&
-      typeof raw.text === 'string' &&
-      raw.text.length <= 200000
-    ) {
+    } else if (raw.type === 'draft') {
       const next = prompt.value + `${prompt.value ? '\n\n' : ''}${raw.text}`;
       if (next.length <= prompt.maxLength) {
         prompt.value = next;
@@ -2171,62 +1675,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         saveDraft();
       } else error.textContent = 'Draft is too large; selection was not appended';
       prompt.focus();
-    } else if (
-      raw.type === 'image' &&
-      'session' in raw &&
-      raw.session === state?.selected &&
-      'asset' in raw
-    ) {
-      if ('request_id' in raw && typeof raw.request_id === 'number')
-        pendingImages.delete(raw.request_id);
-      const message = ipcMessage.parse({ type: 'image', id: 0, asset: raw.asset });
-      if (message.type !== 'image') return;
-      const asset = message.asset,
-        ref = (state?.view?.entries || []).find((row) => row.image?.id === asset.image.id)?.image;
-      if (
-        !ref ||
-        ref.bytes !== asset.image.bytes ||
-        ref.mime !== asset.image.mime ||
-        ref.sha256 !== asset.image.sha256
-      )
-        return;
-      const bytes = atob(asset.data);
-      if (bytes.length !== ref.bytes || btoa(bytes) !== asset.data) throw new Error();
-      if (!images.has(ref.id)) {
-        while (imageBytes + ref.bytes > 32 * 1024 * 1024 && images.size) {
-          const first = images.keys().next().value!;
-          imageBytes -= images.get(first)!.asset.image.bytes;
-          URL.revokeObjectURL(images.get(first)!.url);
-          images.delete(first);
-        }
-        images.set(ref.id, {
-          asset,
-          url: URL.createObjectURL(
-            new Blob([Uint8Array.from(bytes, (ch) => ch.charCodeAt(0))], { type: ref.mime }),
-          ),
-        });
-        imageBytes += ref.bytes;
-      }
-      if ('request_id' in raw && typeof raw.request_id === 'number')
-        pendingImages.delete(raw.request_id);
-      else
-        for (const [request_id, pending] of pendingImages)
-          if (pending.image === ref.id && pending.session === raw.session)
-            pendingImages.delete(request_id);
-      imageErrors.delete(ref.id);
-      schedule();
-    } else if (
-      raw.type === 'content' &&
-      'session' in raw &&
-      raw.session === state?.selected &&
-      'ref' in raw &&
-      'slice' in raw &&
-      'offset' in raw &&
-      Number.isSafeInteger(raw.offset) &&
-      Number(raw.offset) >= 0
-    ) {
-      const ref = contentRef.parse(raw.ref),
-        slice = contentSlice.parse(raw.slice);
+    } else if (raw.type === 'content' && raw.session === state?.selected) {
+      const ref = raw.ref,
+        slice = raw.slice;
       const known =
         state?.view?.entries.some(
           (entry) => 'Archived' in entry.text && entry.text.Archived.content.id === ref.id,
@@ -2252,29 +1703,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
         next: slice.next_offset,
       });
       schedule();
-    } else if (
-      raw.type === 'content_error' &&
-      'session' in raw &&
-      raw.session === state?.selected &&
-      'ref' in raw
-    ) {
-      const ref = contentRef.parse(raw.ref);
+    } else if (raw.type === 'content_error' && raw.session === state?.selected) {
+      const ref = raw.ref;
       contentPages.delete(ref.id);
-      schedule();
-    } else if (
-      raw.type === 'image_error' &&
-      'session' in raw &&
-      raw.session === state?.selected &&
-      'image' in raw &&
-      typeof raw.image === 'string'
-    ) {
-      if ('request_id' in raw && typeof raw.request_id === 'number')
-        pendingImages.delete(raw.request_id);
-      else
-        for (const [request_id, pending] of pendingImages)
-          if (pending.image === raw.image && pending.session === raw.session)
-            pendingImages.delete(request_id);
-      imageErrors.set(raw.image, 'Archive unavailable');
       schedule();
     }
   } catch {
@@ -2284,11 +1715,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 window.addEventListener('unload', () => {
   if (inputPreviewUrl) URL.revokeObjectURL(inputPreviewUrl);
   inputImages.clear();
-  for (const image of images.values()) URL.revokeObjectURL(image.url);
-  images.clear();
+  imageView.clear();
   contentPages.clear();
-  turnDiffs.clear();
-  diffContents.clear();
-  pendingImages.clear();
+  diffView.clear();
 });
 send({ type: 'ready' });

@@ -1,9 +1,9 @@
 import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { readContent } from './workbench-content';
 import type { WorkbenchClient } from './workbench-client';
-import type { ContentRef, EntryHeader, HistoryCursor, SessionId } from './workbench-protocol';
+import type { EntryHeader, HistoryCursor, SessionId } from './workbench-protocol';
 import { continuesMessage } from './workbench-messages';
 
 /** Reverse cold pages on disk, then stream chronological logical messages.
@@ -54,28 +54,6 @@ export async function* exportMarkdown(
       previousFirst = page.entries[0].seq;
       cursor = page.next_cursor;
     }
-    async function* content(ref: ContentRef) {
-      let offset = 0;
-      const hash = createHash('sha256');
-      for (;;) {
-        guard();
-        const slice = await client.call({ method: 'content', ref, offset });
-        guard();
-        const end = offset + Buffer.byteLength(slice.text);
-        if (slice.sha256 !== ref.sha256 || slice.total_bytes !== ref.bytes || end > ref.bytes)
-          throw new Error('Export content identity changed');
-        hash.update(slice.text);
-        yield slice.text;
-        if (slice.next_offset === null) {
-          if (end !== ref.bytes || hash.digest('hex') !== ref.sha256)
-            throw new Error('Export content checksum mismatch');
-          break;
-        }
-        if (slice.next_offset !== end || end <= offset)
-          throw new Error('Export content cursor made no progress');
-        offset = end;
-      }
-    }
     yield `# Session ${session}\n\nChronological committed transcript. Images are immutable archive descriptors, not external links.\n\n`;
     let previous: EntryHeader | undefined;
     for (let page = pages - 1; page >= 0; page--) {
@@ -98,7 +76,7 @@ export async function* exportMarkdown(
         if (!previous || !continuesMessage(previous, entry))
           yield `${previous ? '\n\n' : ''}## ${entry.seq} · ${entry.role}\n\n`;
         if ('Inline' in entry.text) yield entry.text.Inline.text;
-        else yield* content(entry.text.Archived.content);
+        else yield* readContent(client, entry.text.Archived.content, guard);
         if (entry.image)
           yield `\n\n[Archived image: ${entry.image.mime}; ${entry.image.bytes} bytes; ${entry.image.sha256}]`;
         previous = entry;

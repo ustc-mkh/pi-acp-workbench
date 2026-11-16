@@ -7,6 +7,7 @@ mod database_request;
 pub mod delivery;
 #[cfg(test)]
 mod delivery_sql_tests;
+mod diff_archive;
 mod fork;
 pub mod format;
 pub(crate) mod history_clear;

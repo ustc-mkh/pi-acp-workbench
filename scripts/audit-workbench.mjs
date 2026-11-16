@@ -117,13 +117,8 @@ for (const { command } of packageJson.contributes.commands)
   );
 
 const sourceRoot = 'rust/crates/pi-acp-workbenchd/src';
-// Raw JSON may exist only in these four ACP codec/opaque conversion boundaries.
-// Include actor/app/worker/transport files, not just the three domain directories.
-const jsonBoundaries = new Set(
-  ['acp.rs', 'acp/codec.rs', 'acp/content.rs', 'acp/client.rs'].map(
-    (path) => `${sourceRoot}/${path}`,
-  ),
-);
+// Explicitly marked ACP conversion boundaries may handle dynamic JSON.
+// Markers travel with split/renamed codecs; they never authorize business-layer JSON.
 async function business(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = `${directory}/${entry.name}`;
@@ -136,7 +131,13 @@ async function business(directory) {
         ),
         `retired file-storage/commit path in ${path}`,
       );
-      if (jsonBoundaries.has(path)) continue;
+      if (/^\/\/! Raw JSON boundary: \S.+$/m.test(source)) {
+        assert(
+          /^acp(?:\.rs$|\/)/.test(path.slice(sourceRoot.length + 1)),
+          `raw JSON boundary outside ACP layer: ${path}`,
+        );
+        continue;
+      }
       assert(
         !/\bValue\b|serde_json::(?:json!|from_value|to_value)/.test(source),
         `business raw JSON in ${path}`,
@@ -163,7 +164,7 @@ for (const [file, name] of [
 const allowed = {
   extension: /^src\/workbench-[^/]+\.ts$/,
   browser:
-    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-elements|workbench-interactions|workbench-settings|workbench-model-controls|workbench-shell|workbench-labels|tooltips|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|paint-scheduler|markdown|diagrams))\.ts$/,
+    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-submissions|workbench-image-view|workbench-diff-view|workbench-keyboard|workbench-elements|workbench-interactions|workbench-settings|workbench-model-controls|workbench-shell|workbench-labels|tooltips|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|paint-scheduler|markdown|diagrams))\.ts$/,
   // Shared pure model-name normalization has no provider, UI or I/O dependencies.
   adapter:
     /^src\/(?:pi-[^/]+|adapter-[^/]+|atomic-json|native-branch|telemetry|workbench-model-defaults)\.ts$/,
@@ -220,7 +221,6 @@ const documents = [
   'README.md',
   'CONTRIBUTING.md',
   'docs/README.md',
-  'docs/persistence-recovery.md',
   'test/fixtures/README.md',
   'test/fixtures/rewrite/README.md',
   ...(await readdir('docs'))

@@ -332,7 +332,7 @@ async fn large_diff_reader_workload_v1() {
             .or_default()
             .push(began.elapsed().as_secs_f64() * 1000.0);
         let began = Instant::now();
-        let page = crate::workspace_review::summary(Some(decoded), 16).unwrap();
+        let page = crate::workspace_review::summary(Some(&decoded), 16).unwrap();
         assert_eq!(page.files.len(), 16);
         assert_eq!(page.next_offset, Some(32));
         assert!(page
@@ -346,7 +346,7 @@ async fn large_diff_reader_workload_v1() {
     }
     drop(connection);
     // Three pages and five slices of one 320 KiB body; only a small response
-    // leaves storage, while the whole 30 MiB row is currently decoded per call.
+    // leaves storage. Each reader decodes once, then reuses its bounded archive cache.
     for mixed in [false, true] {
         let stop = Arc::new(AtomicBool::new(false));
         let reader = if mixed {
