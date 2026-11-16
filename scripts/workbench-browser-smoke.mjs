@@ -699,7 +699,14 @@ try {
     'switching restores three complete turns and archived LaTeX; earlier prepends twenty turns and the only latest control is the arrow',
   );
   const olderTurn = page.locator(`section.turn[data-turn="${workspaceReviewTurn}"]`);
-  await olderTurn.scrollIntoViewIfNeeded();
+  // The host publishes before the WebView reconciles. Resolve and scroll the
+  // live node in one browser task so a frame cannot detach the target in between.
+  await page.waitForFunction((id) => {
+    const turn = document.querySelector(`section.turn[data-turn="${CSS.escape(id)}"]`);
+    if (!turn || document.querySelectorAll('section.turn[data-turn]').length !== 23) return false;
+    turn.scrollIntoView({ block: 'center' });
+    return true;
+  }, workspaceReviewTurn);
   await olderTurn.locator('.turn-diff-header').waitFor();
   assert.equal(await olderTurn.locator('.turn-review-action').count(), 0);
   assert.deepEqual(

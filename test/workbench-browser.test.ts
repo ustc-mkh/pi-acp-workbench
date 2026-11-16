@@ -23,6 +23,7 @@ async function browser(saved?: unknown, silentIntersectionObserver = false) {
   vi.stubGlobal('window', dom.window);
   vi.stubGlobal('document', dom.window.document);
   vi.stubGlobal('requestAnimationFrame', dom.window.requestAnimationFrame.bind(dom.window));
+  vi.stubGlobal('cancelAnimationFrame', dom.window.cancelAnimationFrame.bind(dom.window));
   let persisted = saved;
   vi.stubGlobal('acquireVsCodeApi', () => ({
     postMessage: (message: UiCommand) => sent.push(message),
