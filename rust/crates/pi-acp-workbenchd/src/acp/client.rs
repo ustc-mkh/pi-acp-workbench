@@ -28,6 +28,12 @@ impl AcpClient {
         let request = JsonRpcRequest::new(id, method, params)
             .map_err(|e| DomainError::Protocol(e.to_string()))?;
         let response = self.worker.request(request).await?;
+        Self::decode_response(method, response)
+    }
+    pub(super) fn decode_response<R: DeserializeOwned>(
+        method: &str,
+        response: JsonRpcResponse,
+    ) -> Result<R, DomainError> {
         if let Some(error) = response.error {
             // Provider descriptions may contain upstream URLs/credentials. Only
             // our typed method name and remote code cross into domain/UI errors.
@@ -462,16 +468,19 @@ impl AcpClient {
         }
         Ok(())
     }
-    pub async fn prompt(
+    pub(super) async fn start_prompt(
         &self,
         session_id: NativeSessionId,
         prompt: Vec<ContentBlock>,
-    ) -> Result<PromptResponse, DomainError> {
-        self.call(
+    ) -> Result<(), DomainError> {
+        let id = RequestId::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let request = JsonRpcRequest::new(
+            id,
             "session/prompt",
             SessionPromptRequest { session_id, prompt },
         )
-        .await
+        .map_err(|e| DomainError::Protocol(e.to_string()))?;
+        self.worker.prompt(request).await
     }
     pub async fn cancel(&self, session_id: NativeSessionId) -> Result<(), DomainError> {
         let notification = JsonRpcNotification {
@@ -612,7 +621,7 @@ mod tests {
             Default::default(),
             1,
         );
-        let (tx, mut rx) = mpsc::channel(32);
+        let (tx, mut rx) = mpsc::channel(1);
         let worker = supervisor.spawn(SessionId::generate(), tx).await.unwrap();
         let client = AcpClient::new(worker);
         assert!(
@@ -628,14 +637,27 @@ mod tests {
             .await
             .unwrap()
             .session_id;
-        let result = client
-            .prompt(native.clone(), vec![ContentBlock::text("hello")])
+        client
+            .start_prompt(native.clone(), vec![ContentBlock::text("hello")])
             .await
             .unwrap();
-        assert!(matches!(result.stop_reason, StopReason::EndTurn));
+        use crate::worker::WorkerEvent;
         assert!(
-            matches!(rx.recv().await, Some(crate::worker::WorkerEvent::Update(SessionNotification { update: SessionUpdate::AgentMessage { content, .. }, .. })) if content.display_text() == Some("echo: hello"))
+            matches!(rx.recv().await, Some(WorkerEvent::Update(SessionNotification { update: SessionUpdate::AgentMessage { content, .. }, .. })) if content.display_text() == Some("echo: hello"))
         );
+        assert!(matches!(
+            rx.recv().await,
+            Some(WorkerEvent::Update(SessionNotification {
+                update: SessionUpdate::ToolCall { .. },
+                ..
+            }))
+        ));
+        let Some(WorkerEvent::PromptResponse(response)) = rx.recv().await else {
+            panic!("expected ordered prompt reply")
+        };
+        let result: PromptResponse =
+            AcpClient::decode_response("session/prompt", response).unwrap();
+        assert!(matches!(result.stop_reason, StopReason::EndTurn));
         client.cancel(native).await.unwrap();
         client.stop().await;
     }

@@ -474,7 +474,13 @@ try {
   assert.equal(await page.locator('.assistant .message-reuse').count(), 0);
   await reuse.click();
   assert.equal(await page.locator('#prompt').inputValue(), 'workspace-write');
-  await page.locator('#prompt').fill('');
+  const composerInput = page.locator('#prompt');
+  await composerInput.fill('unsent draft');
+  await composerInput.press('ArrowUp');
+  assert.equal(await composerInput.inputValue(), 'workspace-write');
+  await composerInput.press('ArrowDown');
+  assert.equal(await composerInput.inputValue(), 'unsent draft');
+  await composerInput.fill('');
   check(
     'finished-turn Diff appears without scrolling; reuse stays inside the user bubble and never on assistant replies',
   );
@@ -855,6 +861,20 @@ try {
   await page.getByRole('link', { name: 'External', exact: true }).click();
   await wait(() => externalLinks.length === 1, 'normalized explicit link request');
   assert.equal(externalLinks[0], 'https://xn--fsqu00a.xn--0zwm56d/path');
+  await page.locator('#prompt').fill('/');
+  const reviewCommand = page.getByRole('option', { name: '/review — Review' });
+  // Keyboard completion alone can succeed even when the footer clips every option.
+  assert(
+    await reviewCommand.evaluate((option) => {
+      const bounds = option.getBoundingClientRect();
+      return option.contains(
+        document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+      );
+    }),
+    'slash command must be visible above the composer and reachable by pointer',
+  );
+  await reviewCommand.click();
+  assert.equal(await page.locator('#prompt').inputValue(), '/review ');
   await page.locator('#prompt').fill('/re');
   await page.locator('#prompt').press('ArrowDown');
   await page.locator('#prompt').press('Tab');

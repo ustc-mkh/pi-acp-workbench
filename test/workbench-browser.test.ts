@@ -350,7 +350,23 @@ it('automatically reads finished-turn diff and renders the classic header withou
   const files = b.document.querySelector<HTMLDetailsElement>('.turn-diff-files')!;
   expect(files.open).toBe(false);
   expect(b.document.querySelector('.turn-diff-notes')?.closest('details')).toBe(files);
-  files.open = true;
+  // Force a host repaint in the same task, before the queued native toggle event.
+  let paint: FrameRequestCallback | undefined;
+  vi.stubGlobal('requestAnimationFrame', (fn: FrameRequestCallback) => {
+    paint = fn;
+    return 1;
+  });
+  const file = files.querySelector<HTMLDetailsElement>('.turn-diff-file')!;
+  let sequence = 1;
+  for (const open of [true, false, true]) {
+    files.open = file.open = open;
+    b.update(++sequence);
+    expect(paint).toBeDefined();
+    paint!(0);
+    paint = undefined;
+    expect(files.open).toBe(open);
+    expect(file.open).toBe(open);
+  }
   expect(files.textContent).toContain('不是文件回滚点。');
   expect(b.document.querySelector('.turn-diff-notes')?.textContent).toContain(
     '1 个文件未采集文本内容',
@@ -716,6 +732,50 @@ it('dismisses a red error across updates but shows a new operation failure', asy
   expect(b.document.querySelector('#error-message')!.textContent).toContain('provider unavailable');
 });
 
+it('recalls user inputs in order, preserves multiline editing and restores the unsent draft', async () => {
+  const b = await browser();
+  b.state.view!.entries = (['User', 'Agent', 'User'] as const).map((role, index) => ({
+    role,
+    id: entryId.parse(`entry-${index}`),
+    turn: 'history' as never,
+    seq: index + 1,
+    message: null,
+    image: null,
+    text: { Inline: { text: ['first', 'answer', 'last'][index] } },
+  }));
+  b.update();
+  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
+  await expect.poll(() => prompt.disabled).toBe(false);
+  const arrow = (key: string, options: KeyboardEventInit = {}) =>
+    prompt.dispatchEvent(
+      new dom!.window.KeyboardEvent('keydown', { key, cancelable: true, ...options }),
+    );
+  prompt.value = 'one\ntwo';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  prompt.setSelectionRange(5, 5);
+  expect(arrow('ArrowUp')).toBe(true);
+  prompt.setSelectionRange(0, 0);
+  expect(arrow('ArrowUp', { isComposing: true })).toBe(true);
+  expect(arrow('ArrowUp', { shiftKey: true })).toBe(true);
+  expect(arrow('ArrowUp')).toBe(false);
+  expect(prompt.value).toBe('last');
+  expect(arrow('ArrowUp')).toBe(false);
+  expect(prompt.value).toBe('first');
+  arrow('ArrowUp');
+  expect(prompt.value).toBe('first');
+  arrow('ArrowDown');
+  expect(prompt.value).toBe('last');
+  arrow('ArrowDown');
+  expect(prompt.value).toBe('one\ntwo');
+  expect(prompt.selectionStart).toBe(0);
+  arrow('ArrowUp');
+  prompt.value += ' edited';
+  prompt.dispatchEvent(new dom!.window.Event('input'));
+  expect(arrow('ArrowDown')).toBe(true);
+  expect(prompt.value).toBe('last edited');
+  expect(b.sent.some((message) => message.type === 'execute')).toBe(false);
+});
+
 it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepted', async () => {
   const b = await browser();
   b.update();
@@ -983,6 +1043,9 @@ it('completes only declared slash commands with keyboard/IME and restores access
   prompt.value = '/';
   prompt.dispatchEvent(new dom!.window.Event('input'));
   expect(b.document.querySelectorAll('#commands button')).toHaveLength(0);
+  expect(b.document.querySelector('#commands')?.textContent).toContain('当前 Agent 尚未提供命令');
+  prompt.dispatchEvent(new dom!.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  expect(prompt.getAttribute('aria-expanded')).toBe('false');
 });
 
 it('renders actual separate Thinking/Fast selects and preserves their DOM across unrelated deltas', async () => {

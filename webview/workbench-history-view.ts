@@ -141,6 +141,7 @@ export function createHistoryView({
     }
     return box;
   }
+  let userInputs: string[] = [];
   let messageProjection = new MessageProjection();
   const markdownCache = new Map<string, { text: string; html: string }>();
   function renderMessageMarkdown(id: string, text: string) {
@@ -197,6 +198,7 @@ export function createHistoryView({
     for (const message of projected)
       if (message.row.role === 'Agent' && !message.row.image)
         lastAnswers.set(message.row.turn, message.key);
+    userInputs = [];
     const folded = new Set<string>();
     for (const message of projected) {
       const completeText =
@@ -214,6 +216,8 @@ export function createHistoryView({
               )
               .join('')
           : undefined);
+      if (message.row.role === 'User' && !message.row.image && completeText?.trim())
+        userInputs.push(completeText);
       const row =
         completeText !== undefined
           ? { ...message.row, text: { Inline: { text: completeText } } }
@@ -551,10 +555,11 @@ export function createHistoryView({
     observedHistoryText.clear();
     visibleHistoryText.clear();
     lastHistoryTextRequest = '';
+    userInputs = [];
     messageProjection = new MessageProjection();
     markdownCache.clear();
     contentPages.clear();
     delete messages.dataset.oldestSeq;
   }
-  return { render: renderTranscript, receive, clear };
+  return { render: renderTranscript, receive, clear, userInputs: () => userInputs };
 }

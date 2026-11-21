@@ -93,6 +93,7 @@ fn request_deadline(method: &str, now: Instant) -> Option<Instant> {
 pub enum WorkerEvent {
     Request(crate::acp::interaction::InboundRequest),
     Update(SessionNotification),
+    PromptResponse(JsonRpcResponse),
     Closed(String),
 }
 enum WorkerCommand {
@@ -359,6 +360,7 @@ async fn worker_loop(
     // One staged notification propagates bounded backpressure to stdout without
     // blocking cancellation or writes that resolve an inbound request.
     let mut staged = None;
+    let mut prompt_id = None;
     let mut pending: HashMap<RequestId, PendingRequest> = HashMap::new();
     let mut exit_reason = None;
     let mut drain_deadline = Instant::now();
@@ -390,7 +392,16 @@ async fn worker_loop(
             command = commands.recv() => {
                 let Some(command) = command else { break "handle closed".into() };
                 let (message, written) = match command {
-                    WorkerCommand::Send { message, written } => (message, Some(written)),
+                    WorkerCommand::Send { message, written } => {
+                        if let JsonRpcMessage::Request(request) = &message {
+                            if prompt_id.is_some() {
+                                let _ = written.send(Err(DomainError::Busy));
+                                continue;
+                            }
+                            prompt_id = Some(request.id.clone());
+                        }
+                        (message, Some(written))
+                    }
                     WorkerCommand::Request { request, reply } => {
                         if pending.contains_key(&request.id) || pending.len() >= 64 {
                             let _ = reply.send(Err(DomainError::Backpressure));
@@ -436,7 +447,13 @@ async fn worker_loop(
                 }
                 match decoded {
                     Ok(JsonRpcMessage::Response(response)) => {
-                        if let Some(request) = pending.remove(&response.id) { let _ = request.reply.send(Ok(response)); }
+                        if prompt_id.as_ref() == Some(&response.id) {
+                            prompt_id = None;
+                            // Keep the turn boundary on the same FIFO as stdout notifications.
+                            staged = Some(WorkerEvent::PromptResponse(response));
+                        } else if let Some(request) = pending.remove(&response.id) {
+                            let _ = request.reply.send(Ok(response));
+                        }
                     }
                     Ok(JsonRpcMessage::Notification(notification)) if notification.method == "session/update" => {
                         match decode_notification(notification.params) {

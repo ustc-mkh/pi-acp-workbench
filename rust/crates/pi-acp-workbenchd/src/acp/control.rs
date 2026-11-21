@@ -156,6 +156,7 @@ pub(super) async fn pump<T>(
                         captured.live.push(WorkerEvent::Request(request));
                     }
                 }
+                Some(WorkerEvent::PromptResponse(_)) => return Err(DomainError::Protocol("unexpected prompt response".into())),
                 Some(WorkerEvent::Closed(reason)) => return Err(DomainError::Worker(reason)),
                 None => return Err(DomainError::Worker("worker event stream closed".into())),
             },

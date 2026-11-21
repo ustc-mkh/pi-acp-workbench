@@ -139,6 +139,28 @@ fn unsafe_pi_intermediate_points_may_have_empty_hash_without_hiding_safe_neighbo
             .is_err()
     );
 }
+async fn prompt_until_finished(
+    client: &AcpClient,
+    updates: &mut mpsc::Receiver<crate::worker::WorkerEvent>,
+    session: NativeSessionId,
+    text: &str,
+) {
+    use crate::worker::WorkerEvent;
+    client
+        .start_prompt(session, vec![super::ContentBlock::text(text)])
+        .await
+        .unwrap();
+    loop {
+        match updates.recv().await {
+            Some(WorkerEvent::PromptResponse(response)) => {
+                AcpClient::decode_response::<PromptResponse>("session/prompt", response).unwrap();
+                return;
+            }
+            Some(WorkerEvent::Update(_)) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+}
 #[tokio::test]
 async fn typed_native_fork_preserves_source_and_loads_independent_historical_settings_without_text_reseed(
 ) {
@@ -155,7 +177,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
         )]),
         1,
     );
-    let (tx, _updates) = mpsc::channel(32);
+    let (tx, mut updates) = mpsc::channel(32);
     let client = AcpClient::new(supervisor.spawn(SessionId::generate(), tx).await.unwrap());
     let metadata = client
         .initialize()
@@ -169,13 +191,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
         .unwrap();
     let source = created.session_id;
     let mut details = created.details;
-    client
-        .prompt(
-            source.clone(),
-            vec![super::ContentBlock::text("fork source")],
-        )
-        .await
-        .unwrap();
+    prompt_until_finished(&client, &mut updates, source.clone(), "fork source").await;
     client
         .configure(
             &source,
@@ -188,13 +204,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
         )
         .await
         .unwrap();
-    client
-        .prompt(
-            source.clone(),
-            vec![super::ContentBlock::text("after settings")],
-        )
-        .await
-        .unwrap();
+    prompt_until_finished(&client, &mut updates, source.clone(), "after settings").await;
     let before = tokio::fs::read(root.join(format!("{}.json", source.as_str())))
         .await
         .unwrap();
@@ -226,7 +236,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
         before
     );
     client.stop().await;
-    let (tx, _updates) = mpsc::channel(32);
+    let (tx, mut updates) = mpsc::channel(32);
     let branch = AcpClient::new(supervisor.spawn(SessionId::generate(), tx).await.unwrap());
     branch.initialize().await.unwrap();
     let native = NativeSessionId::try_from(forked.as_str().to_owned()).unwrap();
@@ -236,13 +246,7 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
         .unwrap();
     assert_eq!(loaded.details.select("model").unwrap().1, "default");
     assert_eq!(loaded.details.modes.unwrap().current_mode_id, "low");
-    branch
-        .prompt(
-            native,
-            vec![super::ContentBlock::text("branch continuation")],
-        )
-        .await
-        .unwrap();
+    prompt_until_finished(&branch, &mut updates, native, "branch continuation").await;
     #[derive(serde::Deserialize)]
     struct NativeState {
         entries: Vec<NativeEntry>,

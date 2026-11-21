@@ -44,6 +44,7 @@ export function buildClassicShell(options: {
   interactions: HTMLElement;
   operations: HTMLElement;
   composer: HTMLFormElement;
+  completions: HTMLElement;
   advanced: HTMLElement;
   historyOpen: boolean;
   onHistoryChange(open: boolean): void;
@@ -164,6 +165,9 @@ export function buildClassicShell(options: {
   demo.onclick = () => options.root.dispatchEvent(new window.CustomEvent('workbench-preview'));
   welcome.append(hero, heading, description, start, demo, note);
   options.transcript.prepend(welcome);
+  // Anchor suggestions above the scrollable footer so it cannot clip their hit targets.
+  const commandAnchor = el('div', 'command-anchor');
+  commandAnchor.append(options.completions);
   const footer = el('footer');
   const resizer = options.composer.querySelector('.composer-resize')!;
   resizer.id = 'composer-resizer';
@@ -183,6 +187,7 @@ export function buildClassicShell(options: {
     area,
     options.interactions,
     resizer,
+    commandAnchor,
     footer,
   );
   options.root.replaceChildren(options.header, chat, options.management);

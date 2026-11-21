@@ -244,6 +244,7 @@ async fn run_protocol(
                         } else { client.answer(&request, InteractionResponse::Cancel).await }
                     },
                     Some(WorkerEvent::Request(_)) => Err(DomainError::Protocol("request belongs to another native session".into())),
+                    Some(WorkerEvent::PromptResponse(_)) => Err(DomainError::Protocol("unexpected prompt response".into())),
                     Some(WorkerEvent::Closed(reason)) => Err(DomainError::Worker(reason)),
                     None => Err(DomainError::Worker("worker event stream closed".into())),
                 };
@@ -525,10 +526,11 @@ async fn run_protocol(
         let request = async {
             submitted.store(true, std::sync::atomic::Ordering::Release);
             client
-                .prompt(native.clone(), prompt_blocks(&text, &prompt_capabilities)?)
+                .start_prompt(native.clone(), prompt_blocks(&text, &prompt_capabilities)?)
                 .await
         };
         tokio::pin!(request);
+        let mut written = false;
         let result = loop {
             tokio::select! {
                 biased;
@@ -550,7 +552,11 @@ async fn run_protocol(
                         let result = client.cancel(native.clone()).await;
                         for interaction in interactions.values() { let _ = client.answer(interaction, InteractionResponse::Cancel).await; }
                         if submitted.load(std::sync::atomic::Ordering::Acquire) {
-                            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), &mut request).await;
+                            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                                while let Some(event) = updates.recv().await {
+                                    if matches!(event, WorkerEvent::PromptResponse(_) | WorkerEvent::Closed(_)) { break; }
+                                }
+                            }).await;
                         }
                         let _ = reply.send(result);
                         break 'adapter;
@@ -579,6 +585,7 @@ async fn run_protocol(
                             break 'adapter;
                         }
                     }
+                    Some(WorkerEvent::PromptResponse(response)) => break AcpClient::decode_response::<super::PromptResponse>("session/prompt", response),
                     Some(WorkerEvent::Closed(reason)) => {
                         let _ = context.publish(AgentEvent::Crashed { reason }).await;
                         break 'adapter;
@@ -588,7 +595,10 @@ async fn run_protocol(
                         break 'adapter;
                     }
                 },
-                result = &mut request => break result,
+                result = &mut request, if !written => match result {
+                    Ok(()) => written = true,
+                    Err(error) => break Err(error),
+                },
             }
         };
         if runs.rejected.as_ref() == Some(&turn) {
@@ -693,6 +703,9 @@ impl RunState {
                 }
                 WorkerEvent::Request(request) => {
                     client.answer(&request, InteractionResponse::Cancel).await?
+                }
+                WorkerEvent::PromptResponse(_) => {
+                    return Err(DomainError::Protocol("unexpected prompt response".into()))
                 }
                 WorkerEvent::Closed(reason) => return Err(DomainError::Worker(reason)),
             }

@@ -25,8 +25,6 @@ export function reconcile(parent: HTMLElement, desired: HTMLElement) {
             if (!next.hasAttribute(attr.name)) old.removeAttribute(attr.name);
           for (const attr of [...next.attributes])
             if (old.getAttribute(attr.name) !== attr.value) old.setAttribute(attr.name, attr.value);
-          if (old instanceof view.HTMLDetailsElement && next instanceof view.HTMLDetailsElement)
-            old.open = next.open;
           if (old instanceof view.HTMLButtonElement && next instanceof view.HTMLButtonElement)
             old.disabled = next.disabled;
         }

@@ -6,6 +6,7 @@
 
 点击活动栏 **Pi Agent** 或运行 **Pi: Open Chat**。新建会话时选择 Agent；模型和 thinking/mode 控件只展示 provider 实际提供的选项。新会话继承该 Agent 最近成功使用的模型和 thinking；已有会话保留自身设置，Fast 不作为全局默认。
 
+- 输入框中按 ↑ 取回当前会话已加载的上一条用户文本，按 ↓ 切到较新一条，到最新后再按 ↓ 恢复原草稿。多行文本在光标位于开头或末尾时切换；调出的文本可编辑，按 Enter 发送。
 - 输入区支持 provider 声明的斜杠命令，使用方向键、Tab/Enter 选择，Escape 关闭；输入法确认不会误发送。
 - **Pi: Add Selection to Chat**（`Ctrl+Alt+P`，macOS 为 `Cmd+Alt+P`）添加选区，也可选择文本文件加入上下文。
 - 图片可粘贴，或右键“上下文”按钮选择。每次输入最多一张、原始大小最多 4 MiB；未发送图片仅保存在内存，重载会丢失。输入支持静态 PNG/JPEG/WebP，由宿主解码校验并重新编码后发送。

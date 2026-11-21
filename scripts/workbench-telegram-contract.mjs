@@ -308,10 +308,26 @@ try {
   assert(thread);
   await client.call({ method: 'attach', session });
   check('one host creates forum topic and session through its shared runtime');
-  let finished = client.waitFor((batch) => turnFinished(batch, session));
+  let firstTurn;
+  let finished = client.waitFor((batch) => {
+    if (batch.session !== session) return false;
+    firstTurn ??= batch.entries.find(
+      (entry) => entry.role === 'User' && inlineText(entry) === '你好',
+    )?.turn;
+    return firstTurn && turnFinished(batch, session);
+  });
   text('你好', thread);
   await finished;
-  await until(() => sent.some((message) => message.text === 'echo: 你好'), 'Telegram agent output');
+  const frozen = deliveryEntryIds(data, `turn-${firstTurn}`).map((id) => archivedEntry(data, id));
+  assert(
+    frozen.some((entry) => entry.text === 'echo: 你好'),
+    'completion must freeze the preceding ACP reply',
+  );
+  await until(
+    () =>
+      sent.some((message) => message.message_thread_id === thread && message.text === 'echo: 你好'),
+    'Telegram agent output',
+  );
   check('Telegram prompt produces IPC events and durable Telegram output');
   const interaction = client.waitFor(
     (batch) =>

@@ -70,23 +70,35 @@ function persist() {
     ...attachmentDrafts.snapshot(),
   });
 }
+// Native details change their open attribute before the browser dispatches toggle.
+function saveDisclosures(records: MutationRecord[]) {
+  let changed = false;
+  for (const { target } of records) {
+    if (!(target instanceof window.HTMLDetailsElement) || !target.isConnected) continue;
+    const key = target.dataset.key;
+    if (key && preferences.open(key, !target.open) !== target.open) {
+      preferences.setOpen(key, target.open);
+      changed = true;
+    }
+  }
+  if (changed) persist();
+}
+const disclosureChanges = new window.MutationObserver(saveDisclosures);
+disclosureChanges.observe(document, { subtree: true, attributes: true, attributeFilter: ['open'] });
 function disclosure(key: string, fallback = false) {
   const details = element('details');
   details.dataset.key = key;
   details.open = preferences.open(key, fallback);
-  details.addEventListener('toggle', () => {
-    if (!details.isConnected || details.open === preferences.open(key, fallback)) return;
-    preferences.setOpen(key, details.open);
-    persist();
-  });
   return details;
 }
 const submissions = new Submissions();
+let inputHistory: { items: string[]; index: number; draft: string; caret: number } | undefined;
 function clearAcceptedDraft(session: string) {
   inputImages.delete(session);
   attachmentDrafts.set(session, []);
   drafts.set(session, '');
   if (session === selected) {
+    inputHistory = undefined;
     prompt.value = '';
     renderAttachments();
   }
@@ -99,6 +111,7 @@ function settlePiDraft() {
     const { draft: pending, restore: unchanged } = result;
     if (unchanged) {
       drafts.set(selected, pending.text);
+      inputHistory = undefined;
       prompt.value = pending.text;
       attachmentDrafts.set(selected, pending.attachments);
       if (pending.image) inputImages.set(selected, pending.image);
@@ -111,10 +124,11 @@ function settlePiDraft() {
   }
 }
 function touchDraft(session = selected || '') {
+  if (session === selected) inputHistory = undefined;
   submissions.touch(session);
 }
 function saveDraft() {
-  drafts.set(selected || '', prompt.value);
+  drafts.set(selected || '', inputHistory?.draft ?? prompt.value);
   persist();
 }
 const send = (message: UiCommand) => vscode.postMessage(message);
@@ -452,7 +466,7 @@ attach.oncontextmenu = (event) => {
   imagePicker.click();
 };
 attach.title = '添加当前编辑器的选区或文件；右键选择图片，也可粘贴图片';
-composerBox.append(prompt, completions, composerTools, imagePicker);
+composerBox.append(prompt, composerTools, imagePicker);
 composer.append(attachments, resize, composerBox);
 let inputPreviewUrl: string | undefined;
 function renderAttachments() {
@@ -536,7 +550,22 @@ function renderCommands() {
     option.setAttribute('aria-selected', String(index === commandIndex));
     completions.append(option);
   });
-  prompt.setAttribute('aria-expanded', String(choices.length > 0));
+  if (
+    !choices.length &&
+    current() &&
+    prompt.value === '/' &&
+    prompt.selectionStart === 1 &&
+    !composing &&
+    dismissedCommand !== '/' &&
+    !current()?.catalogue.commands.length
+  ) {
+    const empty = element('div', '当前 Agent 尚未提供命令');
+    empty.className = 'commands-empty';
+    empty.setAttribute('role', 'option');
+    empty.setAttribute('aria-disabled', 'true');
+    completions.append(empty);
+  }
+  prompt.setAttribute('aria-expanded', String(completions.childElementCount > 0));
   if (choices.length) prompt.setAttribute('aria-activedescendant', `command-${commandIndex}`);
   else prompt.removeAttribute('aria-activedescendant');
 }
@@ -558,14 +587,48 @@ prompt.addEventListener('input', () => {
   renderCommands();
   updateSend();
 });
+function recallInput(older: boolean) {
+  if (!selected || current()?.id !== selected || state?.selected !== selected) return false;
+  const caret = prompt.selectionStart;
+  if (caret !== prompt.selectionEnd) return false;
+  if (prompt.value.includes('\n') && caret !== (older ? 0 : prompt.value.length)) return false;
+  if (!inputHistory) {
+    if (!older) return false;
+    const items = historyView.userInputs().filter((text) => text.length <= prompt.maxLength);
+    if (!items.length) return false;
+    inputHistory = { items, index: items.length, draft: prompt.value, caret };
+  }
+  const history = inputHistory;
+  const index = history.index + (older ? -1 : 1);
+  if (index < 0) return true;
+  history.index = index;
+  const restoring = index === history.items.length;
+  prompt.value = restoring ? history.draft : history.items[index];
+  const nextCaret = restoring
+    ? history.caret
+    : older && prompt.value.includes('\n')
+      ? 0
+      : prompt.value.length;
+  prompt.setSelectionRange(nextCaret, nextCaret);
+  if (restoring) inputHistory = undefined;
+  submissions.touch(selected);
+  dismissedCommand = restoring ? '' : prompt.value;
+  renderCommands();
+  updateSend();
+  return true;
+}
 prompt.addEventListener('keydown', (event) => {
   if (event.isComposing || event.keyCode === 229 || composing) return;
+  if (event.key === 'Escape' && completions.childElementCount) {
+    event.preventDefault();
+    dismissedCommand = prompt.value;
+    renderCommands();
+    return;
+  }
   if (commandChoices().length) {
-    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab'].includes(event.key)) {
       event.preventDefault();
-      if (event.key === 'Escape') dismissedCommand = prompt.value;
-      else if (event.key === 'ArrowDown')
-        commandIndex = (commandIndex + 1) % commandChoices().length;
+      if (event.key === 'ArrowDown') commandIndex = (commandIndex + 1) % commandChoices().length;
       else if (event.key === 'ArrowUp')
         commandIndex = (commandIndex + commandChoices().length - 1) % commandChoices().length;
       else {
@@ -575,6 +638,17 @@ prompt.addEventListener('keydown', (event) => {
       renderCommands();
       return;
     }
+  }
+  if (
+    (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    recallInput(event.key === 'ArrowUp')
+  ) {
+    event.preventDefault();
+    return;
   }
   // Enter used to commit IME composition is not a send gesture.
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
@@ -599,6 +673,7 @@ composer.addEventListener('submit', (event) => {
     error.textContent = failure instanceof Error ? failure.message : 'Cannot submit draft';
     return;
   }
+  inputHistory = undefined;
   saveDraft();
   submit.disabled = true;
   classic.scrollToBottom();
@@ -668,6 +743,7 @@ const classic = buildClassicShell({
   interactions,
   operations,
   composer,
+  completions,
   advanced,
   historyOpen: preferences.historyOpen,
   onLatest: () => {
@@ -802,6 +878,7 @@ function renderPlan(snapshot: SessionView) {
   }
 }
 function render() {
+  saveDisclosures(disclosureChanges.takeRecords());
   if (!state) return;
   const earlierLoaded = state.view?.earlierLoaded;
   const historyFeedback =
@@ -821,6 +898,7 @@ function render() {
     jumpToLatest = false;
     if (scrollOnPrompt?.session !== state.selected) scrollOnPrompt = undefined;
     saveDraft();
+    inputHistory = undefined;
     selected = state.selected;
     prompt.value = drafts.get(selected || '');
     renderAttachments();
@@ -1055,6 +1133,7 @@ function render() {
   cancel.title = snapshot?.active_turn ? '停止输出' : '停止后台任务';
   cancel.hidden = !snapshot?.active_turn;
   submit.hidden = Boolean(snapshot?.active_turn);
+  renderCommands();
   management.setView(snapshot, state.sessions, state.operations, state.error);
   if (snapshot) {
     sessions.dataset.limit = String(preferences.sessionRows);
@@ -1076,7 +1155,6 @@ function render() {
     working.hidden = !snapshot.active_turn;
     workingLabel.textContent = `${snapshot.harness === 'Pi' ? 'Pi Agent' : snapshot.harness} 正在处理…`;
     const follow = preferences.autoScroll && classic.nearBottom();
-    renderCommands();
     renderPlan(snapshot);
     const prepended = historyView.render(snapshot, busy);
     renderInteractions(interactions, snapshot, mutate);
@@ -1232,6 +1310,8 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   }
 });
 window.addEventListener('unload', () => {
+  saveDisclosures(disclosureChanges.takeRecords());
+  disclosureChanges.disconnect();
   if (inputPreviewUrl) URL.revokeObjectURL(inputPreviewUrl);
   inputImages.clear();
   imageView.clear();
