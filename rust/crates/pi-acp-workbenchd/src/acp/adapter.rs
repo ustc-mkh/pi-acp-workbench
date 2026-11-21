@@ -334,7 +334,7 @@ async fn run_protocol(
                     let patch = captured.finish(
                         &mut details,
                         &native,
-                        super::control::ControlPhase::Startup { resuming: true },
+                        super::control::ControlPhase::RefreshCatalogue,
                     )?;
                     context.publish(AgentEvent::Catalogue(patch)).await?;
                     Ok(response)

@@ -164,7 +164,7 @@ for (const [file, name] of [
 const allowed = {
   extension: /^src\/workbench-[^/]+\.ts$/,
   browser:
-    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-submissions|workbench-image-view|workbench-diff-view|workbench-keyboard|workbench-elements|workbench-interactions|workbench-settings|workbench-model-controls|workbench-shell|workbench-labels|tooltips|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|paint-scheduler|markdown|diagrams))\.ts$/,
+    /^(?:src\/workbench-[^/]+|webview\/(?:workbench-main|workbench-submissions|workbench-image-view|workbench-diff-view|workbench-history-view|workbench-keyboard|workbench-elements|workbench-interactions|workbench-settings|workbench-model-controls|workbench-shell|workbench-labels|tooltips|workbench-dom|workbench-management|workbench-drafts|workbench-preferences|workbench-attachment-drafts|composer-resize|paint-scheduler|markdown|diagrams))\.ts$/,
   // Shared pure model-name normalization has no provider, UI or I/O dependencies.
   adapter:
     /^src\/(?:pi-[^/]+|adapter-[^/]+|atomic-json|native-branch|telemetry|workbench-model-defaults)\.ts$/,

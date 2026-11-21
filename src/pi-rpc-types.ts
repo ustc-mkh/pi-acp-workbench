@@ -72,6 +72,7 @@ export interface PiAgent {
   dispose(): void;
 }
 export interface WorkbenchParams {
+  snapshot?: string;
   sessionId: string;
   model?: string;
   text?: string;

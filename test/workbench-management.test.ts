@@ -77,6 +77,57 @@ it('reloads model metadata after discovery completes even when an early settings
   expect(sent.some((m) => m.type === 'execute')).toBe(false);
 });
 
+it('stops automatic reads after failure and observes a recovered management receipt once', () => {
+  const dom = new JSDOM();
+  vi.stubGlobal('document', dom.window.document);
+  const sent: UiCommand[] = [];
+  const panel = new ManagementPanel(
+    (m) => sent.push(m),
+    () => {},
+  );
+  const view = emptyView();
+  view.catalogue.models = [{ id: 'vendor/model' as never, name: 'Model' }];
+  const requestId = () => {
+    const last = sent.at(-1)!;
+    expect(last.type).toBe('read_management');
+    return last.type === 'read_management' ? last.request_id : 0;
+  };
+  panel.setView(view, [], []);
+  panel.receive({ type: 'management_error', request_id: requestId(), error: 'offline' });
+  panel.setView(view, [], []);
+  expect(sent).toHaveLength(1);
+  panel.openModels();
+  expect(sent).toHaveLength(2);
+  const data: ManagementData = {
+    models: [],
+    naming_policy: 'follow',
+    title_model: null,
+    groups: [],
+    totals: null,
+    next_cursor: null,
+  };
+  const receive = () => panel.receive({ type: 'management', request_id: requestId(), data });
+  receive();
+  const op = {
+    method: 'manage',
+    operation: 'save' as never,
+    session: view.id,
+    status: 'uncertain' as const,
+    error: '等待确认',
+  };
+  panel.setView(view, [], [op]);
+  receive();
+  expect(panel.root.textContent).toContain('等待确认');
+  const recovered = { ...op, status: 'completed' as const, error: undefined };
+  panel.setView(view, [], [recovered]);
+  expect(sent).toHaveLength(4);
+  receive();
+  expect(panel.root.textContent).not.toContain('等待确认');
+  panel.setView(view, [], [recovered]);
+  expect(sent).toHaveLength(4);
+  dom.window.close();
+});
+
 it('renders searchable grouped models, four prices, explicit context, titles and paged statistics as actual user actions', () => {
   const dom = new JSDOM('<main></main>');
   vi.stubGlobal('document', dom.window.document);
@@ -152,12 +203,19 @@ it('renders searchable grouped models, four prices, explicit context, titles and
     command: { action: { action: 'naming', policy: 'model', model: 'vendor/model' } },
   });
   click('刷新模型配置');
-  expect(sent.at(-1)).toMatchObject({ type: 'read_management', refresh_models: true });
-  const metadataRequest = sent.at(-1)!;
-  panel.receive({
-    type: 'management',
-    request_id: metadataRequest.type === 'read_management' ? metadataRequest.request_id : 0,
-    data,
+  expect(sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: { method: 'manage', action: { action: 'refresh_models' } },
+  });
+  dom.window.document
+    .querySelector<HTMLInputElement>('[aria-label="Visible in model selector"]')!
+    .click();
+  expect(sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: {
+      method: 'manage',
+      action: { action: 'visibility', models: ['vendor/model'], hidden: true, reset: false },
+    },
   });
   expect(
     [...dom.window.document.querySelectorAll('button')].some(
@@ -172,6 +230,13 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   )!;
   expect(context.value).toBe('256');
   expect(multiplier.value).toBe('1');
+  context.value = '1.001';
+  click('保存模型设置');
+  expect(sent.at(-1)).toMatchObject({ command: { action: { context_window: 1001 } } });
+  const beforeInvalidContext = sent.length;
+  context.value = '1.0015';
+  click('保存模型设置');
+  expect(sent).toHaveLength(beforeInvalidContext);
   context.value = '512';
   multiplier.value = '0.5';
   click('保存模型设置');
@@ -243,7 +308,7 @@ it('renders searchable grouped models, four prices, explicit context, titles and
   dom.window.close();
 });
 
-it('shares Pi defaults across model aliases, preserves explicit overrides and saves context/prices/multiplier together', () => {
+it('renders host-resolved defaults for a model alias, preserves explicit overrides and saves context/prices/multiplier together', () => {
   const dom = new JSDOM('<main></main>');
   vi.stubGlobal('document', dom.window.document);
   const sent: UiCommand[] = [];
@@ -266,7 +331,12 @@ it('shares Pi defaults across model aliases, preserves explicit overrides and sa
     models: [
       {
         harness: 'Pi',
-        model: 'openai/GPT-6.1 Sol',
+        model,
+        effective: {
+          price: { input: 2, output: 12, cache_read: 0.2, cache_write: 0 },
+          price_source: 'catalogue',
+          context_source: 'catalogue',
+        },
         hidden: false,
         price: null,
         default_price: { input: 2, output: 12, cache_read: 0.2, cache_write: 0 },
@@ -343,7 +413,7 @@ it('shares Pi defaults across model aliases, preserves explicit overrides and sa
     default_context_window: 272000,
     multiplier: 0.4,
   };
-  confirmed({ ...base, models: [...base.models, override] });
+  confirmed({ ...base, models: [override] });
   expect(input('input price').value).toBe('3');
   expect(input('context k tokens').value).toBe('1000');
   expect(input('price multiplier').value).toBe('0.4');
@@ -362,7 +432,6 @@ it('shares Pi defaults across model aliases, preserves explicit overrides and sa
   confirmed({
     ...base,
     models: [
-      ...base.models,
       { ...override, price: null, context_window: 272000, context_override: null, multiplier: 1 },
     ],
   });

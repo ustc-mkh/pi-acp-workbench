@@ -61,6 +61,26 @@ it('copy/export preserve complete Markdown across cold page boundaries', async (
   expect(output).toContain(expected);
   expect(output.match(/^## /gm)).toHaveLength(1);
 });
+it('rejects an oversized standalone message before reading its archived body', async () => {
+  const entry = entryHeader.parse({
+    ...row(1, ''),
+    message: null,
+    text: {
+      Archived: {
+        content: { id: 'body', kind: 'Text', bytes: 1024 * 1024 + 1, sha256: '0'.repeat(64) },
+      },
+    },
+  });
+  const client = {
+    call: async () => {
+      throw new Error('Unexpected archive read');
+    },
+  };
+  await expect(
+    copyLogicalMessage(client, sessionId.parse('session'), entry.id, () => {}, entry),
+  ).rejects.toThrow('Message exceeds clipboard budget');
+});
+
 it('normalizes IDNs and rejects credentials, local files, command/script and malformed URLs', () => {
   expect(externalDestination('https://例子.测试/path')).toBe(
     'https://xn--fsqu00a.xn--0zwm56d/path',

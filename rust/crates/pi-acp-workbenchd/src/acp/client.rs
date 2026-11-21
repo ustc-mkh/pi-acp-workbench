@@ -190,7 +190,7 @@ impl AcpClient {
             } => (Some(model.as_str()), *context_window, true),
             _ => (None, None, false),
         };
-        self.call(
+        self.read_model_metadata(
             "_pi_workbench/models",
             Params {
                 session_id: native,
@@ -217,8 +217,60 @@ impl AcpClient {
                 "update the matching Pi adapter for profile model metadata".into(),
             ));
         }
-        self.call("_pi_workbench/profile_models", serde_json::json!({}))
+        self.read_model_metadata("_pi_workbench/profile_models", serde_json::json!({}))
             .await
+    }
+    async fn read_model_metadata(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<crate::domain::management::ProviderModels, DomainError> {
+        use crate::domain::management::{ProviderModel, ProviderModels};
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Snapshot {
+            #[serde(flatten)]
+            metadata: ProviderModels,
+            candidate_snapshot: Option<String>,
+            candidate_count: Option<usize>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Page {
+            models: Vec<ProviderModel>,
+        }
+        let Snapshot {
+            mut metadata,
+            candidate_snapshot,
+            candidate_count,
+        } = self.call(method, params).await?;
+        let invalid = || DomainError::Protocol("invalid model metadata page".into());
+        if metadata.models.len() > 500 || metadata.candidates.len() > 500 {
+            return Err(invalid());
+        }
+        match (candidate_snapshot, candidate_count) {
+            (None, None) => {}
+            (Some(snapshot), Some(count))
+                if snapshot.len() <= 64
+                    && (501..=20000).contains(&count)
+                    && metadata.candidates.len() == 500 =>
+            {
+                while metadata.candidates.len() < count {
+                    let offset = metadata.candidates.len();
+                    let page: Page = self
+                        .call(
+                            "_pi_workbench/model_candidates",
+                            serde_json::json!({"snapshot":snapshot, "cursor":offset}),
+                        )
+                        .await?;
+                    if page.models.len() != (count - offset).min(500) {
+                        return Err(invalid());
+                    }
+                    metadata.candidates.extend(page.models);
+                }
+            }
+            _ => return Err(invalid()),
+        }
+        Ok(metadata)
     }
     pub async fn title(
         &self,

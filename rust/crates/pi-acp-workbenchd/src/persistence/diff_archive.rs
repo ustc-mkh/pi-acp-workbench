@@ -3,7 +3,7 @@
 use super::database::StoreError;
 use crate::{
     domain::{SessionId, TurnId},
-    workspace_review::TurnDiff,
+    workspace_review::{DiffStatus, FileStatus, TurnDiff},
 };
 use rusqlite::OptionalExtension;
 use std::{collections::VecDeque, sync::Arc};
@@ -57,8 +57,18 @@ impl DiffArchive {
             )
             .optional()?;
         let Some(json) = json else { return Ok(None) };
-        let diff: TurnDiff = serde_json::from_str(&json)
+        let mut diff: TurnDiff = serde_json::from_str(&json)
             .map_err(|_| StoreError::Invalid("turn diff archive is corrupt"))?;
+        if diff.status == DiffStatus::Complete
+            && diff
+                .files
+                .iter()
+                .any(|file| file.status == FileStatus::Added && !file.added_path_verified)
+        {
+            diff.status = DiffStatus::Partial;
+            diff.warnings
+                .push("Older snapshot cannot verify added paths; undo is disabled.".into());
+        }
         let bytes = retained_bytes(&diff);
         let diff = Arc::new(diff);
         if bytes <= CACHE_BYTES {
@@ -125,6 +135,23 @@ mod tests {
         connection.execute("DELETE FROM turn_diffs", []).unwrap();
         assert!(cache.read(&connection, &session, &turn).unwrap().is_none());
         assert_eq!(cache.bytes, 0);
+    }
+    #[test]
+    fn legacy_added_paths_remain_readable_and_disable_undo() {
+        let (connection, session, turn) = fixture();
+        let legacy = r#"{"status":"complete","files":[{"path":"report.txt","status":"added","added":1,"removed":0,"before":"","after":"notes"}],"warnings":[],"added":1,"removed":0}"#;
+        connection
+            .execute(
+                "INSERT INTO turn_diffs VALUES (?1,?2,?3)",
+                rusqlite::params![session.as_str(), turn.as_str(), legacy],
+            )
+            .unwrap();
+        let diff = DiffArchive::default()
+            .read(&connection, &session, &turn)
+            .unwrap()
+            .unwrap();
+        assert_eq!(diff.status, DiffStatus::Partial);
+        assert_eq!(diff.files[0].after.as_deref(), Some("notes"));
     }
     #[test]
     fn least_recent_archives_are_evicted() {

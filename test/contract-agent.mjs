@@ -864,6 +864,35 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       });
     }
     reply(r.id, {});
+  } else if (
+    process.env.WORKBENCH_CONTRACT_PAGED_MODELS &&
+    r.method === '_pi_workbench/profile_models'
+  ) {
+    reply(r.id, {
+      models: [{ model: 'proxy/GPT-Model', price: null, contextWindow: null }],
+      candidates: Array.from({ length: 500 }, (_, i) => ({
+        model: `proxy${i}/GPT-Model`,
+        price: null,
+        contextWindow: null,
+      })),
+      candidateSnapshot: 'fixture',
+      candidateCount: 501,
+    });
+  } else if (
+    process.env.WORKBENCH_CONTRACT_PAGED_MODELS &&
+    r.method === '_pi_workbench/model_candidates'
+  ) {
+    if (r.params.snapshot !== 'fixture' || r.params.cursor !== 500)
+      return fail(r.id, 'Invalid page');
+    reply(r.id, {
+      models: [
+        {
+          model: 'openai/GPT-Model',
+          price: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+          contextWindow: 272000,
+        },
+      ],
+    });
   } else if (['_pi_workbench/models', '_pi_workbench/profile_models'].includes(r.method)) {
     trace({ method: r.method, params: r.params });
     if (!process.env.WORKBENCH_CONTRACT_MANAGEMENT) {
@@ -917,9 +946,22 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
         process.env.WORKBENCH_CONTRACT_CONTEXT_FILE,
         'utf8',
       );
+    const models = ['default', 'other'];
+    const extraModel = process.env.WORKBENCH_CONTRACT_EXTRA_MODEL;
+    if (extraModel && existsSync(extraModel)) {
+      const value = 'openai/new-model';
+      models.push(value);
+      if (
+        r.method === '_pi_workbench/models' &&
+        !configOptions[0].options.some((option) => option.value === value)
+      ) {
+        configOptions[0].options.push({ value, name: 'OpenAI New Model' });
+        update({ sessionUpdate: 'config_option_update', configOptions });
+      }
+    }
     reply(r.id, {
       contextAck: r.params.contextProjection ?? null,
-      models: ['default', 'other'].map((model) => ({
+      models: models.map((model) => ({
         model,
         contextWindow: Number(process.env.WORKBENCH_CONTRACT_CONTEXT ?? 200000),
         price: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.5 },

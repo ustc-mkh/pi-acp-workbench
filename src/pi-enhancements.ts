@@ -9,6 +9,7 @@ import type {
   WorkbenchParams,
 } from './pi-rpc-types';
 import { providerError } from './adapter-errors';
+import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat, mkdtemp, copyFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,15 +21,14 @@ import { nativePath, nativeForkPoints, NATIVE_FORK_MARKER } from './native-branc
 import type { Inspection, Price, UsageRecord } from './telemetry';
 import { validRecord, validPrice } from './telemetry';
 import { fastConfig } from './pi-fast-config';
-import { refreshPiModels, getPiModelDefaults, getPiContextAck } from './pi-context-config';
-import { piModelDefaults } from './pi-model-defaults';
+import { refreshPiModels, getPiModelMetadata, getPiContextAck } from './pi-context-config';
+import { piModelMetadata, type PiModelMetadata } from './pi-model-defaults';
 import { generatePiTitle } from './pi-title';
 type ModelResponse = {
-  models: {
-    model: string;
-    price: { input: number; output: number; cache_read: number; cache_write: number } | null;
-    contextWindow: number | null;
-  }[];
+  models: PiModelMetadata['models'];
+  candidates?: PiModelMetadata['models'];
+  candidateSnapshot?: string;
+  candidateCount?: number;
 };
 export function usageRecord(
   id: string,
@@ -71,6 +71,20 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
   const Agent = Base as new (...args: unknown[]) => PiAgent;
   const Process = PiRpcProcess as PiProcessFactory;
   return class extends Agent {
+    private candidatePages?: { id: string; rows: PiModelMetadata['models'] };
+    private modelResponse({ models, candidates }: PiModelMetadata): ModelResponse {
+      this.candidatePages = undefined;
+      if (!candidates || candidates.length <= 500)
+        return candidates ? { models, candidates } : { models };
+      const id = randomUUID();
+      this.candidatePages = { id, rows: candidates };
+      return {
+        models,
+        candidates: candidates.slice(0, 500),
+        candidateSnapshot: id,
+        candidateCount: candidates.length,
+      };
+    }
     private forkWorkers = new Map<string, { dispose: () => void }>();
     private usageCache?: { key: string; records: UsageRecord[] };
     private turns = new Map<string, Set<{ cancelled: boolean }>>();
@@ -135,6 +149,7 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     dispose() {
       for (const turns of this.turns.values()) for (const turn of turns) turn.cancelled = true;
       this.turns.clear();
+      this.candidatePages = undefined;
       for (const worker of this.forkWorkers.values()) worker.dispose();
       super.dispose();
     }
@@ -149,6 +164,21 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
     ): Promise<Inspection | { sessionId?: string } | ModelResponse> {
       if (!method.startsWith('_pi_workbench/'))
         throw new Error(`Unsupported extension method: ${method}`);
+      if (method === '_pi_workbench/model_candidates') {
+        const page = this.candidatePages;
+        const offset = params.cursor;
+        if (
+          !page ||
+          params.snapshot !== page.id ||
+          offset === undefined ||
+          !Number.isSafeInteger(offset) ||
+          offset < 500 ||
+          offset >= page.rows.length ||
+          offset % 500 !== 0
+        )
+          throw new Error('Invalid model metadata cursor');
+        return { models: page.rows.slice(offset, offset + 500) };
+      }
       if (method === '_pi_workbench/profile_models') {
         const cwd = await mkdtemp(join(tmpdir(), 'pi-model-metadata-'));
         let proc: PiProcess | undefined;
@@ -160,9 +190,9 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
           });
           if (!(await refreshPiModels(proc, undefined, true)))
             throw new Error('Pi 未提供本地模型元数据。');
-          const models = getPiModelDefaults(proc);
+          const models = getPiModelMetadata(proc);
           if (!models) throw new Error('Pi 未返回本地模型元数据。');
-          return { models };
+          return this.modelResponse(models);
         } finally {
           if (proc) {
             const child = proc.child;
@@ -222,7 +252,9 @@ export function enhancePiAgent(Base: unknown, PiRpcProcess: unknown, Errors = Re
         if ((available.models?.length ?? 0) > 500)
           throw new Error('Model catalogue exceeds budget');
         return {
-          models: getPiModelDefaults(session.proc) ?? piModelDefaults(available.models || []),
+          ...this.modelResponse(
+            getPiModelMetadata(session.proc) ?? piModelMetadata(available.models || []),
+          ),
           ...(params.setContext ? { contextAck: getPiContextAck(session.proc) } : {}),
         };
       }

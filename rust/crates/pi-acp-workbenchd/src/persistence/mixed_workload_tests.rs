@@ -262,6 +262,7 @@ async fn large_diff_reader_workload_v1() {
         status: DiffStatus::Complete,
         files: (0..48)
             .map(|index| FileDiff {
+                added_path_verified: false,
                 path: format!("file-{index:02}.txt"),
                 status: FileStatus::Modified,
                 before_hash: None,

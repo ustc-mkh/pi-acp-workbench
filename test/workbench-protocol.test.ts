@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  clientCommand,
+  commandPolicy,
+  commandPool,
+  durableCommand,
+  usesReservedWorkflow,
   commandReceipt,
   commitBatch,
   contentRef,
@@ -224,4 +229,21 @@ describe('IPC v3 fixed contracts (not yet the production transport)', () => {
     );
     expect(() => sessionView.parse({ ...fixture().view, pending_interactions: items })).toThrow();
   });
+});
+
+it('classifies every IPC command by transport pool, receipt and desktop reserve', () => {
+  const rows = JSON.parse(
+    readFileSync(new URL('./fixtures/rewrite/ipc-command-policy.json', import.meta.url), 'utf8'),
+  );
+  expect(rows.map((row: { command: { method: string } }) => row.command.method).sort()).toEqual(
+    Object.keys(commandPolicy).sort(),
+  );
+  for (const row of rows) {
+    const command = clientCommand.parse(row.command);
+    expect([
+      commandPool(command),
+      durableCommand(command),
+      usesReservedWorkflow(command.method),
+    ]).toEqual([row.pool, row.durable, row.reserved]);
+  }
 });

@@ -49,7 +49,7 @@ mutation 返回 `type: reply` 和类型化 receipt；普通查询返回 `type: q
 
 分页使用服务端返回的游标，不自行构造；切换筛选重新开始。归档正文完整读取后校验哈希，单片所带全内容哈希不能独立验证该片。`content_batch` 因帧预算省略的尾部请求需继续读取。
 
-`management` 额外指定 `refresh_models:true` 时会启动临时 Pi metadata worker，只读本地目录，不创建业务会话或推理；普通查询只读缓存。时间过滤和日期分组使用 UTC 毫秒，费用与缺失值规则见[模型与用量](workbench-management.md)。
+`management` 额外指定 `refresh_models:true` 时会启动临时 Pi metadata worker，只读本地目录，不创建业务会话或推理；普通查询只读缓存。读取模型设置时可传 `query.catalogue_session`。宿主按该会话的 Agent 返回已保存设置，并补入该会话目录中的模型。每行的 `effective.price` 和 `context_window` 是生效值，`effective.price_source` 和 `effective.context_source` 分别标记 `user`、`catalogue` 或 `unknown`。统计按 `query.group` 分组，不能同时指定 `catalogue_session`。时间过滤和日期分组使用 UTC 毫秒，费用与缺失值规则见[模型与用量](workbench-management.md)。
 
 ## 订阅与恢复
 
@@ -60,5 +60,7 @@ mutation 返回 `type: reply` 和类型化 receipt；普通查询返回 `type: q
 ## 容量与实现
 
 帧最大 8 MiB，不完整帧期限 10 秒。每连接普通/控制/后台查询/前台历史容量为 16/4/4/1。普通页和批次完整 JSON envelope 最大 1 MiB，视图 512 KiB，内联正文 16 KiB，单个归档正文最大 64 MiB；整数必须是 JS-safe。
+
+桌面端另为 `cancel`、`cancel_fork`、`answer` 和 `remove` 预留操作名额。`undo_turn` 在 IPC 使用控制池，在桌面端使用普通操作名额。新增命令时同步更新 `src/workbench-protocol.ts` 中的 `commandPolicy` 和共享样例 `test/fixtures/rewrite/ipc-command-policy.json`。两端都校验 IPC 池和回执分类，桌面端还校验预留名额。
 
 宿主入口为 `transport/vscode.rs`，共享类型在 `domain/query.rs`；TS 校验和客户端位于 `src/workbench-{protocol,schema,client}.ts`。操作提交与进程生命周期见[架构说明](workbench-architecture.md)，撤回语义见 [Diff 与撤回](turn-diff.md)。

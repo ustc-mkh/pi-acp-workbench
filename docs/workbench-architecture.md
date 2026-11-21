@@ -4,17 +4,17 @@
 
 ## 模块职责
 
-| 模块                                 | 职责                                                                                                    |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Rust `domain/`                       | 领域类型、命令、事件、纯 reducer 和验证                                                                 |
-| `actor*`、`actor_registry`           | 串行状态所有权、冷加载、路由、热会话预算                                                                |
-| `app_prompt`、`app_worker_lifecycle` | 输入预处理与派发、worker 发现/观察/停止                                                                 |
-| `worker`、`task_scope`               | 子进程预算、启动、取消和等待退出                                                                        |
-| `acp/`                               | 强类型协议转换、RPC 关联及明确的不透明扩展边界                                                          |
-| `persistence/`                       | SQLite 事务、归档、回执、查询与维护                                                                     |
-| `telegram/`、`transport/vscode`      | 入口授权、输入与输出适配                                                                                |
-| TS `src/workbench-*`                 | IPC 客户端、显示视图、宿主工作流；`operations` 管理回执，`diff-reader` 管理 Diff 读取                   |
-| `webview/`                           | 主入口组装界面；`submissions` 管理草稿确认，`image-view` 管理图片资源，`diff-view` 管理 Diff 展示与分页 |
+| 模块                                 | 职责                                                                                                                |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Rust `domain/`                       | 领域类型、命令、事件、纯 reducer 和验证                                                                             |
+| `actor*`、`actor_registry`           | 串行状态所有权、冷加载、路由、热会话预算                                                                            |
+| `app_prompt`、`app_worker_lifecycle` | 输入预处理与派发、worker 发现/观察/停止                                                                             |
+| `worker`、`task_scope`               | 子进程预算、启动、取消和等待退出                                                                                    |
+| `acp/`                               | 强类型协议转换、RPC 关联及明确的不透明扩展边界                                                                      |
+| `persistence/`                       | SQLite 事务、归档、回执、查询与维护                                                                                 |
+| `telegram/`、`transport/vscode`      | 入口授权、输入与输出适配                                                                                            |
+| TS `src/workbench-*`                 | IPC 客户端与会话视图。`controller` 协调授权，`undo` 管理撤回确认，`operations` 管理持久回执                         |
+| `webview/`                           | 主入口组装界面。`history-view` 渲染对话历史，`submissions` 确认草稿提交，`image-view` 和 `diff-view` 展示图片与变更 |
 
 Session actor 是领域热态、worker epoch、pending intent 的唯一 owner。provider 完成消息携带 session/epoch/turn，验证后才能提交。客户端只维护有界显示视图，不保存第二套领域状态。
 
@@ -56,5 +56,7 @@ SQLite writer 在请求之间检查 WAL，达到逻辑阈值时尝试 RESTART ch
 ## 界面契约与归档读取
 
 宿主到 Webview 的所有消息由 `workbench-ui.ts` 的 `uiMessage` 统一解析，消息、状态和回执类型从 schema 推导。UI 模块接收已验证消息，继续按当前会话、operation 和草稿 generation 检查过期响应。持久回执恢复只查询结果，不重新发送命令。
+
+历史视图按当前会话缓存消息投影、Markdown 和长文本分页。切换会话时，它清空消息节点与缓存，断开可见性观察器并取消待执行的动画帧。归档正文响应携带会话 ID，视图只接收当前会话的响应。实现位于 `webview/workbench-history-view.ts`。
 
 SQLite 的每个读取线程持有最多 4 份、正文及元数据分配容量合计最多 48 MiB 的 Diff 解码缓存（两个读取线程合计最多 96 MiB，不含当前请求临时分配）。命中时只查询归档身份是否仍存在，避免会话删除后返回旧缓存；缺失结果不缓存。摘要只复制当页元数据，不复制 before/after 正文，分片复用不可变正文。该优化不改变数据库格式；首次读取、淘汰后读取或超预算归档仍需完整解码。完整 Undo 读取仍返回独立快照。

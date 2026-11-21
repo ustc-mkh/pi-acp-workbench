@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     os::{
@@ -43,6 +43,9 @@ pub enum DiffStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileDiff {
+    // Archived proof for undo. Summary responses omit this internal field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added_path_verified: bool,
     pub path: String,
     pub status: FileStatus,
     pub before_hash: Option<String>,
@@ -73,6 +76,7 @@ struct State {
 pub struct Snapshot {
     root: PathBuf,
     files: BTreeMap<String, State>,
+    unobserved: Option<BTreeSet<PathBuf>>,
     warnings: Vec<String>,
     complete: bool,
 }
@@ -256,11 +260,57 @@ fn read_state(root: &fs::File, name: &str) -> std::io::Result<Option<State>> {
         hash: h,
     }))
 }
+// Record names outside Git's visible inventory without reading their contents.
+// A directory with no captured children covers its entire unobserved subtree.
+fn unobserved_paths(
+    root: &fs::File,
+    files: &BTreeMap<String, State>,
+    start: Instant,
+) -> std::io::Result<BTreeSet<PathBuf>> {
+    let mut directories = BTreeSet::from([Path::new("")]);
+    for name in files.keys() {
+        for parent in Path::new(name).ancestors().skip(1) {
+            if !directories.insert(parent) {
+                break;
+            }
+        }
+    }
+    let mut unobserved = BTreeSet::new();
+    let mut bytes = 0;
+    for path in &directories {
+        let mut directory = root.try_clone()?;
+        for component in path.iter() {
+            directory = open_at(
+                &directory,
+                component.to_str().expect("UTF-8 inventory path"),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+            )?;
+        }
+        for entry in fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
+            if start.elapsed() > Duration::from_secs(10) {
+                return Err(std::io::Error::other("path inventory timed out"));
+            }
+            let name = path.join(entry?.file_name());
+            if directories.contains(name.as_path())
+                || name.to_str().is_some_and(|n| files.contains_key(n))
+            {
+                continue;
+            }
+            bytes += name.as_os_str().len();
+            if bytes > ENUM_MAX_BYTES || unobserved.len() >= FILES_MAX {
+                return Err(std::io::Error::other("path inventory exceeded budget"));
+            }
+            unobserved.insert(name);
+        }
+    }
+    Ok(unobserved)
+}
 impl Snapshot {
     pub fn unavailable(root: PathBuf, warning: String) -> Self {
         Self {
             root,
             files: BTreeMap::new(),
+            unobserved: None,
             warnings: vec![warning],
             complete: false,
         }
@@ -273,6 +323,7 @@ impl Snapshot {
         let mut s = Self {
             root,
             files: BTreeMap::new(),
+            unobserved: None,
             warnings: vec![],
             complete: true,
         };
@@ -305,6 +356,9 @@ impl Snapshot {
                 }
             }
         }
+        if s.complete {
+            s.unobserved = unobserved_paths(&fd, &s.files, start).ok();
+        }
         s.warnings.sort();
         s.warnings.dedup();
         if s.warnings.len() > 16 {
@@ -325,6 +379,13 @@ impl Snapshot {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    fn confirms_absence(&self, path: &str) -> bool {
+        self.unobserved.as_ref().is_some_and(|paths| {
+            !Path::new(path)
+                .ancestors()
+                .any(|ancestor| paths.contains(ancestor))
+        })
     }
     pub fn diff(&self, after: &Self) -> TurnDiff {
         let mut names: Vec<_> = self.files.keys().chain(after.files.keys()).collect();
@@ -356,7 +417,9 @@ impl Snapshot {
             }
             let old = a.map_or(Some(""), |s| s.text.as_deref());
             let new = b.map_or(Some(""), |s| s.text.as_deref());
+            let added_path_verified = a.is_none() && self.confirms_absence(n);
             let mut f = FileDiff {
+                added_path_verified,
                 path: n.clone(),
                 status: if a.is_none() {
                     FileStatus::Added
@@ -376,7 +439,11 @@ impl Snapshot {
                 patch: None,
                 omitted: None,
             };
-            if let (Some(x), Some(y)) = (old, new) {
+            if (a.is_none() && !added_path_verified) || (b.is_none() && !after.confirms_absence(n))
+            {
+                f.omitted =
+                    Some("Path absence could not be verified in the workspace snapshot".into());
+            } else if let (Some(x), Some(y)) = (old, new) {
                 if used + x.len() + y.len() <= DETAIL_MAX_BYTES {
                     (f.added, f.removed) = line_counts(x, y);
                     f.before = Some(x.into());
@@ -478,6 +545,7 @@ pub fn summary(
             .take(16)
             .map(|file| {
                 let mut metadata = FileDiff {
+                    added_path_verified: false,
                     path: file.path.clone(),
                     status: file.status.clone(),
                     before_hash: file.before_hash.clone(),
@@ -561,6 +629,41 @@ mod tests {
         assert!(!partial.complete);
         let missing = Snapshot::unavailable(root.clone(), "capture failed".into());
         assert!(matches!(partial.diff(&missing).status, DiffStatus::Partial));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn force_adding_preexisting_ignored_files_preserves_their_contents() {
+        let root = repo();
+        fs::write(root.join(".gitignore"), "ignored.txt\ncache/\n").unwrap();
+        fs::create_dir(root.join("cache")).unwrap();
+        let paths = ["ignored.txt", "cache/notes.txt"];
+        for path in paths {
+            fs::write(root.join(path), "existing notes").unwrap();
+        }
+        let before = Snapshot::capture(&root).unwrap();
+        assert!(Command::new("git")
+            .args(["add", "-f"])
+            .args(paths)
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let diff = before.diff(&Snapshot::capture(&root).unwrap());
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.status, DiffStatus::Partial);
+        for path in paths {
+            assert!(crate::workspace_undo::undo_selected(
+                &root,
+                diff.clone(),
+                Some(&[path.into()]),
+                false
+            )
+            .is_err());
+            assert_eq!(
+                fs::read_to_string(root.join(path)).unwrap(),
+                "existing notes"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

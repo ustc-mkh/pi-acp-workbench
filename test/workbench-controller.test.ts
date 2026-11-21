@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { WorkbenchOperations } from '../src/workbench-operations';
 import { WorkbenchController } from '../src/workbench-controller';
 import { uiStateMessage, type WorkbenchUiMessage } from '../src/workbench-ui';
 import { entryId, imageRef } from '../src/workbench-protocol';
@@ -734,6 +735,29 @@ it('keeps reserved receipt capacity for control commands when ordinary workflows
     method: 'cancel',
     status: 'completed',
   });
+});
+
+it('dispatches a cancellation while all 16 ordinary operations await replies', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const operations = new WorkbenchOperations(
+    peer.client(),
+    undefined,
+    undefined,
+    () => false,
+    () => {},
+    () => {},
+  );
+  const session = emptyView().id;
+  const pending = Array.from({ length: 16 }, () =>
+    operations.execute({ method: 'discover', session }),
+  );
+  await expect.poll(() => peer.requests.length).toBe(16);
+  await expect(operations.execute({ method: 'discover', session })).rejects.toThrow('Too many');
+  const cancel = operations.execute({ method: 'cancel', session });
+  await expect.poll(() => peer.requests.at(-1)?.command.method).toBe('cancel');
+  for (const request of peer.requests) peer.reply(request, { Accepted: { session, revision: 1 } });
+  await Promise.all([...pending, cancel]);
 });
 
 it('does not dispatch if durable local handle persistence fails', async () => {

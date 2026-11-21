@@ -1,0 +1,355 @@
+[
+  {
+    "command": {
+      "method": "create",
+      "harness": "Pi",
+      "cwd": "/tmp"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "load",
+      "session": "s"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "prompt",
+      "session": "s",
+      "prompt": {
+        "parts": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ]
+      }
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "fork",
+      "session": "s",
+      "request": {
+        "entry": "entry"
+      }
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "discover",
+      "session": "s"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "set_model",
+      "session": "s",
+      "model": "m"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "set_mode",
+      "session": "s",
+      "mode": "m"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "set_option",
+      "session": "s",
+      "id": "a",
+      "value": "v"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "manage",
+      "session": "s",
+      "action": {
+        "action": "refresh_models"
+      }
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "prepare_history_clear",
+      "filter": {
+        "text": "",
+        "harness": null
+      }
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "clear_history_batch",
+      "job": "job"
+    },
+    "pool": 0,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "cancel",
+      "session": "s"
+    },
+    "pool": 1,
+    "durable": true,
+    "reserved": true
+  },
+  {
+    "command": {
+      "method": "answer",
+      "session": "s",
+      "answer": {
+        "interaction": "i",
+        "response": "Cancel"
+      }
+    },
+    "pool": 1,
+    "durable": true,
+    "reserved": true
+  },
+  {
+    "command": {
+      "method": "remove",
+      "session": "s"
+    },
+    "pool": 1,
+    "durable": true,
+    "reserved": true
+  },
+  {
+    "command": {
+      "method": "cancel_fork",
+      "session": "s",
+      "operation": "op"
+    },
+    "pool": 1,
+    "durable": true,
+    "reserved": true
+  },
+  {
+    "command": {
+      "method": "undo_turn",
+      "session": "s",
+      "turn": "t"
+    },
+    "pool": 1,
+    "durable": true,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "operation",
+      "operation": "op"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "list"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "inspect",
+      "session": "s"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "history",
+      "session": "s"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "content_batch",
+      "reads": [
+        {
+          "ref": {
+            "id": "body",
+            "kind": "Text",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bytes": 1
+          },
+          "offset": 0
+        }
+      ]
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "tools",
+      "session": "s",
+      "turn": "t"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "content",
+      "ref": {
+        "id": "body",
+        "kind": "Text",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "bytes": 1
+      },
+      "offset": 0
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "attach",
+      "session": "s"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "image",
+      "image": {
+        "id": "image",
+        "mime": "image/png",
+        "bytes": 1,
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "management",
+      "query": {}
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "search",
+      "filter": {
+        "text": "",
+        "harness": null
+      }
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "validate_undo",
+      "session": "s",
+      "turn": "t"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "turn_diff",
+      "session": "s",
+      "turn": "t"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "turn_diff_content",
+      "session": "s",
+      "turn": "t",
+      "file": 0,
+      "after": false,
+      "offset": 0
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "detach",
+      "session": "s"
+    },
+    "pool": 2,
+    "durable": false,
+    "reserved": false
+  },
+  {
+    "command": {
+      "method": "history_turns",
+      "session": "s",
+      "cursor": {
+        "version": 3,
+        "session": "s",
+        "max_entry_seq": 2,
+        "before_seq": 2
+      },
+      "turns": 1
+    },
+    "pool": 3,
+    "durable": false,
+    "reserved": false
+  }
+]

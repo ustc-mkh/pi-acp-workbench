@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { WorkbenchClient, WorkbenchError } from './workbench-client';
+import { WorkbenchClient, WorkbenchError, WORKBENCH_LIMITS } from './workbench-client';
 import {
   durableCommand,
+  usesReservedWorkflow,
   operationId,
   type ClientCommand,
   type OperationId,
@@ -92,10 +93,13 @@ export class WorkbenchOperations {
   ) {
     if (!durableCommand(command)) throw new Error('Expected a mutation');
     // Bound both retained receipt display and concurrent long-running workflows.
-    if (this.rows.filter((row) => row.status === 'pending').length >= 16)
+    const control = usesReservedWorkflow(command.method);
+    const pending = this.rows.filter(
+      (row) => row.status === 'pending' && usesReservedWorkflow(row.method) === control,
+    );
+    if (pending.length >= WORKBENCH_LIMITS.pools[control ? 1 : 0])
       throw new Error('Too many UI workflows are active');
     const unresolved = this.rows.filter((row) => ['pending', 'uncertain'].includes(row.status));
-    const control = ['cancel', 'answer', 'remove', 'cancel_fork'].includes(command.method);
     if (unresolved.length >= (control ? 64 : 48))
       throw new Error('Resolve uncertain operation receipts before starting more workflows');
     const operation = operationId.parse(randomUUID());

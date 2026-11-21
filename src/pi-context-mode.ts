@@ -6,7 +6,7 @@ import {
   validProjection,
   ContextProjectionError,
 } from './pi-context-projection';
-import { piModelDefaults } from './pi-model-defaults';
+import { piModelMetadata } from './pi-model-defaults';
 import type { PiModel } from './pi-rpc-types';
 export const MODEL_DEFAULTS = 'workbench-model-defaults';
 export const CONTEXT_COMMAND = 'workbench-context';
@@ -80,7 +80,7 @@ export function installContextConfig(pi: ContextApi) {
             // Metadata only, never model context or billable tool output; no credentials/headers.
             pi.appendEntry?.(MODEL_DEFAULTS, {
               requestId,
-              models: piModelDefaults(available, all),
+              ...piModelMetadata(available, all),
             });
           }
           if (!ctx.isIdle()) throw new Error('Pi 在配置刷新期间开始运行，尚未确认 context。');

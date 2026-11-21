@@ -1,3 +1,4 @@
+import { WorkbenchUndo } from './workbench-undo';
 import { WorkbenchDiffReader } from './workbench-diff-reader';
 import { WorkbenchOperations } from './workbench-operations';
 import { exportMarkdown } from './workbench-export';
@@ -64,7 +65,7 @@ export class WorkbenchController {
   private residencyTimer?: ReturnType<typeof setTimeout>;
   private exporting = false;
   private attaching = false;
-  private undoConfirming = false;
+  private undo: WorkbenchUndo;
   private restoredSelection?: SessionId;
   private reconnectTimer?: NodeJS.Timeout;
   private reconnectAttempt = 0;
@@ -91,6 +92,7 @@ export class WorkbenchController {
           this.scheduleResidencyRefresh();
       },
     );
+    this.undo = new WorkbenchUndo(client, ports, this.receipts);
     this.diffs = new WorkbenchDiffReader(
       client,
       () => this.selected,
@@ -137,7 +139,7 @@ export class WorkbenchController {
     try {
       const message = uiCommand.parse(value);
       if (
-        this.undoConfirming &&
+        this.undo.confirming &&
         ['execute', 'create', 'select', 'clear_selection'].includes(message.type)
       )
         throw new Error('Finish or cancel the undo confirmation first');
@@ -394,13 +396,17 @@ export class WorkbenchController {
               : selected.view.status !== 'ready')
           )
             throw new Error('Refresh the authoritative session before modifying it');
-          let token = await this.authorize(snapshot.cwd);
-          this.assertAuthorization(token);
-          if (this.selected !== selected || selected.view.view?.cwd !== snapshot.cwd)
-            throw new Error('Session changed while authorizing');
-          if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
-          if (this.selected !== selected || selected.view.view?.cwd !== snapshot.cwd)
-            throw new Error('Session changed while authorizing');
+          const token = await this.authorize(snapshot.cwd);
+          const checkSession = () => {
+            this.assertAuthorization(token);
+            if (this.selected !== selected || selected.view.view?.cwd !== snapshot.cwd)
+              throw new Error('Session changed while authorizing');
+          };
+          checkSession();
+          if (message.command.method === 'undo_turn') {
+            await this.undo.execute(message.command, selected, checkSession);
+            break;
+          }
           if (message.command.method === 'fork') {
             const entry = message.command.request.entry;
             if (!selected.view.entries.some((row) => row.id === entry))
@@ -409,55 +415,7 @@ export class WorkbenchController {
           if (['prompt', 'set_model', 'set_mode'].includes(message.command.method)) {
             // Inspect remains cold. Only an explicit authorized user mutation loads a peer.
             await this.receipts.execute({ method: 'load', session: selected.id });
-            this.assertAuthorization(token);
-            if (this.closed || this.selected !== selected)
-              throw new Error('Session selection changed during load');
-            if (this.closed || !this.ports.trusted() || this.ports.workspace() !== token.workspace)
-              throw new Error('Workspace trust changed');
-          }
-          this.assertAuthorization(token);
-          const undoTurn =
-            message.command.method === 'undo_turn' ? message.command.turn : undefined;
-          if (undoTurn) {
-            if (!selected.view.entries.some((row) => row.turn === undoTurn))
-              throw new Error('Turn is not in confirmed history');
-            if (snapshot.active_turn)
-              throw new Error('Wait for the active task to finish before undo');
-            this.undoConfirming = true;
-            try {
-              await this.client.call({
-                method: 'validate_undo',
-                session: selected.id,
-                turn: undoTurn,
-                files: message.command.method === 'undo_turn' ? message.command.files : undefined,
-              });
-              this.assertAuthorization(token);
-              if (
-                !this.ports.confirmUndo ||
-                !(await this.ports.confirmUndo(
-                  selected.id,
-                  undoTurn,
-                  message.command.method === 'undo_turn'
-                    ? (message.command.files ?? undefined)
-                    : undefined,
-                ))
-              )
-                break;
-              this.assertAuthorization(token);
-              if (
-                this.closed ||
-                this.selected !== selected ||
-                !this.ports.trusted() ||
-                selected.view.view?.active_turn
-              )
-                throw new Error(
-                  'Workspace trust, task state, or selection changed during confirmation',
-                );
-              await this.ports.validateUndo?.(selected.id, undoTurn);
-              this.assertAuthorization(token);
-            } finally {
-              this.undoConfirming = false;
-            }
+            checkSession();
           }
           let promptOperation: import('./workbench-protocol').OperationId | undefined;
           const result = await this.receipts.execute(message.command, (operation) => {
@@ -470,15 +428,34 @@ export class WorkbenchController {
                 operation,
               });
           });
-          if (message.command.method === 'manage') await this.refresh();
+          if (message.command.method === 'manage') {
+            const { action } = message.command;
+            const view = selected.view.view;
+            if (
+              action.action === 'visibility' &&
+              !action.hidden &&
+              !this.closed &&
+              this.selected === selected &&
+              view?.harness === 'Pi' &&
+              action.models.some((id) => !view.catalogue.models.some((model) => model.id === id))
+            ) {
+              try {
+                this.assertAuthorization(token);
+                await this.receipts.execute({
+                  method: 'manage',
+                  session: selected.id,
+                  action: { action: 'refresh_models' },
+                });
+              } catch (error) {
+                throw new Error(
+                  '显示设置已保存，当前会话的模型列表刷新失败。' +
+                    (error instanceof Error ? ' ' + error.message : ''),
+                );
+              }
+            }
+            await this.refresh();
+          }
 
-          if (undoTurn && result && typeof result === 'object' && 'UndoCompleted' in result)
-            this.ports.post({
-              type: 'undo_result',
-              session: selected.id,
-              turn: undoTurn,
-              report: result.UndoCompleted.report,
-            });
           if (message.command.method === 'prompt' && !this.closed) {
             this.ports.post({
               type: 'prompt_accepted',

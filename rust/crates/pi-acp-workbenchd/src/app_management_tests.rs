@@ -7,6 +7,7 @@ use crate::domain::{
 use std::{collections::HashMap, fs};
 fn query(group: &str) -> ManagementQuery {
     ManagementQuery {
+        catalogue_session: None,
         group: Some(group.into()),
         from: None,
         to: None,
@@ -199,6 +200,45 @@ async fn profile_metadata_refresh_preserves_overrides_and_a_running_session() {
     assert_eq!(model.context_window, Some(256000));
     assert!(model.hidden);
     assert_eq!(app.database().context_snapshot().await.unwrap().revision, 1);
+    app.shutdown_checked().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn model_page_uses_unconfigured_provider_defaults_without_listing_the_provider() {
+    let root = std::env::temp_dir().join(format!("paged-model-defaults-{}", uuid::Uuid::new_v4()));
+    let app = app_at_with_env(
+        &root,
+        HashMap::from([
+            ("WORKBENCH_CONTRACT_MANAGEMENT".into(), "1".into()),
+            ("WORKBENCH_CONTRACT_PAGED_MODELS".into(), "1".into()),
+        ]),
+    );
+    let session = create(&app).await;
+    app.refresh_model_defaults().await.unwrap();
+    let settings = data(
+        &app,
+        ManagementQuery {
+            catalogue_session: Some(session),
+            group: None,
+            ..query("model")
+        },
+    )
+    .await;
+    assert!(!settings
+        .models
+        .iter()
+        .any(|m| m.model == "openai/GPT-Model"));
+    let model = settings
+        .models
+        .iter()
+        .find(|m| m.model == "proxy/GPT-Model")
+        .unwrap();
+    let effective = model.effective.as_ref().unwrap();
+    assert!(matches!(effective.price_source, SettingSource::Catalogue));
+    assert!(matches!(effective.context_source, SettingSource::Catalogue));
+    assert_eq!(effective.price.as_ref().unwrap().input, 0.0);
+    assert_eq!(model.context_window, Some(272000));
     app.shutdown_checked().await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -851,6 +891,7 @@ async fn management_alias_defaults_and_additive_existing_root_upgrade() {
         .model_defaults(
             session.clone(),
             ProviderModels {
+                candidates: vec![],
                 context_ack: None,
                 models: vec![
                     ProviderModel {

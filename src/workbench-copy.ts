@@ -14,17 +14,14 @@ export async function copyLogicalMessage(
   let cursor: HistoryCursor | undefined;
   let group: EntryHeader[] = [],
     previous: EntryHeader | undefined;
-  let found = false,
+  let found = standalone !== undefined,
     bytes = 0;
   const budget = 1024 * 1024;
   outer: for (;;) {
     guard();
-    if (standalone) {
-      group = [standalone];
-      found = true;
-      break;
-    }
-    const page = await client.call({ method: 'history', session, cursor, limit: 200 });
+    const page = standalone
+      ? { entries: [standalone], next_cursor: null }
+      : await client.call({ method: 'history', session, cursor, limit: 200 });
     guard();
     for (const entry of [...page.entries].reverse()) {
       if (previous && !continuesMessage(entry, previous)) {
@@ -48,17 +45,6 @@ export async function copyLogicalMessage(
     cursor = page.next_cursor;
   }
   if (!found) throw new Error('Message is no longer available');
-  if (
-    group.reduce(
-      (total, entry) =>
-        total +
-        ('Inline' in entry.text
-          ? Buffer.byteLength(entry.text.Inline.text)
-          : entry.text.Archived.content.bytes),
-      0,
-    ) > budget
-  )
-    throw new Error('Message exceeds clipboard budget; use full Markdown export');
   let text = '';
   for (const entry of group.reverse()) {
     guard();

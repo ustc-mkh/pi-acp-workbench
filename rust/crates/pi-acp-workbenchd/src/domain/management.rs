@@ -1,6 +1,7 @@
 //! Bounded account settings and indexed usage queries, never full history views.
 use super::{session::Harness, SessionId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
@@ -106,6 +107,8 @@ impl ManagementAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagementQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue_session: Option<SessionId>,
     pub group: Option<String>,
     pub from: Option<u64>,
     pub to: Option<u64>,
@@ -115,9 +118,11 @@ pub struct ManagementQuery {
 }
 impl ManagementQuery {
     pub fn valid(&self) -> bool {
-        self.group
-            .as_ref()
-            .is_none_or(|s| ["model", "day", "week", "month", "session"].contains(&s.as_str()))
+        (self.catalogue_session.is_none() || self.group.is_none())
+            && self
+                .group
+                .as_ref()
+                .is_none_or(|s| ["model", "day", "week", "month", "session"].contains(&s.as_str()))
             && self.from.unwrap_or(0) <= self.to.unwrap_or(8_640_000_000_000_000)
             && self.to.unwrap_or(0) <= 8_640_000_000_000_000
             && self.model.as_ref().is_none_or(|s| s.len() <= 300)
@@ -127,6 +132,8 @@ impl ManagementQuery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSetting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<EffectiveModel>,
     pub harness: Harness,
     pub model: String,
     pub hidden: bool,
@@ -138,6 +145,44 @@ pub struct ModelSetting {
     pub multiplier: f64,
     pub context_state: Option<String>,
     pub context_error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSource {
+    User,
+    Catalogue,
+    Unknown,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EffectiveModel {
+    pub price: Option<Price>,
+    pub price_source: SettingSource,
+    pub context_source: SettingSource,
+}
+impl ModelSetting {
+    pub fn effective_price(&self) -> Option<&Price> {
+        self.price.as_ref().or(self.default_price.as_ref())
+    }
+    pub fn effective_values(&self) -> EffectiveModel {
+        use SettingSource::*;
+        EffectiveModel {
+            price: self.effective_price().cloned(),
+            price_source: if self.price.is_some() {
+                User
+            } else if self.default_price.is_some() {
+                Catalogue
+            } else {
+                Unknown
+            },
+            context_source: if self.context_override.is_some() {
+                User
+            } else if self.context_window.is_some() {
+                Catalogue
+            } else {
+                Unknown
+            },
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +221,8 @@ pub struct ProviderModel {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderModels {
+    #[serde(default)]
+    pub candidates: Vec<ProviderModel>,
     pub models: Vec<ProviderModel>,
     #[serde(default, rename = "contextAck")]
     pub context_ack: Option<ContextProjection>,
@@ -214,4 +261,67 @@ pub struct ContextIntent {
 pub struct ContextSnapshot {
     pub revision: u64,
     pub pending: Vec<ContextIntent>,
+}
+
+pub(crate) fn model_key(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+#[derive(Clone, Copy)]
+pub(crate) struct Candidate<'a> {
+    pub id: &'a str,
+    pub price: Option<&'a Price>,
+    pub context: Option<u64>,
+}
+pub(crate) fn catalogue_defaults<'a>(
+    models: impl Iterator<Item = Candidate<'a>>,
+) -> HashMap<String, (Option<Price>, Option<u64>)> {
+    let mut groups: HashMap<String, Vec<Candidate>> = HashMap::new();
+    for model in models {
+        groups.entry(model_key(model.id)).or_default().push(model);
+    }
+    groups
+        .into_iter()
+        .map(|(key, mut candidates)| {
+            let priority = |m: &Candidate| {
+                [
+                    "openai",
+                    "anthropic",
+                    "google",
+                    "mistral",
+                    "xai",
+                    "deepseek",
+                    "openai-codex",
+                    "groq",
+                ]
+                .iter()
+                .position(|p| *p == m.id.split('/').next().unwrap_or(""))
+                .unwrap_or(100)
+            };
+            candidates.sort_by_key(|m| (priority(m), m.id));
+            let price = candidates
+                .iter()
+                .filter(|m| priority(m) < 100)
+                .find_map(|m| m.price)
+                .or_else(|| {
+                    candidates.iter().find_map(|m| {
+                        m.price.filter(|p| {
+                            [p.input, p.output, p.cache_read, p.cache_write]
+                                .iter()
+                                .any(|v| *v > 0.0)
+                        })
+                    })
+                })
+                .or_else(|| candidates.iter().find_map(|m| m.price))
+                .cloned();
+            let context = candidates.iter().find_map(|m| m.context);
+            (key, (price, context))
+        })
+        .collect()
 }

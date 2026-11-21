@@ -474,3 +474,21 @@ fn stop_and_explicit_worker_release_have_distinct_domain_intents() {
         );
     }
 }
+
+#[test]
+fn ipc_command_policy_matches_the_desktop_contract() {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        command: ClientCommand,
+        pool: usize,
+        durable: bool,
+    }
+    let rows: Vec<Row> = serde_json::from_str(include_str!(
+        "../../../../../test/fixtures/rewrite/ipc-command-policy.json"
+    ))
+    .unwrap();
+    for row in rows {
+        assert_eq!(row.command.pool(), row.pool, "{:?}", row.command);
+        assert_eq!(row.command.pool() < QUERY_POOL, row.durable);
+    }
+}

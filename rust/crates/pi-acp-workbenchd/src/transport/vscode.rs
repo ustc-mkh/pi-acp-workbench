@@ -206,7 +206,17 @@ impl ClientCommand {
             | Self::CancelFork { .. }
             | Self::Answer { .. }
             | Self::Remove { .. } => 1,
-            _ => 0,
+            Self::Create { .. }
+            | Self::Load { .. }
+            | Self::Prompt { .. }
+            | Self::Fork { .. }
+            | Self::Discover { .. }
+            | Self::SetModel { .. }
+            | Self::SetMode { .. }
+            | Self::SetOption { .. }
+            | Self::Manage { .. }
+            | Self::PrepareHistoryClear { .. }
+            | Self::ClearHistoryBatch { .. } => 0,
         }
     }
     fn query(&self) -> Option<QueryCommand> {

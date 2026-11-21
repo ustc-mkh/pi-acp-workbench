@@ -87,6 +87,7 @@ try {
             WORKBENCH_CONTRACT_NATIVE_STATE: join(root, 'native'),
             WORKBENCH_CONTRACT_TRACE: join(root, 'trace'),
             WORKBENCH_CONTRACT_FORK_GATE: join(root, 'fork-gate'),
+            WORKBENCH_CONTRACT_EXTRA_MODEL: join(root, 'extra-model'),
           },
         },
       },
@@ -526,8 +527,8 @@ try {
   assert.equal(controller.snapshot.operations.length, beforeModelPage);
   const beforeRefresh = managementReplies;
   await page.getByRole('button', { name: '刷新模型配置', exact: true }).click();
-  await wait(() => managementReplies > beforeRefresh, 'S6 manual profile metadata refresh');
-  assert.equal(controller.snapshot.operations.length, beforeModelPage);
+  await wait(() => managementReplies > beforeRefresh, 'S6 manual session model refresh');
+  assert.equal(controller.snapshot.operations.length, beforeModelPage + 1);
   const modelCard = page
     .locator('#management [data-model]')
     .filter({ has: page.locator('h3', { hasText: 'Other' }) });
@@ -545,7 +546,6 @@ try {
   await modelCard
     .getByRole('checkbox', { name: 'Visible in model selector', exact: true })
     .uncheck();
-  await modelCard.getByRole('button', { name: '保存模型设置', exact: true }).click();
   await wait(
     () =>
       controller.snapshot.operations.filter(
@@ -556,8 +556,43 @@ try {
   await page.waitForFunction(
     () => !document.querySelector('select[aria-label="model"] option[value="other"]'),
   );
+  assert.equal(
+    await modelCard.getByLabel('other price multiplier', { exact: true }).inputValue(),
+    '0.5',
+  );
+  const beforeSave = managementReplies;
+  await modelCard.getByRole('button', { name: '保存模型设置', exact: true }).click();
+  await wait(() => managementReplies > beforeSave, 'S6 price and context saved');
   await page.screenshot({ path: join(artifacts, 'model-defaults-multiplier.png') });
   await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await writeFile(join(root, 'extra-model'), '');
+  await page.getByRole('button', { name: '模型设置', exact: true }).first().click();
+  const newModel = page.locator('[data-model="Pi:openai/new-model"]');
+  await newModel.locator('h3').waitFor({ state: 'attached' });
+  await page.locator('#management details[data-provider="openai"] > summary').click();
+  assert.equal(
+    await page.locator('select[aria-label="model"] option[value="openai/new-model"]').count(),
+    0,
+  );
+  const visibility = newModel.getByRole('checkbox', {
+    name: 'Visible in model selector',
+    exact: true,
+  });
+  const beforeHide = managementReplies;
+  await visibility.uncheck();
+  await wait(() => managementReplies > beforeHide, 'S6 new model hidden preference saved');
+  await visibility.check();
+  await page.waitForFunction(
+    () => !!document.querySelector('select[aria-label="model"] option[value="openai/new-model"]'),
+  );
+  await page.getByRole('button', { name: '返回对话', exact: true }).click();
+  await page.locator('.model-controls-trigger').click();
+  await page.locator('.model-picker-trigger').click();
+  await page
+    .locator('.model-picker-options')
+    .getByRole('button', { name: 'OpenAI New Model', exact: true })
+    .waitFor();
+  await page.keyboard.press('Escape');
   await prompt('usage-complete');
   await wait(() => controller.snapshot.view?.view?.status === 'Idle', 'S6 usage completion');
   await page.getByRole('button', { name: '用量统计', exact: true }).first().click();

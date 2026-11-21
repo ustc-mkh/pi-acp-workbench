@@ -195,9 +195,7 @@ pub fn undo_selected(
     }
     let mut report = UndoReport { files: vec![] };
     for file in &diff.files {
-        let mut single = diff.clone();
-        single.files = vec![file.clone()];
-        match undo(root, &single, check_only) {
+        match undo_inner(root, std::slice::from_ref(file), check_only, &mut |_| {}) {
             Ok(result) if !check_only => report.files.extend(result.files),
             Ok(_) => report.files.push(UndoFileResult {
                 path: file.path.clone(),
@@ -214,28 +212,28 @@ pub fn undo_selected(
     Ok(report)
 }
 pub fn undo(root: &Path, diff: &TurnDiff, check_only: bool) -> Result<UndoReport, String> {
-    undo_inner(root, diff, check_only, &mut |_| {})
+    if diff.status != DiffStatus::Complete {
+        return Err("Complete, nonempty workspace snapshot required".into());
+    }
+    undo_inner(root, &diff.files, check_only, &mut |_| {})
 }
 fn undo_inner(
     root: &Path,
-    diff: &TurnDiff,
+    files: &[review::FileDiff],
     check_only: bool,
     before_publish: &mut dyn FnMut(usize),
 ) -> Result<UndoReport, String> {
     if !check_only {
-        undo(root, diff, true)?;
+        undo_inner(root, files, true, before_publish)?;
     }
-    if diff.status != DiffStatus::Complete
-        || diff.files.is_empty()
-        || diff.files.len() > review::UNDO_FILES_MAX
-    {
+    if files.is_empty() || files.len() > review::UNDO_FILES_MAX {
         return Err("Complete, nonempty workspace snapshot required".into());
     }
     let root = review::open_root(root).map_err(|e| e.to_string())?;
     let mut seen = HashSet::new();
     let mut bytes = 0usize;
     let mut path_bytes = 0usize;
-    for file in &diff.files {
+    for file in files {
         if !review::safe_path(&file.path) || !seen.insert(&file.path) {
             return Err(format!("{}: unsafe or duplicate path", file.path));
         }
@@ -258,7 +256,10 @@ fn undo_inner(
             || after.contains('\0')
             || file.omitted.is_some()
             || file.status == FileStatus::Added
-                && (!before.is_empty() || file.before_hash.is_some() || file.old_mode.is_some())
+                && (!file.added_path_verified
+                    || !before.is_empty()
+                    || file.before_hash.is_some()
+                    || file.old_mode.is_some())
             || file.status == FileStatus::Deleted
                 && (!after.is_empty() || file.after_hash.is_some() || file.new_mode.is_some())
             || file.status != FileStatus::Added
@@ -274,7 +275,7 @@ fn undo_inner(
         }
     }
     let mut targets = Vec::new();
-    for file in &diff.files {
+    for file in files {
         let parts: Vec<_> = file.path.split('/').collect();
         let mut parent = root.try_clone().map_err(|e| e.to_string())?;
         let mut absent = false;
@@ -501,7 +502,7 @@ mod tests {
             fs::write(root.join(name), "after").unwrap();
         }
         let diff = before.diff(&Snapshot::capture(&root).unwrap());
-        let report = undo_inner(&root, &diff, false, &mut |index| {
+        let report = undo_inner(&root, &diff.files, false, &mut |index| {
             if index == 1 {
                 fs::write(root.join("b"), "external edit").unwrap();
             }

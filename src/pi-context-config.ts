@@ -10,11 +10,8 @@ import {
 import { validProjection, type ContextProjection } from './pi-context-projection';
 const applied = new WeakMap<PiProcess, ContextProjection>();
 export const getPiContextAck = (proc: PiProcess) => applied.get(proc);
-const defaults = new WeakMap<
-  PiProcess,
-  ReturnType<typeof import('./pi-model-defaults').piModelDefaults>
->();
-export const getPiModelDefaults = (proc: PiProcess) => defaults.get(proc);
+const defaults = new WeakMap<PiProcess, import('./pi-model-defaults').PiModelMetadata>();
+export const getPiModelMetadata = (proc: PiProcess) => defaults.get(proc);
 /** Never send an unregistered internal command to the model. */
 export async function refreshPiModels(
   proc: PiProcess,
@@ -97,12 +94,15 @@ export async function refreshPiModels(
         e.customType === MODEL_DEFAULTS &&
         (e.data as { requestId?: string })?.requestId === requestId,
     );
-    const models = (snapshot?.data as { models?: unknown[] } | undefined)?.models;
-    if (Array.isArray(models) && models.length <= 500)
-      defaults.set(
-        proc,
-        models as ReturnType<typeof import('./pi-model-defaults').piModelDefaults>,
-      );
+    const metadata = snapshot?.data as import('./pi-model-defaults').PiModelMetadata | undefined;
+    if (metadata && Array.isArray(metadata.models) && metadata.models.length <= 500) {
+      if (
+        metadata.candidates !== undefined &&
+        (!Array.isArray(metadata.candidates) || metadata.candidates.length > 20000)
+      )
+        throw new Error('模型目录超出上限。');
+      defaults.set(proc, { models: metadata.models, candidates: metadata.candidates });
+    }
   }
   return true;
 }

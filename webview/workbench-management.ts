@@ -1,4 +1,3 @@
-import { modelDefaultKey } from '../src/workbench-model-defaults';
 import { uiLabel } from './workbench-labels';
 import {
   type ManagementData,
@@ -33,11 +32,13 @@ export class ManagementPanel {
   private sessions: SessionSummary[] = [];
   private request = 0;
   private pending = 0;
+  private managementError?: { operation: string; message: string };
+  private readFailed = false;
   private mode: 'models' | 'statistics' = 'models';
   private filter: ManagementQuery = {};
-  private seen = new Set<string>();
+  private seen = new Map<string, UiOperation['status']>();
   private search = '';
-  private modelDrafts = new Map<string, { value: string; checked: boolean }[]>();
+  private modelDrafts = new Map<string, string[]>();
   private submittedDrafts = new Map<
     string,
     { snapshot: string; action: Extract<ManagementAction, { action: 'model_config' }> }
@@ -64,7 +65,9 @@ export class ManagementPanel {
     heading.append(
       el('h2', '模型设置'),
       button('刷新模型配置', () => {
-        this.load(undefined, true);
+        if (this.mode === 'models' && this.view?.harness === 'Pi')
+          this.mutate({ action: 'refresh_models' });
+        else this.load(undefined, true);
       }),
       back,
     );
@@ -72,31 +75,57 @@ export class ManagementPanel {
     this.root.append(el('summary', '模型与用量'), heading, this.status, this.body);
     this.root.addEventListener('toggle', () => {
       this.changed();
-      if (this.root.open && !this.data && !this.pending) this.load();
+      if (this.root.open && !this.data && !this.pending && !this.readFailed) this.load();
     });
   }
-  setView(view: SessionView | undefined, sessions: SessionSummary[], operations: UiOperation[]) {
+  setView(
+    view: SessionView | undefined,
+    sessions: SessionSummary[],
+    operations: UiOperation[],
+    error?: string,
+  ) {
     const switched = this.view?.id !== view?.id;
+    const previousModels = this.view?.catalogue.models;
     if (switched) {
       this.modelDrafts.clear();
       this.submittedDrafts.clear();
+      this.readFailed = false;
+      this.managementError = undefined;
     }
     this.view = view;
     this.sessions = sessions;
     let updated = false;
     for (const op of operations)
       if (
-        ['manage', 'discover'].includes(op.method) &&
-        op.status === 'completed' &&
-        !this.seen.has(op.operation)
+        ((op.method === 'discover' && op.status === 'completed') ||
+          (op.method === 'manage' && op.status !== 'pending')) &&
+        this.seen.get(op.operation) !== op.status
       ) {
-        this.seen.add(op.operation);
-        while (this.seen.size > 64) this.seen.delete(this.seen.values().next().value!);
+        this.seen.set(op.operation, op.status);
+        while (this.seen.size > 64) this.seen.delete(this.seen.keys().next().value!);
+        if (
+          op.method === 'manage' &&
+          op.session === view?.id &&
+          (op.status === 'failed' || op.status === 'uncertain')
+        )
+          this.managementError = {
+            operation: op.operation,
+            message: op.error ?? error ?? '模型设置操作未确认。',
+          };
+        else if (this.managementError?.operation === op.operation) this.managementError = undefined;
         updated = true;
       }
-    if (updated || (switched && this.root.open)) this.load();
+    if (updated || (switched && (this.root.open || view?.catalogue.models.length))) this.load();
+    else if (
+      this.root.open &&
+      this.mode === 'models' &&
+      this.data &&
+      JSON.stringify(previousModels) !== JSON.stringify(view?.catalogue.models)
+    )
+      this.load();
     // Read-only account preferences, never discovery or native configuration.
-    if (!this.data && !this.pending && view?.catalogue.models.length) this.load();
+    if (!this.data && !this.pending && !this.readFailed && view?.catalogue.models.length)
+      this.load();
   }
   private load(cursor?: string, refreshModels = false, page = 0) {
     this.pending = ++this.request;
@@ -110,7 +139,11 @@ export class ManagementPanel {
     this.send({
       type: 'read_management',
       request_id: this.pending,
-      query: { ...this.filter, cursor },
+      query: {
+        ...this.filter,
+        cursor,
+        ...(this.mode === 'models' && this.view ? { catalogue_session: this.view.id } : {}),
+      },
       ...(refreshModels ? { refresh_models: true } : {}),
     });
   }
@@ -122,6 +155,7 @@ export class ManagementPanel {
       HTMLInputElement | HTMLSelectElement | HTMLButtonElement
     >('input,select,button'))
       input.disabled = false;
+    this.readFailed = m.type === 'management_error';
     if (m.type === 'management_error') {
       this.render();
       this.status.textContent = '暂时无法读取设置与用量，请手动刷新。';
@@ -164,6 +198,7 @@ export class ManagementPanel {
         }
       }
       this.status.textContent =
+        this.managementError?.message ??
         m.warning ??
         (this.mode === 'models'
           ? ''
@@ -202,6 +237,7 @@ export class ManagementPanel {
       this.status.textContent = '请先选择会话';
       return;
     }
+    this.managementError = undefined;
     if (action.action === 'model_config') {
       const key = `${this.view.id}:${action.model}`;
       this.submittedDrafts.set(key, {
@@ -334,22 +370,33 @@ export class ManagementPanel {
           card.append(modelHeading);
           const visible = el('input');
           visible.type = 'checkbox';
-          visible.checked = !saved?.hidden;
+          visible.checked = this.visible(model, harness);
+          visible.disabled = !this.view;
+          visible.onchange = () =>
+            this.mutate({
+              action: 'visibility',
+              models: [model],
+              hidden: !visible.checked,
+              reset: false,
+            });
           const visibility = field('显示', visible);
           visibility.className = 'model-visibility';
           visible.setAttribute('aria-label', 'Visible in model selector');
           modelHeading.append(visibility);
+          if (this.view && !this.view.catalogue.models.some((choice) => choice.id === model)) {
+            card.append(el('small', '当前会话的模型列表尚未提供此模型。'));
+          }
           const grid = el('div');
           grid.className = 'price-grid';
           card.append(grid);
-          const matched = this.data?.models.find(
-            (m) => m.harness === 'Pi' && modelDefaultKey(m.model) === modelDefaultKey(model),
-          );
-          const defaultPrice = saved?.default_price ?? matched?.default_price;
-          const price = saved?.price ?? defaultPrice;
+          const defaultPrice = saved?.default_price;
+          const price = saved?.effective ? saved.effective.price : (saved?.price ?? defaultPrice);
+          const source =
+            saved?.effective?.price_source ??
+            (saved?.price ? 'user' : price ? 'catalogue' : 'unknown');
           const priceNote = el(
             'small',
-            saved?.price ? '自定义价格' : price ? '默认价格' : '暂无价格',
+            { user: '自定义价格', catalogue: '默认价格', unknown: '暂无价格' }[source],
           );
           priceNote.className = 'stats-caption';
           card.title = model;
@@ -381,12 +428,8 @@ export class ManagementPanel {
           context.min = '0.001';
           context.max = '100000';
           context.step = 'any';
-          const defaultContext =
-            saved?.default_context_window ??
-            matched?.default_context_window ??
-            matched?.context_window;
-          const effectiveContext =
-            saved?.context_override ?? saved?.context_window ?? defaultContext;
+          const defaultContext = saved?.default_context_window;
+          const effectiveContext = saved?.context_window;
           context.value = effectiveContext ? (effectiveContext / 1000).toString() : '';
           context.placeholder = defaultContext
             ? `默认 ${defaultContext / 1000}`
@@ -435,7 +478,7 @@ export class ManagementPanel {
                 return;
               }
               const factor = Number(multiplier.value);
-              const tokens = context.value ? Number(context.value) * 1000 : null;
+              const tokens = context.value ? Math.round(context.valueAsNumber * 1000) : null;
               if (
                 multiplier.value === '' ||
                 !Number.isFinite(factor) ||
@@ -447,7 +490,7 @@ export class ManagementPanel {
               }
               if (
                 context.value &&
-                (!Number.isSafeInteger(tokens) || tokens! <= 0 || tokens! > 100000000)
+                (tokens! / 1000 !== context.valueAsNumber || tokens! <= 0 || tokens! > 100000000)
               ) {
                 this.status.textContent = '上下文必须是正整数 Token 数量';
                 return;
@@ -494,19 +537,14 @@ export class ManagementPanel {
           );
           modelsBody.append(card);
           const draftKey = `${this.view?.id ?? 'profile'}:${model}`;
-          const fields = [...card.querySelectorAll<HTMLInputElement>('input')];
+          const fields = [...inputs, context, multiplier];
           const draft = this.modelDrafts.get(draftKey);
-          if (draft)
-            fields.forEach((input, i) => {
-              if (draft[i]) {
-                input.value = draft[i].value;
-                input.checked = draft[i].checked;
-              }
-            });
-          card.addEventListener('input', () => {
+          if (draft) fields.forEach((input, i) => (input.value = draft[i]));
+          card.addEventListener('input', (event) => {
+            if (event.target === visible) return;
             this.modelDrafts.set(
               draftKey,
-              fields.map((input) => ({ value: input.value, checked: input.checked })),
+              fields.map((input) => input.value),
             );
             while (this.modelDrafts.size > 100)
               this.modelDrafts.delete(this.modelDrafts.keys().next().value!);
@@ -525,7 +563,7 @@ export class ManagementPanel {
     this.body.prepend(
       el(
         'p',
-        '单价：USD / 百万 token；费用按单价 × 价格倍率估算（默认 1）。价格和 context 默认取自 Pi，同型号跨渠道共用默认值；用户设置优先。统一点击保存；context 留空恢复默认。其他 Agent 暂不支持修改 context。',
+        '显示开关自动保存。价格、倍率和 context 通过保存按钮提交。单价为 USD / 百万 token，费用按单价 × 倍率估算。价格和 context 默认取自 Pi，同型号跨渠道共用默认值。context 留空恢复默认，其他 Agent 暂不支持修改 context。',
       ),
     );
     const count = el('p', `${models.length} / ${models.length} 个模型`);
@@ -595,41 +633,38 @@ export class ManagementPanel {
     session.value = this.filter.session ?? '';
     const filters = el('div');
     filters.className = 'stats-filters';
-    filters.append(
-      field('分组', group),
-      field('开始日期（UTC）', from),
-      field('结束日期（UTC，含当日）', to),
-      model,
-      session,
-      button('应用筛选', () => {
-        this.filter = {
-          group: group.value as ManagementQuery['group'],
-          from: from.value ? Date.parse(from.value) : null,
-          to: to.value ? Date.parse(to.value) + 86399999 : null,
-          model: model.value || null,
-          session: session.value ? (session.value as SessionView['id']) : null,
-        };
-        this.load();
-      }),
-    );
+    const applyFilters = () => {
+      this.filter = {
+        group: group.value as ManagementQuery['group'],
+        from: from.value ? Date.parse(from.value) : null,
+        to: to.value ? Date.parse(to.value) + 86399999 : null,
+        model: model.value || null,
+        session: session.value ? (session.value as SessionView['id']) : null,
+      };
+      this.load();
+    };
     const advanced = el('details');
     advanced.className = 'additional-settings';
     advanced.dataset.mode = 'statistics';
     advanced.open = this.statisticsFiltersOpen;
-    advanced.append(el('summary', '更多筛选'), group, model, session);
-    const apply = filters.querySelector<HTMLButtonElement>('button')!;
-    advanced.append(apply);
-    filters.replaceChildren(
+    advanced.append(
+      el('summary', '更多筛选'),
+      group,
+      model,
+      session,
+      button('应用筛选', applyFilters),
+    );
+    filters.append(
       from,
       el('span', '至'),
       to,
       button('全部日期', () => {
         from.value = '';
         to.value = '';
-        apply.click();
+        applyFilters();
       }),
     );
-    from.onchange = to.onchange = () => apply.click();
+    from.onchange = to.onchange = applyFilters;
     this.body.append(filters);
     const totals = el('div');
     totals.className = 'stats-totals';
@@ -736,10 +771,6 @@ export class ManagementPanel {
     ])
       head.append(el('th', name));
     table.append(head);
-    const max = Math.max(
-      0.000001,
-      ...rows.filter((r) => r.key !== 'total').map((r) => r.estimated_usd),
-    );
     for (const r of rows) {
       const tr = el('tr');
       tr.title = `调用 ${r.calls} 次；用量缺失 ${r.missing}；缓存缺失 ${r.cache_missing}；未定价 ${r.unpriced}`;
@@ -774,14 +805,6 @@ export class ManagementPanel {
           '$' + r.estimated_usd.toFixed(4),
         ].map((v) => el('td', String(v))),
       );
-      if (['day', 'week', 'month'].includes(this.filter.group ?? '') && r.key !== 'total') {
-        const bar = el('meter');
-        bar.min = 0;
-        bar.max = max;
-        bar.value = r.estimated_usd;
-        bar.setAttribute('aria-label', `${r.key} estimated USD`);
-        key.append(bar);
-      }
       table.append(tr);
     }
     const tableWrap = el('div');

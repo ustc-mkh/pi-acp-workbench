@@ -360,6 +360,7 @@ export const managementAction = tagged('action', {
   }),
 });
 export const managementQuery = object({
+  catalogue_session: optional(sessionId),
   group: optional(nullable(oneOf('model', 'day', 'week', 'month', 'session'))),
   from: optional(nullable(uint)),
   to: optional(nullable(uint)),
@@ -388,6 +389,13 @@ export const managementData = object({
       hidden: boolean,
       price: nullable(modelPrice),
       default_price: nullable(modelPrice),
+      effective: optional(
+        object({
+          price: nullable(modelPrice),
+          price_source: oneOf('user', 'catalogue', 'unknown'),
+          context_source: oneOf('user', 'catalogue', 'unknown'),
+        }),
+      ),
       context_window: nullable(uint),
       default_context_window: optional(nullable(uint)),
       context_override: optional(nullable(uint)),
@@ -781,28 +789,53 @@ const mutationCommand = tagged('method', {
   remove: object({ method: literal('remove'), ...session }),
 });
 const detachCommand = object({ method: literal('detach'), ...session });
-const queryMethods = new Set([
-  'operation',
-  'list',
-  'inspect',
-  'history',
-  'history_turns',
-  'content_batch',
-  'tools',
-  'content',
-  'attach',
-  'image',
-  'management',
-  'search',
-  'validate_undo',
-  'turn_diff',
-  'turn_diff_content',
-]);
+type CommandMethod = QueryCommand['method'] | Infer<typeof mutationCommand>['method'] | 'detach';
+export const commandPolicy = {
+  answer: 'control',
+  attach: 'query',
+  cancel: 'control',
+  cancel_fork: 'control',
+  clear_history_batch: 'mutation',
+  content: 'query',
+  content_batch: 'query',
+  create: 'mutation',
+  detach: 'query',
+  discover: 'mutation',
+  fork: 'mutation',
+  history: 'query',
+  history_turns: 'history',
+  image: 'query',
+  inspect: 'query',
+  list: 'query',
+  load: 'mutation',
+  manage: 'mutation',
+  management: 'query',
+  operation: 'query',
+  prepare_history_clear: 'mutation',
+  prompt: 'mutation',
+  remove: 'control',
+  search: 'query',
+  set_mode: 'mutation',
+  set_model: 'mutation',
+  set_option: 'mutation',
+  tools: 'query',
+  turn_diff: 'query',
+  turn_diff_content: 'query',
+  undo_turn: 'undo',
+  validate_undo: 'query',
+} as const satisfies Record<CommandMethod, 'mutation' | 'control' | 'undo' | 'query' | 'history'>;
+function policyFor(method: string) {
+  return Object.hasOwn(commandPolicy, method) ? commandPolicy[method as CommandMethod] : undefined;
+}
+export function usesReservedWorkflow(method: string) {
+  return policyFor(method) === 'control';
+}
 export const clientCommand = schema(
   (value): QueryCommand | Infer<typeof mutationCommand> | Infer<typeof detachCommand> => {
     if (!value || typeof value !== 'object' || !('method' in value)) invalid();
-    if (queryMethods.has(String(value.method))) return queryCommand.parse(value);
     if (value.method === 'detach') return detachCommand.parse(value);
+    const policy = policyFor(String(value.method));
+    if (policy === 'query' || policy === 'history') return queryCommand.parse(value);
     return mutationCommand.parse(value);
   },
 );
@@ -876,10 +909,8 @@ type ExistingCommandResult<C extends ClientCommand> = C extends { method: 'valid
                             ? SessionId
                             : CommandReceipt;
 export function commandPool(command: ClientCommand): 0 | 1 | 2 | 3 {
-  if (command.method === 'history_turns') return 3;
-  if (queryMethods.has(command.method) || command.method === 'detach') return 2;
-  if (['cancel', 'cancel_fork', 'answer', 'remove', 'undo_turn'].includes(command.method)) return 1;
-  return 0;
+  const pools = { mutation: 0, control: 1, undo: 1, query: 2, history: 3 } as const;
+  return pools[commandPolicy[command.method]];
 }
 export function durableCommand(command: ClientCommand) {
   return commandPool(command) < 2;

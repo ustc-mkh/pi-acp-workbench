@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) enum ControlPhase {
     Startup { resuming: bool },
     Configure { preferences_applied: bool },
+    RefreshCatalogue,
 }
 
 #[derive(Default)]
@@ -54,6 +55,9 @@ impl ControlUpdates {
             ControlPhase::Configure {
                 preferences_applied,
             } => (false, false, preferences_applied),
+            // The refresh RPC returns metadata only. The live notification is
+            // authoritative for the selector, even after typed startup options.
+            ControlPhase::RefreshCatalogue => (false, false, false),
         };
         if self.session.as_ref().is_some_and(|id| id != native) {
             return Err(DomainError::Protocol(

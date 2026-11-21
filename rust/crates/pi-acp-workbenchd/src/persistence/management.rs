@@ -179,7 +179,7 @@ pub(super) fn models(
     session: Option<&SessionId>,
     response: &ProviderModels,
 ) -> Result<(), StoreError> {
-    if response.models.len() > 500 {
+    if response.models.len() > 500 || response.candidates.len() > 20000 {
         return Err(StoreError::Invalid("model catalogue exceeds budget"));
     }
     let tx = db.transaction()?;
@@ -192,7 +192,7 @@ pub(super) fn models(
         "UPDATE model_settings SET default_price=NULL,context_window=NULL WHERE harness=?1",
         [harness(&provider)],
     )?;
-    for m in &response.models {
+    for m in response.models.iter().chain(&response.candidates) {
         if m.model.is_empty()
             || m.model.len() > 300
             || m.price.as_ref().is_some_and(|p| !p.valid())
@@ -200,7 +200,17 @@ pub(super) fn models(
         {
             return Err(StoreError::Invalid("invalid provider model"));
         }
-        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![harness(&provider),m.model,m.price.as_ref().map(encode).transpose()?,m.context_window.map(|n|n as i64)])?;
+    }
+    let defaults = catalogue_defaults(response.candidates.iter().map(|m| Candidate {
+        id: &m.model,
+        price: m.price.as_ref(),
+        context: m.context_window,
+    }));
+    for m in &response.models {
+        let inherited = defaults.get(&model_key(&m.model));
+        let price = inherited.and_then(|v| v.0.as_ref()).or(m.price.as_ref());
+        let context = inherited.and_then(|v| v.1).or(m.context_window);
+        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![harness(&provider),m.model,price.map(encode).transpose()?,context.map(|n|n as i64)])?;
     }
     let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
     if count > 1500 {
@@ -298,56 +308,6 @@ struct UsageCursor {
     cost: f64,
     number: u64,
 }
-fn model_key(model: &str) -> String {
-    model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-fn matched_defaults(models: &[ModelSetting], model: &str) -> (Option<Price>, Option<u64>) {
-    let key = model_key(model);
-    let mut candidates: Vec<_> = models
-        .iter()
-        .filter(|m| m.harness == crate::domain::session::Harness::Pi && model_key(&m.model) == key)
-        .collect();
-    let priority = |m: &&ModelSetting| {
-        [
-            "openai",
-            "anthropic",
-            "google",
-            "mistral",
-            "xai",
-            "deepseek",
-            "openai-codex",
-            "groq",
-        ]
-        .iter()
-        .position(|p| *p == m.model.split('/').next().unwrap_or(""))
-        .unwrap_or(100)
-    };
-    candidates.sort_by_key(|m| (priority(m), &m.model));
-    let price = candidates
-        .iter()
-        .filter(|m| priority(m) < 100)
-        .find_map(|m| m.default_price.as_ref())
-        .or_else(|| {
-            candidates.iter().find_map(|m| {
-                m.default_price.as_ref().filter(|p| {
-                    [p.input, p.output, p.cache_read, p.cache_write]
-                        .iter()
-                        .any(|n| *n > 0.0)
-                })
-            })
-        })
-        .or_else(|| candidates.iter().find_map(|m| m.default_price.as_ref()))
-        .cloned();
-    let context = candidates.iter().find_map(|m| m.default_context_window);
-    (price, context)
-}
 pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<ManagementData, StoreError> {
     if !q.valid() {
         return Err(StoreError::Invalid("invalid statistics filter"));
@@ -358,7 +318,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let models = {
+    let mut models = {
         let mut statement=tx.prepare("SELECT m.harness,m.model,m.hidden,m.price,m.default_price,m.context_window,m.context_override,m.price_multiplier,c.state,c.error FROM model_settings m LEFT JOIN model_context_intents c ON m.harness='Pi' AND c.model=m.model ORDER BY m.harness,m.model LIMIT 1500")?;
         let rows = statement.query_map([], |r| {
             Ok((
@@ -379,6 +339,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             let (h, m, hidden, p, d, c, override_context, multiplier, context_state, context_error) =
                 row?;
             models.push(ModelSetting {
+                effective: None,
                 harness: serde_json::from_str(&format!("\"{h}\""))?,
                 model: m,
                 hidden,
@@ -394,13 +355,50 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
         }
         models
     };
-    let mut models = models;
-    let defaults = models.clone();
+    let defaults = catalogue_defaults(
+        models
+            .iter()
+            .filter(|m| m.harness == crate::domain::Harness::Pi)
+            .map(|m| Candidate {
+                id: &m.model,
+                price: m.default_price.as_ref(),
+                context: m.default_context_window,
+            }),
+    );
+    if let Some(session) = &q.catalogue_session {
+        let view = query::view(&tx, session)?;
+        models.retain(|m| m.harness == view.harness);
+        let known: std::collections::HashSet<_> = models.iter().map(|m| m.model.clone()).collect();
+        for choice in view.catalogue.models {
+            if !known.contains(choice.id.as_str()) {
+                models.push(ModelSetting {
+                    effective: None,
+                    harness: view.harness.clone(),
+                    model: choice.id.as_str().into(),
+                    hidden: false,
+                    price: None,
+                    default_price: None,
+                    context_window: None,
+                    default_context_window: None,
+                    context_override: None,
+                    multiplier: 1.0,
+                    context_state: None,
+                    context_error: None,
+                });
+            }
+        }
+    }
     for model in &mut models {
-        let (price, context) = matched_defaults(&defaults, &model.model);
+        let (price, context) = defaults
+            .get(&model_key(&model.model))
+            .cloned()
+            .unwrap_or_default();
         model.default_price = price.or(model.default_price.take());
         model.default_context_window = context.or(model.default_context_window);
         model.context_window = model.context_override.or(model.default_context_window);
+        if q.catalogue_session.is_some() {
+            model.effective = Some(model.effective_values());
+        }
     }
     let mut data = ManagementData {
         models,
@@ -424,14 +422,16 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             .map(|m| ResolvedPrice {
                 harness: harness(&m.harness).into(),
                 model: m.model.clone(),
-                price: m.price.clone().or(m.default_price.clone()),
+                price: m.effective_price().cloned(),
                 multiplier: m.multiplier,
             })
             .collect();
         let missing = tx.prepare("SELECT DISTINCT u.harness,u.model FROM usage_facts u LEFT JOIN model_settings m ON m.harness=u.harness AND m.model=u.model WHERE m.model IS NULL LIMIT 1500")?
             .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
         for (h, model) in missing {
-            let (price, _) = matched_defaults(&defaults, &model);
+            let price = defaults
+                .get(&model_key(&model))
+                .and_then(|(price, _)| price.clone());
             prices.push(ResolvedPrice {
                 harness: h,
                 model,

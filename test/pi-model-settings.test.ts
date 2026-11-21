@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { enhancePiAgent } from '../src/pi-enhancements';
-import { CONTEXT_APPLIED } from '../src/pi-context-mode';
+import { CONTEXT_APPLIED, CONTEXT_COMMAND, MODEL_DEFAULTS } from '../src/pi-context-mode';
 it('negotiated model refresh and explicit context use only the registered internal extension and preserve provider defaults', async () => {
   const prompts: string[] = [];
   const entries: unknown[] = [];
@@ -18,7 +18,7 @@ it('negotiated model refresh and explicit context use only the registered intern
     getAvailableThinkingLevels: async () => [],
     request: async (command: { type: string }) =>
       command.type === 'get_commands'
-        ? { success: true, data: { commands: [{ name: 'pi-acp-workbench-models' }] } }
+        ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
         : { success: true, data: { entries } },
     prompt: async (text: string) => {
       prompts.push(text);
@@ -38,12 +38,6 @@ it('negotiated model refresh and explicit context use only the registered intern
       }
     },
   };
-  // Use the actual registered command name from the existing trusted Pi extension.
-  const { CONTEXT_COMMAND } = await import('../src/pi-context-mode');
-  proc.request = async (command: { type: string }) =>
-    command.type === 'get_commands'
-      ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
-      : { success: true, data: { entries } };
   class Base {
     sessions = new Map([['native', { sessionId: 'native', proc }]]);
     conn = {
@@ -92,56 +86,78 @@ it('negotiated model refresh and explicit context use only the registered intern
   expect(model.contextWindow).toBe(200000);
 });
 
-it('reads profile metadata without consulting sessions or submitting a model task', async () => {
-  const { CONTEXT_COMMAND, MODEL_DEFAULTS } = await import('../src/pi-context-mode');
-  const entries: unknown[] = [];
-  const calls: unknown[] = [];
-  let disposed = false;
-  const models = [
-    {
-      model: 'vendor/model',
-      price: { input: 1, output: 2, cache_read: 0, cache_write: 0 },
-      contextWindow: 200000,
-    },
-  ];
-  const proc = {
-    child: { exitCode: 0, signalCode: null },
-    dispose: () => {
-      disposed = true;
-    },
-    getState: async () => ({ isStreaming: false, isCompacting: false }),
-    request: async ({ type }: { type: string }) =>
-      type === 'get_commands'
-        ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
-        : { success: true, data: { entries } },
-    prompt: async (text: string) => {
-      expect(text.startsWith(`/${CONTEXT_COMMAND} `)).toBe(true);
-      const input = JSON.parse(Buffer.from(text.split(' ')[1], 'base64').toString());
-      expect(input.action).toBe('refresh');
-      expect(input.includeDefaults).toBe(true);
-      expect(input.model).toBeUndefined();
-      entries.push({
-        type: 'custom',
-        customType: MODEL_DEFAULTS,
-        data: { requestId: input.requestId, models },
-      });
-    },
-  };
-  class Base {
-    get sessions(): never {
-      throw new Error('Profile refresh must not consult sessions');
+it.each([0, 501])(
+  'reads profile metadata with %i alias candidates without consulting sessions',
+  async (count) => {
+    const entries: unknown[] = [];
+    const calls: unknown[] = [];
+    let disposed = false;
+    const models = [
+      {
+        model: 'vendor/model',
+        price: { input: 1, output: 2, cache_read: 0, cache_write: 0 },
+        contextWindow: 200000,
+      },
+    ];
+    const candidates = Array.from({ length: count }, (_, i) => ({
+      ...models[0],
+      model: `vendor${i}/model`,
+    }));
+    const proc = {
+      child: { exitCode: 0, signalCode: null },
+      dispose: () => {
+        disposed = true;
+      },
+      getState: async () => ({ isStreaming: false, isCompacting: false }),
+      request: async ({ type }: { type: string }) =>
+        type === 'get_commands'
+          ? { success: true, data: { commands: [{ name: CONTEXT_COMMAND }] } }
+          : { success: true, data: { entries } },
+      prompt: async (text: string) => {
+        expect(text.startsWith(`/${CONTEXT_COMMAND} `)).toBe(true);
+        const input = JSON.parse(Buffer.from(text.split(' ')[1], 'base64').toString());
+        expect(input.action).toBe('refresh');
+        expect(input.includeDefaults).toBe(true);
+        expect(input.model).toBeUndefined();
+        entries.push({
+          type: 'custom',
+          customType: MODEL_DEFAULTS,
+          data: { requestId: input.requestId, models, candidates: count ? candidates : undefined },
+        });
+      },
+    };
+    class Base {
+      get sessions(): never {
+        throw new Error('Profile refresh must not consult sessions');
+      }
     }
-  }
-  const Agent = enhancePiAgent(Base, {
-    spawn: async (options: unknown) => {
-      calls.push(options);
-      return proc;
-    },
-  });
-  expect(await new Agent().extMethod('_pi_workbench/profile_models', { sessionId: '' })).toEqual({
-    models,
-  });
-  expect(calls).toEqual([expect.objectContaining({ workbenchMetadata: true })]);
-  expect(calls[0]).not.toHaveProperty('sessionPath');
-  expect(disposed).toBe(true);
-});
+    const Agent = enhancePiAgent(Base, {
+      spawn: async (options: unknown) => {
+        calls.push(options);
+        return proc;
+      },
+    });
+    const agent = new Agent();
+    const result = await agent.extMethod('_pi_workbench/profile_models', { sessionId: '' });
+    if (count) {
+      expect(result).toMatchObject({
+        models,
+        candidates: candidates.slice(0, 500),
+        candidateCount: count,
+      });
+      if (!('candidateSnapshot' in result)) throw new Error('Missing page snapshot');
+      const params = { sessionId: '', snapshot: result.candidateSnapshot, cursor: 500 };
+      expect(await agent.extMethod('_pi_workbench/model_candidates', params)).toEqual({
+        models: candidates.slice(500),
+      });
+      await expect(
+        agent.extMethod('_pi_workbench/model_candidates', { ...params, snapshot: 'stale' }),
+      ).rejects.toThrow('cursor');
+    } else {
+      expect(result).toEqual({ models });
+    }
+    expect(calls).toEqual([expect.objectContaining({ workbenchMetadata: true })]);
+    expect(calls[0]).not.toHaveProperty('sessionPath');
+    expect(disposed).toBe(true);
+  },
+);

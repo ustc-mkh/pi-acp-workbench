@@ -36,4 +36,4 @@
 
 ## 实现
 
-`src/workbench-client.ts` 负责 IPC，`workbench-session.ts` 维护有界显示视图，`workbench-controller.ts` 处理工作流和授权。`webview/workbench-main.ts` 渲染页面；流式绘制按 80 ms 合并，使用稳定消息键复用 DOM。领域状态和历史以宿主为准，协议见 [IPC v3](workbench-ipc.md)。
+`src/workbench-client.ts` 负责 IPC，`workbench-session.ts` 维护有界显示视图，`workbench-controller.ts` 处理工作流和授权。`webview/workbench-main.ts` 组装页面并调度绘制，流式更新按 80 ms 合并。`webview/workbench-history-view.ts` 按稳定消息键复用历史节点。领域状态和历史以宿主为准，协议见 [IPC v3](workbench-ipc.md)。
