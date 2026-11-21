@@ -49,6 +49,27 @@ it('blocks a release whose Alt press happened outside the webview', () => {
   expect(b.forwarded).toEqual([]);
 });
 
+it('does not re-arm menu activation when held Alt repeats after focus returns', () => {
+  const b = setup();
+  b.key('keydown', 'Alt');
+  b.view.dispatchEvent(new b.view.Event('focus'));
+  expect(b.key('keydown', 'Alt', { repeat: true, altKey: true }).defaultPrevented).toBe(true);
+  expect(b.key('keyup', 'Alt').defaultPrevented).toBe(true);
+  expect(b.forwarded).toEqual(['keydown:Alt']);
+  b.key('keydown', 'Alt');
+  expect(b.key('keyup', 'Alt').defaultPrevented).toBe(false);
+});
+
+it('invalidates a held Alt on Tab or a visibility change even without a window blur', () => {
+  const b = setup();
+  b.key('keydown', 'Alt');
+  expect(b.key('keydown', 'Tab', { altKey: true }).defaultPrevented).toBe(false);
+  expect(b.key('keyup', 'Alt').defaultPrevented).toBe(true);
+  b.key('keydown', 'Alt');
+  b.view.document.dispatchEvent(new b.view.Event('visibilitychange'));
+  expect(b.key('keyup', 'Alt').defaultPrevented).toBe(true);
+});
+
 it('preserves deliberate Alt menu activation, shortcuts, and normal focus navigation', () => {
   const b = setup();
   b.key('keydown', 'Alt');

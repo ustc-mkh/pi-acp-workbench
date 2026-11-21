@@ -15,6 +15,10 @@
 
 消息支持 Markdown、代码、公式和 Mermaid。思考与工具调用可折叠，待办独立展示；会话列表高度可选 4/10/16 行，输入区高度可调整。外链由宿主确认后打开，页面不会自动读取消息中的文件路径或远程图片。终端引用仅作元数据展示，当前没有终端输出流。
 
+### Alt+Tab 切回时菜单栏获得焦点
+
+聊天页会拦截切回后收到的孤立 Alt 松键和重复按键。若松键直接到达 VS Code 主窗口，菜单栏由 VS Code 自己处理。在 Windows 或 Linux 使用自定义菜单栏时，可在用户设置中关闭 `window.customMenuBarAltFocus`，使单按 Alt 不再聚焦菜单栏。如果 `window.menuBarVisibility` 已设为 `toggle`，需同时改为 `classic` 或 `visible` 才能使用此设置。Alt 字母快捷键由独立的 `window.enableMenuBarMnemonics` 设置控制。
+
 ## 历史与会话
 
 打开会话显示最近 3 个完整回合，“加载更早消息”每次补充最多 20 轮并保持滚动位置。浏览历史不启动 provider；流式输出继续接收。归档正文进入可见区域后批量加载、校验并渲染，超大正文保留分片读取和导出入口。

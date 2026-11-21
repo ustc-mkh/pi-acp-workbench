@@ -130,6 +130,8 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
     await page.keyboard.down('Alt');
     await vscode.commands.executeCommand('piAcp.open');
     await frame.locator('#prompt').fill('');
+    // CDP marks a second keydown of the still-held key as auto-repeat.
+    await page.keyboard.down('Alt');
     await page.keyboard.up('Alt');
     await page.keyboard.type('fileedit', { delay: 100 });
     assert.equal(await frame.locator('#prompt').inputValue(), 'fileedit');

@@ -6,7 +6,15 @@ export function installAltReleaseGuard(view: Window = window) {
     altPressedHere = false;
   };
   const down = (event: KeyboardEvent) => {
-    if (event.key === 'Alt') altPressedHere = true;
+    if (event.key === 'Tab' && event.altKey) reset();
+    if (event.key !== 'Alt') return;
+    if (!event.repeat) {
+      altPressedHere = view.document.hasFocus() && !view.document.hidden;
+    } else if (!altPressedHere && !event.ctrlKey && !event.metaKey) {
+      // A held Alt can start repeating in the newly focused window.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
   };
   const up = (event: KeyboardEvent) => {
     if (event.key !== 'Alt') return;
@@ -21,9 +29,15 @@ export function installAltReleaseGuard(view: Window = window) {
   view.addEventListener('keydown', down, true);
   view.addEventListener('keyup', up, true);
   view.addEventListener('blur', reset);
+  view.addEventListener('focus', reset);
+  view.addEventListener('pagehide', reset);
+  view.document.addEventListener('visibilitychange', reset);
   return () => {
     view.removeEventListener('keydown', down, true);
     view.removeEventListener('keyup', up, true);
     view.removeEventListener('blur', reset);
+    view.removeEventListener('focus', reset);
+    view.removeEventListener('pagehide', reset);
+    view.document.removeEventListener('visibilitychange', reset);
   };
 }
