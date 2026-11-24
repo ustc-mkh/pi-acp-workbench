@@ -185,7 +185,17 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
 
     const resultPath = join(root, '../result #1.txt');
     await writeFile(resultPath, 'fixture result\n');
-    await send(`[Open fixture result](${pathToFileURL(resultPath).href})`);
+    const formula = String.raw`\(\frac{a}{b}\)`;
+    await send(`[Open fixture result](${pathToFileURL(resultPath).href}) and ${formula}`);
+    const renderedFormula = frame.locator('article.assistant .katex-html');
+    await renderedFormula.click();
+    await renderedFormula.evaluate((element) => window.getSelection().selectAllChildren(element));
+    await page.keyboard.press('Control+c');
+    await until(
+      async () => (await vscode.env.clipboard.readText()) === formula,
+      'copied formula retains original LaTeX delimiters',
+    );
+    checks.push('native transcript selection copies original formula source');
     await frame
       .locator('article.assistant')
       .getByRole('link', { name: 'Open fixture result', exact: true })

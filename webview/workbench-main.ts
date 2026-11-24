@@ -17,7 +17,7 @@ import { Preferences } from './workbench-preferences';
 import { ManagementPanel } from './workbench-management';
 import { AttachmentDrafts } from './workbench-attachment-drafts';
 import { composePrompt } from '../src/workbench-input';
-import { createRenderer } from './markdown';
+import { createRenderer, selectionWithMath } from './markdown';
 import {
   type ClientCommand,
   type ImageAsset,
@@ -40,20 +40,32 @@ declare function acquireVsCodeApi(): {
 const vscode = acquireVsCodeApi(),
   root = document.querySelector<HTMLElement>('#workbench')!;
 const markdown = createRenderer(window);
+function copyableSelection(event: Event) {
+  const target = event.target;
+  if (
+    event.defaultPrevented ||
+    (target instanceof window.Element &&
+      target.closest('input, textarea, [contenteditable="true"]'))
+  )
+    return null;
+  return window.getSelection();
+}
 // VS Code webviews may route the native copy command to the focused composer.
 // Send the actual document selection through the extension clipboard port.
 document.addEventListener('keydown', (event) => {
   if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'c') return;
-  const target = event.target;
-  if (
-    target instanceof window.HTMLElement &&
-    target.closest('input, textarea, [contenteditable="true"]')
-  )
-    return;
-  const text = window.getSelection()?.toString();
+  const selection = copyableSelection(event);
+  const text = selectionWithMath(selection) ?? selection?.toString();
   if (!text) return;
   event.preventDefault();
   send({ type: 'copy_text', text });
+});
+document.addEventListener('copy', (event) => {
+  if (!event.clipboardData) return;
+  const text = selectionWithMath(copyableSelection(event));
+  if (text === undefined) return;
+  event.clipboardData.setData('text/plain', text);
+  event.preventDefault();
 });
 let state: WorkbenchUiState | undefined,
   sequence = 0,
@@ -590,8 +602,7 @@ prompt.addEventListener('input', () => {
 function recallInput(older: boolean) {
   if (!selected || current()?.id !== selected || state?.selected !== selected) return false;
   const caret = prompt.selectionStart;
-  if (caret !== prompt.selectionEnd) return false;
-  if (prompt.value.includes('\n') && caret !== (older ? 0 : prompt.value.length)) return false;
+  if (caret !== prompt.selectionEnd || caret !== (older ? 0 : prompt.value.length)) return false;
   if (!inputHistory) {
     if (!older) return false;
     const items = historyView.userInputs().filter((text) => text.length <= prompt.maxLength);
@@ -604,11 +615,7 @@ function recallInput(older: boolean) {
   history.index = index;
   const restoring = index === history.items.length;
   prompt.value = restoring ? history.draft : history.items[index];
-  const nextCaret = restoring
-    ? history.caret
-    : older && prompt.value.includes('\n')
-      ? 0
-      : prompt.value.length;
+  const nextCaret = restoring ? history.caret : older ? 0 : prompt.value.length;
   prompt.setSelectionRange(nextCaret, nextCaret);
   if (restoring) inputHistory = undefined;
   submissions.touch(selected);

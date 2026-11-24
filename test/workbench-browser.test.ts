@@ -754,15 +754,21 @@ it('recalls user inputs in order, preserves multiline editing and restores the u
   prompt.dispatchEvent(new dom!.window.Event('input'));
   prompt.setSelectionRange(5, 5);
   expect(arrow('ArrowUp')).toBe(true);
+  prompt.setSelectionRange(1, 1);
+  expect(arrow('ArrowUp')).toBe(true);
   prompt.setSelectionRange(0, 0);
   expect(arrow('ArrowUp', { isComposing: true })).toBe(true);
   expect(arrow('ArrowUp', { shiftKey: true })).toBe(true);
   expect(arrow('ArrowUp')).toBe(false);
   expect(prompt.value).toBe('last');
+  expect(prompt.selectionStart).toBe(0);
   expect(arrow('ArrowUp')).toBe(false);
   expect(prompt.value).toBe('first');
   arrow('ArrowUp');
   expect(prompt.value).toBe('first');
+  expect(arrow('ArrowDown')).toBe(true);
+  expect(prompt.value).toBe('first');
+  prompt.setSelectionRange(prompt.value.length, prompt.value.length);
   arrow('ArrowDown');
   expect(prompt.value).toBe('last');
   arrow('ArrowDown');
@@ -1685,6 +1691,59 @@ it('copies the selected transcript text through the host on Ctrl/Cmd+C and keeps
   prompt.dispatchEvent(key);
   expect(key.defaultPrevented).toBe(false);
   expect(b.sent).toHaveLength(count);
+});
+
+it('copies original math delimiters for partial and mixed transcript selections', async () => {
+  const b = await browser();
+  const inline = String.raw`\(\frac{a}{b}\)`;
+  const display = '$$\nx^2\n$$';
+  b.state.view = {
+    ...b.state.view!,
+    entries: [
+      {
+        seq: 1,
+        id: entryId.parse('copy-math'),
+        turn: 'turn' as never,
+        role: 'Agent',
+        message: null,
+        image: null,
+        text: { Inline: { text: `Before ${inline} after.\n\n${display}\n\nEnd.` } },
+      },
+    ],
+  };
+  b.update();
+  await expect.poll(() => b.document.querySelectorAll('.katex').length).toBe(2);
+  const message = b.document.querySelector('article .markdown')!;
+  const glyph = [...message.querySelectorAll('.katex-html .mord')]
+    .map((element) => element.firstChild)
+    .find((node) => node?.nodeType === node?.TEXT_NODE && node?.textContent)!;
+  const selection = dom!.window.getSelection()!;
+  const partial = b.document.createRange();
+  partial.selectNodeContents(glyph);
+  selection.addRange(partial);
+  const shortcut = new dom!.window.KeyboardEvent('keydown', {
+    key: 'c',
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  message.dispatchEvent(shortcut);
+  expect(shortcut.defaultPrevented).toBe(true);
+  expect(b.sent.at(-1)).toEqual({ type: 'copy_text', text: inline });
+  expect(selection.getRangeAt(0).startContainer).toBe(glyph);
+
+  const mixed = b.document.createRange();
+  mixed.selectNodeContents(message);
+  selection.removeAllRanges();
+  selection.addRange(mixed);
+  const copy = new dom!.window.Event('copy', { bubbles: true, cancelable: true });
+  const clipboard = new Map<string, string>();
+  Object.defineProperty(copy, 'clipboardData', {
+    value: { setData: clipboard.set.bind(clipboard) },
+  });
+  message.dispatchEvent(copy);
+  expect(copy.defaultPrevented).toBe(true);
+  expect(clipboard.get('text/plain')).toBe(`Before ${inline} after.\n${display}\nEnd.\n`);
 });
 
 it('counts logical thoughts, restores classic activity containers and folds a completed trace', async () => {

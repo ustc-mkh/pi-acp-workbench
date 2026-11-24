@@ -475,11 +475,29 @@ try {
   await reuse.click();
   assert.equal(await page.locator('#prompt').inputValue(), 'workspace-write');
   const composerInput = page.locator('#prompt');
-  await composerInput.fill('unsent draft');
+  const wrappedDraft = 'word '.repeat(80) + 'end';
+  await composerInput.fill(wrappedDraft);
+  await composerInput.evaluate((input) =>
+    input.setSelectionRange(input.value.length, input.value.length),
+  );
+  await composerInput.press('ArrowUp');
+  assert.equal(await composerInput.inputValue(), wrappedDraft);
+  const caret = await composerInput.evaluate((input) => input.selectionStart);
+  assert(caret > 0 && caret < wrappedDraft.length, 'Up should move within wrapped text');
+  await composerInput.fill('unsent draft\nsecond line');
+  await composerInput.evaluate((input) =>
+    input.setSelectionRange(input.value.length, input.value.length),
+  );
+  await composerInput.press('ArrowUp');
+  assert.equal(await composerInput.inputValue(), 'unsent draft\nsecond line');
+  assert((await composerInput.evaluate((input) => input.selectionStart)) < 'unsent draft\n'.length);
+  await composerInput.evaluate((input) => input.setSelectionRange(0, 0));
   await composerInput.press('ArrowUp');
   assert.equal(await composerInput.inputValue(), 'workspace-write');
+  await composerInput.press('End');
   await composerInput.press('ArrowDown');
-  assert.equal(await composerInput.inputValue(), 'unsent draft');
+  assert.equal(await composerInput.inputValue(), 'unsent draft\nsecond line');
+  assert.equal(await composerInput.evaluate((input) => input.selectionStart), 0);
   await composerInput.fill('');
   check(
     'finished-turn Diff appears without scrolling; reuse stays inside the user bubble and never on assistant replies',

@@ -135,6 +135,7 @@ md.inline.ruler.before('escape', 'pi_math', (state, silent) => {
     const token = state.push('pi_math', 'math', 0);
     token.content = source;
     token.meta = { display };
+    token.attrSet('data-math-source', state.src.slice(start, end + close.length));
   }
   state.pos = end + close.length;
   return true;
@@ -181,16 +182,19 @@ md.block.ruler.before(
     if (silent) return true;
     const token = state.push('pi_math_block', 'math', 0);
     token.block = true;
-    token.content = env ? open + body + close : body.trim();
+    const source = open + body + close;
+    token.content = env ? source : body.trim();
+    token.attrSet('data-math-source', source);
     token.map = [start, line + 1];
     state.line = line + 1;
     return true;
   },
   { alt: ['paragraph', 'reference', 'blockquote', 'list'] },
 );
-md.renderer.rules.pi_math = (tokens, i) => mathHtml(tokens[i].content, !!tokens[i].meta?.display);
-md.renderer.rules.pi_math_block = (tokens, i) =>
-  `<div class="math-block">${mathHtml(tokens[i].content, true)}</div>\n`;
+md.renderer.rules.pi_math = (tokens, i, _options, _env, self) =>
+  `<span${self.renderAttrs(tokens[i])}>${mathHtml(tokens[i].content, !!tokens[i].meta?.display)}</span>`;
+md.renderer.rules.pi_math_block = (tokens, i, _options, _env, self) =>
+  `<div class="math-block"${self.renderAttrs(tokens[i])}>${mathHtml(tokens[i].content, true)}</div>\n`;
 // Markdown image URLs/paths/data are display-only. Only the separate typed
 // archive UI may request bytes; no hidden marker can authorize later I/O.
 md.renderer.rules.image = (tokens, i) =>
@@ -204,7 +208,29 @@ export function createRenderer(window: Window) {
       FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'img', 'foreignObject'],
       FORBID_ATTR: ['src', 'srcset', 'onerror', 'onclick'],
       ALLOW_DATA_ATTR: false,
-      ADD_ATTR: ['data-file-link'],
-      ADD_URI_SAFE_ATTR: ['data-file-link'],
+      ADD_ATTR: ['data-file-link', 'data-math-source'],
+      ADD_URI_SAFE_ATTR: ['data-file-link', 'data-math-source'],
     });
+}
+
+const mathSource = '[data-math-source]';
+
+function enclosingMath(node: Node) {
+  const element = node.nodeType === node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  return element?.closest(mathSource);
+}
+
+export function selectionWithMath(selection: Selection | null): string | undefined {
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0).cloneRange();
+  // A selection that starts or ends within KaTeX still represents the entire formula.
+  const first = enclosingMath(range.startContainer);
+  const last = enclosingMath(range.endContainer);
+  if (first) range.setStartBefore(first);
+  if (last) range.setEndAfter(last);
+  const contents = range.cloneContents();
+  const formulas = contents.querySelectorAll(mathSource);
+  if (!formulas.length) return;
+  for (const formula of formulas) formula.replaceWith(formula.getAttribute('data-math-source')!);
+  return contents.textContent ?? '';
 }

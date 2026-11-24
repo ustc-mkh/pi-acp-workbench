@@ -19,6 +19,9 @@ describe('Markdown and mathematics', () => {
     expect(d.querySelector('.katex')).not.toBeNull();
     expect(d.querySelector('math')).not.toBeNull();
     expect(d.querySelector('.math-fallback')).toBeNull();
+    expect(d.querySelector('[data-math-source]')?.getAttribute('data-math-source')).toBe(
+      source.replace(/^inline /, ''),
+    );
   });
   it.each([
     ['**加粗**', '加粗'],
