@@ -335,10 +335,9 @@ export function createHistoryView({
         parsed.querySelectorAll('a').forEach((link) => {
           link.onclick = (event) => {
             event.preventDefault();
-            send({
-              type: 'open_link',
-              url: (event.currentTarget as HTMLAnchorElement).getAttribute('href') || '',
-            });
+            const anchor = event.currentTarget as HTMLAnchorElement;
+            const url = anchor.dataset.fileLink ?? anchor.getAttribute('href');
+            if (url) send({ type: 'open_link', url });
           };
         });
         for (const copy of parsed.querySelectorAll<HTMLButtonElement>('.copy-code'))

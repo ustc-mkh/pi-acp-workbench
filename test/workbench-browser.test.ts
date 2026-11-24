@@ -968,6 +968,7 @@ it('groups identified Markdown fragments and preserves message, turn, focus and 
     'Hello **',
     'world**\n\n```ts\n',
     'const x = 1;\n```\n\n[site](https://example.com)',
+    ' [file](file:///tmp/result%20final.pdf) [artifact](sandbox:/tmp/result.pdf) [relative](./result.pdf)',
   ].map((text, i) => ({
     seq: i + 1,
     id: entryId.parse(`group-${i}`),
@@ -1002,6 +1003,16 @@ it('groups identified Markdown fragments and preserves message, turn, focus and 
   expect(dom!.window.getSelection()!.toString()).toBe('world');
   article.querySelector('a')!.click();
   expect(b.sent.at(-1)).toEqual({ type: 'open_link', url: 'https://example.com' });
+  const [, file, artifact, relative] = article.querySelectorAll('a');
+  expect(file.getAttribute('href')).toBe('#');
+  for (const [link, url] of [
+    [file, 'file:///tmp/result%20final.pdf'],
+    [artifact, 'sandbox:/tmp/result.pdf'],
+    [relative, './result.pdf'],
+  ] as const) {
+    link.click();
+    expect(b.sent.at(-1)).toEqual({ type: 'open_link', url });
+  }
   expect(b.state.view!.entries).toEqual(rows);
 });
 

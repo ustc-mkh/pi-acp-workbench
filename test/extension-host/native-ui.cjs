@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const { readFile, writeFile, access } = require('node:fs/promises');
 const { join } = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { chromium } = require('@playwright/test');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -181,6 +182,20 @@ exports.run = async ({ vscode, api, root, checkpoint }) => {
       'native clipboard copy of committed Agent body',
     );
     checks.push('native clipboard port with test-owned content');
+
+    const resultPath = join(root, '../result #1.txt');
+    await writeFile(resultPath, 'fixture result\n');
+    await send(`[Open fixture result](${pathToFileURL(resultPath).href})`);
+    await frame
+      .locator('article.assistant')
+      .getByRole('link', { name: 'Open fixture result', exact: true })
+      .click();
+    await until(
+      () => vscode.window.activeTextEditor?.document.uri.fsPath === resultPath,
+      'result link opens in VS Code editor',
+    );
+    assert.equal(vscode.window.activeTextEditor.document.getText(), 'fixture result\n');
+    checks.push('Agent file link opens an encoded host path in the editor');
 
     await until(
       () => state().view?.view?.catalogue.selects?.some((option) => option.id === 'thought_level'),

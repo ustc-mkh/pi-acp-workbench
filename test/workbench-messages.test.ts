@@ -1,11 +1,7 @@
 import { expect, it } from 'vitest';
 import { entryHeader, sessionId } from '../src/workbench-protocol';
-import {
-  MessageProjection,
-  continuesMessage,
-  externalDestination,
-  projectMessages,
-} from '../src/workbench-messages';
+import { MessageProjection, continuesMessage, projectMessages } from '../src/workbench-messages';
+import { externalDestination, linkDestination } from '../src/workbench-links';
 import { exportMarkdown } from '../src/workbench-export';
 import { copyLogicalMessage } from '../src/workbench-copy';
 import type { WorkbenchClient } from '../src/workbench-client';
@@ -95,4 +91,33 @@ it('normalizes IDNs and rejects credentials, local files, command/script and mal
     'https://example.com\n',
   ])
     expect(() => externalDestination(url)).toThrow();
+});
+
+it('resolves result file URLs and paths on the extension host', () => {
+  const cwd = '/home/remote/project';
+  expect(linkDestination('report%20final.md', cwd)).toEqual({
+    kind: 'file',
+    path: '/home/remote/project/report final.md',
+  });
+  for (const url of [
+    '/tmp/result%20%23.pdf',
+    'file:///tmp/result%20%23.pdf',
+    'sandbox:/tmp/result%20%23.pdf',
+  ])
+    expect(linkDestination(url, cwd)).toEqual({ kind: 'file', path: '/tmp/result #.pdf' });
+  expect(linkDestination('https://example.com/result.pdf', cwd)).toEqual({
+    kind: 'external',
+    url: 'https://example.com/result.pdf',
+  });
+  for (const url of [
+    '//another-host/result.md',
+    'file://another-host/result.md',
+    'sandbox://another-host/result.md',
+    'vscode://another-extension/result',
+    'command:workbench.action.closeWindow',
+    '/tmp/result%00.md',
+    '%2Ftmp/result.md',
+  ])
+    expect(() => linkDestination(url, cwd)).toThrow();
+  expect(() => linkDestination('report.md')).toThrow('Select a session');
 });

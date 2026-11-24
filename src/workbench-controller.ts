@@ -3,7 +3,7 @@ import { WorkbenchDiffReader } from './workbench-diff-reader';
 import { WorkbenchOperations } from './workbench-operations';
 import { exportMarkdown } from './workbench-export';
 import { copyLogicalMessage } from './workbench-copy';
-import { externalDestination } from './workbench-messages';
+import { linkDestination, type LinkDestination } from './workbench-links';
 import { WorkbenchClient } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
 import {
@@ -29,7 +29,7 @@ export interface WorkbenchPorts {
   /** Canonical workspace authorization before any provider/session mutation. */
   authorize(cwd: string): Promise<void>;
   copyText?(text: string): PromiseLike<void>;
-  openLink?(url: string): Promise<void>;
+  openLink?(destination: LinkDestination): Promise<void>;
   login?(): Promise<void>;
   configureTelegram?(): Promise<void>;
   openDiff?(turn: string, files: { path: string; before: string; after: string }[]): Promise<void>;
@@ -147,7 +147,7 @@ export class WorkbenchController {
         case 'open_link': {
           if (!this.ports.trusted() || !this.ports.openLink)
             throw new Error('Trusted host required');
-          await this.ports.openLink(externalDestination(message.url));
+          await this.ports.openLink(linkDestination(message.url, this.selected?.view.view?.cwd));
           break;
         }
         case 'login': {

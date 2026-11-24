@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, open, realpath, rename, rm } from 'node:fs/promises';
+import { mkdtemp, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { WorkbenchClient } from './workbench-client';
@@ -8,7 +8,6 @@ import { WorkbenchController } from './workbench-controller';
 import { readTextAttachment } from './workbench-attachments';
 import { MAX_ATTACHMENTS } from './workbench-input';
 import { telegramConfiguration } from './workbench-setup';
-import { externalDestination } from './workbench-messages';
 
 function isWithin(root: string, target: string) {
   const part = relative(root, target);
@@ -79,8 +78,15 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
       copyText: (text) => vscode.env.clipboard.writeText(text),
       login: () => this.login(),
       openLink: async (destination) => {
-        const url = externalDestination(destination);
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+        if (destination.kind === 'file') {
+          const file = await stat(destination.path);
+          if (!file.isFile()) throw new Error('The link does not point to a file');
+          if (!vscode.workspace.isTrusted) throw new Error('Workspace trust changed');
+          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(destination.path));
+          return;
+        }
+        const { url } = destination;
         const choice = await vscode.window.showInformationMessage(
           `External destination:\n${url}`,
           { modal: true },

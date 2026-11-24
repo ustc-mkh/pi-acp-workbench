@@ -62,13 +62,3 @@ export class MessageProjection {
 export function projectMessages(entries: readonly EntryHeader[]) {
   return new MessageProjection().update(entries);
 }
-
-/** Validate at the host boundary too; WHATWG URL serializes IDNs as punycode. */
-export function externalDestination(value: string): string {
-  if (value.length > 8192 || /[\u0000-\u0020\u007f]/.test(value))
-    throw new Error('Invalid external destination');
-  const url = new URL(value);
-  if (!['https:', 'http:', 'mailto:'].includes(url.protocol) || url.username || url.password)
-    throw new Error('Only credential-free HTTP(S) and mailto links may be opened');
-  return url.href;
-}

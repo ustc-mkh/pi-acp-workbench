@@ -40,6 +40,19 @@ const md: ReturnType<typeof MarkdownIt> = new MarkdownIt({
     return `<pre class="code-block"><button class="copy-code" type="button" aria-label="复制代码">复制</button><code class="hljs language-${md.utils.escapeHtml(lang || 'text')}">${body}</code></pre>`;
   },
 });
+const fileLink = /^(?:file|sandbox):\//i;
+const validateLink = md.validateLink;
+md.validateLink = (url) => fileLink.test(url) || validateLink(url);
+md.renderer.rules.link_open = (tokens, index, options, _env, self) => {
+  const token = tokens[index];
+  const href = token.attrGet('href');
+  if (typeof href === 'string' && fileLink.test(href)) {
+    // Send file URLs to the extension host without putting them in a navigable href.
+    token.attrSet('data-file-link', href);
+    token.attrSet('href', '#');
+  }
+  return self.renderToken(tokens, index, options);
+};
 md.use(taskLists, { enabled: false, label: false });
 md.use(footnotes);
 // CommonMark's punctuation flanking rules reject common CJK prose such as
@@ -191,5 +204,7 @@ export function createRenderer(window: Window) {
       FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'img', 'foreignObject'],
       FORBID_ATTR: ['src', 'srcset', 'onerror', 'onclick'],
       ALLOW_DATA_ATTR: false,
+      ADD_ATTR: ['data-file-link'],
+      ADD_URI_SAFE_ATTR: ['data-file-link'],
     });
 }
