@@ -137,8 +137,8 @@ try {
   let confirmations = 0;
   let managementReplies = 0;
   controller = new WorkbenchController(client, {
-    openLink: async (url) => {
-      externalLinks.push(url);
+    openLink: async (destination) => {
+      externalLinks.push(destination);
     },
     openDiff: async (turn, files) => {
       editorDiffs.push({ turn, files });
@@ -860,7 +860,10 @@ try {
   );
   await page.getByRole('link', { name: 'External', exact: true }).click();
   await wait(() => externalLinks.length === 1, 'normalized explicit link request');
-  assert.equal(externalLinks[0], 'https://xn--fsqu00a.xn--0zwm56d/path');
+  assert.deepEqual(externalLinks[0], {
+    kind: 'external',
+    url: 'https://xn--fsqu00a.xn--0zwm56d/path',
+  });
   await page.locator('#prompt').fill('/');
   const reviewCommand = page.getByRole('option', { name: '/review — Review' });
   // Keyboard completion alone can succeed even when the footer clips every option.
