@@ -190,11 +190,6 @@ export async function buildAdapter({ outdir = 'dist' } = {}) {
   );
   source = replaceExactlyOnce(
     source,
-    '    this.pendingTurn?.resolve(reason);\n    this.pendingTurn = null;',
-    '    if (this.modelError && !this.cancelRequested) this.pendingTurn?.reject(RequestError3.internalError({}, this.modelError));\n    else this.pendingTurn?.resolve(reason);\n    this.pendingTurn = null;',
-  );
-  source = replaceExactlyOnce(
-    source,
     'text: "Retry finished, resuming."',
     'text: ev.success === false ? "\\n重试已耗尽，模型请求失败。" : "\\n重试结束。"',
   );

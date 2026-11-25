@@ -26,6 +26,15 @@ pub enum TelegramAction {
     Control(ControlCommand),
     Rejected(RejectionReason),
 }
+impl TelegramAction {
+    pub(crate) fn releases_pending_input(&self) -> bool {
+        matches!(
+            self,
+            Self::Answer { .. }
+                | Self::Control(ControlCommand::Cancel { .. } | ControlCommand::Interrupt { .. })
+        )
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MenuPage {
     Home,
@@ -253,6 +262,7 @@ pub fn parse_text(
                     "" | "pi" => Harness::Pi,
                     "codex" => Harness::Codex,
                     "claude" => Harness::Claude,
+                    "antigravity" => Harness::Antigravity,
                     _ => return Err(RejectionReason::InvalidArguments),
                 };
                 let cwd = match parts.next().map(str::trim).filter(|path| !path.is_empty()) {

@@ -23,7 +23,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 const CAPACITY: [usize; 3] = [8, 4, 4];
 fn pool(record: &InboxRecord) -> usize {
-    match record.command.action {
+    match &record.command.action {
         TelegramAction::Rejected(_)
         | TelegramAction::Control(
             ControlCommand::Help
@@ -34,11 +34,9 @@ fn pool(record: &InboxRecord) -> usize {
             | ControlCommand::Notifications { enabled: None }
             | ControlCommand::Silent { enabled: None },
         ) => 2,
-        TelegramAction::Answer { .. }
-        | TelegramAction::Control(
-            ControlCommand::Cancel { .. }
-            | ControlCommand::Interrupt { .. }
-            | ControlCommand::History { .. }
+        action if action.releases_pending_input() => 1,
+        TelegramAction::Control(
+            ControlCommand::History { .. }
             | ControlCommand::Sync { .. }
             | ControlCommand::Remove { .. }
             | ControlCommand::Notifications { enabled: Some(_) }
@@ -52,6 +50,10 @@ pub(crate) async fn run(
     stop: CancellationToken,
 ) -> Result<(), AdapterError> {
     let mut tasks = JoinSet::new();
+    // A busy committed view can belong to the previous daemon. Recover its
+    // owner once per waiting input without awaiting a mutation lane in this loop.
+    let mut recoveries = JoinSet::new();
+    let mut checked = BTreeSet::new();
     let mut active: BTreeMap<UpdateId, (TopicKey, usize)> = BTreeMap::new();
     let mut tick = interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -68,46 +70,57 @@ pub(crate) async fn run(
                     _ => break Err(AdapterError::Task),
                 }
             }
+            result = recoveries.join_next(), if !recoveries.is_empty() => {
+                match result {
+                    Some(Ok((id, Err(DomainError::Backpressure)))) => { checked.remove(&id); }
+                    Some(Ok((_, Err(error @ DomainError::Persistence(_))))) => break Err(error.into()),
+                    Some(Ok(_)) => {}
+                    _ => break Err(AdapterError::Task),
+                }
+            }
             _ = tick.tick() => {
                 // Inbox admission already bounds the pending records. Looking
                 // only at the first eight would hide controls behind busy lanes.
-                let records = match context.store.pending(context.config.inbox_capacity).await {
+                let records = match context.store.pending(crate::persistence::inbox::MAX_PENDING).await {
                     Ok(records) => records,
                     Err(DomainError::Backpressure) => continue,
                     Err(error) => break Err(AdapterError::Domain(error)),
                 };
+                checked.retain(|id| records.binary_search_by_key(id, |record| record.id).is_ok());
                 let mut used = [0; 3];
                 let mut blocked = BTreeSet::new();
                 for (topic, class) in active.values() { used[*class] += 1; if *class != 2 { blocked.insert(topic.clone()); } }
                 let mut waiting = BTreeSet::new();
                 for record in records {
                     if active.contains_key(&record.id) { continue; }
-                    let class = if context.authorized(&record) { pool(&record) } else { 2 };
+                    let authorized = context.authorized(&record);
+                    let class = if authorized { pool(&record) } else { 2 };
                     // Reserve the first unscheduled mutation too: a later
                     // control must not jump an earlier same-topic config/new.
-                    let barrier = matches!(&record.command.action, TelegramAction::Answer { .. } | TelegramAction::Control(ControlCommand::Cancel { .. } | ControlCommand::Interrupt { .. }));
-                    let queued_topic = waiting.contains(&record.command.topic);
                     if class != 2 && !blocked.insert(record.command.topic.clone()) {
-                        if !(barrier && queued_topic) {
-                            // Only waiting prompts may be crossed. A config/new/history
-                            // between them and a control retains the causal boundary.
-                            if !matches!(&record.command.action, TelegramAction::Prompt { .. }) {
-                                waiting.remove(&record.command.topic);
-                            }
-                            continue;
-                        }
-                        waiting.remove(&record.command.topic);
+                        // Consecutive waiting prompts may be crossed by the next
+                        // answer/stop/interrupt. Any other mutation closes that window.
+                        if matches!(&record.command.action, TelegramAction::Prompt { .. }) { continue; }
+                        let after_prompts = waiting.remove(&record.command.topic);
+                        if !after_prompts || !record.command.action.releases_pending_input() { continue; }
                     }
-                    if let TelegramAction::Prompt { session, .. } = &record.command.action {
-                        if context.authorized(&record) {
-                            if let Err(error) = context.app.command(crate::domain::DomainCommand::LoadSession(session.clone())).await {
-                                if matches!(error, DomainError::Persistence(_)) { break 'scheduler Err(AdapterError::Domain(error)); }
+                    if let (true, TelegramAction::Prompt { session, .. }) = (authorized, &record.command.action) {
+                        let view = match context.inspect(session).await {
+                            Ok(view) => view,
+                            Err(DomainError::Backpressure) => continue,
+                            Err(error) => break 'scheduler Err(error.into()),
+                        };
+                        if view.is_some_and(|v| v.active_turn.is_some() || v.configuration_intent.is_some()) {
+                            if recoveries.len() < CAPACITY[0] && checked.insert(record.id) {
+                                let app = context.app.clone();
+                                let session = session.clone();
+                                let id = record.id;
+                                recoveries.spawn(async move {
+                                    (id, app.load_queued_prompt_session(session).await)
+                                });
                             }
-                        }
-                        match context.inspect(session).await {
-                            Ok(Some(view)) if context.authorized(&record) && (view.active_turn.is_some() || view.configuration_intent.is_some()) => { waiting.insert(record.command.topic.clone()); continue; }
-                            Err(error) => break 'scheduler Err(AdapterError::Domain(error)),
-                            _ => {}
+                            waiting.insert(record.command.topic.clone());
+                            continue;
                         }
                     }
                     if used[class] >= CAPACITY[class] { continue; }
@@ -127,6 +140,13 @@ pub(crate) async fn run(
             Ok((_, Ok(()) | Err(DomainError::Backpressure))) => {}
             Ok((_, Err(error))) => cleanup = Err(AdapterError::Domain(error)),
             Err(_) => cleanup = Err(AdapterError::Task),
+        }
+    }
+    while let Some(result) = recoveries.join_next().await {
+        match result {
+            Ok((_, Err(error @ DomainError::Persistence(_)))) => cleanup = Err(error.into()),
+            Err(_) => cleanup = Err(AdapterError::Task),
+            _ => {}
         }
     }
     result.and(cleanup)

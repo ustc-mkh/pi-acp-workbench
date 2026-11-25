@@ -56,11 +56,9 @@ export function buildClassicShell(options: {
     return node;
   };
   const brand = el('div', 'brand'),
-    logo = el('span', 'logo'),
-    protocol = el('span', 'protocol');
+    logo = el('span', 'logo');
   logo.id = 'harness-logo';
   logo.textContent = 'π';
-  protocol.textContent = 'ACP';
   const more = options.advanced.querySelector('summary')!;
   more.textContent = 'ACP';
   more.className = 'protocol';
@@ -216,13 +214,14 @@ export function buildClassicShell(options: {
       historical?: boolean;
     }) {
       historical = !!view.historical;
-      const glyph = view.harness === 'Pi' ? 'π' : view.harness === 'Codex' ? '>_' : 'C';
+      const glyph =
+        view.harness === 'Pi' ? 'π' : view.harness === 'Codex' ? '>_' : view.harness.charAt(0);
       logo.textContent = glyph;
       hero.textContent = glyph;
       welcome.hidden = view.entries > 0 || !!view.preview;
       start.hidden = view.hasSession;
       connection.hidden = !view.hasSession && !view.preview;
-      harnessNote.textContent = `让 ${view.harness === 'Pi' ? 'Pi' : view.harness} 在你的工作区里协助你。`;
+      harnessNote.textContent = `让 ${view.harness} 在你的工作区里协助你。`;
       sessionTitle.hidden = !view.hasSession || !!view.preview;
       sessionTitle.textContent = view.number ? '#' + String(view.number).padStart(3, '0') : '#—';
       options.status.textContent = view.preview

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { NativeForkFixture } from './helpers/native-fork-fixture.mjs';
 
+const resumeOnly = process.env.WORKBENCH_CONTRACT_PROVIDER === 'antigravity';
 const trace = (record) => {
   if (process.env.WORKBENCH_CONTRACT_TRACE)
     appendFileSync(process.env.WORKBENCH_CONTRACT_TRACE, JSON.stringify(record) + '\n');
@@ -302,39 +303,46 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       clientCapabilities: {},
       agentInfo: { name: 'contract-agent', title: 'Contract Agent', version: '1' },
       agentCapabilities: {
-        loadSession: true,
+        loadSession: !resumeOnly,
+        sessionCapabilities: resumeOnly ? { resume: {} } : undefined,
         promptCapabilities: {
           image: process.env.WORKBENCH_CONTRACT_NO_IMAGE !== '1',
           embeddedContext: process.env.WORKBENCH_CONTRACT_NO_CONTEXT !== '1',
         },
-        _meta: {
-          'pi-workbench': {
-            version: 1,
-            autonomousRuns:
-              process.env.WORKBENCH_CONTRACT_AUTONOMOUS === '1'
-                ? true
-                : process.env.WORKBENCH_CONTRACT_AUTONOMOUS === 'unknown'
-                  ? undefined
-                  : false,
-            inspect: true,
-            nativeFork: true,
-            title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
-            models: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
-            profileModels: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
-            contextProjection:
-              !!process.env.WORKBENCH_CONTRACT_MANAGEMENT &&
-              process.env.WORKBENCH_CONTRACT_CONTEXT_PROJECTION !== '0',
-          },
-        },
+        _meta: resumeOnly
+          ? undefined
+          : {
+              'pi-workbench': {
+                version: 1,
+                autonomousRuns:
+                  process.env.WORKBENCH_CONTRACT_AUTONOMOUS === '1'
+                    ? true
+                    : process.env.WORKBENCH_CONTRACT_AUTONOMOUS === 'unknown'
+                      ? undefined
+                      : false,
+                inspect: true,
+                nativeFork: true,
+                title: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+                models: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+                profileModels: !!process.env.WORKBENCH_CONTRACT_MANAGEMENT,
+                contextProjection:
+                  !!process.env.WORKBENCH_CONTRACT_MANAGEMENT &&
+                  process.env.WORKBENCH_CONTRACT_CONTEXT_PROJECTION !== '0',
+              },
+            },
       },
       authMethods: [],
     });
   } else if (r.method === 'session/new') {
+    if (resumeOnly && process.cwd() !== r.params.cwd) {
+      fail(r.id, 'Antigravity fixture requires the session workspace as process cwd');
+      return;
+    }
     workspace = r.params.cwd;
     sessionId = randomUUID();
     nativeFixture?.create(sessionId, configOptions[0].currentValue, modes.currentModeId);
     reply(r.id, { sessionId, configOptions, modes });
-  } else if (r.method === 'session/load') {
+  } else if (r.method === (resumeOnly ? 'session/resume' : 'session/load')) {
     workspace = r.params.cwd;
     if (nativeFixture) {
       try {

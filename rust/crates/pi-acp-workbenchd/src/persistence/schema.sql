@@ -30,7 +30,7 @@ CREATE TABLE sessions (
     activity_seq INTEGER NOT NULL DEFAULT 0 CHECK (activity_seq BETWEEN 0 AND 9007199254740991),
     revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
     last_entry_seq INTEGER NOT NULL CHECK (last_entry_seq BETWEEN 0 AND 9007199254740991),
-    harness TEXT NOT NULL CHECK (harness IN ('Pi', 'Codex', 'Claude')),
+    harness TEXT NOT NULL CHECK (harness IN ('Pi', 'Codex', 'Claude', 'Antigravity')),
     cwd TEXT NOT NULL CHECK (length(cwd) > 0),
     status_json TEXT NOT NULL CHECK (json_valid(status_json) AND COALESCE(json_extract(status_json, '$') IN ('Idle', 'Running', 'Waiting', 'Cancelling') OR (json_type(status_json) = 'object' AND json_type(status_json, '$.Failed') = 'text'), 0)),
     hot_state_json TEXT NOT NULL CHECK (json_valid(hot_state_json) AND json_type(hot_state_json, '$.transcript') IS NULL)

@@ -59,7 +59,8 @@ export const workspacePath = checked(
     s.startsWith('/') && byteLength(s) <= 4096 && !s.includes('\0') && !s.split('/').includes('..'),
 );
 const digest = checked(string, (s) => /^[0-9a-f]{64}$/.test(s));
-const harness = oneOf('Pi', 'Codex', 'Claude');
+export const HARNESSES = ['Pi', 'Codex', 'Claude', 'Antigravity'] as const;
+export const harness = oneOf(...HARNESSES);
 const status = variants({
   Idle: null,
   Running: null,
@@ -626,6 +627,18 @@ export const attached = checked(
 );
 const listLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_LIST_LIMIT)));
 const historyLimit = optional(nullable(checked(uint, (n) => n > 0 && n <= MAX_HISTORY_LIMIT)));
+const undoTarget = {
+  session: sessionId,
+  turn: turnId,
+  files: optional(
+    nullable(
+      checked(
+        array(checked(string, (s) => byteLength(s) <= 1024)),
+        (v) => v.length > 0 && v.length <= 256 && v.reduce((n, s) => n + byteLength(s), 0) <= 65536,
+      ),
+    ),
+  ),
+};
 export const queryCommand = checked(
   tagged('method', {
     operation: object({ method: literal('operation'), operation: operationId }),
@@ -680,17 +693,7 @@ export const queryCommand = checked(
     }),
     validate_undo: object({
       method: literal('validate_undo'),
-      session: sessionId,
-      turn: turnId,
-      files: optional(
-        nullable(
-          checked(
-            array(checked(string, (s) => byteLength(s) <= 1024)),
-            (v) =>
-              v.length > 0 && v.length <= 256 && v.reduce((n, s) => n + byteLength(s), 0) <= 65536,
-          ),
-        ),
-      ),
+      ...undoTarget,
     }),
     turn_diff: object({
       method: literal('turn_diff'),
@@ -726,9 +729,6 @@ export const queryCommand = checked(
         return !v.cursor || (v.cursor.session === v.session && v.cursor.turn === v.turn);
       case 'content':
         return v.offset <= v.ref.bytes;
-      case 'turn_diff':
-      case 'turn_diff_content':
-        return true;
       default:
         return true;
     }
@@ -774,17 +774,7 @@ const mutationCommand = tagged('method', {
   clear_history_batch: object({ method: literal('clear_history_batch'), job: operationId }),
   undo_turn: object({
     method: literal('undo_turn'),
-    session: sessionId,
-    turn: turnId,
-    files: optional(
-      nullable(
-        checked(
-          array(checked(string, (s) => byteLength(s) <= 1024)),
-          (v) =>
-            v.length > 0 && v.length <= 256 && v.reduce((n, s) => n + byteLength(s), 0) <= 65536,
-        ),
-      ),
-    ),
+    ...undoTarget,
   }),
   remove: object({ method: literal('remove'), ...session }),
 });
@@ -859,6 +849,28 @@ export const queryResult = tagged('kind', {
   attached: object({ kind: literal('attached'), value: attached }),
 });
 export type QueryResult = Infer<typeof queryResult>;
+type QueryResultMethod = Exclude<QueryCommand['method'], 'image'>;
+const queryResultKinds = {
+  operation: 'operation',
+  search: 'list',
+  list: 'list',
+  inspect: 'view',
+  history: 'history',
+  history_turns: 'history_turns',
+  content_batch: 'content_batch',
+  tools: 'tools',
+  content: 'content',
+  management: 'management',
+  validate_undo: 'validate_undo',
+  turn_diff: 'turn_diff',
+  turn_diff_content: 'turn_diff_content',
+  attach: 'attached',
+} as const satisfies Record<QueryResultMethod, QueryResult['kind']>;
+export function expectedQueryKind(method: CommandMethod) {
+  return Object.hasOwn(queryResultKinds, method)
+    ? queryResultKinds[method as QueryResultMethod]
+    : undefined;
+}
 export const ipcMessage = checked(
   tagged('type', {
     reply: object({ type: literal('reply'), id: uint, receipt: commandReceipt }),
@@ -872,46 +884,17 @@ export const ipcMessage = checked(
   (value) => jsonBytes(value) <= (value.type === 'image' ? MAX_FRAME_BYTES : MAX_QUERY_BYTES),
 );
 export type IpcMessage = Infer<typeof ipcMessage>;
-type HistoryQueryResults = {
-  history_turns: Infer<typeof historyTurnPage>;
-  content_batch: Infer<typeof contentBatch>;
-};
-export type CommandResult<C extends ClientCommand> = C extends { method: keyof HistoryQueryResults }
-  ? HistoryQueryResults[C['method']]
-  : ExistingCommandResult<C>;
-type ExistingCommandResult<C extends ClientCommand> = C extends { method: 'validate_undo' }
-  ? UndoReport
-  : C extends { method: 'management' }
-    ? ManagementData
-    : C extends { method: 'operation' }
-      ? OperationStatus
-      : C extends { method: 'image' }
-        ? ImageAsset
-        : C extends { method: 'list' | 'search' }
-          ? ListPage
-          : C extends { method: 'inspect' }
-            ? SessionView
-            : C extends { method: 'history' }
-              ? HistoryPage
-              : C extends { method: 'tools' }
-                ? ToolPage
-                : C extends { method: 'content' }
-                  ? ContentSlice
-                  : C extends { method: 'undo_turn' }
-                    ? CommandReceipt
-                    : C extends { method: 'turn_diff' }
-                      ? TurnDiff
-                      : C extends { method: 'turn_diff_content' }
-                        ? { bytes: string; total_bytes: number; next_offset?: number | null }
-                        : C extends { method: 'attach' }
-                          ? Attached
-                          : C extends { method: 'detach' }
-                            ? SessionId
-                            : CommandReceipt;
+export type CommandResult<C extends ClientCommand> = C extends { method: QueryResultMethod }
+  ? Extract<QueryResult, { kind: (typeof queryResultKinds)[C['method']] }>['value']
+  : C extends { method: 'image' }
+    ? ImageAsset
+    : C extends { method: 'detach' }
+      ? SessionId
+      : CommandReceipt;
 export function commandPool(command: ClientCommand): 0 | 1 | 2 | 3 {
   const pools = { mutation: 0, control: 1, undo: 1, query: 2, history: 3 } as const;
   return pools[commandPolicy[command.method]];
 }
-export function durableCommand(command: ClientCommand) {
+export function durableCommand(command: ClientCommand): command is Infer<typeof mutationCommand> {
   return commandPool(command) < 2;
 }

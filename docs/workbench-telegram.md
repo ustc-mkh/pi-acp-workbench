@@ -25,25 +25,25 @@ Telegram adapter 运行在 `pi-acp-workbenchd` 内，与 VS Code 共用会话、
 
 ## 常用命令
 
-| 命令                                           | 作用                                                |
-| ---------------------------------------------- | --------------------------------------------------- |
-| `/new [pi\|codex\|claude] [绝对路径]`          | 新建会话；在 forum 中创建独立新话题，保留原话题绑定 |
-| `/open SESSION_ID`、`/attach SESSION_ID`       | 打开授权范围内的会话；已有绑定时返回原话题          |
-| `/sessions`、`/status`                         | 查看会话列表或当前状态、模型与待办                  |
-| `/menu [directories\|sessions\|models\|modes]` | 打开交互菜单，选择目录、会话、模型或模式            |
-| `/discover`                                    | 明确启动 provider 获取可用设置，不发送业务输入      |
-| `/model ID`、`/mode ID`、`/setting ID VALUE`   | 使用实际 provider catalogue 中的选项                |
-| `/answer INTERACTION_ID TEXT_OR_TYPED_JSON`    | 回答指定交互                                        |
-| `/prompt TEXT`、`//TEXT`                       | 明确发送新输入                                      |
-| `/queue`                                       | 查看排队输入                                        |
-| `/stop`、`/cancel`                             | 停止当前任务及其屏障覆盖的较早排队输入              |
-| `/interrupt TEXT`                              | 停止旧任务并接受替换输入                            |
-| `/remove`                                      | 删除当前绑定会话                                    |
-| `/history`、`/history all`                     | 导出近期历史或继续完整历史导出                      |
-| `/sync`                                        | 分页同步可访问会话和近期历史                        |
-| `/notifications [on\|off]`                     | 查询或设置自动通知                                  |
-| `/silent [on\|off]`                            | 查询或设置静默发送                                  |
-| `/help`、`/start`                              | 查看帮助                                            |
+| 命令                                               | 作用                                                |
+| -------------------------------------------------- | --------------------------------------------------- |
+| `/new [pi\|codex\|claude\|antigravity] [绝对路径]` | 新建会话；在 forum 中创建独立新话题，保留原话题绑定 |
+| `/open SESSION_ID`、`/attach SESSION_ID`           | 打开授权范围内的会话；已有绑定时返回原话题          |
+| `/sessions`、`/status`                             | 查看会话列表或当前状态、模型与待办                  |
+| `/menu [directories\|sessions\|models\|modes]`     | 打开交互菜单，选择目录、会话、模型或模式            |
+| `/discover`                                        | 明确启动 provider 获取可用设置，不发送业务输入      |
+| `/model ID`、`/mode ID`、`/setting ID VALUE`       | 使用实际 provider catalogue 中的选项                |
+| `/answer INTERACTION_ID TEXT_OR_TYPED_JSON`        | 回答指定交互                                        |
+| `/prompt TEXT`、`//TEXT`                           | 明确发送新输入                                      |
+| `/queue`                                           | 查看排队输入                                        |
+| `/stop`、`/cancel`                                 | 停止当前任务及其屏障覆盖的较早排队输入              |
+| `/interrupt TEXT`                                  | 停止旧任务并接受替换输入                            |
+| `/remove`                                          | 删除当前绑定会话                                    |
+| `/history`、`/history all`                         | 导出近期历史或继续完整历史导出                      |
+| `/sync`                                            | 分页同步可访问会话和近期历史                        |
+| `/notifications [on\|off]`                         | 查询或设置自动通知                                  |
+| `/silent [on\|off]`                                | 查询或设置静默发送                                  |
+| `/help`、`/start`                                  | 查看帮助                                            |
 
 只有一个待回答交互时，普通文本被识别为该交互的回答；多个交互时要求明确指定。拒绝、过期或重复的回答不会改作新输入。权限、单选和布尔字段提供按钮；多字段表单可提交类型化 JSON：
 
@@ -57,7 +57,7 @@ Telegram adapter 运行在 `pi-acp-workbenchd` 内，与 VS Code 共用会话、
 
 一个会话最多绑定一个 Telegram 话题。唯一已授权 forum 可为桌面新会话自动镜像话题，标题使用 `#编号 · 会话名称`，改名后同步。多个 forum 或目标不明确时不自动选择；已绑定会话不会被抢占到其他话题。
 
-忙碌时普通输入可靠排队，`/queue` 可查询。回答、停止和打断具有控制容量，但不越过中间的配置、新建或历史导出操作。重启恢复原操作身份，不重复执行已接受或结果未知的模型任务。
+忙碌时普通输入进入持久队列，`/queue` 可查询。队列达到 `inbox_capacity` 后，新普通输入会收到拒收提示，可在队列腾出空间后重发。系统额外预留 4 个位置给回答、停止和打断。回答、停止和打断具有控制容量，但不越过中间的配置、新建或历史导出操作。重启恢复原操作身份，不重复执行已接受或结果未知的模型任务。
 
 Pi 自主后台轮次使用相同的授权、历史与完成投递。停止先请求取消，正常结束后保留 worker，5 秒未结束则终止；worker 驻留与释放规则见 [VS Code 会话说明](workbench-vscode.md)。自主轮次不提供完整工作区 Diff。
 

@@ -15,8 +15,6 @@ mod workspace_reviews;
 pub mod workspace_undo;
 
 #[cfg(test)]
-mod actor_store_tests;
-#[cfg(test)]
 mod actor_tests;
 
 pub use actor::{RegistryHandle, Runtime};

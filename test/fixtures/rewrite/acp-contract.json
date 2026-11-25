@@ -3,7 +3,8 @@
   "providers": [
     { "harness": "Pi", "agentInfo": { "name": "pi-acp", "version": "fixture" } },
     { "harness": "Codex", "agentInfo": { "name": "codex-acp", "version": "fixture" } },
-    { "harness": "Claude", "agentInfo": { "name": "claude-agent-acp", "version": "fixture" } }
+    { "harness": "Claude", "agentInfo": { "name": "claude-agent-acp", "version": "fixture" } },
+    { "harness": "Antigravity", "agentInfo": { "name": "Antigravity ACP Server", "version": "fixture" } }
   ],
   "messages": [
     { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": 1, "clientInfo": { "name": "workbench-contract", "version": "2" }, "clientCapabilities": {} } },

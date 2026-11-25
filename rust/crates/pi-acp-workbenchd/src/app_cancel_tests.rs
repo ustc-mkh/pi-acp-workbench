@@ -104,10 +104,12 @@ async fn cold_load_commits_recovery_notices_and_acknowledgments_survive_restart_
         .unwrap();
         drop(sql);
         let app = app_at_with_env(&root, env.clone());
-        let recovered = app
-            .command(DomainCommand::LoadSession(id.clone()))
-            .await
-            .unwrap();
+        let recovered = if cancelling {
+            app.command(DomainCommand::LoadSession(id.clone())).await
+        } else {
+            app.load_queued_prompt_session(id.clone()).await
+        }
+        .unwrap();
         let recovered = recovered.view().unwrap();
         assert!(if cancelling {
             matches!(recovered.status, SessionStatus::Idle)

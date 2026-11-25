@@ -29,6 +29,89 @@ async fn trace(path: &Path) -> Vec<Trace> {
         .collect()
 }
 #[tokio::test]
+async fn desktop_configuration_does_not_block_another_telegram_topic() {
+    let root = root();
+    let gate = root.join("config");
+    let app = app_with_env(
+        &root,
+        std::collections::HashMap::from([(
+            "WORKBENCH_CONTRACT_CONFIG_GATE".into(),
+            gate.to_string_lossy().into_owned(),
+        )]),
+    );
+    let api = Fake::default();
+    let context = Context::new(app.clone(), api.clone(), &root.join("telegram"), config())
+        .await
+        .unwrap();
+    let crate::domain::query::CommandReceipt::Created { summary } = app
+        .command(DomainCommand::CreateSession {
+            harness: Harness::Pi,
+            cwd: WorkspacePath::new("/tmp").unwrap(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("create")
+    };
+    let topic = TopicKey {
+        chat: ChatId::new(-100).unwrap(),
+        thread: Some(TopicId::new(10).unwrap()),
+    };
+    let session = summary.id;
+    context
+        .store
+        .bind(topic.clone(), session.clone())
+        .await
+        .unwrap();
+    let mut events = app.subscribe();
+    app.command(DomainCommand::Prompt {
+        session: session.clone(),
+        prompt: Prompt::new("prime").unwrap(),
+    })
+    .await
+    .unwrap();
+    finished(&mut events).await;
+    let desktop = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.command(DomainCommand::SetModel {
+                session,
+                model: crate::domain::ModelId::new("other").unwrap(),
+            })
+            .await
+        })
+    };
+    until(async || gate.with_extension("started").exists()).await;
+    api.0.lock().await.updates.extend([
+        update(1, topic.thread, "queued input"),
+        update(2, Some(TopicId::new(11).unwrap()), "/help"),
+    ]);
+    poll_once(&context).await.unwrap();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(crate::telegram::execution::run(
+        context.clone(),
+        stop.clone(),
+    ));
+    until(async || {
+        let records = context.store.snapshot().await.unwrap().inbox;
+        matches!(
+            records[&UpdateId::new(2).unwrap()].status,
+            InboxStatus::Completed(_)
+        )
+    })
+    .await;
+    assert!(!desktop.is_finished());
+    tokio::fs::write(gate.with_extension("release"), b"release")
+        .await
+        .unwrap();
+    desktop.await.unwrap().unwrap();
+    until(async || context.store.pending(32).await.unwrap().is_empty()).await;
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    app.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+#[tokio::test]
 async fn eight_blocked_topics_preserve_control_query_reserves_fifo_and_joined_shutdown_recovery() {
     let root = root();
     let gate = root.join("gate");
@@ -330,6 +413,7 @@ async fn history_and_sync_remain_cold_and_recheck_workspace_authorization() {
         context
             .store
             .admit(crate::persistence::inbox::Admission {
+                workspace: context.config.workspace.clone(),
                 id: record.id,
                 sender: Some(record.sender),
                 command: Some(record.command.clone()),

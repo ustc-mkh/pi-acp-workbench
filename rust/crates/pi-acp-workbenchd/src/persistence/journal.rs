@@ -280,17 +280,12 @@ pub(super) fn finish_in_transaction(
     } else {
         "Failed"
     };
-    if record(db, &ticket.operation)?.is_none() && ticket.local {
+    if ticket.local && record(db, &ticket.operation)?.is_none() {
         db.execute(
             "INSERT INTO operations(operation,fingerprint,status) VALUES (?1,?2,'Started')",
             params![ticket.operation.as_str(), ticket.fingerprint.0],
         )
         .map_err(failure)?;
-    }
-    let current =
-        record(db, &ticket.operation)?.ok_or_else(|| failure("journal admission missing"))?;
-    if current.fingerprint != ticket.fingerprint || current.status != "Started" {
-        return Err(DomainError::OperationConflict);
     }
     let changed = db
         .execute(
@@ -299,6 +294,9 @@ pub(super) fn finish_in_transaction(
         )
         .map_err(failure)?;
     if changed != 1 {
+        if record(db, &ticket.operation)?.is_none() {
+            return Err(failure("journal admission missing"));
+        }
         return Err(DomainError::OperationConflict);
     }
     Ok(())
@@ -306,23 +304,16 @@ pub(super) fn finish_in_transaction(
 fn create_local(
     db: &mut Connection,
     ticket: OperationTicket,
-    view: &crate::domain::query::SessionView,
+    mut view: crate::domain::query::SessionView,
 ) -> Result<CommandReceipt, DomainError> {
-    view.validate()?;
     let tx = db.transaction().map_err(failure)?;
     if let Some(stored) = record(&tx, &ticket.operation)? {
         return replay(&ticket, stored)?;
     }
-    tx.execute(
-        "INSERT INTO operations(operation,fingerprint,status) VALUES (?1,?2,'Started')",
-        params![ticket.operation.as_str(), ticket.fingerprint.0],
-    )
-    .map_err(failure)?;
-    let mut view = view.clone();
     let saved: Option<String> = tx
         .query_row(
             "SELECT config_json FROM provider_preferences WHERE harness=?1",
-            [super::query::harness_name(&view.harness)],
+            [view.harness.as_str()],
             |row| row.get(0),
         )
         .optional()
@@ -362,7 +353,7 @@ pub(super) fn execute(db: &mut Connection, request: Request) {
             view,
             reply,
         } => {
-            let _ = reply.send(create_local(db, ticket, &view));
+            let _ = reply.send(create_local(db, ticket, *view));
         }
         Request::Status { operation, reply } => {
             use crate::domain::query::OperationStatus as S;

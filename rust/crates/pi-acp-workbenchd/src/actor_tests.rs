@@ -135,7 +135,11 @@ async fn failed_commit_does_not_publish_or_replace_owned_state() {
             .await,
         Err(crate::domain::error::DomainError::Persistence(_))
     ));
-    assert_eq!(view(&runtime, &id).await.revision.get(), 0);
+    let unchanged = view(&runtime, &id).await;
+    assert!(matches!(unchanged.status, SessionStatus::Idle));
+    assert_eq!(unchanged.revision.get(), 0);
+    assert_eq!(unchanged.last_entry_seq.get(), 0);
+    assert!(store.outbox.pending(0, 10).await.unwrap().is_empty());
     assert!(events.try_recv().is_err());
     store
         .database()
@@ -149,7 +153,88 @@ async fn failed_commit_does_not_publish_or_replace_owned_state() {
         .unwrap()
         .active_turn
         .is_none());
-    prompt(&runtime, &id, "retry").await;
+    let OwnerReply::Committed(batch) = runtime
+        .registry
+        .command(DomainCommand::Prompt {
+            session: id,
+            prompt: Prompt::new("retry").unwrap(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("commit")
+    };
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.revision.get(), 1);
+    assert_eq!(
+        serde_json::to_value(events.recv().await.unwrap()).unwrap(),
+        serde_json::to_value(batch).unwrap()
+    );
+    assert!(events.try_recv().is_err());
+    close(runtime, store, root).await;
+}
+#[tokio::test]
+async fn image_archive_failure_never_commits_or_publishes_a_dangling_reference() {
+    use crate::domain::image::ImageAsset;
+    let root = root();
+    let store = SessionStore::fixture(&root);
+    let runtime = Runtime::start(store.clone(), 8);
+    let id = create(&runtime).await;
+    let turn = prompt(&runtime, &id, "test").await;
+    let before = view(&runtime, &id).await;
+    let mut events = runtime.events.subscribe();
+    let asset = ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap();
+    let command = DomainCommand::Agent {
+        session: id.clone(),
+        event: AgentEvent::Image {
+            turn,
+            asset: asset.clone(),
+            message: None,
+        },
+    };
+    let database = store.database();
+    database
+        .set_session_commit_failure(id.clone(), true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        runtime.registry.command(command.clone()).await,
+        Err(crate::domain::error::DomainError::Persistence(_))
+    ));
+    assert_eq!(
+        serde_json::to_value(view(&runtime, &id).await).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    assert!(store.payloads.image(asset.image()).await.is_err());
+    assert!(events.try_recv().is_err());
+    database
+        .set_session_commit_failure(id.clone(), false)
+        .await
+        .unwrap();
+    let OwnerReply::Committed(batch) = runtime.registry.command(command).await.unwrap() else {
+        panic!("image commit")
+    };
+    assert_eq!(batch.entries[0].image.as_ref().unwrap(), asset.image());
+    assert_eq!(
+        store.payloads.image(asset.image()).await.unwrap().bytes(),
+        asset.bytes()
+    );
+    assert_eq!(events.recv().await.unwrap().revision, batch.revision);
+    let late = runtime
+        .registry
+        .command(DomainCommand::Agent {
+            session: id.clone(),
+            event: AgentEvent::Image {
+                turn: crate::domain::TurnId::generate(),
+                asset,
+                message: None,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(late, OwnerReply::Receipt(_)));
+    assert_eq!(view(&runtime, &id).await.revision, batch.revision);
+    assert!(events.try_recv().is_err());
     close(runtime, store, root).await;
 }
 #[tokio::test]
@@ -301,11 +386,11 @@ async fn list_and_inspect_expose_bounded_committed_projection_without_workers() 
     let store = SessionStore::fixture(&root);
     let runtime = Runtime::start(store.clone(), 8);
     let id = create(&runtime).await;
-    prompt(&runtime, &id, "你好").await;
+    let turn = prompt(&runtime, &id, "你好").await;
     let live = view(&runtime, &id).await;
     assert_eq!(live.last_entry_seq.get(), 1);
     assert_eq!(live.revision.get(), 1);
-    assert!(live.active_turn.is_some());
+    assert_eq!(live.active_turn, Some(turn));
     let page = store
         .database()
         .history(id.clone(), None, None)
@@ -478,16 +563,6 @@ async fn checked_shutdown_commits_cancellation_and_reports_failed_final_write() 
     ));
     store.database().shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
-}
-#[tokio::test]
-async fn registry_owns_session_and_routes_commands() {
-    let root = root();
-    let store = SessionStore::fixture(&root);
-    let runtime = Runtime::start(store.clone(), 4);
-    let id = create(&runtime).await;
-    let turn = prompt(&runtime, &id, "hello").await;
-    assert_eq!(view(&runtime, &id).await.active_turn.as_ref(), Some(&turn));
-    close(runtime, store, root).await;
 }
 #[tokio::test]
 async fn agent_events_update_owned_state() {

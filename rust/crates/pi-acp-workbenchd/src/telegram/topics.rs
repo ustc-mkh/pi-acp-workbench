@@ -12,6 +12,7 @@ use crate::domain::{
     query::{ListCursor, SessionSummary},
     OperationId, SessionId,
 };
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) type Locks = std::sync::Arc<
@@ -69,7 +70,7 @@ pub(super) async fn ensure(
         .database()
         .summary(session.clone())
         .await
-        .map_err(|e| DomainError::Persistence(e.to_string()))?;
+        .map_err(|error| crate::persistence::inbox::session_read_error(error, session))?;
     if authorize_workspace(&summary.cwd, &context.config.workspace).await? != summary.cwd {
         return Err(DomainError::OperationConflict);
     }
@@ -137,8 +138,12 @@ pub(super) async fn reconcile(
         }
         // An uncertain creation stays fenced by its original receipt; continue
         // scanning other sessions rather than blocking their independent topics.
-        if ensure(context, chat, &item.id).await.is_err() {
-            pending = true;
+        match ensure(context, chat, &item.id).await {
+            Ok(_) | Err(DomainError::NotFound(_)) => {}
+            Err(error @ (DomainError::Backpressure | DomainError::Persistence(_))) => {
+                return Err(error)
+            }
+            Err(_) => pending = true,
         }
     }
     Ok((page.next_cursor, pending))
@@ -174,24 +179,28 @@ pub(super) async fn run(
             if uncertain { 0 } else { i64::MAX },
             std::sync::atomic::Ordering::Release,
         );
-        if !pause(&stop, std::time::Duration::from_secs(30)).await {
+        if !pause(&stop, Duration::from_secs(30)).await {
             return Ok(());
         }
     };
     let mut cursor = None;
-    loop {
-        if stop.is_cancelled() || context.app.is_closing() {
-            return Ok(());
-        }
-        let (next, pending) = reconcile(&context, chat, cursor).await?;
-        cursor = next;
-        if !pause(
-            &stop,
-            std::time::Duration::from_secs(if pending { 30 } else { 1 }),
-        )
-        .await
-        {
-            return Ok(());
+    while !stop.is_cancelled() && !context.app.is_closing() {
+        let delay = match reconcile(&context, chat, cursor.clone()).await {
+            Ok((next, pending)) => {
+                cursor = next;
+                Duration::from_secs(if pending { 30 } else { 1 })
+            }
+            Err(DomainError::Backpressure) => Duration::from_millis(100),
+            Err(DomainError::Worker(_) | DomainError::MailboxClosed)
+                if stop.is_cancelled() || context.app.is_closing() =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !pause(&stop, delay).await {
+            break;
         }
     }
+    Ok(())
 }

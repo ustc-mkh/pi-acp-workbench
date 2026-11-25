@@ -131,7 +131,7 @@ pub(super) async fn run(
         payloads.put_notice(&NoticeContent { id, text }).await?;
         plan
     };
-    let mut text = String::from("Sync: sessions by recent committed activity, chronological entries per session, 10 sessions per stable activity-watermark page. Five newest accessible sessions: up to 10 entries each; older: up to 2. Scan cap 200/session; no Thoughts or raw tool text.\n");
+    let mut text = String::from("Sync: sessions by recent committed activity, chronological entries per session, 10 sessions per stable activity-watermark page. Five newest accessible sessions: up to 10 entries each; older: up to 2. Scan cap 2000/session; no Thoughts or raw tool text.\n");
     for item in &plan.items {
         if payloads
             .find_notice(&result_id(record.id, &item.session)?)

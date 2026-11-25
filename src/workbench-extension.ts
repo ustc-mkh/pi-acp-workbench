@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { HARNESSES } from './workbench-protocol';
 import { WorkbenchClient } from './workbench-client';
 import { WorkbenchController } from './workbench-controller';
 import { readTextAttachment } from './workbench-attachments';
@@ -11,7 +12,7 @@ import { telegramConfiguration } from './workbench-setup';
 
 function isWithin(root: string, target: string) {
   const part = relative(root, target);
-  return part === '' || (!part.startsWith('..' + '/') && part !== '..' && !isAbsolute(part));
+  return part !== '..' && !part.startsWith('..' + sep) && !isAbsolute(part);
 }
 async function hasDirtyDocuments(cwd: string) {
   const root = await realpath(cwd);
@@ -66,14 +67,17 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
     const client = new WorkbenchClient(path, {
       lost: (error) => this.log.appendLine(error.message),
     });
+    const harnessKey = `workbench.harness:${path}`;
+    const selectionKey = `workbench.selection:${path}`;
     const operationKey = `workbench.operations:${path}`;
+    const { workspaceState } = context;
     this.controller = new WorkbenchController(client, {
-      loadSelection: () => context.workspaceState?.get(`workbench.selection:${path}`),
-      saveSelection: (session) =>
-        context.workspaceState?.update(`workbench.selection:${path}`, session) ?? Promise.resolve(),
-      loadOperations: () => context.workspaceState?.get(operationKey),
-      saveOperations: (operations) =>
-        context.workspaceState?.update(operationKey, operations) ?? Promise.resolve(),
+      loadHarness: () => workspaceState.get(harnessKey),
+      saveHarness: (harness) => workspaceState.update(harnessKey, harness),
+      loadSelection: () => workspaceState.get(selectionKey),
+      saveSelection: (session) => workspaceState.update(selectionKey, session),
+      loadOperations: () => workspaceState.get(operationKey),
+      saveOperations: (operations) => workspaceState.update(operationKey, operations),
       trusted: () => vscode.workspace.isTrusted,
       copyText: (text) => vscode.env.clipboard.writeText(text),
       login: () => this.login(),
@@ -168,22 +172,19 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
           });
           snapshots.set(original.toString(), file.before);
           snapshots.set(modified.toString(), file.after);
-          return { original, modified };
+          return { originalUri: original, modifiedUri: modified };
         });
         if (resources.length === 1) {
           await vscode.commands.executeCommand(
             'vscode.diff',
-            resources[0].original,
-            resources[0].modified,
+            resources[0].originalUri,
+            resources[0].modifiedUri,
             `${turn} · ${files[0].path}`,
           );
         } else {
           await vscode.commands.executeCommand('_workbench.openMultiDiffEditor', {
             title: `Turn ${turn} · workspace changes`,
-            resources: resources.map(({ original, modified }) => ({
-              originalUri: original,
-              modifiedUri: modified,
-            })),
+            resources,
           });
         }
       },
@@ -197,28 +198,14 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
           )) === 'Clear next batch'
         );
       },
+      hasDirtyDocuments,
       confirmUndo: async (_session, turn, files) => {
-        if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
-        const view = this.controller.snapshot.view;
-        if (!view || !view.view || view.view.active_turn || view.view.id !== _session)
-          throw new Error('Session changed or task is active');
-        const cwd = view.view.cwd;
-        if (await hasDirtyDocuments(cwd))
-          throw new Error('Save or close dirty editor buffers before undo');
         const choice = await vscode.window.showWarningMessage(
           `Undo ${files ? `${files.length} selected files (${files.join(', ')}) from` : 'workspace changes from'} turn ${turn}? This does not change chat history or model context. Multi-file undo can partially fail. External editors and residual background processes are not locked; inspect the diff first.`,
           { modal: true },
           'Undo turn',
         );
         return choice === 'Undo turn';
-      },
-      validateUndo: async (_session) => {
-        const view = this.controller.snapshot.view?.view;
-        if (!vscode.workspace.isTrusted || !view || view.active_turn || view.id !== _session)
-          throw new Error('Workspace trust, session, or task state changed');
-        if (await hasDirtyDocuments(view.cwd))
-          throw new Error('Save or close dirty editor buffers before undo');
-        await this.controller.authorizeForUndo?.(view.cwd);
       },
       attachFiles: async (cwd) => {
         if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required');
@@ -300,29 +287,17 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
         const roots = await Promise.all(
           (vscode.workspace.workspaceFolders || []).map((folder) => realpath(folder.uri.fsPath)),
         );
-        if (
-          !roots.some((root) => {
-            const part = relative(root, source);
-            return (
-              part === '' || (!part.startsWith('..' + '/') && part !== '..' && !isAbsolute(part))
-            );
-          })
-        )
+        if (!roots.some((root) => isWithin(root, source)))
           throw new Error('Open this session workspace before continuing it');
       },
       post: (message) => {
         void this.view?.webview.postMessage(message).then(undefined, () => {});
       },
     });
+    const invalidate = () => this.controller.invalidateAuthorization();
     this.resources.push(
-      ...[
-        vscode.workspace.onDidChangeWorkspaceFolders?.(() =>
-          this.controller.invalidateAuthorization(),
-        ),
-        vscode.workspace.onDidGrantWorkspaceTrust?.(() =>
-          this.controller.invalidateAuthorization(),
-        ),
-      ].filter((item): item is vscode.Disposable => Boolean(item)),
+      vscode.workspace.onDidChangeWorkspaceFolders(invalidate),
+      vscode.workspace.onDidGrantWorkspaceTrust(invalidate),
     );
   }
   resolveWebviewView(view: vscode.WebviewView) {
@@ -346,35 +321,32 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
   async login() {
     if (!vscode.workspace.isTrusted) throw new Error('Open a trusted workspace first');
-    const profile = await vscode.window.showQuickPick(['Pi', 'Codex', 'Claude'], {
-      title: 'Native provider login (trusted built-in profiles)',
-    });
-    if (!profile) return;
-    const profiles: Record<string, { command: string; args: string[]; instruction: string }> = {
-      Pi: { command: 'pi', args: [], instruction: 'Use /login in the Pi terminal.' },
-      Codex: {
-        command: 'codex',
-        args: ['login'],
-        instruction: 'Follow the native Codex login flow.',
-      },
-      Claude: {
-        command: 'claude',
-        args: ['auth', 'login'],
-        instruction: 'Follow the native Claude login flow.',
-      },
+    const commands = {
+      Pi: ['pi'],
+      Codex: ['codex', 'login'],
+      Claude: ['claude', 'auth', 'login'],
+      Antigravity: ['agy', 'acp', '--login'],
     };
-    const selected = profiles[profile];
-    if (!selected) return;
+    const profile = await vscode.window.showQuickPick(
+      HARNESSES.map((label) => ({ label, command: commands[label] })),
+      { title: 'Native provider login (trusted built-in profiles)' },
+    );
+    if (!profile) return;
+    const [command, ...args] = profile.command;
+    const instruction =
+      profile.label === 'Pi'
+        ? 'Use /login in the Pi terminal.'
+        : `Follow the native ${profile.label} login flow.`;
     const choice = await vscode.window.showWarningMessage(
-      `Run ${[selected.command, ...selected.args].join(' ')} in a native terminal? ${selected.instruction} Credentials stay with the provider CLI. Custom daemon worker commands are not used.`,
+      `Run ${profile.command.join(' ')} in a native terminal? ${instruction} Credentials stay with the provider CLI. Custom daemon worker commands are not used.`,
       { modal: true },
       'Open login terminal',
     );
     if (choice !== 'Open login terminal' || !vscode.workspace.isTrusted) return;
     const terminal = vscode.window.createTerminal({
-      name: `${profile} login`,
-      shellPath: selected.command,
-      shellArgs: selected.args,
+      name: `${profile.label} login`,
+      shellPath: command,
+      shellArgs: args,
     });
     terminal.show();
   }
@@ -386,7 +358,7 @@ export class WorkbenchProvider implements vscode.WebviewViewProvider, vscode.Dis
     }
     await this.controller.receive({
       type: 'create',
-      command: { method: 'create', harness: 'Pi', cwd },
+      command: { method: 'create', harness: this.controller.newSessionHarness, cwd },
     });
   }
   async attachSelection() {

@@ -261,6 +261,7 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
     execute(&context).await;
     assert_eq!(api.0.lock().await.topics, 1);
     let mut events = app.subscribe();
+    let receipts_before_prompt = app.journal_snapshot().await.unwrap().len();
     api.0
         .lock()
         .await
@@ -283,6 +284,16 @@ async fn shared_runtime_forum_permission_callback_and_429_retry_never_rerun_agen
     })
     .await
     .unwrap();
+    for _ in 0..2 {
+        app.load_queued_prompt_session(session.clone())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        app.journal_snapshot().await.unwrap().len(),
+        receipts_before_prompt + 1,
+        "submission and repeated busy checks create only the prompt's operation"
+    );
     deliver_once(&context).await.unwrap();
     let button = api
         .0

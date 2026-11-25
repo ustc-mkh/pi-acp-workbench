@@ -457,11 +457,13 @@ async fn execute(core: Arc<CommandCore>, envelope: Envelope) -> Option<SessionId
                         .content_slice(r#ref, offset, length)
                         .await
                         .map(R::Content),
-                    Q::Attach { session } => core
-                        .database
-                        .attached(session)
-                        .await
-                        .map(|attached| R::Attached(Box::new(attached))),
+                    Q::Attach { session } => match core.database.attached(session.clone()).await {
+                        Ok(attached) => Ok(R::Attached(Box::new(attached))),
+                        Err(crate::persistence::database::StoreError::NotFound) => {
+                            return Err(DomainError::NotFound(session));
+                        }
+                        Err(error) => Err(error),
+                    },
                     Q::Management { query } => {
                         return core
                             .database

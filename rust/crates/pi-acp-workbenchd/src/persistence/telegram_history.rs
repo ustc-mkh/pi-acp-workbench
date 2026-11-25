@@ -33,22 +33,7 @@ pub(super) fn reply(
         cwd,
         all,
     } = request;
-    let mut statement = db
-        .prepare(&format!(
-            "SELECT {INBOX_COLUMNS} FROM telegram_inbox WHERE bot_id=?1 AND update_id=?2"
-        ))
-        .map_err(failure)?;
-    let mut rows = statement
-        .query(params![bot, safe(update.get())?])
-        .map_err(failure)?;
-    let admitted = record(
-        db,
-        bot,
-        offset,
-        rows.next()
-            .map_err(failure)?
-            .ok_or_else(|| failure("history inbox missing"))?,
-    )?;
+    let admitted = inbox_record(db, bot, offset, update)?;
     let receipt_id = if let Some((limit, max_seq)) = sync {
         if all
             || admitted.command.topic.chat != topic.chat
@@ -88,7 +73,8 @@ pub(super) fn reply(
     if binding(db, bot, &topic)?.as_ref() != Some(&session) {
         return Err(DomainError::OperationConflict);
     }
-    let view = query::view(db, &session).map_err(failure)?;
+    let view =
+        query::view(db, &session).map_err(|error| inbox::session_read_error(error, &session))?;
     if cwd.as_ref() != Some(&view.cwd) {
         return Err(DomainError::OperationConflict);
     }

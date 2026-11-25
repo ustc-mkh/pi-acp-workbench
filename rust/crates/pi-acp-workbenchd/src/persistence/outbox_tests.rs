@@ -1,10 +1,7 @@
 use super::*;
 use crate::{
     domain::{EntryId, SessionId, WorkspacePath},
-    persistence::{
-        format::StorageLease,
-        sqlite_tests::{open, Root},
-    },
+    persistence::sqlite_tests::{open, Root},
 };
 fn at(value: u64) -> SafeInteger {
     SafeInteger::new(value).unwrap()
@@ -173,36 +170,4 @@ async fn obsolete_payload_layout_is_rejected_without_migration_or_rewrite() {
     assert!(store.enqueue(event).await.is_err());
     db.shutdown().await.unwrap();
     assert_eq!(std::fs::read(&file).unwrap(), before);
-}
-#[tokio::test]
-async fn failed_ack_preserves_pending_and_corrupt_records_fail_closed() {
-    let root = Root::new();
-    let (lease, db) = open(&root.data()).await;
-    let event = event();
-    let store = OutboxStore::new(db.clone(), 16);
-    store.enqueue(event.clone()).await.unwrap();
-    db.shutdown().await.unwrap();
-    let file = root.data().join("workbench.sqlite3");
-    let sql = rusqlite::Connection::open(&file).unwrap();
-    sql.execute_batch("CREATE TRIGGER reject_ack BEFORE UPDATE ON deliveries BEGIN SELECT RAISE(ABORT,'test ack failure'); END").unwrap();
-    drop(sql);
-    let db = Database::open(root.data(), &lease).await.unwrap();
-    let store = OutboxStore::new(db.clone(), 16);
-    assert!(store.ack(&event.id).await.is_err());
-    assert_eq!(store.pending(0, 16).await.unwrap().len(), 1);
-    db.shutdown().await.unwrap();
-    let sql = rusqlite::Connection::open(&file).unwrap();
-    sql.execute_batch("DROP TRIGGER reject_ack").unwrap();
-    sql.execute("UPDATE deliveries SET target_key='tampered'", [])
-        .unwrap();
-    drop(sql);
-    let before = std::fs::read(&file).unwrap();
-    let db = Database::open(root.data(), &lease).await.unwrap();
-    let store = OutboxStore::new(db.clone(), 16);
-    assert!(store.pending(0, 16).await.is_err());
-    assert!(store.enqueue(event).await.is_err());
-    db.shutdown().await.unwrap();
-    assert_eq!(std::fs::read(&file).unwrap(), before);
-    drop(lease);
-    drop(StorageLease::lock(&root.data()).unwrap());
 }

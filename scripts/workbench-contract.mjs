@@ -111,6 +111,14 @@ try {
   let daemon = await start();
   await open();
   const createCommand = { method: 'create', harness: 'Pi', cwd: root };
+  await assert.rejects(
+    client.call({ ...createCommand, harness: 'Claude' }, 'contract-unconfigured'),
+    /provider_not_configured/,
+  );
+  assert.equal(
+    (await client.call({ method: 'operation', operation: 'contract-unconfigured' })).status,
+    'unknown',
+  );
   const created = await client.call(createCommand, 'contract-create'),
     session = created.Created.summary.id;
   assert.deepEqual(await client.call(createCommand, 'contract-create'), created);
@@ -387,7 +395,14 @@ try {
     result.catch(() => {});
     return result;
   });
-  await assert.rejects(client.call(createCommand), /backpressure/);
+  await assert.rejects(
+    client.call(createCommand, 'contract-not-admitted'),
+    /admission_backpressure/,
+  );
+  assert.equal(
+    (await client.call({ method: 'operation', operation: 'contract-not-admitted' })).status,
+    'unknown',
+  );
   assert((await inspect(blockedSession)).configuration_intent);
   assert.equal((await client.call({ method: 'list' })).sessions.length, 2);
   const independentFinished = client.waitFor((batch) => turnFinished(batch, independentSession));

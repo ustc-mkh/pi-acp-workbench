@@ -302,6 +302,39 @@ it('requires editor confirmation and sends undo as one durable command with an o
     report: { files: [{ path: 'a.txt', status: 'restored', error: null }] },
   });
 });
+it('shows selected-file conflicts before asking for undo confirmation', async () => {
+  let confirmed = false;
+  const entry = {
+    seq: 1,
+    id: 'entry',
+    turn: 'turn',
+    role: 'User',
+    text: { Inline: { text: 'edit' } },
+    message: null,
+    image: null,
+  };
+  const { peer, controller } = await setup(undefined, async () => {
+    confirmed = true;
+    return true;
+  }, [entry]);
+  const undo = controller.receive({
+    type: 'execute',
+    session: 'session',
+    command: { method: 'undo_turn', session: 'session', turn: 'turn', files: ['ok', 'changed'] },
+  });
+  await expect.poll(() => peer.requests.length).toBe(3);
+  peer.query(peer.requests[2], 'validate_undo', {
+    files: [
+      { path: 'ok', status: 'ready', error: null },
+      { path: 'changed', status: 'conflict', error: 'contents changed on disk' },
+    ],
+  });
+  await undo;
+  expect(confirmed).toBe(false);
+  expect(controller.snapshot.error).toContain('changed · contents changed on disk');
+  expect(peer.requests).toHaveLength(3);
+});
+
 it('rechecks workspace authorization after modal confirmation before undo admission', async () => {
   const entry = {
     seq: 1,
@@ -494,7 +527,7 @@ it('does not release a running session without confirmation or a session outside
   ).toBe(false);
 });
 
-it('selection is cold, typed state reaches the webview, and only user mutation explicitly loads a provider', async () => {
+it('keeps selection cold and sends the authorized prompt directly to the host', async () => {
   const { peer, controller, messages, authorization } = await setup();
   expect(peer.requests.map((r) => r.command.method)).toEqual(['list', 'attach']);
   expect(authorization).toEqual([]);
@@ -508,17 +541,13 @@ it('selection is cold, typed state reaches the webview, and only user mutation e
     },
   });
   await expect.poll(() => peer.requests.length).toBe(3);
-  expect(peer.requests[2].command.method).toBe('load');
-  peer.reply(peer.requests[2], { Loaded: { view: emptyView(5) } });
-  await expect.poll(() => peer.requests.length).toBe(4);
-  expect(peer.requests[3].command.method).toBe('prompt');
-  expect(peer.requests[3].operation).toBeDefined();
-  peer.reply(peer.requests[3], { Accepted: { session: 'session', revision: 6 } });
+  expect(peer.requests[2].command.method).toBe('prompt');
+  expect(peer.requests[2].operation).toBeDefined();
+  peer.reply(peer.requests[2], { Accepted: { session: 'session', revision: 6 } });
   await action;
   expect(peer.requests.map((request) => request.command.method)).toEqual([
     'list',
     'attach',
-    'load',
     'prompt',
   ]);
   expect(authorization).toEqual(['/workspace']);
@@ -699,6 +728,48 @@ it.each([47, 63, 64])(
     } else expect(persisted).toEqual(controller.snapshot.operations);
   },
 );
+
+it('releases only requested unknown receipts and reuses the ordinary slot after definitive rejection', async () => {
+  const peer = await workbenchPeer();
+  peers.push(peer);
+  const saved = Array.from({ length: 48 }, (_, i) => ({
+    operation: `old-${i}`,
+    method: 'prompt',
+    status: 'uncertain',
+    code: i === 0 ? 'unknown' : 'uncertain',
+  }));
+  const controller = new WorkbenchController(peer.client(), {
+    post: () => {},
+    trusted: () => true,
+    workspace: () => '/workspace',
+    authorize: async () => {},
+    loadOperations: () => saved,
+  });
+  peer.cleanups.push(async () => controller.dispose());
+  await controller.receive({ type: 'stop_tracking_unknown', operations: ['old-0', 'old-1'] });
+  expect(peer.requests).toHaveLength(0);
+  expect(controller.snapshot.operations[0].status).toBe('untracked');
+  expect(controller.snapshot.operations[1].status).toBe('uncertain');
+  for (const [index, code] of [
+    'provider_not_configured',
+    'admission_backpressure',
+    'not_admitted',
+    'operation_interrupted',
+  ].entries()) {
+    const creating = controller.receive({
+      type: 'create',
+      command: { method: 'create', harness: 'Pi', cwd: '/workspace' },
+    });
+    await expect.poll(() => peer.requests.length).toBe(index + 1);
+    const request = peer.requests[index];
+    peer.send(request.socket, { type: 'error', id: request.id, code, message: code });
+    await creating;
+    expect(controller.snapshot.operations.at(-1)).toMatchObject({
+      code,
+      status: code === 'operation_interrupted' ? 'uncertain' : 'failed',
+    });
+  }
+});
 
 it('keeps reserved receipt capacity for control commands when ordinary workflows are blocked', async () => {
   const peer = await workbenchPeer();

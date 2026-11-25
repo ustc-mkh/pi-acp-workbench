@@ -390,6 +390,7 @@ pub enum IpcMessage {
 fn error(id: SafeInteger, error: DomainError) -> IpcMessage {
     let code = match error {
         DomainError::Backpressure => "backpressure",
+        DomainError::ProviderNotConfigured => "provider_not_configured",
         DomainError::WorkerCapacity => "worker_capacity",
         DomainError::MailboxClosed => "mailbox_closed",
         DomainError::FrameTooLarge => "frame_too_large",
@@ -414,6 +415,18 @@ fn error(id: SafeInteger, error: DomainError) -> IpcMessage {
         id,
         code: code.into(),
         message: error.to_string(),
+    }
+}
+fn admission_error(id: SafeInteger, failure: DomainError) -> IpcMessage {
+    let code = if matches!(failure, DomainError::Backpressure) {
+        "admission_backpressure"
+    } else {
+        "not_admitted"
+    };
+    IpcMessage::Error {
+        id,
+        code: code.into(),
+        message: failure.to_string(),
     }
 }
 pub struct ExternalTransport {
@@ -590,7 +603,15 @@ async fn connection(
                 let command = request.command;
                 let pool = command.pool();
                 let permit = pools[pool].clone().try_acquire_owned();
-                let Ok(permit) = permit else { write_message(&mut write, &error(id, DomainError::Backpressure)).await?; continue; };
+                let Ok(permit) = permit else {
+                    let rejected = if matches!(pool, QUERY_POOL | HISTORY_POOL) {
+                        error(id, DomainError::Backpressure)
+                    } else {
+                        admission_error(id, DomainError::Backpressure)
+                    };
+                    write_message(&mut write, &rejected).await?;
+                    continue;
+                };
                 if matches!(pool, QUERY_POOL | HISTORY_POOL) && request.operation.is_some() { error(id, DomainError::InvalidAnswer("queries cannot carry an operation id".into())) }
                 else { match command {
                     ClientCommand::Attach { session } => {
@@ -598,7 +619,8 @@ async fn connection(
                         else {
                             let result = tokio::select! { _ = stop.cancelled() => return Ok(()), result = app.query(QueryCommand::Attach { session: session.clone() }) => result };
                             match result {
-                                Ok(QueryResult::Attached(attached)) => {
+                                Ok(QueryResult::Attached(mut attached)) => {
+                                    app.project_current_choices(&mut attached.view).await;
                                     subscriptions.insert(session, attached.view.revision);
                                     IpcMessage::Query { id, result: QueryResult::Attached(attached) }
                                 }
@@ -631,7 +653,7 @@ async fn connection(
                         }
                         let command = command.into_domain().expect("all queries handled");
                         match app.enqueue_command(request.operation, command) {
-                            Err(failure) => error(id, failure),
+                            Err(failure) => admission_error(id, failure),
                             Ok(ticket) => {
                                 pending_ids.insert(id);
                                 replies.spawn(async move {
@@ -644,13 +666,16 @@ async fn connection(
                 }}
             },
             event = events.recv() => match event {
-                Ok(batch) => {
+                Ok(mut batch) => {
                     let Some(last) = subscriptions.get_mut(&batch.session) else { continue; };
                     if batch.revision <= *last { continue; }
                     if last.next().ok() != Some(batch.revision) {
                         write_message(&mut write, &IpcMessage::ResyncRequired).await?; return Ok(());
                     }
                     *last = batch.revision;
+                    if let Some(view) = &mut batch.view {
+                        app.project_current_choices(view).await;
+                    }
                     IpcMessage::Batch { batch: Box::new(batch) }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => { write_message(&mut write, &IpcMessage::ResyncRequired).await?; return Ok(()); }

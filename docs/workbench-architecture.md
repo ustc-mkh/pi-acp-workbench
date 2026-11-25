@@ -1,6 +1,8 @@
 # 架构与实现
 
-`pi-acp-workbenchd` 是唯一控制进程。VS Code 经 Unix socket IPC v3 接入，Telegram adapter 在宿主内调用同一 app/domain；Pi、Codex、Claude ACP worker 是独立外部子进程。
+`pi-acp-workbenchd` 是唯一控制进程。VS Code 经 Unix socket IPC v3 接入，Telegram adapter 在宿主内调用同一 app/domain；Pi、Codex、Claude、Antigravity ACP worker 是独立外部子进程。
+
+Antigravity 使用独立的 `Harness::Antigravity` 身份。宿主从 `workers.antigravity` 读取启动配置，通过 stdio 与 `agy acp` 通信。VS Code 和 Telegram 发送同一个创建会话命令。模型、思考级别和图片能力取自 ACP 握手或会话配置。已有原生会话优先使用 provider 声明的 `session/load`，仅声明 `sessionCapabilities.resume` 时使用 `session/resume`，两者都使用已保存的原生 ID。
 
 ## 模块职责
 
@@ -56,6 +58,8 @@ SQLite writer 在请求之间检查 WAL，达到逻辑阈值时尝试 RESTART ch
 ## 界面契约与归档读取
 
 宿主到 Webview 的所有消息由 `workbench-ui.ts` 的 `uiMessage` 统一解析，消息、状态和回执类型从 schema 推导。UI 模块接收已验证消息，继续按当前会话、operation 和草稿 generation 检查过期响应。持久回执恢复只查询结果，不重新发送命令。
+
+IPC 客户端用同一张映射表校验普通查询的响应种类，并推导调用方的返回类型。Webview 的 `workbench-session-list.ts` 按会话 ID 复用列表行，只在行的显示内容或操作状态变化时更新。分页按钮点击时读取当前游标，流式回复期间可继续用键盘翻页。
 
 历史视图按当前会话缓存消息投影、Markdown 和长文本分页。切换会话时，它清空消息节点与缓存，断开可见性观察器并取消待执行的动画帧。归档正文响应携带会话 ID，视图只接收当前会话的响应。实现位于 `webview/workbench-history-view.ts`。
 

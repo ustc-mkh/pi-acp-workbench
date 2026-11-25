@@ -56,7 +56,7 @@ async fn poll_cancellable(
             .filter(|query| {
                 !query.is_empty() && query.len() <= 200 && !query.chars().any(char::is_control)
             });
-        if let Some(mut incoming) = update.incoming() {
+        let admission = if let Some(mut incoming) = update.incoming() {
             addressed(&mut incoming.content, context.username.as_deref());
             let authorized = !incoming.from_bot
                 && context
@@ -80,11 +80,12 @@ async fn poll_cancellable(
                 &context.policy(),
                 now(),
             )
-            .await?;
+            .await?
         } else {
             context
                 .store
                 .admit(Admission {
+                    workspace: context.config.workspace.clone(),
                     id,
                     sender: None,
                     command: None,
@@ -92,15 +93,20 @@ async fn poll_cancellable(
                     callback_query: None,
                     expected_binding: None,
                 })
-                .await?;
-        }
+                .await?
+        };
         // Acknowledgement is presentation only, after durable admission. It can
         // be repeated without executing a user/domain command again.
         if let Some(query) = query {
+            let reply = if admission == crate::persistence::inbox::AdmissionResult::QueueFull {
+                "Inbox full. Please retry."
+            } else {
+                "Received"
+            };
             if let Ok(Err(error @ super::api::ApiError::Response { code: 401, .. })) =
                 tokio::time::timeout(
                     Duration::from_secs(2),
-                    context.api.answer_callback(&query, "Received"),
+                    context.api.answer_callback(&query, reply),
                 )
                 .await
             {

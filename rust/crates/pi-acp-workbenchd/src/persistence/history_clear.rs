@@ -1,6 +1,6 @@
 //! Frozen targets, bounded per-session removal, and durable partial results.
 //! Native files, usage, receipts and delivery manifests are never deleted here.
-use super::{database::StoreError, query};
+use super::database::StoreError;
 use crate::domain::{
     operation::OperationTicket,
     query::{CommandReceipt, HistoryClearReport, SessionFilter},
@@ -56,7 +56,7 @@ pub(crate) fn execute(db: &mut Connection, request: Request) -> Result<Output, S
                 return Err(StoreError::Invalid("invalid history filter"));
             }
             let tx = db.transaction()?;
-            let h = filter.harness.as_ref().map(query::harness_name);
+            let h = filter.harness.as_ref().map(crate::domain::Harness::as_str);
             tx.execute("INSERT INTO history_clear_jobs(job,filter_json,active,pending_deliveries) VALUES(?1,?2,0,0)", params![ticket.operation.as_str(),super::database::encode(&filter)?])?;
             tx.execute("INSERT INTO history_clear_targets(job,session) SELECT ?1,s.id FROM sessions s LEFT JOIN session_metadata m ON m.session=s.id WHERE (?2 IS NULL OR s.harness=?2) AND (?3='' OR instr(lower(COALESCE(m.title,'')),lower(?3))>0 OR instr(lower(s.cwd),lower(?3))>0 OR instr(lower(s.id),lower(?3))>0)",params![ticket.operation.as_str(),h,filter.text])?;
             tx.execute("UPDATE history_clear_jobs SET active=(SELECT count(*) FROM sessions s JOIN history_clear_targets t ON t.session=s.id WHERE t.job=?1 AND s.status_json IN ('\"Running\"','\"Waiting\"','\"Cancelling\"')),pending_deliveries=(SELECT count(*) FROM deliveries d WHERE d.status='Pending' AND COALESCE(json_extract(d.target_json,'$.Session.session'),json_extract(d.payload_json,'$.Input.session'),json_extract(d.payload_json,'$.Turn.session'),json_extract(d.payload_json,'$.HistoryEntry.session')) IN (SELECT session FROM history_clear_targets WHERE job=?1)) WHERE job=?1",[ticket.operation.as_str()])?;

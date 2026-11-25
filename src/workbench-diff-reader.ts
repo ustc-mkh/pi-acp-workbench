@@ -1,15 +1,14 @@
 import type { WorkbenchClient } from './workbench-client';
 import type { WorkbenchSession } from './workbench-session';
 import type { UiCommand, WorkbenchUiMessage } from './workbench-ui';
-import type { TurnDiff } from './workbench-protocol';
+import type { SessionId } from './workbench-protocol';
 
 /** Bounded diff observation; only the host opens editor documents. */
 export class WorkbenchDiffReader {
-  private turnDiffCache = new Map<string, TurnDiff>();
+  private confirmedFileCounts = new Map<string, number>();
   constructor(
     private client: WorkbenchClient,
     private selected: () => WorkbenchSession | undefined,
-    private closed: () => boolean,
     private post: (message: WorkbenchUiMessage) => void,
     private openDiff?: (
       turn: string,
@@ -17,19 +16,19 @@ export class WorkbenchDiffReader {
     ) => Promise<void>,
   ) {}
   clear() {
-    this.turnDiffCache.clear();
+    this.confirmedFileCounts.clear();
+  }
+  private confirmedSession(session: SessionId, turn: string) {
+    const selected = this.selected();
+    if (selected?.id !== session || !selected.view.entries.some((row) => row.turn === turn))
+      throw new Error('Turn is not in the confirmed view');
+    return selected;
   }
   async openTurnDiff(message: Extract<UiCommand, { type: 'open_turn_diff' }>) {
-    const selected = this.selected();
-    if (
-      !selected ||
-      selected.id !== message.session ||
-      !selected.view.entries.some((row) => row.turn === message.turn)
-    )
-      throw new Error('Turn is not in the confirmed view');
+    const selected = this.confirmedSession(message.session, message.turn);
     if (!this.openDiff) throw new Error('Editor diff is unavailable');
     const files: { path: string; before: string; after: string }[] = [];
-    let offset = 0;
+    let offset = message.file ?? 0;
     let used = 0;
     do {
       const page = await this.client.call({
@@ -67,24 +66,18 @@ export class WorkbenchDiffReader {
         }
         files.push({ path: file.path, before: text[0], after: text[1] });
       }
-      if (page.next_offset == null) break;
+      if (message.file !== undefined || page.next_offset == null) break;
       if (page.next_offset <= offset || page.next_offset > 5000)
         throw new Error('Invalid diff page');
       offset = page.next_offset;
     } while (true);
-    if (this.selected() !== selected || this.closed()) return;
+    if (this.selected() !== selected) return;
     if (!files.length)
       throw new Error('No complete text snapshots available; review partial reasons in the card');
     await this.openDiff(message.turn, files);
   }
   async readTurnDiff(message: Extract<UiCommand, { type: 'read_turn_diff' }>) {
-    const selected = this.selected();
-    if (
-      !selected ||
-      selected.id !== message.session ||
-      !selected.view.entries.some((row) => row.turn === message.turn)
-    )
-      throw new Error('Turn is not in the confirmed view');
+    const selected = this.confirmedSession(message.session, message.turn);
     try {
       const diff = await this.client.call({
         method: 'turn_diff',
@@ -92,28 +85,24 @@ export class WorkbenchDiffReader {
         turn: message.turn,
         offset: message.offset,
       });
-      if (this.selected() !== selected || this.closed()) return;
-      const key = `${selected.id}:${message.turn}`;
-      const previous = this.turnDiffCache.get(key);
+      if (this.selected() !== selected) return;
       const start = message.offset ?? 0;
-      if (start > 0 && (!previous || previous.files.length !== start))
+      if (start > 0 && this.confirmedFileCounts.get(message.turn) !== start)
         throw new Error('Diff page is out of order');
-      const merged =
-        start > 0 && previous ? { ...diff, files: [...previous.files, ...diff.files] } : diff;
-      if (merged.files.length > 5000) throw new Error('Diff exceeds file budget');
-      this.turnDiffCache.set(key, merged);
-      while (this.turnDiffCache.size > 16)
-        this.turnDiffCache.delete(this.turnDiffCache.keys().next().value!);
-      if (this.selected() === selected && !this.closed())
-        this.post({
-          type: 'turn_diff',
-          session: selected.id,
-          turn: message.turn,
-          offset: message.offset,
-          diff,
-        });
+      const count = start + diff.files.length;
+      if (count > 5000) throw new Error('Diff exceeds file budget');
+      this.confirmedFileCounts.set(message.turn, count);
+      if (this.confirmedFileCounts.size > 16)
+        this.confirmedFileCounts.delete(this.confirmedFileCounts.keys().next().value!);
+      this.post({
+        type: 'turn_diff',
+        session: selected.id,
+        turn: message.turn,
+        offset: message.offset,
+        diff,
+      });
     } catch {
-      if (this.selected() === selected && !this.closed())
+      if (this.selected() === selected)
         this.post({
           type: 'turn_diff_error',
           session: selected.id,
@@ -123,15 +112,8 @@ export class WorkbenchDiffReader {
     }
   }
   async readTurnDiffContent(message: Extract<UiCommand, { type: 'read_turn_diff_content' }>) {
-    const selected = this.selected();
-    const diff = this.turnDiffCache.get(`${message.session}:${message.turn}`);
-    if (
-      !selected ||
-      selected.id !== message.session ||
-      !selected.view.entries.some((row) => row.turn === message.turn) ||
-      !diff ||
-      message.file >= diff.files.length
-    )
+    const selected = this.confirmedSession(message.session, message.turn);
+    if (message.file >= (this.confirmedFileCounts.get(message.turn) ?? 0))
       throw new Error('Diff file is not in the confirmed view');
     try {
       const content = await this.client.call({
@@ -142,7 +124,7 @@ export class WorkbenchDiffReader {
         after: message.after,
         offset: message.offset,
       });
-      if (this.selected() === selected && !this.closed())
+      if (this.selected() === selected)
         this.post({
           type: 'turn_diff_content',
           session: selected.id,
@@ -153,7 +135,7 @@ export class WorkbenchDiffReader {
           ...content,
         });
     } catch {
-      if (this.selected() === selected && !this.closed())
+      if (this.selected() === selected)
         this.post({
           type: 'turn_diff_error',
           session: selected.id,

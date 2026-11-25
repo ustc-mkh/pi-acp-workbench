@@ -5,6 +5,19 @@ pub enum Harness {
     Pi,
     Codex,
     Claude,
+    Antigravity,
+}
+impl Harness {
+    pub const ALL: [Self; 4] = [Self::Pi, Self::Codex, Self::Claude, Self::Antigravity];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pi => "Pi",
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::Antigravity => "Antigravity",
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SessionStatus {

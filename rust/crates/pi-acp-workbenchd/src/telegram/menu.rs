@@ -42,7 +42,7 @@ impl Menu {
         cwd: &WorkspacePath,
         create_topic: bool,
     ) {
-        for harness in [Harness::Pi, Harness::Codex, Harness::Claude] {
+        for harness in Harness::ALL {
             if app.harness_configured(&harness) {
                 self.push(
                     format!("New {harness:?}"),
@@ -522,7 +522,7 @@ pub(super) async fn sync_result(
         "Main menu",
         ControlCommand::Menu {
             page: MenuPage::Home,
-            create_topic: forum && record.command.topic.thread.is_none(),
+            create_topic: forum,
         },
     );
     menu.encode()

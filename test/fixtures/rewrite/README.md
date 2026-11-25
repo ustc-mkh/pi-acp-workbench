@@ -9,7 +9,7 @@
 
 `test/contract-agent.mjs` 是独立 stdio 模拟 peer，支持流式消息、工具、图片、设置、交互及故障场景。`WORKBENCH_CONTRACT_NATIVE_STATE` 启用合成原生历史与分支，`WORKBENCH_CONTRACT_FORK_GATE` 在远端分支创建后阻塞响应，用于未知结果和取消测试。场景细节以 peer 实现和调用测试为准。
 
-模拟 Pi/Codex/Claude profile 用于验证宿主协议行为，不代表真实模型兼容性。真实 Pi SDK 样例验证本地格式和 native 操作，也不代表在线模型流式输出。
+模拟 Pi/Codex/Claude/Antigravity profile 用于验证宿主协议行为，不代表真实模型兼容性。真实 Pi SDK 样例验证本地格式和 native 操作，也不代表在线模型流式输出。
 
 ## 运行入口
 

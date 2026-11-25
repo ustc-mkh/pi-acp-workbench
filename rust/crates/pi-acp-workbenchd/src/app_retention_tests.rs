@@ -32,14 +32,10 @@ async fn retention_capacity_uses_user_input_not_discovery_and_resumes_native_his
     let native = inspect_view(&app, &first).await.provider_session;
     prompt(&app, &second, "second input").await;
     wait_finished(&mut events).await;
-    let order = app.core.coordinator.adapters.lock().await[&first]
-        .last_used
-        .load(Ordering::Relaxed);
+    let order = app.core.coordinator.adapters.lock().await[&first].last_used;
     discover(&app, &first).await;
     assert_eq!(
-        app.core.coordinator.adapters.lock().await[&first]
-            .last_used
-            .load(Ordering::Relaxed),
+        app.core.coordinator.adapters.lock().await[&first].last_used,
         order
     );
     let saved = history_text(&app, &first).await;
@@ -312,7 +308,7 @@ async fn retention_restores_input_time_from_durable_records_without_refreshing_i
     discover(&app, &id).await;
     let adapters = app.core.coordinator.adapters.lock().await;
     assert_eq!(adapters[&id].last_user_input_at, activity.0);
-    assert_eq!(adapters[&id].last_used.load(Ordering::Relaxed), activity.1);
+    assert_eq!(adapters[&id].last_used, activity.1);
     drop(adapters);
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();

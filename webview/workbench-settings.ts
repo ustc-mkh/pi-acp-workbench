@@ -31,9 +31,13 @@ export function renderSettings(snapshot: SessionView, deps: SettingsDeps) {
     preferences,
   } = deps;
   const current = state();
+  const selectedModel = snapshot.catalogue.current_model ?? snapshot.config.model;
+  const selectedMode = snapshot.catalogue.current_mode ?? snapshot.config.mode;
   const definition = JSON.stringify([
     snapshot.id,
     snapshot.catalogue,
+    selectedModel,
+    selectedMode,
     current?.error,
     current?.view?.error,
     current?.operations.slice(-1).map((op) => [op.operation, op.status]),
@@ -99,7 +103,7 @@ export function renderSettings(snapshot: SessionView, deps: SettingsDeps) {
     for (const choice of choices) {
       if (
         key === 'model' &&
-        choice.id !== snapshot.catalogue.current_model &&
+        choice.id !== selectedModel &&
         !management.visible(choice.id, snapshot.harness)
       )
         continue;
@@ -107,8 +111,7 @@ export function renderSettings(snapshot: SessionView, deps: SettingsDeps) {
       option.value = choice.id;
       select.append(option);
     }
-    select.value =
-      (key === 'model' ? snapshot.catalogue.current_model : snapshot.catalogue.current_mode) || '';
+    select.value = (key === 'model' ? selectedModel : selectedMode) || '';
     select.addEventListener('change', () => {
       const value = choices.find((choice) => choice.id === select.value);
       if (!value) return;
@@ -137,11 +140,7 @@ export function renderSettings(snapshot: SessionView, deps: SettingsDeps) {
       : !current?.operations.length
         ? current?.error || current?.view?.error
         : undefined;
-  modelControls.update(
-    snapshot.id + ':' + snapshot.catalogue.current_model,
-    providerSelects,
-    failure,
-  );
+  modelControls.update(snapshot.id + ':' + selectedModel, providerSelects, failure);
   const processLabel = element('label', '显示执行过程');
   const processToggle = element('input');
   processToggle.type = 'checkbox';

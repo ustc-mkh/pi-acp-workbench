@@ -15,12 +15,10 @@ impl CommandCore {
         if self.closed.load(Ordering::Acquire) {
             return Err(ingress::stopping());
         }
-        let inspected = self
-            .runtime
-            .registry
-            .command_admitted(DomainCommand::Inspect(session.clone()))
+        let loaded = self
+            .commit(DomainCommand::LoadSession(session.clone()))
             .await?;
-        let Some(snapshot) = inspected.view() else {
+        let Some(snapshot) = loaded.view() else {
             return Err(DomainError::NotFound(session.clone()));
         };
         if !self.coordinator.supervisor.is_configured(&snapshot.harness) {
@@ -39,11 +37,6 @@ impl CommandCore {
                 "native branch has no committed source entry".into(),
             ));
         }
-        if cancel.is_cancelled() {
-            return Err(DomainError::ForkCancelled);
-        }
-        self.commit(DomainCommand::LoadSession(session.clone()))
-            .await?;
         if cancel.is_cancelled() {
             return Err(DomainError::ForkCancelled);
         }

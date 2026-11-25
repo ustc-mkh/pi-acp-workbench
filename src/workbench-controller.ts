@@ -7,8 +7,9 @@ import { linkDestination, type LinkDestination } from './workbench-links';
 import { WorkbenchClient } from './workbench-client';
 import { WorkbenchSession } from './workbench-session';
 import {
+  HARNESSES,
   sessionId,
-  type ClientCommand,
+  usesReservedWorkflow,
   type SessionId,
   type SessionSummary,
   type ContentRef,
@@ -35,7 +36,9 @@ export interface WorkbenchPorts {
   openDiff?(turn: string, files: { path: string; before: string; after: string }[]): Promise<void>;
   confirmUndo?(session: SessionId, turn: string, files?: string[]): Promise<boolean>;
   confirmHistoryClear?(report: import('./workbench-protocol').HistoryClearReport): Promise<boolean>;
-  validateUndo?(session: SessionId, turn: string): Promise<void>;
+  hasDirtyDocuments?(cwd: string): Promise<boolean>;
+  loadHarness?(): unknown;
+  saveHarness?(harness: SessionSummary['harness']): PromiseLike<void>;
   loadSelection?(): unknown;
   saveSelection?(session: SessionId | undefined): PromiseLike<void>;
   loadOperations?(): unknown;
@@ -45,9 +48,9 @@ export interface WorkbenchPorts {
 }
 /** UI owns only selection/display/workflow observers. The Rust actor owns all domain state. */
 export class WorkbenchController {
+  newSessionHarness: SessionSummary['harness'];
   private diffs: WorkbenchDiffReader;
   private selected?: WorkbenchSession;
-  private selection = 0;
   private closed = false;
   private sequence = 0;
   private listRequest = 0;
@@ -75,6 +78,8 @@ export class WorkbenchController {
     readonly client: WorkbenchClient,
     private ports: WorkbenchPorts,
   ) {
+    const savedHarness = ports.loadHarness?.();
+    this.newSessionHarness = HARNESSES.find((name) => name === savedHarness) ?? 'Pi';
     try {
       const savedSelection = ports.loadSelection?.();
       if (savedSelection !== undefined) this.restoredSelection = sessionId.parse(savedSelection);
@@ -96,7 +101,6 @@ export class WorkbenchController {
     this.diffs = new WorkbenchDiffReader(
       client,
       () => this.selected,
-      () => this.closed,
       (message) => ports.post(message),
       ports.openDiff?.bind(ports),
     );
@@ -108,11 +112,6 @@ export class WorkbenchController {
         this.emit();
       },
     });
-  }
-  async authorizeForUndo(cwd: string): Promise<void> {
-    if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
-    await this.ports.authorize(cwd);
-    if (this.closed || !this.ports.trusted()) throw new Error('Workspace trust changed');
   }
   get snapshot(): WorkbenchUiState {
     return {
@@ -143,7 +142,20 @@ export class WorkbenchController {
         ['execute', 'create', 'select', 'clear_selection'].includes(message.type)
       )
         throw new Error('Finish or cancel the undo confirmation first');
+      if (
+        (message.type === 'ready' || message.type === 'set_harness') &&
+        message.harness &&
+        message.harness !== this.newSessionHarness
+      ) {
+        this.newSessionHarness = message.harness;
+        await this.ports.saveHarness?.(message.harness);
+      }
       switch (message.type) {
+        case 'set_harness':
+          return;
+        case 'stop_tracking_unknown':
+          await this.receipts.stopTrackingUnknown(message.operations);
+          break;
         case 'open_link': {
           if (!this.ports.trusted() || !this.ports.openLink)
             throw new Error('Trusted host required');
@@ -282,7 +294,6 @@ export class WorkbenchController {
           break;
         case 'clear_selection': {
           if (this.selecting) throw new Error('Another session selection is in progress');
-          ++this.selection;
           const previous = this.selected;
           this.selected = undefined;
           this.restoredSelection = undefined;
@@ -298,9 +309,7 @@ export class WorkbenchController {
           const token = await this.authorize(view.cwd);
           this.assertAuthorization(token);
           await this.receipts.execute({ method: 'remove', session: message.session });
-          if (this.selected?.id === message.session) await this.ports.saveSelection?.(undefined);
-          this.invalidateList();
-          this.state.sessions = this.state.sessions.filter((row) => row.id !== message.session);
+          await this.forgetSession(message.session);
           break;
         }
         case 'release_session': {
@@ -334,8 +343,7 @@ export class WorkbenchController {
           const token = await this.authorize(message.command.cwd);
           this.assertAuthorization(token);
           const result = await this.receipts.execute(message.command);
-          if (!result || typeof result !== 'object' || !('Created' in result))
-            throw new Error('Created session missing');
+          if (!('Created' in result)) throw new Error('Created session missing');
           this.upsert(result.Created.summary);
           const id = result.Created.summary.id;
           this.preparing = id;
@@ -386,7 +394,7 @@ export class WorkbenchController {
           )
             throw new Error('Command is not a user mutation');
           const snapshot = selected.view.view;
-          const control = ['cancel', 'answer', 'remove'].includes(message.command.method);
+          const control = usesReservedWorkflow(message.command.method);
           if (this.preparing === selected.id && !control)
             throw new Error('新会话正在加载模型与偏好，请稍候。');
           if (
@@ -411,11 +419,6 @@ export class WorkbenchController {
             const entry = message.command.request.entry;
             if (!selected.view.entries.some((row) => row.id === entry))
               throw new Error('Fork entry is not in the committed transcript');
-          }
-          if (['prompt', 'set_model', 'set_mode'].includes(message.command.method)) {
-            // Inspect remains cold. Only an explicit authorized user mutation loads a peer.
-            await this.receipts.execute({ method: 'load', session: selected.id });
-            checkSession();
           }
           let promptOperation: import('./workbench-protocol').OperationId | undefined;
           const result = await this.receipts.execute(message.command, (operation) => {
@@ -463,29 +466,17 @@ export class WorkbenchController {
               prompt: message.command.prompt,
               // Last-mile Pi busy rejection is a turn fact, not an acceptance rollback.
               pi_after_seq: snapshot.harness === 'Pi' ? snapshot.last_entry_seq : undefined,
-              revision:
-                result && typeof result === 'object' && 'Accepted' in result
-                  ? result.Accepted.revision
-                  : undefined,
+              revision: 'Accepted' in result ? result.Accepted.revision : undefined,
               generation: message.generation,
               operation: promptOperation!,
             });
           }
-          if (
-            message.command.method === 'fork' &&
-            result &&
-            typeof result === 'object' &&
-            'Forked' in result
-          ) {
+          if (message.command.method === 'fork' && 'Forked' in result) {
             this.upsert(result.Forked.summary);
             if (this.selected === selected) await this.select(result.Forked.summary.id);
           }
           if (message.command.method === 'remove') {
-            if (this.selected === selected) await this.ports.saveSelection?.(undefined);
-            this.invalidateList();
-            this.state.sessions = this.state.sessions.filter(
-              (summary) => summary.id !== selected.id,
-            );
+            await this.forgetSession(selected.id);
           }
           break;
         }
@@ -694,7 +685,7 @@ export class WorkbenchController {
             const session = this.restoredSelection;
             this.restoredSelection = undefined;
             await this.select(session);
-            if (this.snapshot.view?.status !== 'ready') {
+            if (this.selected && this.snapshot.view?.status !== 'ready') {
               this.scheduleReconnect();
               return;
             }
@@ -723,18 +714,13 @@ export class WorkbenchController {
     if (!this.ports.trusted()) throw new Error('Workspace trust is required');
     const token = {
       generation: ++this.authorizationGeneration,
-      cwd,
       workspace: this.ports.workspace(),
     };
     await this.ports.authorize(cwd);
     this.assertAuthorization(token);
     return token;
   }
-  private assertAuthorization(token: {
-    generation: number;
-    cwd: string;
-    workspace: string | undefined;
-  }) {
+  private assertAuthorization(token: { generation: number; workspace: string | undefined }) {
     if (
       this.closed ||
       !this.ports.trusted() ||
@@ -751,6 +737,17 @@ export class WorkbenchController {
     this.listFlight = undefined;
     this.listCursor = undefined;
     this.state.sessionsCursor = undefined;
+  }
+  private async forgetSession(id: SessionId) {
+    this.invalidateList();
+    this.state.sessions = this.state.sessions.filter((item) => item.id !== id);
+    if (this.selected?.id !== id) return;
+    const removed = this.selected;
+    this.selected = undefined;
+    this.diffs.clear();
+    this.resetReconnect();
+    void removed.stop();
+    await this.ports.saveSelection?.(undefined);
   }
   private upsert(summary: SessionSummary) {
     this.invalidateList();
@@ -785,7 +782,6 @@ export class WorkbenchController {
   private async select(session: SessionId) {
     if (this.selecting) throw new Error('Another session selection is in progress');
     this.selecting = true;
-    const generation = ++this.selection;
     try {
       const previous = this.selected;
       this.selected = undefined;
@@ -794,12 +790,18 @@ export class WorkbenchController {
       // stop() synchronously drops the old observer before awaiting its detach
       // acknowledgement. An unrelated old socket reply must not block the new view.
       if (previous) void previous.stop();
-      if (this.closed || generation !== this.selection) return;
+      if (this.closed) return;
       // Cold inspection is display-only and does not load a provider.
       const view = new WorkbenchSession(this.client, session);
       this.selected = view;
       view.observe((snapshot) => {
         if (this.selected !== view) return;
+        if (snapshot.status === 'removed') {
+          void this.forgetSession(session).catch((error) => {
+            this.state.error = error instanceof Error ? error.message : 'Cannot clear selection';
+            this.emit();
+          });
+        }
         if (snapshot.status === 'stale' || snapshot.status === 'disconnected')
           this.scheduleReconnect();
         this.emit();
@@ -823,29 +825,21 @@ export class WorkbenchController {
   private async prepareNewSession(id: SessionId, cwd: string) {
     const selected = this.selected;
     if (!selected || selected.id !== id) return;
-    const run = async (command: ClientCommand) => {
-      if (this.selected !== selected || this.closed) return false;
-      const token = await this.authorize(cwd);
-      this.assertAuthorization(token);
-      if (this.selected !== selected || this.closed) return false;
-      const result = await this.receipts.execute(command);
-      await selected.start();
-      if (this.selected !== selected || this.closed) return false;
-      if (!result || !('Loaded' in result) || !selected.confirmEmptyView(result.Loaded.view))
-        await selected.refresh();
-      // Residency is owned by the host, never guessed from the viewed session.
-      if (this.selected !== selected || this.closed) return false;
-      if (selected.view.status !== 'ready' || !selected.view.view)
-        throw new Error('新会话设置尚未就绪');
-      return true;
-    };
-    if (!(await run({ method: 'discover', session: id }))) return;
+    const token = await this.authorize(cwd);
+    this.assertAuthorization(token);
+    if (this.selected !== selected) return;
+    const result = await this.receipts.execute({ method: 'discover', session: id });
+    await selected.start();
+    if (this.selected !== selected) return;
+    if (!('Loaded' in result) || !selected.confirmEmptyView(result.Loaded.view))
+      await selected.refresh();
+    if (this.selected === selected && (selected.view.status !== 'ready' || !selected.view.view))
+      throw new Error('新会话设置尚未就绪');
   }
   dispose() {
     if (this.closed) return;
     this.closed = true;
     clearTimeout(this.residencyTimer);
-    this.selection++;
     this.listRequest++;
     this.authorizationGeneration++;
     clearTimeout(this.emitTimer);

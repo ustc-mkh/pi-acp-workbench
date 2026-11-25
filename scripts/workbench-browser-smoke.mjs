@@ -77,6 +77,11 @@ try {
     config,
     JSON.stringify({
       workers: {
+        antigravity: {
+          command: process.execPath,
+          args: [resolve('test/contract-agent.mjs'), 'antigravity'],
+          env: { WORKBENCH_CONTRACT_PROVIDER: 'antigravity' },
+        },
         pi: {
           command: process.execPath,
           args: [resolve('test/contract-agent.mjs')],
@@ -868,6 +873,18 @@ try {
   check(
     'source unchanged, no browser external fetch/errors, production extension excludes legacy wire/facade',
   );
+  await page.locator('#harness-switch').selectOption('Antigravity');
+  await page.getByRole('button', { name: '新对话', exact: true }).click();
+  await wait(
+    () =>
+      controller.snapshot.view?.view?.harness === 'Antigravity' &&
+      !!controller.snapshot.view.view.provider_session &&
+      !controller.snapshot.preparing,
+    'Antigravity session discovery',
+  );
+  await prompt('worker-profile');
+  await page.getByText('antigravity:antigravity', { exact: true }).first().waitFor();
+  check('Antigravity selection creates a session and streams the configured worker reply');
   // Isolated display workload after the real-host flow; never dispatch prompts.
   const metrics = await measureRenderWorkload(page, controller.snapshot);
   assert.equal(metrics.messages, 2);

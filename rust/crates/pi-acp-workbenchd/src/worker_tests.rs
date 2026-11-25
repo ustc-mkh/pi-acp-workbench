@@ -5,15 +5,14 @@ mod budget_tests;
 
 #[test]
 fn prompt_and_native_fork_do_not_inherit_the_short_control_deadline() {
-    let now = Instant::now();
-    assert_eq!(request_deadline("session/prompt", now), None);
+    assert_eq!(request_timeout("session/prompt"), None);
     assert_eq!(
-        request_deadline("_pi_workbench/fork", now),
-        Some(now + Duration::from_secs(180))
+        request_timeout("_pi_workbench/fork"),
+        Some(Duration::from_secs(180))
     );
     assert_eq!(
-        request_deadline("session/load", now),
-        Some(now + Duration::from_secs(30))
+        request_timeout("session/load"),
+        Some(Duration::from_secs(30))
     );
 }
 
@@ -39,8 +38,13 @@ impl WorkerSupervisor {
         session: SessionId,
         events: mpsc::Sender<WorkerEvent>,
     ) -> Result<WorkerHandle, DomainError> {
-        self.spawn_for(session, &crate::domain::Harness::Pi, events)
-            .await
+        self.spawn_for(
+            session,
+            &crate::domain::Harness::Pi,
+            std::path::Path::new("/tmp"),
+            events,
+        )
+        .await
     }
 }
 
@@ -125,6 +129,7 @@ async fn configured_harnesses_use_distinct_args_env_and_commands_without_leaking
             pi: Some(launch("pi")),
             codex: Some(codex),
             claude: Some(launch("claude")),
+            antigravity: Some(launch("antigravity")),
         },
         1,
     )
@@ -134,10 +139,16 @@ async fn configured_harnesses_use_distinct_args_env_and_commands_without_leaking
         (Harness::Pi, "pi"),
         (Harness::Codex, "codex"),
         (Harness::Claude, "claude"),
+        (Harness::Antigravity, "antigravity"),
     ] {
         let (tx, mut rx) = mpsc::channel(1);
         let worker = supervisor
-            .spawn_for(SessionId::generate(), &harness, tx)
+            .spawn_for(
+                SessionId::generate(),
+                &harness,
+                std::path::Path::new("/tmp"),
+                tx,
+            )
             .await
             .unwrap();
         assert!(worker.epoch > epoch);
@@ -175,39 +186,64 @@ async fn capacity_and_epochs_are_global_across_harnesses_and_disabled_provider_n
         WorkersConfig {
             pi: Some(launch()),
             codex: Some(launch()),
-            claude: None,
+            ..Default::default()
         },
         2,
     );
     let (tx, _rx) = mpsc::channel(1);
     assert!(matches!(
         supervisor
-            .spawn_for(SessionId::generate(), &Harness::Claude, tx)
+            .spawn_for(
+                SessionId::generate(),
+                &Harness::Claude,
+                std::path::Path::new("/tmp"),
+                tx
+            )
             .await,
         Err(DomainError::ProviderNotConfigured)
     ));
     let (tx, _rx1) = mpsc::channel(1);
     let first = supervisor
-        .spawn_for(SessionId::generate(), &Harness::Pi, tx)
+        .spawn_for(
+            SessionId::generate(),
+            &Harness::Pi,
+            std::path::Path::new("/tmp"),
+            tx,
+        )
         .await
         .unwrap();
     let (tx, _rx2) = mpsc::channel(1);
     let second = supervisor
-        .spawn_for(SessionId::generate(), &Harness::Codex, tx)
+        .spawn_for(
+            SessionId::generate(),
+            &Harness::Codex,
+            std::path::Path::new("/tmp"),
+            tx,
+        )
         .await
         .unwrap();
     assert!(second.epoch > first.epoch);
     let (tx, _rx3) = mpsc::channel(1);
     assert!(matches!(
         supervisor
-            .spawn_for(SessionId::generate(), &Harness::Pi, tx)
+            .spawn_for(
+                SessionId::generate(),
+                &Harness::Pi,
+                std::path::Path::new("/tmp"),
+                tx
+            )
             .await,
         Err(DomainError::WorkerCapacity)
     ));
     first.stop().await;
     let (tx, _rx4) = mpsc::channel(1);
     let replacement = supervisor
-        .spawn_for(SessionId::generate(), &Harness::Codex, tx)
+        .spawn_for(
+            SessionId::generate(),
+            &Harness::Codex,
+            std::path::Path::new("/tmp"),
+            tx,
+        )
         .await
         .unwrap();
     assert!(replacement.epoch > second.epoch);
@@ -304,30 +340,6 @@ async fn full_event_mailbox_backpressures_stdout_without_blocking_cancel_writes(
     assert_eq!(rx.len(), 1); // the consumer never drained the mailbox
     worker.stop().await;
     tokio::fs::remove_file(marker).await.unwrap();
-}
-
-#[tokio::test]
-async fn capacity_is_released_on_stop_and_epochs_advance() {
-    let supervisor = supervisor("/bin/sh", vec!["-c".into(), "exec sleep 60".into()]);
-    let (events, _rx) = mpsc::channel(8);
-    let first = supervisor
-        .spawn(SessionId::generate(), events.clone())
-        .await
-        .unwrap();
-    let epoch = first.epoch;
-    assert!(matches!(
-        supervisor
-            .spawn(SessionId::generate(), events.clone())
-            .await,
-        Err(DomainError::WorkerCapacity)
-    ));
-    first.stop().await;
-    let second = supervisor
-        .spawn(SessionId::generate(), events)
-        .await
-        .unwrap();
-    assert!(second.epoch > epoch);
-    second.stop().await;
 }
 
 #[tokio::test]

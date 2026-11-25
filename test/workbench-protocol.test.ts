@@ -32,6 +32,15 @@ const fixture = () =>
   JSON.parse(readFileSync(new URL('./fixtures/rewrite/ipc-v3.json', import.meta.url), 'utf8'));
 
 describe('IPC v3 fixed contracts (not yet the production transport)', () => {
+  it('preserves Antigravity across create, summaries and attached views', () => {
+    const { summary, view } = fixture();
+    const command = { method: 'create', harness: 'Antigravity', cwd: '/tmp/workspace' };
+    expect(clientCommand.parse(command)).toEqual(command);
+    expect(sessionSummary.parse({ ...summary, harness: command.harness }).harness).toBe(
+      'Antigravity',
+    );
+    expect(sessionView.parse({ ...view, harness: command.harness }).harness).toBe('Antigravity');
+  });
   it('bounds typed context identities/scalars and actual provider select catalogues independently', () => {
     const context = { type: 'context', id: 'selection', name: 'src/a.ts:1', text: 'chosen' };
     expect(

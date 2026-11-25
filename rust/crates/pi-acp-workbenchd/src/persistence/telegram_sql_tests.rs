@@ -58,6 +58,7 @@ async fn telegram_sql_admission_rolls_back_consumed_callback_offset_and_record_t
     let database = Database::open(root.data(), &lease).await.unwrap();
     let store = TelegramStore::new(database.clone(), 8);
     let admission = |expected| Admission {
+        workspace: crate::domain::WorkspacePath::new("/tmp").unwrap(),
         id: UpdateId::new(10).unwrap(),
         sender: Some(UserId::new(5).unwrap()),
         command: Some(TelegramCommand {

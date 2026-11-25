@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { resolvePiCommand } from '../src/pi-command';
 
 let root: string;
@@ -33,7 +33,7 @@ afterEach(async () => {
 });
 async function install(file: string) {
   await mkdir(dirname(file), { recursive: true });
-  await symlink(resolve('test/mock-pi.mjs'), file);
+  await symlink(process.execPath, file);
   return file;
 }
 it('honors an existing explicit executable ahead of PATH and resolves relative paths in the worker cwd', async () => {

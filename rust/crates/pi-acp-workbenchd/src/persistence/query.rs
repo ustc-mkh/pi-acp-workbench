@@ -27,20 +27,11 @@ pub(super) fn next_counter(db: &Connection, name: &str) -> Result<SafeInteger, S
     let value: Option<SafeInteger> = db.query_row("UPDATE store_meta SET value = value + 1 WHERE key = ?1 AND value < 9007199254740991 RETURNING value", [name], |r| r.get(0)).optional()?;
     value.ok_or(StoreError::Invalid("database sequence exhausted"))
 }
-pub(super) fn harness_name(harness: &Harness) -> &'static str {
-    match harness {
-        Harness::Pi => "Pi",
-        Harness::Codex => "Codex",
-        Harness::Claude => "Claude",
-    }
-}
-fn parse_harness(value: &str) -> Result<Harness, StoreError> {
-    match value {
-        "Pi" => Ok(Harness::Pi),
-        "Codex" => Ok(Harness::Codex),
-        "Claude" => Ok(Harness::Claude),
-        _ => Err(StoreError::Invalid("invalid harness")),
-    }
+pub(super) fn parse_harness(value: &str) -> Result<Harness, StoreError> {
+    Harness::ALL
+        .into_iter()
+        .find(|h| h.as_str() == value)
+        .ok_or(StoreError::Invalid("invalid harness"))
 }
 pub(super) fn summary_by_id(db: &Connection, id: &SessionId) -> Result<SessionSummary, StoreError> {
     let view = view(db, id)?;
@@ -66,7 +57,6 @@ pub(super) fn create(
     db: &mut Connection,
     view: &SessionView,
 ) -> Result<SessionSummary, StoreError> {
-    view.validate()?;
     if view.revision.get() != 0 || view.last_entry_seq.get() != 0 {
         return Err(StoreError::Invalid(
             "new session must have zero revision/history",
@@ -89,7 +79,7 @@ pub(super) fn insert_view(db: &Connection, view: &SessionView) -> Result<SafeInt
     }
     let created = next_counter(db, "created_seq")?;
     let activity = next_counter(db, "activity_seq")?;
-    db.execute("INSERT INTO sessions(id,created_seq,activity_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![view.id.as_str(), created, activity, view.revision, view.last_entry_seq, harness_name(&view.harness), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
+    db.execute("INSERT INTO sessions(id,created_seq,activity_seq,revision,last_entry_seq,harness,cwd,status_json,hot_state_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![view.id.as_str(), created, activity, view.revision, view.last_entry_seq, view.harness.as_str(), view.cwd.as_str(), encode(&view.status)?, encode(view)?])?;
     Ok(created)
 }
 pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, StoreError> {
@@ -101,7 +91,7 @@ pub(super) fn view(db: &Connection, session: &SessionId) -> Result<SessionView, 
     if &view.id != session
         || view.revision != row.get::<_, SafeInteger>(1)?
         || view.last_entry_seq != row.get::<_, SafeInteger>(2)?
-        || harness_name(&view.harness) != row.get::<_, String>(3)?
+        || view.harness.as_str() != row.get::<_, String>(3)?
         || view.cwd.as_str() != row.get::<_, String>(4)?
         || encode(&view.status)? != row.get::<_, String>(5)?
     {
@@ -191,7 +181,7 @@ pub(super) fn apply_commit(
         let previous: Option<String> = tx
             .query_row(
                 "SELECT config_json FROM provider_preferences WHERE harness=?1",
-                [harness_name(&commit.next.harness)],
+                [commit.next.harness.as_str()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -221,7 +211,7 @@ pub(super) fn apply_commit(
             .filter(|setting| setting.category.as_deref() == Some("thought_level"))
             .map(|setting| (setting.id.clone(), setting.current_value.clone()))
             .collect();
-        tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![harness_name(&commit.next.harness), encode(&defaults)?])?;
+        tx.execute("INSERT INTO provider_preferences(harness,config_json) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET config_json=excluded.config_json", params![commit.next.harness.as_str(), encode(&defaults)?])?;
     }
     if let Some(turn) = old
         .active_turn
@@ -617,8 +607,8 @@ fn list_impl(
         "created_seq"
     };
     let high: SafeInteger = db.query_row(
-        &format!("SELECT COALESCE(MAX({order_key}),0) FROM sessions"),
-        [],
+        "SELECT value FROM store_meta WHERE key=?1",
+        [order_key],
         |r| r.get(0),
     )?;
     let max = match &cursor {
@@ -639,7 +629,7 @@ fn list_impl(
         filter
             .as_ref()
             .and_then(|f| f.harness.as_ref())
-            .map(harness_name),
+            .map(Harness::as_str),
         filter.as_ref().map_or("", |f| f.text.as_str())
     ])?;
     let mut page = ListPage {
@@ -665,13 +655,13 @@ fn list_impl(
             revision: row.get(4)?,
             created_seq: row.get(5)?,
         };
-        last_order_seq = row.get(6)?;
+        let order_seq = row.get(6)?;
         page.sessions.push(item);
         page.next_cursor = Some(ListCursor {
             filter: filter.clone(),
             version: ProtocolVersion,
             max_created_seq: max,
-            before_seq: last_order_seq,
+            before_seq: order_seq,
         });
         if page.validate().is_err() {
             page.sessions.pop();
@@ -681,6 +671,7 @@ fn list_impl(
             more = true;
             break;
         }
+        last_order_seq = order_seq;
     }
     page.next_cursor = if more {
         Some(ListCursor {

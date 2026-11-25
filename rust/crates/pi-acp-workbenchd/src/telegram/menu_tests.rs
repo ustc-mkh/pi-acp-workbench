@@ -83,6 +83,39 @@ async fn created(app: &WorkbenchApp, cwd: &str) -> SessionId {
 }
 
 #[tokio::test]
+async fn sync_main_menu_button_opens_inside_a_forum_topic() {
+    let root = root();
+    let app = app(&root);
+    let context = Context::new(
+        app.clone(),
+        Fake::default(),
+        &root.join("telegram"),
+        config(),
+    )
+    .await
+    .unwrap();
+    let topic = Some(TopicId::new(10).unwrap());
+    command(&context, 1, topic, "/sync").await;
+    let key = choices(&context)
+        .await
+        .into_iter()
+        .find(|(label, _, _)| label == "Main menu")
+        .unwrap()
+        .1;
+    click(&context, 2, topic, &key, 5).await;
+    assert!(choices(&context)
+        .await
+        .iter()
+        .any(|(label, _, _)| label == "New Pi"));
+    assert_eq!(
+        context.store.callback(&key).await.unwrap().unwrap().used_by,
+        Some(UpdateId::new(2).unwrap())
+    );
+    app.shutdown().await;
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn menu_create_buttons_are_cold_forum_aware_topic_bound_single_use_and_restart_safe() {
     let root = root();
     let trace = root.join("trace");

@@ -47,17 +47,13 @@ async fn committed_answer_with_missing_or_full_adapter_fails_turn_joins_adapter_
             app.core.coordinator.adapters.lock().await.insert(
                 id.clone(),
                 super::super::AdapterHandle {
-                    registry: app.runtime.registry.clone(),
-                    session: id.clone(),
                     epoch: 1,
-                    _workspace_lease: None,
                     tx,
                     stop,
-                    worker_completion: task.clone(),
                     resumable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     background_safe: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     pins: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                    last_used: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    last_used: 0,
                     last_user_input_at: 0,
                     resident_since: 0,
                     context_revision: None,

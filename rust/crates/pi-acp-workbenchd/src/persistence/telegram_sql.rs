@@ -4,10 +4,10 @@ use crate::{
     domain::{error::DomainError, query::SafeInteger, SessionId},
     telegram::{
         command::TelegramAction,
-        state::{InboxRecord, InboxStatus},
+        state::{InboxOutcome, InboxRecord, InboxStatus},
         types::{
             CallbackAction, CallbackBinding, CallbackKey, TopicKey, TopicPreference,
-            TopicPreferences, UserId,
+            TopicPreferences, UpdateId, UserId,
         },
     },
 };
@@ -143,22 +143,7 @@ fn preference_reply(
     use crate::telegram::command::ControlCommand;
     // The frozen inbox classification is the command fingerprint. A caller
     // cannot reuse an update ID to change another topic or preference.
-    let mut statement = db
-        .prepare(&format!(
-            "SELECT {INBOX_COLUMNS} FROM telegram_inbox WHERE bot_id=?1 AND update_id=?2"
-        ))
-        .map_err(failure)?;
-    let mut rows = statement
-        .query(params![bot, safe(id.get())?])
-        .map_err(failure)?;
-    let admitted = record(
-        db,
-        bot,
-        offset,
-        rows.next()
-            .map_err(failure)?
-            .ok_or_else(|| failure("preference inbox receipt missing"))?,
-    )?;
+    let admitted = inbox_record(db, bot, offset, id)?;
     let matches = match (&admitted.command.action, preference) {
         (
             TelegramAction::Control(ControlCommand::Notifications { enabled }),
@@ -257,33 +242,6 @@ fn reclaim_menu_callbacks(db: &Connection, bot: i64, now: u64) -> Result<(), Dom
     }
     Ok(())
 }
-fn put_callback(
-    db: &Connection,
-    bot: i64,
-    key: &CallbackKey,
-    value: &CallbackBinding,
-) -> Result<(), DomainError> {
-    let encoded = json(value)?;
-    if let Some(mut existing) = callback(db, bot, key)? {
-        existing.used_by = value.used_by;
-        if json(&existing)? != encoded {
-            return Err(failure("Telegram callback identity conflict"));
-        }
-        db.execute(
-            "UPDATE telegram_callbacks SET binding_json=?1,used_by=?2 WHERE bot_id=?3 AND key=?4",
-            params![
-                encoded,
-                value.used_by.map(|v| safe(v.get())).transpose()?,
-                bot,
-                key.as_str()
-            ],
-        )
-        .map_err(failure)?;
-        return Ok(());
-    }
-    db.execute("INSERT INTO telegram_callbacks(bot_id,key,binding_json,expires_at,used_by,action_kind) VALUES (?1,?2,?3,?4,?5,?6)", params![bot, key.as_str(), encoded, safe(value.expires_at)?, value.used_by.map(|v| safe(v.get())).transpose()?, callback_kind(&value.action)]).map_err(failure)?;
-    Ok(())
-}
 const INBOX_COLUMNS: &str = "update_id,command_json,operation,callback_ref,status,outcome_json";
 fn record(
     db: &Connection,
@@ -319,6 +277,40 @@ fn record(
     }
     Ok(record)
 }
+fn inbox_record(
+    db: &Connection,
+    bot: i64,
+    offset: u64,
+    id: UpdateId,
+) -> Result<InboxRecord, DomainError> {
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {INBOX_COLUMNS} FROM telegram_inbox WHERE bot_id=?1 AND update_id=?2"
+        ))
+        .map_err(failure)?;
+    let mut rows = statement
+        .query(params![bot, safe(id.get())?])
+        .map_err(failure)?;
+    record(
+        db,
+        bot,
+        offset,
+        rows.next()
+            .map_err(failure)?
+            .ok_or_else(|| failure("inbox record missing"))?,
+    )
+}
+fn complete_record(
+    db: &Connection,
+    bot: i64,
+    mut record: InboxRecord,
+    outcome: InboxOutcome,
+) -> Result<(), DomainError> {
+    let encoded = json(&outcome)?;
+    record.status = InboxStatus::Completed(outcome);
+    db.execute("UPDATE telegram_inbox SET command_json=?3,status='Completed',outcome_json=?4 WHERE bot_id=?1 AND update_id=?2", params![bot, safe(record.id.get())?, json(&record)?, encoded]).map_err(failure)?;
+    Ok(())
+}
 fn pending(
     db: &Connection,
     bot: i64,
@@ -335,6 +327,34 @@ fn pending(
     }
     Ok(output)
 }
+fn has_capacity(
+    db: &Connection,
+    bot: i64,
+    action: &TelegramAction,
+    max_pending: usize,
+) -> Result<bool, DomainError> {
+    let control = action.releases_pending_input();
+    let capacity =
+        i64::try_from(max_pending.saturating_add(if control { inbox::CONTROL_RESERVE } else { 0 }))
+            .map_err(failure)?;
+    let count: i64 = db.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM telegram_inbox WHERE bot_id=?1 AND status='Pending' LIMIT ?2)",
+        params![bot, capacity], |row| row.get(0),
+    ).map_err(failure)?;
+    if count < capacity || !control {
+        return Ok(count < capacity);
+    }
+    // A restart may lower inbox_capacity beneath the existing backlog. Count
+    // the actual pending controls before deciding whether the reserve is full.
+    let controls: i64 = db.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM telegram_inbox WHERE bot_id=?1 AND status='Pending' AND (
+            json_type(command_json,'$.command.action.Answer') IS NOT NULL OR
+            json_type(command_json,'$.command.action.Control.Cancel') IS NOT NULL OR
+            json_type(command_json,'$.command.action.Control.Interrupt') IS NOT NULL) LIMIT ?2)",
+        params![bot, inbox::CONTROL_RESERVE as i64], |row| row.get(0),
+    ).map_err(failure)?;
+    Ok(controls < inbox::CONTROL_RESERVE as i64)
+}
 fn admit(
     db: &Connection,
     bot: i64,
@@ -349,9 +369,17 @@ fn admit(
         if binding(db, bot, &command.topic)? != admission.expected_binding {
             return Err(DomainError::Backpressure);
         }
-        let count: i64 = db.query_row("SELECT count(*) FROM (SELECT 1 FROM telegram_inbox WHERE bot_id=?1 AND status='Pending' LIMIT ?2)", params![bot, i64::try_from(max_pending).map_err(failure)?], |row| row.get(0)).map_err(failure)?;
-        if count as usize >= max_pending {
-            return Err(DomainError::Backpressure);
+        if !has_capacity(db, bot, &command.action, max_pending)? {
+            // Commit the rejection and offset together. Retrying this update forever
+            // would hide later answers behind a full queue of waiting prompts.
+            queue::notice(db, bot, &command.topic, admission.workspace, admission.id, "queue-full",
+                format!("Update {} was rejected because the inbox is full. Retry after queued work finishes.", admission.id.get()))?;
+            db.execute(
+                "UPDATE telegram_meta SET offset=?2 WHERE bot_id=?1",
+                params![bot, safe(admission.id.get() + 1)?],
+            )
+            .map_err(failure)?;
+            return Ok(Output::Admission(AdmissionResult::QueueFull));
         }
     }
     if admission
@@ -396,7 +424,11 @@ fn admit(
             ));
         }
         value.used_by = Some(admission.id);
-        put_callback(db, bot, key, &value)?;
+        db.execute(
+            "UPDATE telegram_callbacks SET binding_json=?1,used_by=?2 WHERE bot_id=?3 AND key=?4",
+            params![json(&value)?, safe(admission.id.get())?, bot, key.as_str()],
+        )
+        .map_err(failure)?;
     }
     let next = safe(admission.id.get() + 1)?;
     let result = if let Some(command) = admission.command {
@@ -468,11 +500,12 @@ fn execute_action(
                     {
                         return Err(DomainError::OperationConflict);
                     }
-                    super::query::view(db, &session).map_err(failure)?;
+                    super::query::view(db, &session)
+                        .map_err(|error| inbox::session_read_error(error, &session))?;
                     db.execute("INSERT INTO telegram_bindings(bot_id,chat,thread,session,binding_json) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(bot_id,chat,thread) DO NOTHING", params![bot, key.chat.get(), key.thread.map_or(0, |t| t.get()), session.as_str(), json(&(&key, &session))?]).map_err(failure)?;
                 }
                 Action::QueueBarrier(id) => {
-                    return queue::barrier(db, bot, offset, id, max_pending)
+                    return queue::barrier(db, bot, offset, id, inbox::MAX_PENDING)
                 }
                 Action::PromptAttempt(id, change) => {
                     return queue::attempt(db, bot, offset, id, change)
@@ -523,29 +556,21 @@ fn execute_action(
                                 "callback cannot start consumed".into(),
                             ));
                         }
-                        put_callback(db, bot, &key, &value)?;
+                        db.execute("INSERT INTO telegram_callbacks(bot_id,key,binding_json,expires_at,used_by,action_kind) VALUES (?1,?2,?3,?4,NULL,?5)", params![bot, key.as_str(), json(&value)?, safe(value.expires_at)?, callback_kind(&value.action)]).map_err(failure)?;
                     }
                 }
                 Action::Admit(admission) => return admit(db, bot, offset, admission, max_pending),
                 Action::Complete(id, outcome) => {
-                    let mut statement = db.prepare(&format!("SELECT {INBOX_COLUMNS} FROM telegram_inbox WHERE bot_id=?1 AND update_id=?2")).map_err(failure)?;
-                    let mut rows = statement
-                        .query(params![bot, safe(id.get())?])
-                        .map_err(failure)?;
-                    let mut value = record(
-                        db,
-                        bot,
-                        offset,
-                        rows.next()
-                            .map_err(failure)?
-                            .ok_or_else(|| failure("inbox record missing"))?,
-                    )?;
-                    if matches!(value.status, InboxStatus::Pending) {
-                        value.status = InboxStatus::Completed(outcome.clone());
-                        db.execute("UPDATE telegram_inbox SET command_json=?3,status='Completed',outcome_json=?4 WHERE bot_id=?1 AND update_id=?2", params![bot, safe(id.get())?, json(&value)?, json(&outcome)?]).map_err(failure)?;
+                    let record = inbox_record(db, bot, offset, id)?;
+                    if matches!(record.status, InboxStatus::Pending) {
+                        complete_record(db, bot, record, outcome)?;
                     }
                 }
                 Action::Compact(now) => {
+                    db.execute(
+                        "DELETE FROM telegram_prompt_attempts WHERE bot_id=?1 AND update_id IN (SELECT update_id FROM telegram_inbox WHERE bot_id=?1 AND status='Completed')",
+                        [bot],
+                    ).map_err(failure)?;
                     let inbox = db
                         .execute(
                             "DELETE FROM telegram_inbox WHERE bot_id=?1 AND status='Completed'",

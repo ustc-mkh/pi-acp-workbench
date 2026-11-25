@@ -82,6 +82,7 @@ async fn explicit_gc_atomically_preserves_pending_callbacks_offset_and_replay() 
         let id = UpdateId::new(i + 1).unwrap();
         store
             .admit(Admission {
+                workspace: crate::domain::WorkspacePath::new("/tmp").unwrap(),
                 id,
                 sender: Some(UserId::new(5).unwrap()),
                 command: Some(TelegramCommand {

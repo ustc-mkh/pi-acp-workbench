@@ -1,13 +1,20 @@
 import { element, button } from './workbench-elements';
-import type { SessionView } from '../src/workbench-protocol';
+import type { SessionView, TurnDiff, UndoReport } from '../src/workbench-protocol';
 import type { UiCommand, WorkbenchUiMessage, WorkbenchUiState } from '../src/workbench-ui';
+
+function remember<T>(cache: Map<string, T>, key: string, value: T, limit: number) {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > limit) cache.delete(cache.keys().next().value!);
+}
 
 /** Diff display owns paging, undo selection and bounded preview caches. */
 export class DiffView {
   private diffContents = new Map<string, { text: string; nextOffset?: number | null }>();
   private diffReads = new Set<string>();
   private attemptedDiffs = new Set<string>();
-  private turnDiffs = new Map<string, import('../src/workbench-protocol').TurnDiff>();
+  private turnDiffs = new Map<string, TurnDiff>();
+  private undoReports = new Map<string, UndoReport>();
   private undoSelections = new Map<string, Set<string>>();
   constructor(
     private state: () => WorkbenchUiState | undefined,
@@ -22,23 +29,24 @@ export class DiffView {
     this.attemptedDiffs.clear();
     this.diffContents.clear();
     this.undoSelections.clear();
+    this.undoReports.clear();
   }
   requestAutomaticDiff(session: string, turn: string) {
     const state = this.state();
     const snapshot = state?.view?.view;
-    const entry = state?.view?.entries.find((row) => row.turn === turn);
     const key = `${session}:${turn}`;
     if (
       !snapshot ||
       session !== state?.selected ||
       session !== snapshot.id ||
-      !entry ||
       turn === snapshot.active_turn ||
       this.turnDiffs.has(key) ||
       this.attemptedDiffs.has(key) ||
       this.diffReads.size >= 2
     )
       return;
+    const entry = state.view?.entries.find((row) => row.turn === turn);
+    if (!entry) return;
     this.attemptedDiffs.add(key);
     this.diffReads.add(key);
     while (this.attemptedDiffs.size > 64)
@@ -100,6 +108,24 @@ export class DiffView {
     }
     diffHeading.append(diffActions);
     diffBox.append(diffHeading);
+    const report = this.undoReports.get(`${snapshot.id}:${turn}`);
+    if (report) {
+      const failures = report.files.filter((file) => file.status !== 'restored');
+      const restored = report.files.length - failures.length;
+      const result = element('section');
+      result.className = 'undo-report';
+      result.setAttribute('role', 'status');
+      result.append(element('p', `撤回结果 · 已恢复 ${restored}/${report.files.length} 个文件`));
+      if (failures.length) {
+        const list = element('ul');
+        for (const file of failures)
+          list.append(
+            element('li', `${file.path} · ${file.status}${file.error ? ' · ' + file.error : ''}`),
+          );
+        result.append(list);
+      }
+      diffBox.append(result);
+    }
     const summary = this.disclosure(`${snapshot.id}:diff:${turn}`, false);
     summary.className = 'turn-diff-files';
     summary.append(element('summary', `全部修改（${savedDiff.files.length} 个文件）`));
@@ -304,57 +330,49 @@ export class DiffView {
     summary.append(notes);
     return diffBox;
   }
-  receive(raw: WorkbenchUiMessage) {
+  receive(message: WorkbenchUiMessage) {
     const state = this.state();
-    if (raw.type === 'undo_result' && raw.session === state?.selected) {
-      const report = raw.report;
-      const partial = report.files.some(
-        (f) => f.status === 'uncertain' || f.status === 'not_attempted',
-      );
-      this.error.textContent = partial
-        ? 'Undo partially completed; inspect each file and do not retry automatically.'
-        : `Restored ${report.files.filter((f) => f.status === 'restored').length} files.`;
-      this.schedule();
-    } else if (raw.type === 'turn_diff' && raw.session === state?.selected) {
-      const message = raw;
+    if (message.type === 'turn_diff_error')
       this.diffReads.delete(`${message.session}:${message.turn}`);
-      this.attemptedDiffs.delete(`${message.session}:${message.turn}`);
-      if (
-        message.session === state?.selected &&
-        state?.view?.entries.some((row) => row.turn === message.turn)
-      ) {
-        const key = `${message.session}:${message.turn}`,
-          previous = this.turnDiffs.get(key);
-        if (message.offset && (!previous || previous.files.length !== message.offset)) return;
-        const files =
-          previous && message.offset
-            ? [...previous.files, ...message.diff.files]
-            : message.diff.files;
+    if (!('session' in message) || message.session !== state?.selected) return;
+    switch (message.type) {
+      case 'undo_result':
+        remember(this.undoReports, `${message.session}:${message.turn}`, message.report, 16);
+        break;
+      case 'turn_diff': {
+        const key = `${message.session}:${message.turn}`;
+        this.diffReads.delete(key);
+        this.attemptedDiffs.delete(key);
+        if (!state.view?.entries.some((row) => row.turn === message.turn)) return;
+        let files = message.diff.files;
+        if (message.offset) {
+          const previous = this.turnDiffs.get(key);
+          if (previous?.files.length !== message.offset) return;
+          files = [...previous.files, ...files];
+        }
         if (files.length > 5000) return;
-        this.turnDiffs.delete(key);
-        this.turnDiffs.set(key, { ...message.diff, files });
-        while (this.turnDiffs.size > 16) this.turnDiffs.delete(this.turnDiffs.keys().next().value!);
-        this.schedule();
+        remember(this.turnDiffs, key, { ...message.diff, files }, 16);
+        break;
       }
-    } else if (raw.type === 'turn_diff_content' && raw.session === state?.selected) {
-      const m = raw;
-      if (state?.view?.entries.some((row) => row.turn === m.turn)) {
-        const key = `${m.session}:${m.turn}:${m.file}:${m.after}`,
-          previous = this.diffContents.get(key);
-        if (m.offset > 0 && (!previous || previous.nextOffset !== m.offset)) return;
-        const text = m.offset && previous ? previous.text + m.bytes : m.bytes;
+      case 'turn_diff_content': {
+        if (!state.view?.entries.some((row) => row.turn === message.turn)) return;
+        const key = `${message.session}:${message.turn}:${message.file}:${message.after}`;
+        let text = message.bytes;
+        if (message.offset) {
+          const previous = this.diffContents.get(key);
+          if (previous?.nextOffset !== message.offset) return;
+          text = previous.text + text;
+        }
         if (text.length > 128 * 1024) return;
-        this.diffContents.delete(key);
-        this.diffContents.set(key, { text, nextOffset: m.next_offset });
-        while (this.diffContents.size > 8)
-          this.diffContents.delete(this.diffContents.keys().next().value!);
-        this.schedule();
+        remember(this.diffContents, key, { text, nextOffset: message.next_offset }, 8);
+        break;
       }
-    } else if (raw.type === 'turn_diff_error') {
-      this.diffReads.delete(`${raw.session}:${raw.turn}`);
-      if (raw.session !== state?.selected) return;
-      if (raw.error) this.error.textContent = String(raw.error);
-      this.schedule();
+      case 'turn_diff_error':
+        if (message.error) this.error.textContent = message.error;
+        break;
+      default:
+        return;
     }
+    this.schedule();
   }
 }

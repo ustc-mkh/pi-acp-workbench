@@ -20,13 +20,12 @@ export class WorkbenchOperations {
   private recoveryFlight?: Promise<void>;
   constructor(
     private client: WorkbenchClient,
-    savedValue: unknown,
+    saved: unknown,
     private save: ((rows: UiOperation[]) => PromiseLike<void>) | undefined,
     private closed: () => boolean,
     private changed: () => void,
     private settled: () => void,
   ) {
-    const saved = savedValue;
     if (Array.isArray(saved) && saved.length <= 64) {
       for (const value of saved) {
         try {
@@ -87,10 +86,23 @@ export class WorkbenchOperations {
     }
     await this.persistOperations();
   }
-  async execute(
-    command: ClientCommand,
-    admitted?: (operation: import('./workbench-protocol').OperationId) => void,
-  ) {
+  async stopTrackingUnknown(operations: OperationId[]) {
+    await this.recoveryFlight;
+    for (const row of this.rows) {
+      if (
+        operations.includes(row.operation) &&
+        row.status === 'uncertain' &&
+        row.code === 'unknown' &&
+        !this.workflows.has(row.operation)
+      ) {
+        row.status = 'untracked';
+        row.error = 'Stopped local receipt tracking at your request. Outcome remains unknown.';
+      }
+    }
+    await this.persistOperations();
+    this.changed();
+  }
+  async execute(command: ClientCommand, admitted?: (operation: OperationId) => void) {
     if (!durableCommand(command)) throw new Error('Expected a mutation');
     // Bound both retained receipt display and concurrent long-running workflows.
     const control = usesReservedWorkflow(command.method);
@@ -123,8 +135,7 @@ export class WorkbenchOperations {
       this.workflows.set(operation, command);
       const result = await ticket.result;
       row.status = 'completed';
-      if (result && typeof result === 'object' && 'HistoryClear' in result)
-        row.historyClear = result.HistoryClear.report;
+      if ('HistoryClear' in result) row.historyClear = result.HistoryClear.report;
       return result;
     } catch (error) {
       row.status =

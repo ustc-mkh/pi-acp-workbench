@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { WorkbenchError, WORKBENCH_LIMITS } from '../src/workbench-client';
 import {
@@ -9,6 +9,7 @@ import {
   operationId,
   sessionId,
   sessionView,
+  type ListPage,
 } from '../src/workbench-protocol';
 import { emptyView, workbenchPeer } from './helpers/workbench-peer';
 const accepted = { Accepted: { session: sessionId.parse('session'), revision: 1 } };
@@ -74,6 +75,23 @@ it('correlates out-of-order replies, live events and resync without a legacy env
   expect(resync).toBe(1);
   expect(observerErrors).toBe(1);
   expect(first.operation).toBe(operation);
+});
+
+it('delivers list pages for search and rejects a list page sent for inspect', async () => {
+  const peer = await fixture();
+  const client = peer.client();
+  const search = client.request({ method: 'search', filter: { text: '', harness: null } });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  const page = { sessions: [], next_cursor: null };
+  peer.query(peer.requests[0], 'list', page);
+  expectTypeOf(search.result).toEqualTypeOf<Promise<ListPage>>();
+  await expect(search.result).resolves.toEqual(page);
+
+  const inspect = client.request(query);
+  const failed = expect(inspect.result).rejects.toMatchObject({ code: 'protocol' });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  peer.query(peer.requests[1], 'list', page);
+  await failed;
 });
 
 it('reserves a foreground history slot under saturation and retains abandoned sent quotas', async () => {

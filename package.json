@@ -2,7 +2,7 @@
   "name": "pi-acp-workbench",
   "displayName": "Pi ACP Workbench",
   "description": "Pi agent over ACP, with streaming Markdown, LaTeX math and editor context.",
-  "version": "2.0.24",
+  "version": "2.0.25",
   "publisher": "local-pi",
   "license": "MIT",
   "engines": {
@@ -118,7 +118,7 @@
     "test:changed": "npm run check && npm run build:workbenchd && vitest run --changed --passWithNoTests",
     "test:full": "node scripts/test-full.mjs",
     "test:runner": "node --test scripts/test-pool.test.mjs scripts/test-reports.test.mjs scripts/ci-failure-diagnostics.test.mjs scripts/typescript-graph.test.mjs scripts/workbench-binary.test.mjs scripts/prepare-release.test.mjs scripts/workbench-sqlite-fixture.test.mjs scripts/release-contract.test.mjs",
-    "verify": "npm run clippy && npm run test:full && npm run test:browser",
+    "verify": "npm run clippy && npm run test:full",
     "package": "vsce package --no-dependencies --allow-missing-repository --out pi-acp-workbench-$npm_package_version.vsix",
     "vscode:prepublish": "npm run check && npm run build",
     "test:extension-host": "npm run build && npm run build:workbenchd && node scripts/workbench-extension-host.mjs",

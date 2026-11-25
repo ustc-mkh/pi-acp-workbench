@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-type FixtureProfile = 'pi' | 'codex' | 'claude';
+type FixtureProfile = 'pi' | 'codex' | 'claude' | 'antigravity';
 
 export interface AgentOptions {
   harness?: FixtureProfile;
@@ -109,11 +109,11 @@ export class AgentProcess {
   async createSession(id?: string): Promise<acp.NewSessionResponse> {
     const params = { cwd: this.options.cwd, mcpServers: [] };
     if (!id) return this.withTimeout(this.request('session/new', params));
-    if (!this.info?.agentCapabilities?.loadSession)
-      throw new Error('此 Agent 未声明 session/load 能力，无法恢复远端会话。');
-    const result = await this.withTimeout(
-      this.request('session/load', { ...params, sessionId: id }),
-    );
+    const caps = this.info?.agentCapabilities;
+    const method = caps?.loadSession ? 'session/load' : 'session/resume';
+    if (!caps?.loadSession && !caps?.sessionCapabilities?.resume)
+      throw new Error('此 Agent 未声明 session/load 或 session/resume 能力，无法恢复远端会话。');
+    const result = await this.withTimeout(this.request(method, { ...params, sessionId: id }));
     return { ...result, sessionId: id };
   }
   withTimeout<T>(request: Promise<T>, ms = this.options.requestTimeoutMs ?? 30000): Promise<T> {

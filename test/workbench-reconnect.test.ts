@@ -55,6 +55,21 @@ it('invalid saved state cannot inject a command or prevent cold list startup', a
   expect(peer.requests.map((request) => request.command.method)).toEqual(['list']);
 });
 
+it('forgets a saved selection deleted while offline and stops retrying attach', async () => {
+  const { peer, controller, saved } = await setup('session');
+  const ready = controller.receive({ type: 'ready' });
+  await expect.poll(() => peer.requests.length).toBe(1);
+  peer.query(peer.requests[0], 'list', { sessions: [], next_cursor: null });
+  await expect.poll(() => peer.requests.length).toBe(2);
+  const attach = peer.requests[1];
+  peer.send(attach.socket, { type: 'error', id: attach.id, code: 'not_found', message: 'gone' });
+  await ready;
+  expect(controller.snapshot.selected).toBeUndefined();
+  expect(saved()).toBeUndefined();
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  expect(peer.requests.filter((request) => request.command.method === 'attach')).toHaveLength(1);
+});
+
 it('manual Refresh reattaches a disconnected selection and persists just its ID', async () => {
   const { peer, controller, saved } = await setup();
   const selecting = controller.receive({ type: 'select', session: 'session' });
@@ -100,30 +115,27 @@ it('disconnect recovers an unknown prompt receipt and observation without replay
     },
   });
   await expect.poll(() => peer.requests.length).toBe(2);
-  peer.reply(peer.requests[1], { Loaded: { view: emptyView() } });
-  await expect.poll(() => peer.requests.length).toBe(3);
-  const original = peer.requests[2];
+  const original = peer.requests[1];
   original.socket.destroy();
   await sending;
   expect(controller.snapshot.operations.at(-1)?.status).toBe('uncertain');
-  await expect.poll(() => peer.requests.length, { timeout: 3000 }).toBe(4);
-  expect(peer.requests[3].command).toEqual({ method: 'operation', operation: original.operation });
-  peer.query(peer.requests[3], 'operation', {
+  await expect.poll(() => peer.requests.length, { timeout: 3000 }).toBe(3);
+  expect(peer.requests[2].command).toEqual({ method: 'operation', operation: original.operation });
+  peer.query(peer.requests[2], 'operation', {
     status: 'completed',
     receipt: { Accepted: { session: 'session', revision: 2 } },
   });
-  await expect.poll(() => peer.requests.length).toBe(5);
-  peer.query(peer.requests[4], 'attached', attached(2));
+  await expect.poll(() => peer.requests.length).toBe(4);
+  peer.query(peer.requests[3], 'attached', attached(2));
   await expect.poll(() => controller.snapshot.view?.status).toBe('ready');
   expect(controller.snapshot.operations.at(-1)?.status).toBe('completed');
   expect(peer.requests.map((request) => request.command.method)).toEqual([
     'attach',
-    'load',
     'prompt',
     'operation',
     'attach',
   ]);
-  expect(peer.requests.slice(3).every((request) => !request.operation)).toBe(true);
+  expect(peer.requests.slice(2).every((request) => !request.operation)).toBe(true);
 });
 
 it('dispose cancels scheduled reconnect and does not create new sockets or requests', async () => {

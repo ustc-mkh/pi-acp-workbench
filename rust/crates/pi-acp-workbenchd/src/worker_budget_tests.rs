@@ -127,7 +127,7 @@ fn maximum_prompt_unicode_and_json_escaping_fit_the_non_media_lane() {
             json!({"sessionId":"native","prompt":[{"type":"text","text":prompt.as_str()}]}),
         )
         .unwrap();
-        validate_outbound(&JsonRpcMessage::Request(request)).unwrap();
+        encode_frame(JsonRpcMessage::Request(request)).unwrap();
         assert!(crate::domain::Prompt::new(scalar.to_string().repeat(100_001)).is_err());
     }
 }

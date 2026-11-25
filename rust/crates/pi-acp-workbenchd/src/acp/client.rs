@@ -35,6 +35,11 @@ impl AcpClient {
         response: JsonRpcResponse,
     ) -> Result<R, DomainError> {
         if let Some(error) = response.error {
+            if error.code == -32000 {
+                return Err(DomainError::Protocol(format!(
+                    "ACP {method} requires authentication (code -32000). Sign in with the provider CLI."
+                )));
+            }
             // Provider descriptions may contain upstream URLs/credentials. Only
             // our typed method name and remote code cross into domain/UI errors.
             return Err(DomainError::Protocol(format!(
@@ -79,13 +84,17 @@ impl AcpClient {
         )
         .await
     }
-    pub async fn load_session(
+    pub async fn restore_session(
         &self,
+        capabilities: &AgentCapabilities,
         cwd: &crate::domain::WorkspacePath,
         session_id: NativeSessionId,
     ) -> Result<LoadSessionResponse, DomainError> {
+        let method = capabilities
+            .restore_method()
+            .ok_or_else(|| DomainError::Protocol("provider cannot resume saved session".into()))?;
         self.call(
-            "session/load",
+            method,
             LoadSessionRequest {
                 cwd: cwd.as_str().into(),
                 session_id,

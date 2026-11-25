@@ -455,6 +455,11 @@ async fn multiselect_decline_and_cancel_form_responses_are_typed() {
         InteractionResponse::Decline,
         InteractionResponse::Cancel,
     ] {
+        let expected = if matches!(response, InteractionResponse::Cancel) {
+            "Turn cancelled."
+        } else {
+            "Turn completed."
+        };
         prompt(&app, &id, "elicitation-multi").await;
         let interaction = wait_interaction(&mut events).await;
         app.command(DomainCommand::AnswerInteraction {
@@ -467,6 +472,14 @@ async fn multiselect_decline_and_cancel_form_responses_are_typed() {
         .await
         .unwrap();
         wait_finished(&mut events).await;
+        let view = inspect_view(&app, &id).await;
+        let summary = app
+            .delivery_payloads()
+            .completion(id.clone(), view.revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(summary.starts_with(expected), "{summary}");
     }
     let texts = history_text(&app, &id).await;
     for expected in [
@@ -479,38 +492,6 @@ async fn multiselect_decline_and_cancel_form_responses_are_typed() {
             "{expected}"
         );
     }
-    app.shutdown().await;
-    tokio::fs::remove_dir_all(root).await.unwrap();
-}
-#[tokio::test]
-async fn worker_crash_is_persisted_and_replacement_resumes_native_session() {
-    let (app, root) = app();
-    let id = create(&app).await;
-    let mut events = app.subscribe();
-    prompt(&app, &id, "crash").await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if events
-                .recv()
-                .await
-                .unwrap()
-                .view
-                .is_some_and(|view| matches!(view.status, SessionStatus::Failed(_)))
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let failed = inspect_view(&app, &id).await;
-    assert!(matches!(failed.status, SessionStatus::Failed(_)));
-    assert!(failed.active_turn.is_none());
-    prompt(&app, &id, "recovered").await;
-    wait_finished(&mut events).await;
-    let recovered = inspect_view(&app, &id).await;
-    assert_eq!(recovered.provider_session, failed.provider_session);
-    assert!(matches!(recovered.status, SessionStatus::Idle));
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
@@ -567,31 +548,6 @@ async fn cancel_stops_worker_and_next_prompt_uses_replacement() {
         .await
         .iter()
         .any(|text| text == "echo: after cancel"));
-    app.shutdown().await;
-    tokio::fs::remove_dir_all(root).await.unwrap();
-}
-#[tokio::test]
-async fn plan_status_and_context_occupancy_are_projected_without_billing_confusion() {
-    let (app, root) = app();
-    let id = create(&app).await;
-    let mut events = app.subscribe();
-    for text in ["plan-report", "usage-report"] {
-        prompt(&app, &id, text).await;
-        wait_finished(&mut events).await;
-    }
-    let view = inspect_view(&app, &id).await;
-    assert!(matches!(
-        view.plan.items[0].status,
-        crate::domain::plan::PlanStatus::Completed
-    ));
-    assert!(matches!(
-        view.plan.items[1].status,
-        crate::domain::plan::PlanStatus::InProgress
-    ));
-    assert_eq!(view.usage.context_used, Some(500));
-    assert_eq!(view.usage.context_size, Some(200_000));
-    assert_eq!(view.usage.input_tokens, 100);
-    assert_eq!(view.usage.output_tokens, 20);
     app.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }

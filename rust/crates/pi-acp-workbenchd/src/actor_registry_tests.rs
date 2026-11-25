@@ -491,9 +491,49 @@ async fn queued_and_executing_owner_commit_survives_cache_pressure() {
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
+async fn worker_crash_reaches_the_owner_after_mailbox_pressure_clears() {
+    let (store, root) = Store::new();
+    let runtime = Runtime::start(store.clone(), 1);
+    let session = id(&runtime).await;
+    runtime
+        .registry
+        .worker_started(session.clone(), 1)
+        .await
+        .unwrap();
+    store.mode.store(5, Ordering::Release);
+    let prompt = submit(&runtime, prompt(&session));
+    store.entered(1).await;
+    let queued = submit(&runtime, DomainCommand::Inspect(session.clone()));
+    assert_eq!(runtime.registry.cache_stats().await.2, 2);
+
+    let crash = runtime.registry.worker_event(
+        session.clone(),
+        1,
+        AgentEvent::Crashed {
+            reason: "fixture EOF".into(),
+        },
+    );
+    tokio::pin!(crash);
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut crash)
+        .await
+        .is_err());
+    store.release(1);
+    prompt.await.unwrap().unwrap();
+    queued.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), crash)
+        .await
+        .unwrap()
+        .unwrap();
+    let state = store.history.database().view(session).await.unwrap();
+    assert!(matches!(state.status, SessionStatus::Failed(_)) && state.active_turn.is_none());
+    runtime.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn worker_owner_remains_pinned_until_matching_physical_join_notification() {
     let (store, root) = Store::new();
-    let runtime = Runtime::start(store.clone(), 128);
+    let runtime = Runtime::start(store.clone(), 1);
     let first = id(&runtime).await;
     runtime
         .registry
@@ -521,7 +561,32 @@ async fn worker_owner_remains_pinned_until_matching_physical_join_notification()
         .await
         .unwrap();
     assert_eq!(store.loads.load(Ordering::Acquire), before);
-    runtime.registry.worker_stopped(first.clone(), 8).await;
+    store.mode.store(5, Ordering::Release);
+    let active = submit(&runtime, prompt(&first));
+    store.entered(1).await;
+    let queued = submit(&runtime, DomainCommand::Inspect(first.clone()));
+    assert_eq!(runtime.registry.cache_stats().await.2, 2);
+    let detach = runtime.registry.worker_stopped(first.clone(), 8);
+    tokio::pin!(detach);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut detach)
+            .await
+            .is_err(),
+        "a full owner mailbox must not lose the detach"
+    );
+    store.release(1);
+    active.await.unwrap().unwrap();
+    queued.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), detach)
+        .await
+        .unwrap();
+    runtime
+        .registry
+        .command(DomainCommand::Cancel {
+            session: first.clone(),
+        })
+        .await
+        .unwrap();
     churn_cold(&runtime, 100).await;
     let before = store.loads.load(Ordering::Acquire);
     // Atomically rehydrate-and-attach a newly starting worker after cache eviction.
@@ -619,11 +684,12 @@ async fn owner_task_panic_is_isolated_and_requires_explicit_reload_for_unadmitte
         runtime.registry.command(prompt(&first)).await,
         Err(DomainError::NotFound(_))
     ));
-    runtime
+    let loaded = runtime
         .registry
         .command(DomainCommand::LoadSession(first.clone()))
         .await
         .unwrap();
+    assert!(matches!(loaded.view().unwrap().status, SessionStatus::Idle));
     assert!(store
         .history
         .database()

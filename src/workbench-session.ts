@@ -2,6 +2,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HistoryText } from './workbench-history-text';
 import {
   loadHistoryTurns,
+  validateHistoryPage,
+  boundRecentHistory,
   historyFits,
   INITIAL_HISTORY_TURNS,
   EARLIER_HISTORY_TURNS,
@@ -9,6 +11,8 @@ import {
 import { WorkbenchClient, WorkbenchError } from './workbench-client';
 import {
   jsonBytes,
+  MAX_HISTORY_LIMIT,
+  MAX_QUERY_BYTES,
   type CommitBatch,
   type EntryHeader,
   type HistoryCursor,
@@ -25,14 +29,26 @@ export interface WorkbenchSessionView {
   readonly entries: readonly EntryHeader[];
   readonly resolvedText?: Readonly<Record<string, string>>;
   readonly tools: readonly ToolHeader[];
+  readonly emptyToolTurns?: readonly EntryHeader['turn'][];
   readonly toolCursor?: ToolCursor;
   readonly earlier?: HistoryCursor;
   readonly historical: boolean;
+  readonly historyTruncated?: boolean;
   readonly loadingEarlier?: boolean;
   readonly earlierLoaded?: number;
   readonly earlierError?: string;
   readonly error?: string;
 }
+function mergeTools(current: readonly ToolHeader[], incoming: readonly ToolHeader[]) {
+  const tools = new Map(current.map((tool) => [`${tool.turn}:${tool.id}`, tool]));
+  for (const tool of incoming) tools.set(`${tool.turn}:${tool.id}`, tool);
+  const recent = [...tools.values()].slice(-MAX_HISTORY_LIMIT);
+  let bytes = jsonBytes(recent);
+  let start = 0;
+  while (bytes > MAX_QUERY_BYTES) bytes -= jsonBytes(recent[start++]) + 1;
+  return start ? recent.slice(start) : recent;
+}
+
 /** Bounded confirmed page projection. No provisional rows, domain reducer or
  * polling. Reattach after gaps; never replay an uncertain mutation. */
 export class WorkbenchSession {
@@ -40,12 +56,10 @@ export class WorkbenchSession {
   private ended = false;
   private attaching = false;
   private generation = 0;
-  private historyRequest = 0;
   private text = new HistoryText();
   private resolvingText = false;
   private visibleText: readonly string[] = [];
   private textDemand = 0;
-  private toolsRequest = 0;
   private toolsReadSequence = 0;
   private toolTurnRequests = new Map<string, number>();
   private pending: CommitBatch[] = [];
@@ -118,11 +132,8 @@ export class WorkbenchSession {
       batch: (batch) => this.batch(batch),
       resync: () => this.stale('Workbench revision gap; reattach required'),
       lost: () => {
-        this.generation++;
-        this.historyRequest++;
-        this.toolsRequest++;
-        this.pending = [];
-        this.pendingBytes = 0;
+        if (!this.active || this.current.status === 'removed') return;
+        this.invalidateRequests();
         this.publish({
           status: 'disconnected',
           loadingEarlier: false,
@@ -135,13 +146,14 @@ export class WorkbenchSession {
     });
     return (this.startTask = this.refresh());
   }
-  private stale(error: string) {
-    if (!this.active) return;
-    this.generation++;
-    this.historyRequest++;
-    this.toolsRequest++;
+  private invalidateRequests() {
     this.pending = [];
     this.pendingBytes = 0;
+    return ++this.generation;
+  }
+  private stale(error: string) {
+    if (!this.active || this.current.status === 'removed') return;
+    this.invalidateRequests();
     this.publish({
       status: 'stale',
       loadingEarlier: false,
@@ -170,48 +182,32 @@ export class WorkbenchSession {
       return;
     }
     if (batch.removed) {
-      this.publish({
-        status: 'removed',
-        view: undefined,
-        entries: [],
-        tools: [],
-        earlier: undefined,
-        loadingEarlier: false,
-        earlierError: undefined,
-        earlierLoaded: undefined,
-        resolvedText: undefined,
-        toolCursor: undefined,
-        historical: false,
-      });
+      this.removed();
       return;
     }
     if (!batch.view) {
       this.stale('Commit has no hot view; explicitly reattach');
       return;
     }
-    let entries = [...this.current.entries];
-    let earlier: HistoryCursor | undefined = this.current.earlier;
-    const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
-    for (const entry of batch.entries) {
-      const prior = bySeq.get(entry.seq);
-      if ((prior && prior.id !== entry.id) || entry.seq > batch.view.last_entry_seq) {
-        this.stale('Entry identity mismatch');
-        return;
+    let entries = this.current.entries;
+    let historyTruncated = this.current.historyTruncated;
+    if (batch.entries.length) {
+      const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
+      for (const entry of batch.entries) {
+        const prior = bySeq.get(entry.seq);
+        if ((prior && prior.id !== entry.id) || entry.seq > batch.view.last_entry_seq) {
+          this.stale('Entry identity mismatch');
+          return;
+        }
+        bySeq.set(entry.seq, entry);
       }
-      bySeq.set(entry.seq, entry);
-    }
-    entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-    while (!historyFits(entries)) {
-      const oldest = entries[0]?.turn;
-      const nextTurn = entries.findIndex((entry) => entry.turn !== oldest);
-      if (nextTurn < 0) {
-        this.stale('完整回合超出历史显示上限，请导出完整历史。');
-        return;
-      }
-      entries = entries.slice(nextTurn);
+      const bounded = boundRecentHistory([...bySeq.values()].sort((a, b) => a.seq - b.seq));
+      entries = bounded.entries;
+      historyTruncated =
+        bounded.partial || (historyTruncated && entries[0]?.turn === this.current.entries[0]?.turn);
     }
     const minimum = entries[0]?.seq;
-    earlier =
+    const earlier: HistoryCursor | undefined =
       minimum && minimum > 1
         ? {
             version: 3,
@@ -220,11 +216,16 @@ export class WorkbenchSession {
             before_seq: minimum,
           }
         : undefined;
-    const tools = new Map(this.current.tools.map((tool) => [`${tool.turn}:${tool.id}`, tool]));
-    for (const tool of batch.tools) tools.set(`${tool.turn}:${tool.id}`, tool);
-    const boundedTools = [...tools.values()];
-    while (boundedTools.length > 200 || jsonBytes(boundedTools) > 1024 * 1024) boundedTools.shift();
-    this.publish({ view: batch.view, entries, tools: boundedTools, earlier, error: undefined });
+    const updatedToolTurns = new Set(batch.tools.map((tool) => tool.turn));
+    this.publish({
+      view: batch.view,
+      entries,
+      historyTruncated,
+      tools: batch.tools.length ? mergeTools(this.current.tools, batch.tools) : this.current.tools,
+      emptyToolTurns: this.current.emptyToolTurns?.filter((turn) => !updatedToolTurns.has(turn)),
+      earlier,
+      error: undefined,
+    });
     if (batch.entries.some((row) => 'Archived' in row.text)) this.requestText();
   }
   setVisibleHistoryText(ids: readonly string[]) {
@@ -232,6 +233,25 @@ export class WorkbenchSession {
       return;
     this.visibleText = ids;
     this.requestText();
+  }
+  private removed() {
+    this.invalidateRequests();
+    this.publish({
+      status: 'removed',
+      view: undefined,
+      entries: [],
+      tools: [],
+      earlier: undefined,
+      loadingEarlier: false,
+      earlierError: undefined,
+      earlierLoaded: undefined,
+      resolvedText: undefined,
+      toolCursor: undefined,
+      emptyToolTurns: undefined,
+      historical: false,
+      historyTruncated: false,
+      error: undefined,
+    });
   }
   private requestText() {
     this.textDemand++;
@@ -278,14 +298,11 @@ export class WorkbenchSession {
     }
   }
   refresh(): Promise<void> {
-    if (!this.active || this.ended || this.current.status === 'removed') return Promise.resolve();
+    if (!this.active || this.current.status === 'removed') return Promise.resolve();
     if (this.flight) return this.flight;
-    const generation = ++this.generation;
-    this.historyRequest++;
-    this.toolsRequest++;
+    const generation = this.invalidateRequests();
+    const valid = () => generation === this.generation;
     this.attaching = true;
-    this.pending = [];
-    this.pendingBytes = 0;
     this.visibleText = [];
     this.publish({ status: 'syncing', loadingEarlier: false, error: undefined });
     const task = (async () => {
@@ -294,7 +311,7 @@ export class WorkbenchSession {
           { method: 'attach', session: this.id },
           { timeoutMs: 10_000 },
         );
-        if (!this.active || generation !== this.generation) return;
+        if (!valid()) return;
         if (
           attached.view.id !== this.id ||
           attached.recent_page.entries.some((entry) => entry.seq > attached.view.last_entry_seq)
@@ -306,14 +323,17 @@ export class WorkbenchSession {
           attached.recent_page,
           attached.view.last_entry_seq,
           INITIAL_HISTORY_TURNS,
-          () => this.active && generation === this.generation,
+          valid,
         );
-        if (!recent || !this.active || generation !== this.generation) return;
+        if (!recent || !valid()) return;
         this.publish({
           resolvedText: this.text.snapshot(recent.entries),
           view: attached.view,
           entries: recent.entries,
+          historyTruncated: recent.truncated,
           tools: [],
+          emptyToolTurns: undefined,
+          toolCursor: undefined,
           earlier: recent.next_cursor ?? undefined,
           historical: false,
           status: 'ready',
@@ -326,11 +346,14 @@ export class WorkbenchSession {
         for (const batch of buffered) this.batch(batch);
         this.requestText();
       } catch (error) {
-        if (this.active && generation === this.generation)
-          this.publish({
-            status: 'stale',
-            error: error instanceof Error ? error.message : 'Cannot attach session',
-          });
+        if (valid()) {
+          if (error instanceof WorkbenchError && error.code === 'not_found') this.removed();
+          else
+            this.publish({
+              status: 'stale',
+              error: error instanceof Error ? error.message : 'Cannot attach session',
+            });
+        }
       } finally {
         this.attaching = false;
       }
@@ -353,12 +376,7 @@ export class WorkbenchSession {
       return;
     }
     const generation = this.generation;
-    const request = ++this.historyRequest;
-    const valid = () =>
-      this.active &&
-      this.current.status === 'ready' &&
-      generation === this.generation &&
-      request === this.historyRequest;
+    const valid = () => generation === this.generation;
     let remaining = EARLIER_HISTORY_TURNS;
     let pending: EntryHeader[] = [];
     let boundary = cursor.before_seq;
@@ -366,7 +384,6 @@ export class WorkbenchSession {
     this.publish({ loadingEarlier: true, earlierLoaded: 0, earlierError: undefined });
     try {
       while (cursor && remaining > 0 && valid()) {
-        const before = cursor.before_seq;
         let page: HistoryTurnPage;
         try {
           page = await this.client.call(
@@ -392,23 +409,16 @@ export class WorkbenchSession {
         }
         retries = 0;
         if (!valid()) return;
-        const next = page.next_cursor;
+        validateHistoryPage(page, cursor, this.id, cursor.max_entry_seq);
         const turns = new Set(page.entries.map((row) => row.turn));
         if (
-          page.entries.some(
-            (row, i) => row.seq >= before || (i > 0 && row.seq <= page.entries[i - 1].seq),
-          ) ||
-          (next &&
-            (next.session !== this.id ||
-              next.max_entry_seq !== cursor.max_entry_seq ||
-              next.before_seq !== page.entries[0]?.seq)) ||
           ((page.partial || pending.length > 0) &&
             (turns.size !== 1 || (pending.length > 0 && !turns.has(pending[0].turn)))) ||
           turns.size > remaining
         )
           throw new Error('历史分页未向前推进，请重新加载会话。');
 
-        cursor = next ?? undefined;
+        cursor = page.next_cursor ?? undefined;
         const older = pending.length ? [...page.entries, ...pending] : page.entries;
         const entries = [...older, ...this.current.entries];
         if (this.current.entries[0]?.seq !== boundary || !historyFits(entries))
@@ -452,37 +462,30 @@ export class WorkbenchSession {
   async loadTools(turn: EntryHeader['turn'], cursor?: ToolCursor) {
     if (!this.active || this.current.status !== 'ready') return;
     const generation = this.generation;
-    const epoch = this.toolsRequest;
     const request = ++this.toolsReadSequence;
     this.toolTurnRequests.set(turn, request);
     while (this.toolTurnRequests.size > 256)
       this.toolTurnRequests.delete(this.toolTurnRequests.keys().next().value!);
     const requestedRevision = this.current.view?.revision;
+    const wasActive = this.current.view?.active_turn === turn;
     const page = await this.client.call({
       method: 'tools',
       session: this.id,
       turn,
       cursor,
-      limit: 200,
+      limit: MAX_HISTORY_LIMIT,
     });
-    if (
-      !this.active ||
-      generation !== this.generation ||
-      epoch !== this.toolsRequest ||
-      request !== this.toolTurnRequests.get(turn)
-    )
-      return;
-    if (requestedRevision !== this.current.view?.revision) return;
-    const tools = new Map(
-      this.current.tools
-        .filter((tool) => cursor || tool.turn !== turn)
-        .map((tool) => [`${tool.turn}:${tool.id}`, tool]),
-    );
-    for (const tool of page.tools) tools.set(`${tool.turn}:${tool.id}`, tool);
-    const bounded = [...tools.values()];
-    while (bounded.length > 200 || jsonBytes(bounded) > 1024 * 1024) bounded.shift();
+    if (generation !== this.generation || request !== this.toolTurnRequests.get(turn)) return;
+    if (wasActive && requestedRevision !== this.current.view?.revision) return;
+    const retained = cursor
+      ? this.current.tools
+      : this.current.tools.filter((tool) => tool.turn !== turn);
     this.publish({
-      tools: bounded,
+      tools: mergeTools(retained, page.tools),
+      emptyToolTurns:
+        !cursor && !page.tools.length
+          ? [...new Set([...(this.current.emptyToolTurns || []), turn])].slice(-256)
+          : this.current.emptyToolTurns?.filter((id) => id !== turn),
       toolCursor: page.next_cursor ?? undefined,
       error: undefined,
     });
@@ -492,12 +495,8 @@ export class WorkbenchSession {
     const connected = this.current.status !== 'disconnected';
     this.ended = true;
     this.active = false;
-    this.generation++;
-    this.historyRequest++;
-    this.toolsRequest++;
+    this.invalidateRequests();
     this.unobserve?.();
-    this.pending = [];
-    this.pendingBytes = 0;
     this.listeners.clear();
     if (!connected) return;
     try {

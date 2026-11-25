@@ -238,10 +238,14 @@ async fn typed_native_fork_preserves_source_and_loads_independent_historical_set
     client.stop().await;
     let (tx, mut updates) = mpsc::channel(32);
     let branch = AcpClient::new(supervisor.spawn(SessionId::generate(), tx).await.unwrap());
-    branch.initialize().await.unwrap();
+    let capabilities = branch.initialize().await.unwrap().agent_capabilities;
     let native = NativeSessionId::try_from(forked.as_str().to_owned()).unwrap();
     let loaded = branch
-        .load_session(&WorkspacePath::new("/tmp").unwrap(), native.clone())
+        .restore_session(
+            &capabilities,
+            &WorkspacePath::new("/tmp").unwrap(),
+            native.clone(),
+        )
         .await
         .unwrap();
     assert_eq!(loaded.details.select("model").unwrap().1, "default");

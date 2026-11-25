@@ -102,8 +102,8 @@ try {
     );
     if (interrupted) break;
     await rust(
-      'three-providers',
-      'app::tests::provider_tests::all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_crash_and_native_restart',
+      'synthetic-providers',
+      'app::tests::provider_tests::all_synthetic_profiles_cover_plan_usage_permission_forms_cancel_crash_and_native_restart',
     );
     if (interrupted) break;
     await rust(

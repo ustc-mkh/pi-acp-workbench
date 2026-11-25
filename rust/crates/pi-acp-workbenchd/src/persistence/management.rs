@@ -1,22 +1,22 @@
-use super::{database::StoreError, query};
+use super::{
+    database::{encode, StoreError},
+    query,
+};
 use crate::domain::query::SafeInteger;
 use crate::domain::{
     management::*,
     operation::OperationTicket,
     query::{CommandReceipt, SessionView},
     transition::Transition,
-    SessionId,
+    Harness, SessionId,
 };
-use rusqlite::{params, Connection};
-fn harness(h: &crate::domain::session::Harness) -> &'static str {
-    match h {
-        crate::domain::session::Harness::Pi => "Pi",
-        crate::domain::session::Harness::Codex => "Codex",
-        crate::domain::session::Harness::Claude => "Claude",
-    }
-}
-fn encode<T: serde::Serialize>(v: &T) -> Result<String, StoreError> {
-    super::database::encode(v)
+use rusqlite::{params, Connection, Transaction};
+fn session_model(view: &SessionView) -> &str {
+    view.config
+        .model
+        .as_ref()
+        .or(view.catalogue.current_model.as_ref())
+        .map_or("unknown", |m| m.as_str())
 }
 pub(super) fn observe(
     db: &Connection,
@@ -38,19 +38,13 @@ pub(super) fn observe(
         db.execute("INSERT INTO session_metadata(session,title,source,attempted) VALUES(?1,?2,'fallback',0) ON CONFLICT(session) DO NOTHING",params![view.id.as_str(),if title.trim().is_empty(){"New task"}else{&title}])?;
     }
     // A turn exists independently of user entries (Pi may wake autonomously).
-    if let Some(turn) = view
-        .active_turn
-        .as_ref()
-        .filter(|turn| old.active_turn.as_ref() != Some(*turn))
-    {
-        let model = view
-            .config
-            .model
-            .as_ref()
-            .or(view.catalogue.current_model.as_ref())
-            .map(|m| m.as_str())
-            .unwrap_or("unknown");
-        db.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'inference',CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(id) DO NOTHING",params![format!("turn:{}:{}",view.id.as_str(),turn.as_str()),view.id.as_str(),harness(&view.harness),model])?;
+    let Some(turn) = &view.active_turn else {
+        return Ok(());
+    };
+    let fact_id = || format!("turn:{}:{}", view.id.as_str(), turn.as_str());
+    let model = session_model(view);
+    if old.active_turn.as_ref() != Some(turn) {
+        db.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'inference',CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(id) DO NOTHING",params![fact_id(),view.id.as_str(),view.harness.as_str(),model])?;
     }
     if view.usage.reported
         && (view.usage.input_tokens != old.usage.input_tokens
@@ -59,45 +53,43 @@ pub(super) fn observe(
             || view.usage.cache_read_tokens != old.usage.cache_read_tokens
             || view.usage.cache_write_tokens != old.usage.cache_write_tokens)
     {
-        if let Some(turn) = &view.active_turn {
-            let model = view
-                .config
-                .model
-                .as_ref()
-                .or(view.catalogue.current_model.as_ref())
-                .map(|m| m.as_str())
-                .unwrap_or("unknown");
-            db.execute("UPDATE usage_facts SET model=?2,input=?3,output=?4,cache_read=?5,cache_write=?6,source='acp_prompt_usage' WHERE id=?1",params![format!("turn:{}:{}",view.id.as_str(),turn.as_str()),model,view.usage.input_tokens as i64,view.usage.output_tokens as i64,view.usage.cache_read_tokens.map(|n|n as i64),view.usage.cache_write_tokens.map(|n|n as i64)])?;
-        }
+        db.execute("UPDATE usage_facts SET model=?2,input=?3,output=?4,cache_read=?5,cache_write=?6,source='acp_prompt_usage' WHERE id=?1",params![fact_id(),model,view.usage.input_tokens as i64,view.usage.output_tokens as i64,view.usage.cache_read_tokens.map(|n|n as i64),view.usage.cache_write_tokens.map(|n|n as i64)])?;
     }
     Ok(())
 }
-pub(super) fn save_model_config(
-    tx: &Connection,
-    h: &crate::domain::session::Harness,
-    action: &ManagementAction,
-) -> Result<(), StoreError> {
-    if let ManagementAction::ModelConfig {
-        model,
-        hidden,
-        price,
-        multiplier,
-        context_window,
-        apply_context,
-    } = action
-    {
-        let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM model_settings WHERE harness=?1 AND model=?2)",
-            params![harness(h), model],
-            |r| r.get(0),
-        )?;
-        if count >= 1500 && !exists {
-            return Err(StoreError::Invalid("model settings budget exceeded"));
-        }
-        tx.execute("INSERT INTO model_settings(harness,model,hidden,price,price_multiplier,context_override) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price,price_multiplier=excluded.price_multiplier,context_override=CASE WHEN ?7 THEN excluded.context_override ELSE context_override END", params![harness(h),model,hidden,price.as_ref().map(encode).transpose()?,multiplier,if *apply_context { context_window.map(|n|n as i64) } else { None },apply_context])?;
+fn check_model_settings_budget(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
+    if count > 1500 {
+        return Err(StoreError::Invalid("model settings budget exceeded"));
     }
     Ok(())
+}
+
+pub(super) fn save_model_config(
+    tx: &Transaction<'_>,
+    harness: &Harness,
+    action: &ManagementAction,
+) -> Result<(), StoreError> {
+    match action {
+        ManagementAction::ModelConfig {
+            model,
+            hidden,
+            price,
+            multiplier,
+            context_window,
+            apply_context,
+        } => {
+            tx.execute("INSERT INTO model_settings(harness,model,hidden,price,price_multiplier,context_override) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price,price_multiplier=excluded.price_multiplier,context_override=CASE WHEN ?7 THEN excluded.context_override ELSE context_override END", params![harness.as_str(),model,hidden,price.as_ref().map(encode).transpose()?,multiplier,if *apply_context { context_window.map(|n|n as i64) } else { None },apply_context])?;
+        }
+        ManagementAction::Context {
+            model,
+            context_window,
+        } => {
+            tx.execute("INSERT INTO model_settings(harness,model,hidden,context_override) VALUES(?1,?2,0,?3) ON CONFLICT(harness,model) DO UPDATE SET context_override=excluded.context_override", params![harness.as_str(),model,context_window.map(|n|n as i64)])?;
+        }
+        _ => return Err(StoreError::Invalid("invalid model configuration")),
+    }
+    check_model_settings_budget(tx)
 }
 pub(super) fn update(
     db: &mut Connection,
@@ -119,17 +111,8 @@ pub(super) fn update(
             hidden,
             price,
         } => {
-            let count: u32 =
-                tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM model_settings WHERE harness=?1 AND model=?2)",
-                params![harness(&view.harness), model],
-                |r| r.get(0),
-            )?;
-            if count >= 1500 && !exists {
-                return Err(StoreError::Invalid("model settings budget exceeded"));
-            }
-            tx.execute("INSERT INTO model_settings(harness,model,hidden,price) VALUES(?1,?2,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price",params![harness(&view.harness),model,hidden,price.as_ref().map(encode).transpose()?])?;
+            tx.execute("INSERT INTO model_settings(harness,model,hidden,price) VALUES(?1,?2,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=excluded.price",params![view.harness.as_str(),model,hidden,price.as_ref().map(encode).transpose()?])?;
+            check_model_settings_budget(&tx)?;
         }
         ManagementAction::ModelConfig { .. } => save_model_config(&tx, &view.harness, action)?,
         ManagementAction::Visibility {
@@ -137,19 +120,10 @@ pub(super) fn update(
             hidden,
             reset,
         } => {
-            let count: u32 =
-                tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-            if count.saturating_add(models.len() as u32) > 2000 {
-                return Err(StoreError::Invalid("model settings budget exceeded"));
-            }
             for model in models {
-                tx.execute("INSERT INTO model_settings(harness,model,hidden) VALUES(?1,?2,?3) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=CASE WHEN ?4 THEN NULL ELSE price END,price_multiplier=CASE WHEN ?4 THEN 1 ELSE price_multiplier END",params![harness(&view.harness),model,hidden,reset])?;
+                tx.execute("INSERT INTO model_settings(harness,model,hidden) VALUES(?1,?2,?3) ON CONFLICT(harness,model) DO UPDATE SET hidden=excluded.hidden,price=CASE WHEN ?4 THEN NULL ELSE price END,price_multiplier=CASE WHEN ?4 THEN 1 ELSE price_multiplier END",params![view.harness.as_str(),model,hidden,reset])?;
             }
-            let count: u32 =
-                tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-            if count > 1500 {
-                return Err(StoreError::Invalid("model settings budget exceeded"));
-            }
+            check_model_settings_budget(&tx)?;
         }
         ManagementAction::Naming { policy, model } => {
             tx.execute(
@@ -190,7 +164,7 @@ pub(super) fn models(
     // Defaults are refreshed separately from user overrides/visibility.
     tx.execute(
         "UPDATE model_settings SET default_price=NULL,context_window=NULL WHERE harness=?1",
-        [harness(&provider)],
+        [provider.as_str()],
     )?;
     for m in response.models.iter().chain(&response.candidates) {
         if m.model.is_empty()
@@ -210,12 +184,9 @@ pub(super) fn models(
         let inherited = defaults.get(&model_key(&m.model));
         let price = inherited.and_then(|v| v.0.as_ref()).or(m.price.as_ref());
         let context = inherited.and_then(|v| v.1).or(m.context_window);
-        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![harness(&provider),m.model,price.map(encode).transpose()?,context.map(|n|n as i64)])?;
+        tx.execute("INSERT INTO model_settings(harness,model,hidden,default_price,context_window) VALUES(?1,?2,0,?3,?4) ON CONFLICT(harness,model) DO UPDATE SET default_price=excluded.default_price,context_window=excluded.context_window",params![provider.as_str(),m.model,price.map(encode).transpose()?,context.map(|n|n as i64)])?;
     }
-    let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-    if count > 1500 {
-        return Err(StoreError::Invalid("model settings budget exceeded"));
-    }
+    check_model_settings_budget(&tx)?;
     crate::diagnostics::sqlite_commit(tx)?;
     Ok(())
 }
@@ -235,15 +206,8 @@ pub(super) fn title_job(
         let selected = model
             .as_deref()
             .filter(|_| policy == "model")
-            .or_else(|| {
-                view.config
-                    .model
-                    .as_ref()
-                    .or(view.catalogue.current_model.as_ref())
-                    .map(|m| m.as_str())
-            })
-            .unwrap_or("unknown");
-        tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,'missing_title') ON CONFLICT(id) DO NOTHING",params![format!("title:{}:0",session.as_str()),session.as_str(),harness(&view.harness),selected])?;
+            .unwrap_or_else(|| session_model(&view));
+        tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,'missing_title') ON CONFLICT(id) DO NOTHING",params![format!("title:{}:0",session.as_str()),session.as_str(),view.harness.as_str(),selected])?;
     }
     crate::diagnostics::sqlite_commit(tx)?;
     Ok(if changed == 1 && policy != "off" {
@@ -280,7 +244,7 @@ pub(super) fn title_result(
         {
             return Err(StoreError::Invalid("invalid title usage"));
         }
-        tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,?5,?6,?7,?8,'pi_title') ON CONFLICT(id) DO UPDATE SET model=excluded.model,input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,source=excluded.source",params![format!("title:{}:{i}",session.as_str()),session.as_str(),harness(&view.harness),r.model,r.input as i64,r.output as i64,r.cache_read as i64,r.cache_write as i64])?;
+        tx.execute("INSERT INTO usage_facts(id,session,session_number,harness,model,kind,occurred_at,input,output,cache_read,cache_write,source) VALUES(?1,?2,(SELECT created_seq FROM sessions WHERE id=?2),?3,?4,'title',CAST(strftime('%s','now') AS INTEGER)*1000,?5,?6,?7,?8,'pi_title') ON CONFLICT(id) DO UPDATE SET model=excluded.model,input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,source=excluded.source",params![format!("title:{}:{i}",session.as_str()),session.as_str(),view.harness.as_str(),r.model,r.input as i64,r.output as i64,r.cache_read as i64,r.cache_write as i64])?;
     }
     crate::diagnostics::sqlite_commit(tx)?;
     Ok(())
@@ -340,7 +304,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
                 row?;
             models.push(ModelSetting {
                 effective: None,
-                harness: serde_json::from_str(&format!("\"{h}\""))?,
+                harness: query::parse_harness(&h)?,
                 model: m,
                 hidden,
                 price: p.map(|s| serde_json::from_str(&s)).transpose()?,
@@ -420,7 +384,7 @@ pub(super) fn read(db: &mut Connection, q: &ManagementQuery) -> Result<Managemen
             .models
             .iter()
             .map(|m| ResolvedPrice {
-                harness: harness(&m.harness).into(),
+                harness: m.harness.as_str().into(),
                 model: m.model.clone(),
                 price: m.effective_price().cloned(),
                 multiplier: m.multiplier,

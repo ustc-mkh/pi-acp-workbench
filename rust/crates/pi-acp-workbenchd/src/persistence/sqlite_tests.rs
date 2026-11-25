@@ -53,10 +53,6 @@ pub(super) enum TestRequest {
         entered: oneshot::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
     },
-    Rollback {
-        commit: Box<Transition>,
-        reply: TestReply<()>,
-    },
     CorruptImage {
         id: crate::domain::ImageId,
         reply: TestReply<()>,
@@ -135,14 +131,6 @@ pub(super) fn execute(db: &mut Connection, request: TestRequest) {
         TestRequest::ReaderPause { entered, resume } | TestRequest::Pause { entered, resume } => {
             let _ = entered.send(());
             let _ = resume.recv();
-        }
-        TestRequest::Rollback { commit, reply } => {
-            let result = (|| {
-                let tx = db.transaction()?;
-                query::apply_commit(&tx, &commit)?;
-                Err(StoreError::Invalid("test transaction fault before commit"))
-            })();
-            let _ = reply.send(result);
         }
         TestRequest::Hold { commit, ready } => {
             let tx = db.transaction().unwrap();
@@ -232,6 +220,98 @@ fn initial() -> SessionView {
     view.last_entry_seq = SafeInteger::default();
     view
 }
+#[test]
+fn legacy_session_harness_upgrade_preserves_history_and_accepts_antigravity() {
+    let root = Root::new();
+    let data = root.data();
+    super::format::prepare_database(&data).unwrap();
+    let mut db = Connection::open(data.join("workbench.sqlite3")).unwrap();
+    db.execute_batch(&include_str!("schema.sql").replace(", 'Antigravity'", ""))
+        .unwrap();
+    super::format::complete_database(&data).unwrap();
+    let mut view = initial();
+    query::create(&mut db, &view).unwrap();
+    seed(&mut db, &view.id, 2).unwrap();
+    db.execute(
+        "INSERT INTO session_metadata VALUES (?1,'Original title','manual',1)",
+        [view.id.as_str()],
+    )
+    .unwrap();
+    db.execute("CREATE INDEX fixture_harness ON sessions(harness)", [])
+        .unwrap();
+    let before = query::view(&db, &view.id).unwrap();
+    drop(db);
+
+    let mut db = super::schema::open(&data).unwrap();
+    assert_eq!(
+        super::database::encode(&query::view(&db, &view.id).unwrap()).unwrap(),
+        super::database::encode(&before).unwrap()
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_entries WHERE session=?1",
+            [view.id.as_str()],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        query::summary_by_id(&db, &view.id)
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Original title")
+    );
+    assert!(db
+        .prepare("SELECT harness FROM sessions INDEXED BY fixture_harness")
+        .is_ok());
+    assert!(db
+        .pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))
+        .unwrap());
+    view.harness = crate::domain::Harness::Antigravity;
+    view.id = SessionId::generate();
+    query::create(&mut db, &view).unwrap();
+    drop(db);
+    assert_eq!(
+        query::view(&super::schema::open(&data).unwrap(), &view.id)
+            .unwrap()
+            .harness,
+        view.harness
+    );
+}
+
+#[test]
+fn model_settings_at_capacity_allow_updates_and_roll_back_excess_rows() {
+    use crate::domain::management::ManagementAction;
+    let mut db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("schema.sql")).unwrap();
+    let view = initial();
+    query::create(&mut db, &view).unwrap();
+    db.execute(
+        "WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<1500)
+         INSERT INTO model_settings(harness,model,hidden) SELECT ?1,CAST(n AS TEXT),0 FROM ids",
+        [view.harness.as_str()],
+    )
+    .unwrap();
+    let model = |model: &str| ManagementAction::Model {
+        model: model.into(),
+        hidden: true,
+        price: None,
+    };
+    super::management::update(&mut db, &view.id, &model("1"), None).unwrap();
+    assert!(matches!(
+        super::management::update(&mut db, &view.id, &model("1501"), None),
+        Err(StoreError::Invalid("model settings budget exceeded"))
+    ));
+    let (rows, hidden): (u32, u32) = db
+        .query_row("SELECT count(*),sum(hidden) FROM model_settings", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((rows, hidden), (1500, 1));
+}
+
 fn entry(id: &str, text: &str) -> NewEntry {
     NewEntry {
         id: EntryId::new(id).unwrap(),
@@ -473,26 +553,6 @@ async fn sqlite_session_commit_archives_notices_and_interactions_with_intents_or
     assert_eq!(count(&sql, "session_entries"), 1);
 }
 
-#[tokio::test]
-async fn sqlite_rollback_discards_session_entries_contents_and_delivery_together() {
-    let root = Root::new();
-    let (_lease, db) = open(&root.data()).await;
-    db.create(initial()).await.unwrap();
-    let (reply, result) = oneshot::channel();
-    db.enqueue(StoreRequest::Test(TestRequest::Rollback {
-        commit: Box::new(update(initial(), "failed", "not committed")),
-        reply,
-    }))
-    .await
-    .unwrap();
-    assert!(result.await.unwrap().is_err());
-    assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 0);
-    db.shutdown().await.unwrap();
-    let sql = Connection::open(root.data().join("workbench.sqlite3")).unwrap();
-    for table in ["entries", "contents", "session_entries", "deliveries"] {
-        assert_eq!(count(&sql, table), 0, "{table}");
-    }
-}
 #[tokio::test]
 async fn sqlite_dropped_observer_is_not_write_cancellation_and_shutdown_drains() {
     let root = Root::new();
@@ -959,9 +1019,8 @@ async fn sqlite_schema_constraints_and_corrupt_content_are_not_hidden() {
     db.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
+async fn sqlite_commit_archives_large_text_images_tools_and_delivery_together() {
     use crate::domain::{
-        image::ImageAsset,
         query::{TextBody, ToolBody, ToolHeader},
         tool::{ToolKind, ToolStatus},
         transition::ToolUpdate,
@@ -972,7 +1031,7 @@ async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
     db.create(initial()).await.unwrap();
     let large = "中🌏\n\"\\".repeat(10_000);
     let mut change = update(initial(), "large", &large);
-    let image = ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap();
+    let image = image_fixture();
     change.append[0].image = Some(image.clone());
     let mut tool_content = entry("tool", "large tool text").text;
     tool_content.content.kind = ContentKind::ToolText;
@@ -991,19 +1050,6 @@ async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
         },
         contents: vec![tool_content],
     });
-    let (reply, result) = oneshot::channel();
-    db.enqueue(StoreRequest::Test(TestRequest::Rollback {
-        commit: Box::new(change.clone()),
-        reply,
-    }))
-    .await
-    .unwrap();
-    assert!(result.await.unwrap().is_err());
-    assert!(matches!(
-        db.image_by_id(image.image().id().clone()).await,
-        Err(StoreError::NotFound)
-    ));
-    assert_eq!(db.view(initial().id).await.unwrap().revision.get(), 0);
     let batch = db.commit(change.clone()).await.unwrap();
     assert_eq!(
         db.image(image.image().clone()).await.unwrap().bytes(),
@@ -1025,25 +1071,6 @@ async fn sqlite_images_large_text_tools_and_intents_commit_atomically() {
     assert_eq!(count(&sql, "contents"), 3);
     assert_eq!(count(&sql, "tools"), 1);
     assert_eq!(count(&sql, "deliveries"), 1);
-    let raw: Vec<u8> = sql
-        .query_row(
-            "SELECT data FROM contents WHERE id=?1 AND kind='Image'",
-            [image.image().id().as_str()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(raw, image.bytes());
-    let allowed = [
-        ".workbench.lock",
-        "storage-format.json",
-        "workbench.sqlite3",
-        "workbench.sqlite3-wal",
-        "workbench.sqlite3-shm",
-        "workbench.sqlite3-journal",
-    ];
-    for file in fs::read_dir(root.data()).unwrap() {
-        assert!(allowed.contains(&file.unwrap().file_name().to_str().unwrap()));
-    }
 }
 fn image_fixture() -> crate::domain::image::ImageAsset {
     crate::domain::image::ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap()

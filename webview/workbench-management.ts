@@ -775,18 +775,16 @@ export class ManagementPanel {
       const tr = el('tr');
       tr.title = `调用 ${r.calls} 次；用量缺失 ${r.missing}；缓存缺失 ${r.cache_missing}；未定价 ${r.unpriced}`;
       const key = el('td');
-      const label = r.key === 'total' ? '筛选合计' : this.sessions.find((s) => s.id === r.key);
+      const session = this.sessions.find((s) => s.id === r.key);
       const text =
         r.key === 'total'
           ? '筛选合计'
           : (r.label ??
-            (typeof label === 'object'
-              ? `#${label.created_seq} ${label.title ?? label.id}`
-              : r.key));
+            (session ? `#${session.created_seq} ${session.title ?? session.id}` : r.key));
       if (this.filter.group === 'model' && r.key !== 'total')
         key.append(
           button(text, () => {
-            this.search = r.key.replace(/^(Pi|Codex|Claude)\//, '');
+            this.search = r.key.slice(r.key.indexOf('/') + 1);
             this.openModels();
           }),
         );

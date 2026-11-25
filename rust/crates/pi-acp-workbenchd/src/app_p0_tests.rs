@@ -4,6 +4,48 @@ use crate::domain::{
 };
 
 #[tokio::test]
+async fn missing_session_preflight_replays_the_original_failure_after_restart() {
+    let (app, root) = app();
+    let session = SessionId::generate();
+    let commands = [
+        (
+            OperationId::generate(),
+            DomainCommand::Cancel {
+                session: session.clone(),
+            },
+        ),
+        (
+            OperationId::generate(),
+            DomainCommand::SetMode {
+                session: session.clone(),
+                mode: ModeId::new("high").unwrap(),
+            },
+        ),
+    ];
+    for (operation, command) in &commands {
+        assert!(matches!(
+            app.command_durable(operation.clone(), command.clone()).await,
+            Err(DomainError::NotFound(id)) if id == session
+        ));
+        assert!(matches!(
+            app.query(QueryCommand::Operation { operation: operation.clone() }).await.unwrap(),
+            QueryResult::Operation(OperationStatus::Failed { message })
+                if message == DomainError::NotFound(session.clone()).to_string()
+        ));
+    }
+    app.shutdown_checked().await.unwrap();
+    let reopened = app_at(&root);
+    for (operation, command) in commands {
+        assert!(matches!(
+            reopened.command_durable(operation, command).await,
+            Err(DomainError::NotFound(id)) if id == session
+        ));
+    }
+    reopened.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn local_noops_seal_receipts_without_revisions_or_batches_and_survive_source_removal() {
     let (app, root) = app();
     let id = create(&app).await;

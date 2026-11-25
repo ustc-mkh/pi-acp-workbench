@@ -161,10 +161,6 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     connection
         .prepare("SELECT image_ref_json FROM contents LIMIT 0")
         .map_err(|_| StoreError::Invalid("unsupported contents schema"))?;
-    let delivery_index = connection
-        .prepare("PRAGMA index_info(deliveries_topic_order)")?
-        .query_map([], |row| row.get::<_, String>(2))?
-        .collect::<Result<Vec<_>, _>>()?;
     let delivery_index_sql: Option<String> = connection
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE type='index' AND name='deliveries_topic_order'",
@@ -172,8 +168,7 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
             |row| row.get(0),
         )
         .optional()?;
-    if delivery_index != ["target_key", "status", "order_seq"]
-        || delivery_index_sql.as_deref() != Some("CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq) WHERE status='Pending'")
+    if delivery_index_sql.as_deref() != Some("CREATE INDEX deliveries_topic_order ON deliveries(target_key, status, order_seq) WHERE status='Pending'")
     {
         return Err(StoreError::Invalid("unsupported delivery index"));
     }
@@ -191,11 +186,9 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     if integrity != "ok" {
         return Err(StoreError::Invalid("SQLite quick_check failed"));
     }
-    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
-    if foreign_keys.query([])?.next()?.is_some() {
+    if connection.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(StoreError::Invalid("SQLite foreign key integrity failed"));
     }
-    drop(foreign_keys);
     // Additive settings upgrade only after validating the complete existing v3 root.
     // Old overrides remain untouched; no journal/history migration or replay.
     let columns = connection
@@ -231,16 +224,14 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
             return Err(StoreError::Invalid("model context revision regressed"));
         }
     }
-    if projection_version != 1346978609
-        || projection_tables == 0
-        || !columns.iter().any(|c| c == "price_multiplier")
-        || !columns.iter().any(|c| c == "context_override")
-    {
+    let needs_multiplier = !columns.iter().any(|c| c == "price_multiplier");
+    let needs_context = !columns.iter().any(|c| c == "context_override");
+    if projection_version != 1346978609 || needs_multiplier || needs_context {
         let tx = connection.transaction()?;
-        if !columns.iter().any(|c| c == "price_multiplier") {
+        if needs_multiplier {
             tx.execute_batch("ALTER TABLE model_settings ADD COLUMN price_multiplier REAL NOT NULL DEFAULT 1 CHECK(price_multiplier >= 0 AND price_multiplier <= 1000000)")?;
         }
-        if !columns.iter().any(|c| c == "context_override") {
+        if needs_context {
             tx.execute_batch("ALTER TABLE model_settings ADD COLUMN context_override INTEGER CHECK(context_override IS NULL OR (context_override > 0 AND context_override <= 100000000))")?;
         }
         if projection_tables == 0 {
@@ -251,19 +242,71 @@ pub(super) fn open(root: &Path) -> Result<Connection, StoreError> {
     }
     // Preserve the final display name in the existing durable removal marker.
     // Older validated roots get a nullable column; already lost names remain unknown.
-    let removed_columns = connection
-        .prepare("PRAGMA table_info(removed_sessions)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !removed_columns.iter().any(|name| name == "title") {
+    if !connection
+        .prepare("SELECT 1 FROM pragma_table_info('removed_sessions') WHERE name='title'")?
+        .exists([])?
+    {
         let tx = connection.transaction()?;
         tx.execute_batch("ALTER TABLE removed_sessions ADD COLUMN title TEXT CHECK(title IS NULL OR length(title)<=320)")?;
         crate::diagnostics::sqlite_commit(tx)?;
     }
+    expand_session_harness(&mut connection)?;
     if initializing {
         format::complete_database(root)?;
     }
     Ok(connection)
+}
+
+/// SQLite requires a table rebuild to widen a CHECK constraint. The startup
+/// lease excludes other writers. Disable cascading deletes during the swap,
+/// then verify all references before committing.
+fn expand_session_harness(connection: &mut Connection) -> Result<(), StoreError> {
+    let ddl: String = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='sessions'",
+        [],
+        |r| r.get(0),
+    )?;
+    if ddl.contains("CHECK (harness IN ('Pi', 'Codex', 'Claude', 'Antigravity'))") {
+        return Ok(());
+    }
+    // Only rewrite the known legacy table. Refuse an unfamiliar layout before
+    // a copy could discard extra columns or constraints.
+    let sessions = SCHEMA
+        .split(';')
+        .map(str::trim)
+        .find(|statement| statement.starts_with("CREATE TABLE sessions ("))
+        .expect("sessions table in bundled schema");
+    if ddl != sessions.replace(", 'Antigravity'", "") {
+        return Err(StoreError::Invalid(
+            "unsupported session harness constraint",
+        ));
+    }
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let tx = connection.transaction()?;
+    // Preserve any additional indexes or triggers owned by the sessions table.
+    // Implicit primary-key and unique indexes come from its CREATE TABLE.
+    let objects = tx.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")?
+        .query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    tx.execute(
+        &sessions.replacen("TABLE sessions", "TABLE sessions_new", 1),
+        [],
+    )?;
+    tx.execute_batch(
+        "INSERT INTO sessions_new SELECT * FROM sessions;
+         DROP TABLE sessions;
+         ALTER TABLE sessions_new RENAME TO sessions;",
+    )?;
+    for sql in objects {
+        tx.execute(&sql, [])?;
+    }
+    if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
+        return Err(StoreError::Invalid(
+            "session harness upgrade failed foreign key check",
+        ));
+    }
+    crate::diagnostics::sqlite_commit(tx)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    Ok(())
 }
 
 /// Readers never initialize schema, change journal mode or run maintenance.

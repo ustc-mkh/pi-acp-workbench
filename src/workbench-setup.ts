@@ -20,7 +20,7 @@ export function telegramConfiguration(input: {
     chat = id(input.chat);
   if (user <= 0) throw new Error('The authorized user ID must be positive');
   return {
-    workers: { pi: { command: 'pi-acp', args: [], env: {} }, codex: null, claude: null },
+    workers: { pi: { command: 'pi-acp' } },
     sessions: { mailbox: 128, max_workers: 16 },
     storage: { root: input.root },
     limits: { pending_interactions: 32 },

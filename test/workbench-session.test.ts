@@ -1,5 +1,8 @@
 import { afterEach, expect, it } from 'vitest';
 import { WorkbenchSession } from '../src/workbench-session';
+import type { WorkbenchClient, WorkbenchObserver } from '../src/workbench-client';
+import { historyFits } from '../src/workbench-history';
+import { exportMarkdown } from '../src/workbench-export';
 import { commitBatch, entryHeader, sessionId, type CommitBatch } from '../src/workbench-protocol';
 import { emptyView, workbenchPeer, type PeerRequest } from './helpers/workbench-peer';
 const peers: Awaited<ReturnType<typeof workbenchPeer>>[] = [];
@@ -329,4 +332,69 @@ it('only adopts complete empty discovery views without skipping unseen transcrip
   expect(view.view.view?.revision).toBe(6);
   expect(view.confirmEmptyView(emptyView(5))).toBe(true);
   expect(view.view.view?.revision).toBe(6);
+});
+
+it('keeps a bounded tail and a usable session when one turn outgrows the display during streaming or attach', async () => {
+  const id = sessionId.parse('session');
+  const row = batch(1, 1).entries[0];
+  const body = { Inline: { text: 'x'.repeat(16 * 1024) } };
+  const rows = Array.from({ length: 520 }, (_, i) => ({
+    ...row,
+    seq: i + 1,
+    id: ('entry-' + i) as typeof row.id,
+    text: body,
+  }));
+  let count = 500;
+  let revision = 1;
+  const page = (before: number) => {
+    const entries = rows.slice(Math.max(0, before - 1 - 50), before - 1);
+    const seq = entries[0].seq;
+    return {
+      entries,
+      next_cursor:
+        seq > 1 ? { version: 3, session: id, max_entry_seq: count, before_seq: seq } : null,
+    };
+  };
+  let observer: WorkbenchObserver;
+  const client = {
+    observe(value: WorkbenchObserver) {
+      observer = value;
+      return () => {};
+    },
+    async call(command: { method: string; cursor?: { before_seq: number } }) {
+      if (command.method === 'attach')
+        return {
+          view: { ...emptyView(revision), last_entry_seq: count },
+          recent_page: page(count + 1),
+        };
+      if (command.method === 'history') return page(command.cursor?.before_seq ?? count + 1);
+      throw new Error(command.method);
+    },
+  } as unknown as WorkbenchClient;
+  const session = new WorkbenchSession(client, id);
+  await session.start();
+  expect(session.view.entries).toHaveLength(count);
+  while (count < rows.length) {
+    const live = batch(++revision);
+    live.entries = rows.slice(count, count + 5);
+    count += live.entries.length;
+    live.view!.last_entry_seq = count;
+    observer!.batch!(live);
+  }
+  const checkTail = () => {
+    expect(session.view.status).toBe('ready');
+    expect(session.view.historyTruncated).toBe(true);
+    expect(historyFits(session.view.entries)).toBe(true);
+    expect(session.view.view?.last_entry_seq).toBe(count);
+    expect(session.view.entries.at(-1)?.seq).toBe(count);
+    expect(session.view.earlier?.before_seq).toBe(session.view.entries[0].seq);
+  };
+  checkTail();
+  await session.refresh();
+  checkTail();
+  let exportedRows = 0;
+  for await (const chunk of exportMarkdown(client, id)) {
+    if (chunk === body.Inline.text) exportedRows++;
+  }
+  expect(exportedRows).toBe(count);
 });

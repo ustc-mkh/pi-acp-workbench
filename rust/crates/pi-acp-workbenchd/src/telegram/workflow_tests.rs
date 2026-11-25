@@ -45,6 +45,15 @@ async fn sync_activity_pages_sort_recently_updated_with_a_stable_watermark() {
             .collect::<Vec<_>>(),
         vec![ids[1].clone(), ids[2].clone()]
     );
+    let mut future = first.next_cursor.clone().unwrap();
+    future.max_created_seq = crate::domain::query::SafeInteger::new(31).unwrap();
+    assert!(matches!(
+        app.list_activity(Some(future), Some(2)).await,
+        Err(crate::domain::error::DomainError::Query(_))
+    ));
+    app.command(DomainCommand::RemoveSession(ids[1].clone()))
+        .await
+        .unwrap();
     let second = app.list_activity(first.next_cursor, Some(2)).await.unwrap();
     assert_eq!(
         second

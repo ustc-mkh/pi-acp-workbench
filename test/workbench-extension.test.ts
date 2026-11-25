@@ -30,6 +30,8 @@ vi.mock('vscode', () => ({
     }),
   },
   workspace: {
+    onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
+    onDidGrantWorkspaceTrust: () => ({ dispose() {} }),
     get textDocuments() {
       return host.documents;
     },
@@ -98,7 +100,18 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   host.socket = peer.path;
   host.workspace = workspace;
   const subscriptions: vscode.Disposable[] = [];
-  activate({ subscriptions, extensionUri: { fsPath: root } } as unknown as vscode.ExtensionContext);
+  const saved = new Map<string, unknown>();
+  const workspaceState = {
+    get: (key: string) => saved.get(key),
+    update: async (key: string, value: unknown) => {
+      saved.set(key, value);
+    },
+  };
+  activate({
+    subscriptions,
+    workspaceState,
+    extensionUri: { fsPath: root },
+  } as unknown as vscode.ExtensionContext);
   cleanups.push(async () => {
     subscriptions.reverse().forEach((item) => item.dispose());
   });
@@ -138,9 +151,11 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   expect(provider.controller.snapshot.error).toContain('trust');
   expect(peer.requests).toHaveLength(0);
   host.trusted = true;
+  await provider.controller.receive({ type: 'set_harness', harness: 'Codex' });
+  expect(saved.get(`workbench.harness:${peer.path}`)).toBe('Codex');
   const creating = host.commands.get('piAcp.newSession')!();
   await expect.poll(() => peer.requests.length).toBe(1);
-  expect(peer.requests[0].command).toEqual({ method: 'create', harness: 'Pi', cwd: workspace });
+  expect(peer.requests[0].command).toEqual({ method: 'create', harness: 'Codex', cwd: workspace });
   const view = { ...emptyView(), cwd: workspace, last_entry_seq: 1 };
   peer.reply(peer.requests[0], {
     Created: {
@@ -190,7 +205,7 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     turn: 'turn',
   });
   await expect.poll(() => peer.requests.length).toBe(5);
-  peer.query(peer.requests[4], 'turn_diff', {
+  const diff = {
     status: 'complete',
     files: ['a.ts', 'b.ts'].map((path) => ({
       path,
@@ -210,7 +225,8 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
     added: 2,
     removed: 2,
     next_offset: null,
-  });
+  };
+  peer.query(peer.requests[4], 'turn_diff', diff);
   for (let i = 0; i < 4; i++) {
     await expect.poll(() => peer.requests.length).toBe(6 + i);
     peer.query(peer.requests[5 + i], 'turn_diff_content', {
@@ -294,4 +310,33 @@ it('production entry configures only v3 socket, restricts CSP resources and reje
   expect(api.window.showWarningMessage).toHaveBeenCalledTimes(2);
   expect(provider.controller.snapshot.error).toBeUndefined();
   expect(peer.requests.some((r) => r.command.method === 'undo_turn')).toBe(false);
+  const singleFile = provider.controller.receive({
+    type: 'open_turn_diff',
+    session: 'session',
+    turn: 'turn',
+    file: 17,
+  });
+  await expect.poll(() => peer.requests.length).toBe(14);
+  expect(peer.requests[13].command).toMatchObject({ method: 'turn_diff', offset: 17 });
+  peer.query(peer.requests[13], 'turn_diff', { ...diff, next_offset: 19 });
+  for (const [i, after] of [false, true].entries()) {
+    await expect.poll(() => peer.requests.length).toBe(15 + i);
+    expect(peer.requests[14 + i].command).toMatchObject({
+      method: 'turn_diff_content',
+      file: 17,
+      after,
+    });
+    peer.query(peer.requests[14 + i], 'turn_diff_content', {
+      bytes: 'x',
+      total_bytes: 1,
+      next_offset: null,
+    });
+  }
+  await singleFile;
+  expect(api.commands.executeCommand).toHaveBeenLastCalledWith(
+    'vscode.diff',
+    expect.anything(),
+    expect.anything(),
+    'turn · a.ts',
+  );
 });

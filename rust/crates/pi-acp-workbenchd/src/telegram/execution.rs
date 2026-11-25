@@ -20,7 +20,7 @@ use crate::{
 #[path = "execution_scheduler.rs"]
 mod scheduler;
 pub(crate) use scheduler::run;
-const HELP: &str = "/menu [directories|sessions|models|modes] · /new [pi|codex|claude] [绝对路径] — 新会话（论坛 General 中创建话题）\n/open ID（/attach ID） · /sessions · /status · /history [all] · /sync · /queue · /stop（/cancel） · /interrupt TEXT · /remove\n/discover — 启动受控模型发现（不发送业务任务） · /model ID · /mode ID\n/notifications [on|off] · /silent [on|off] — 此话题推送/静音设置\n/answer INTERACTION_ID TEXT_OR_TYPED_JSON\n/prompt TEXT — 明确发送 prompt，不猜作回答\n多字段回答示例：/answer ID {\"Form\":{\"fields\":{\"name\":{\"Text\":\"value\"}}}}";
+const HELP: &str = "/menu [directories|sessions|models|modes] · /new [pi|codex|claude|antigravity] [绝对路径] — 新会话（论坛 General 中创建话题）\n/open ID（/attach ID） · /sessions · /status · /history [all] · /sync · /queue · /stop（/cancel） · /interrupt TEXT · /remove\n/discover — 启动受控模型发现（不发送业务任务） · /model ID · /mode ID\n/notifications [on|off] · /silent [on|off] — 此话题推送/静音设置\n/answer INTERACTION_ID TEXT_OR_TYPED_JSON\n/prompt TEXT — 明确发送 prompt，不猜作回答\n多字段回答示例：/answer ID {\"Form\":{\"fields\":{\"name\":{\"Text\":\"value\"}}}}";
 fn rejected(reason: &RejectionReason) -> &'static str {
     match reason {
         RejectionReason::UnknownCommand => "未知命令。使用 /help。",
@@ -56,15 +56,11 @@ fn failure(error: &DomainError) -> &'static str {
 }
 async fn domain(
     context: &Context<impl BotApi>,
-    record: &InboxRecord,
+    operation: &OperationId,
     command: DomainCommand,
     scope: Option<&SessionId>,
 ) -> Result<CommandReceipt, DomainError> {
-    if let Some(result) = context
-        .app
-        .operation_result(&record.operation, &command)
-        .await?
-    {
+    if let Some(result) = context.app.operation_result(operation, &command).await? {
         return result;
     }
     if let Some(session) = scope {
@@ -75,26 +71,10 @@ async fn domain(
             None if matches!(command, DomainCommand::RemoveSession(_)) => {}
             None => return Err(DomainError::NotFound(session.clone())),
         }
-        if matches!(
-            command,
-            DomainCommand::Prompt { .. }
-                | DomainCommand::AnswerInteraction { .. }
-                | DomainCommand::Cancel { .. }
-                | DomainCommand::SetModel { .. }
-                | DomainCommand::SetMode { .. }
-                | DomainCommand::SetOption { .. }
-        ) {
-            // Inspect is deliberately cold/read-only. Execution must explicitly
-            // establish an actor owner; admission and /status must not do this.
-            context
-                .app
-                .command(DomainCommand::LoadSession(session.clone()))
-                .await?;
-        }
     }
     context
         .app
-        .command_durable(record.operation.clone(), command)
+        .command_durable(operation.clone(), command)
         .await
 }
 async fn submit_prompt(
@@ -133,9 +113,7 @@ async fn submit_prompt(
             .prompt_attempt(record.id, Some((previous, operation.clone())))
             .await?;
     }
-    let mut attempt = record.clone();
-    attempt.operation = operation;
-    domain(context, &attempt, command, Some(session))
+    domain(context, &operation, command, Some(session))
         .await
         .map(|_| ())
 }
@@ -167,7 +145,7 @@ pub(crate) async fn dispatch(
         } => {
             domain(
                 context,
-                record,
+                &record.operation,
                 DomainCommand::AnswerInteraction {
                     session: session.clone(),
                     answer: answer.clone(),
@@ -188,7 +166,10 @@ pub(crate) async fn dispatch(
                 "Provider ready without a business prompt. Use /menu models or /menu modes to select actual choices.".into()
             }
             ControlCommand::Queue => {
-                let pending = context.store.pending(context.config.inbox_capacity).await?;
+                let pending = context
+                    .store
+                    .pending(crate::persistence::inbox::MAX_PENDING)
+                    .await?;
                 let ids: Vec<_> = pending
                     .iter()
                     .filter(|item| {
@@ -199,12 +180,12 @@ pub(crate) async fn dispatch(
                     .collect();
                 format!("Queued input IDs: {ids:?}. /stop cancels earlier queued inputs; /interrupt TEXT stops and replaces them. Accepted running work is shown by /status.")
             }
-            ControlCommand::Interrupt { session, prompt } => {
+            ControlCommand::Cancel { session } | ControlCommand::Interrupt { session, .. } => {
                 authorize_history(context, session).await?;
                 let cancelled = context.store.queue_barrier(record.id).await?;
                 match domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::Cancel {
                         session: session.clone(),
                     },
@@ -215,15 +196,19 @@ pub(crate) async fn dispatch(
                     Ok(_) | Err(DomainError::NoActiveTurn) => {}
                     Err(error) => return Err(error),
                 }
-                submit_prompt(
-                    context,
-                    record,
-                    session,
-                    prompt,
-                    OperationId::new(format!("interrupt-input-{}", record.id.get()))?,
-                )
-                .await?;
-                format!("Interrupted; replacement input accepted. Cancelled queued inputs: {cancelled:?}")
+                if let ControlCommand::Interrupt { prompt, .. } = control {
+                    submit_prompt(
+                        context,
+                        record,
+                        session,
+                        prompt,
+                        OperationId::new(format!("interrupt-input-{}", record.id.get()))?,
+                    )
+                    .await?;
+                    format!("Interrupted; replacement input accepted. Cancelled queued inputs: {cancelled:?}")
+                } else {
+                    format!("Cancelled. Cancelled queued inputs: {cancelled:?}")
+                }
             }
             ControlCommand::Menu { page, create_topic } => {
                 super::menu::build(context, record, page, *create_topic).await?
@@ -256,19 +241,7 @@ pub(crate) async fn dispatch(
                     harness: harness.clone(),
                     cwd: cwd.clone(),
                 };
-                let existing = context
-                    .app
-                    .operation_result(&record.operation, &command)
-                    .await?;
-                let events = match existing {
-                    Some(result) => result?,
-                    None => {
-                        context
-                            .app
-                            .command_durable(record.operation.clone(), command)
-                            .await?
-                    }
-                };
+                let events = domain(context, &record.operation, command, None).await?;
                 let CommandReceipt::Created { summary: snapshot } = events else {
                     return Err(DomainError::Persistence(
                         "create receipt missing summary".into(),
@@ -296,7 +269,7 @@ pub(crate) async fn dispatch(
             ControlCommand::Attach { session } => {
                 let events = domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::LoadSession(session.clone()),
                     Some(session),
                 )
@@ -370,7 +343,7 @@ pub(crate) async fn dispatch(
             ControlCommand::Status { session } => {
                 let events = domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::Inspect(session.clone()),
                     Some(session),
                 )
@@ -407,28 +380,10 @@ pub(crate) async fn dispatch(
                     text
                 }
             }
-            ControlCommand::Cancel { session } => {
-                authorize_history(context, session).await?;
-                let cancelled = context.store.queue_barrier(record.id).await?;
-                match domain(
-                    context,
-                    record,
-                    DomainCommand::Cancel {
-                        session: session.clone(),
-                    },
-                    Some(session),
-                )
-                .await
-                {
-                    Ok(_) | Err(DomainError::NoActiveTurn) => {}
-                    Err(error) => return Err(error),
-                }
-                format!("Cancelled. Cancelled queued inputs: {cancelled:?}")
-            }
             ControlCommand::Remove { session } => {
                 domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::RemoveSession(session.clone()),
                     Some(session),
                 )
@@ -439,7 +394,7 @@ pub(crate) async fn dispatch(
             ControlCommand::SetModel { session, model } => {
                 domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::SetModel {
                         session: session.clone(),
                         model: model.clone(),
@@ -452,7 +407,7 @@ pub(crate) async fn dispatch(
             ControlCommand::SetOption { session, id, value } => {
                 domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::SetOption {
                         session: session.clone(),
                         id: id.clone(),
@@ -466,7 +421,7 @@ pub(crate) async fn dispatch(
             ControlCommand::SetMode { session, mode } => {
                 domain(
                     context,
-                    record,
+                    &record.operation,
                     DomainCommand::SetMode {
                         session: session.clone(),
                         mode: mode.clone(),

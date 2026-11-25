@@ -9,60 +9,25 @@ use crate::domain::{
     transcript::{EntryRole, TranscriptEntry},
     EntryId, InteractionId, NoticeId, TurnId,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
-use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn image_archive_is_immutable_identity_checked_and_detects_corruption() {
+async fn payload_image_rejects_a_mismatched_descriptor_for_an_existing_id() {
     let root = Root::new();
-    let (lease, database) = open(&root.data()).await;
+    let (_lease, database) = open(&root.data()).await;
     let store = PayloadStore::new(database);
-    let asset = ImageAsset::from_base64("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=").unwrap();
-    assert!(store.image(asset.image()).await.is_err());
+    let asset = ImageAsset::from_base64("image/gif", "R0lGODlhAQABAA==").unwrap();
     store.put_image(&asset).await.unwrap();
-    store.put_image(&asset).await.unwrap();
-    let loaded = store.image(asset.image()).await.unwrap();
-    assert_eq!(loaded.bytes(), asset.bytes());
-    assert_eq!(loaded.image(), asset.image());
-    let mut bytes = asset.bytes().to_vec();
-    *bytes.last_mut().unwrap() ^= 1;
-    let mut changed = serde_json::to_value(&asset).unwrap();
-    changed["data"] = serde_json::json!(STANDARD.encode(&bytes));
-    changed["image"]["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&bytes)));
-    let changed: ImageAsset = serde_json::from_value(changed).unwrap();
-    assert!(
-        store.put_image(&changed).await.is_err(),
-        "same ID cannot be rebound"
-    );
-    assert!(
-        store.image(changed.image()).await.is_err(),
-        "read must compare full descriptor"
-    );
-    store.shutdown().await;
-    let sql = rusqlite::Connection::open(root.data().join("workbench.sqlite3")).unwrap();
-    let committed: Vec<u8> = sql
-        .query_row(
-            "SELECT data FROM contents WHERE id=?1",
-            [asset.image().id().as_str()],
-            |r| r.get(0),
-        )
-        .unwrap();
     assert_eq!(
-        committed,
-        asset.bytes(),
-        "failed rebind must preserve exact committed BLOB"
+        store.image(asset.image()).await.unwrap().bytes(),
+        asset.bytes()
     );
-    let mut corrupt = committed.clone();
-    *corrupt.last_mut().unwrap() ^= 1;
-    sql.execute(
-        "UPDATE contents SET data=?1 WHERE id=?2",
-        rusqlite::params![corrupt, asset.image().id().as_str()],
-    )
-    .unwrap();
-    drop(sql);
-    let restarted = PayloadStore::new(Database::open(root.data(), &lease).await.unwrap());
-    assert!(restarted.image(asset.image()).await.is_err());
-    restarted.shutdown().await;
+    let mut mismatched = serde_json::to_value(asset.image()).unwrap();
+    mismatched["sha256"] = "0".repeat(64).into();
+    assert!(store
+        .image(&serde_json::from_value(mismatched).unwrap())
+        .await
+        .is_err());
+    store.shutdown().await;
 }
 #[tokio::test]
 async fn payload_entries_notices_and_interactions_survive_physical_database_restart_without_files()

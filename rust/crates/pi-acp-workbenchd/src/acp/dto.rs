@@ -75,8 +75,27 @@ pub struct AgentCapabilities {
     pub metadata: super::extensions::ProviderMetadata,
     #[serde(default)]
     pub load_session: bool,
+    pub session_capabilities: Option<SessionCapabilities>,
     #[serde(default)]
     pub prompt_capabilities: PromptCapabilities,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionCapabilities {
+    pub resume: Option<ResumeCapability>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResumeCapability {}
+
+impl AgentCapabilities {
+    pub fn restore_method(&self) -> Option<&'static str> {
+        if self.load_session {
+            Some("session/load")
+        } else if self.session_capabilities.as_ref()?.resume.is_some() {
+            Some("session/resume")
+        } else {
+            None
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

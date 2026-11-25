@@ -51,6 +51,16 @@ fn snapshot() -> crate::domain::query::SessionView {
         revision: crate::domain::query::SafeInteger::new(1).unwrap(),
     }
 }
+#[test]
+fn new_antigravity_uses_the_requested_workspace() {
+    let action =
+        super::command::parse_text(None, "/new antigravity /tmp/project name", &policy().cwd, 0)
+            .unwrap();
+    assert!(
+        matches!(action, TelegramAction::Control(super::command::ControlCommand::NewSession { harness: Harness::Antigravity, cwd, .. }) if cwd.as_str() == "/tmp/project name")
+    );
+}
+
 fn interaction() -> Interaction {
     Interaction {
         question: None,
@@ -501,7 +511,7 @@ async fn callback_wrong_topic_expiry_and_consumption_are_durable() {
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 #[tokio::test]
-async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback() {
+async fn full_inbox_rejects_explicitly_and_failed_transactions_preserve_the_offset() {
     let root = root();
     let store = fixture(&root, 1).await;
     let snapshot = snapshot();
@@ -515,16 +525,25 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
     )
     .await
     .unwrap();
-    assert!(admit_update(
-        &store,
-        incoming(2, IncomingContent::Text("second".into())),
-        Some(&snapshot),
-        &policy(),
-        1
-    )
-    .await
-    .is_err());
-    assert_eq!(store.snapshot().await.unwrap().offset, 2);
+    assert_eq!(
+        admit_update(
+            &store,
+            incoming(2, IncomingContent::Text("second".into())),
+            Some(&snapshot),
+            &policy(),
+            1
+        )
+        .await
+        .unwrap(),
+        AdmissionResult::QueueFull
+    );
+    assert_eq!(store.snapshot().await.unwrap().offset, 3);
+    let id = UpdateId::new(1).unwrap();
+    let operation = crate::domain::OperationId::generate();
+    store
+        .prompt_attempt(id, Some((None, operation.clone())))
+        .await
+        .unwrap();
     store
         .complete(UpdateId::new(1).unwrap(), InboxOutcome::Applied)
         .await
@@ -536,14 +555,14 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
     let store = fixture(&root, 1).await;
     assert!(admit_update(
         &store,
-        incoming(2, IncomingContent::Text("second".into())),
+        incoming(3, IncomingContent::Text("second".into())),
         Some(&snapshot),
         &policy(),
         1
     )
     .await
     .is_err());
-    assert_eq!(store.snapshot().await.unwrap().offset, 2);
+    assert_eq!(store.snapshot().await.unwrap().offset, 3);
     assert!(store.pending(8).await.unwrap().is_empty());
     let committed = serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap();
     store.database().shutdown().await.unwrap();
@@ -553,6 +572,10 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
     let store = fixture(&root, 1).await;
     assert!(store.compact(100).await.is_err());
     assert_eq!(
+        store.prompt_attempt(id, None).await.unwrap(),
+        Some(operation)
+    );
+    assert_eq!(
         serde_json::to_vec(&store.snapshot().await.unwrap()).unwrap(),
         committed
     );
@@ -561,11 +584,113 @@ async fn full_inbox_and_failed_writes_do_not_advance_offset_or_consume_callback(
     sql.execute_batch("DROP TRIGGER reject_compact").unwrap();
     sql.close().unwrap();
     let store = fixture(&root, 1).await;
+    let pending_id = UpdateId::new(3).unwrap();
+    let pending_operation = crate::domain::OperationId::generate();
+    admit_update(
+        &store,
+        incoming(3, IncomingContent::Text("pending".into())),
+        Some(&snapshot),
+        &policy(),
+        1,
+    )
+    .await
+    .unwrap();
+    store
+        .prompt_attempt(pending_id, Some((None, pending_operation.clone())))
+        .await
+        .unwrap();
     assert_eq!(store.compact(100).await.unwrap(), (1, 0));
-    assert_eq!(store.snapshot().await.unwrap().offset, 2);
+    assert_eq!(
+        store.prompt_attempt(pending_id, None).await.unwrap(),
+        Some(pending_operation)
+    );
+    assert_eq!(store.snapshot().await.unwrap().offset, 4);
     assert_eq!(store.compact(100).await.unwrap(), (0, 0));
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+#[tokio::test]
+async fn control_reserve_reaches_answers_and_stop_beyond_a_full_poll_page() {
+    let root = root();
+    let store = fixture(&root, 6).await;
+    let mut view = snapshot();
+    let permission = interaction();
+    let answer = format!("/answer {} yes", permission.id);
+    view.pending_interactions
+        .insert(permission.id.clone(), permission);
+    store.bind(topic(1), view.id.clone()).await.unwrap();
+    let policy = policy();
+    // Force prompt classification even while an interaction is open.
+    for id in 1..=103 {
+        let result = admit_update(
+            &store,
+            incoming(id, IncomingContent::Text("/prompt input".into())),
+            Some(&view),
+            &policy,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            if id <= 6 {
+                AdmissionResult::Accepted
+            } else {
+                AdmissionResult::QueueFull
+            }
+        );
+    }
+    store.database().shutdown().await.unwrap();
+    let store = fixture(&root, 1).await;
+    for (id, text) in [
+        (104, answer.as_str()),
+        (105, "/stop"),
+        (106, "/interrupt instead"),
+        (107, "/stop"),
+        (108, "/stop"),
+    ] {
+        let result = admit_update(
+            &store,
+            incoming(id, IncomingContent::Text(text.into())),
+            Some(&view),
+            &policy,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            if id < 108 {
+                AdmissionResult::Accepted
+            } else {
+                AdmissionResult::QueueFull
+            }
+        );
+    }
+    assert_eq!(store.offset().await.unwrap(), 109);
+    assert_eq!(store.pending(32).await.unwrap().len(), 10);
+    assert_eq!(
+        store
+            .queue_barrier(UpdateId::new(105).unwrap())
+            .await
+            .unwrap(),
+        (1..=6)
+            .map(|id| UpdateId::new(id).unwrap())
+            .collect::<Vec<_>>()
+    );
+    store.database().shutdown().await.unwrap();
+    let sql = rusqlite::Connection::open(root.join("workbench.sqlite3")).unwrap();
+    let rejections: i64 = sql
+        .query_row(
+            "SELECT count(*) FROM deliveries WHERE delivery_id LIKE 'queue-full-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rejections, 98);
+    drop(sql);
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
 #[tokio::test]
 async fn bot_identity_and_corrupt_state_fail_closed() {
     let root = root();

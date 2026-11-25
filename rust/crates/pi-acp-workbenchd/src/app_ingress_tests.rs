@@ -413,15 +413,8 @@ async fn settings_after_failed_worker_commit_cold_preferences_and_resume_without
     prompt(&app, &id, "crash").await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let closed = app
-                .core
-                .coordinator
-                .adapters
-                .lock()
-                .await
-                .get(&id)
-                .is_some_and(|handle| handle.tx.is_closed());
-            if closed && matches!(inspect(&app, &id).await.status, SessionStatus::Failed(_)) {
+            let retired = !app.core.coordinator.adapters.lock().await.contains_key(&id);
+            if retired && matches!(inspect(&app, &id).await.status, SessionStatus::Failed(_)) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -454,16 +447,7 @@ async fn settings_after_failed_worker_commit_cold_preferences_and_resume_without
     assert_eq!(state.config.model.as_ref().unwrap().as_str(), "other");
     assert_eq!(state.config.mode.as_ref().unwrap().as_str(), "high");
     assert!(state.configuration_intent.is_none());
-    assert!(app
-        .core
-        .coordinator
-        .adapters
-        .lock()
-        .await
-        .get(&id)
-        .unwrap()
-        .tx
-        .is_closed());
+    assert!(!app.core.coordinator.adapters.lock().await.contains_key(&id));
     let mut resumed = app.subscribe();
     prompt(&app, &id, "after configuration recovery").await;
     wait_finished(&mut resumed).await;

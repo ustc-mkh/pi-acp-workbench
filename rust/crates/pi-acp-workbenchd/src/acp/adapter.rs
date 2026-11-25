@@ -10,7 +10,13 @@ use crate::{
     domain::{command::AgentEvent, error::DomainError, SessionId, TurnId, WorkspacePath},
     worker::{WorkerEvent, WorkerHandle},
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -101,42 +107,27 @@ async fn run_protocol(
         .transpose();
     let startup = async {
         let expected = expected.map_err(|error| DomainError::Protocol(error.into()))?;
-        let initialized =
+        let ((native, mut details, capabilities), mut captured) =
             super::control::pump(&client, &mut updates, &stop, expected.as_ref(), async {
-                let initialized = client.initialize().await?;
-                match &expected {
+                let capabilities = client.initialize().await?.agent_capabilities;
+                let (native, details) = match &expected {
                     Some(native) => {
-                        if !initialized.agent_capabilities.load_session {
-                            return Err(DomainError::Protocol(
-                                "provider cannot resume saved session".into(),
-                            ));
-                        }
-                        let loaded = client.load_session(&context.cwd, native.clone()).await?;
-                        Ok((
-                            native.clone(),
-                            loaded.details,
-                            initialized.agent_capabilities.metadata,
-                            initialized.agent_capabilities.load_session,
-                            initialized.agent_capabilities.prompt_capabilities,
-                        ))
+                        let restored = client
+                            .restore_session(&capabilities, &context.cwd, native.clone())
+                            .await?;
+                        (native.clone(), restored.details)
                     }
                     None => {
                         let created = client.new_session(&context.cwd).await?;
-                        Ok((
-                            created.session_id,
-                            created.details,
-                            initialized.agent_capabilities.metadata,
-                            initialized.agent_capabilities.load_session,
-                            initialized.agent_capabilities.prompt_capabilities,
-                        ))
+                        (created.session_id, created.details)
                     }
-                }
+                };
+                Ok((native, details, capabilities))
             })
             .await?;
-        let ((native, mut details, metadata, resumable, prompt_capabilities), mut captured) =
-            initialized;
-        runs.enabled = context.session_harness == "Pi"
-            && metadata
+        runs.enabled = context.session_harness == crate::domain::Harness::Pi
+            && capabilities
+                .metadata
                 .pi_workbench
                 .as_ref()
                 .is_some_and(|cap| cap.version == 1 && cap.autonomous_runs == Some(true));
@@ -156,7 +147,7 @@ async fn run_protocol(
                 resuming: context.provider_session.is_some(),
             },
         )?;
-        patch.image_input = Some(prompt_capabilities.image);
+        patch.image_input = Some(capabilities.prompt_capabilities.image);
         if context.provider_session.is_none() {
             context
                 .publish(AgentEvent::ProviderSessionAttached {
@@ -198,9 +189,9 @@ async fn run_protocol(
                 .publish(AgentEvent::ConfigurationRestored(restored))
                 .await?;
         }
-        Ok::<_, DomainError>((native, details, metadata, resumable, prompt_capabilities))
+        Ok::<_, DomainError>((native, details, capabilities))
     };
-    let (native, mut details, metadata, resumable, prompt_capabilities) = match startup.await {
+    let (native, mut details, capabilities) = match startup.await {
         Ok(result) => result,
         Err(error) => {
             if !stop.is_cancelled() {
@@ -214,22 +205,20 @@ async fn run_protocol(
             return;
         }
     };
-    if let Some((resumable_state, background_state)) = &context.worker_capabilities {
-        resumable_state.store(resumable, std::sync::atomic::Ordering::Release);
-        background_state.store(
-            if matches!(context.session_harness.as_str(), "Pi") {
-                metadata
-                    .pi_workbench
-                    .as_ref()
-                    .and_then(|cap| cap.autonomous_runs)
-                    == Some(false)
-            } else {
-                true
-            },
-            std::sync::atomic::Ordering::Release,
-        );
-    }
-    let client = std::sync::Arc::new(client);
+    context
+        .resumable
+        .store(capabilities.restore_method().is_some(), Ordering::Release);
+    let metadata = capabilities.metadata;
+    let background_safe = context.session_harness != crate::domain::Harness::Pi
+        || metadata
+            .pi_workbench
+            .as_ref()
+            .and_then(|cap| cap.autonomous_runs)
+            == Some(false);
+    context
+        .background_safe
+        .store(background_safe, Ordering::Release);
+    let client = Arc::new(client);
     let mut title_tasks = tokio::task::JoinSet::new();
     'adapter: loop {
         let command = tokio::select! {
@@ -513,20 +502,24 @@ async fn run_protocol(
         runs.live = None;
         let title_text: String = text.as_str().chars().take(1000).collect();
         let title_job = if metadata.supports_title() {
-            if let Some(db) = &context.database {
-                db.title_job(context.session.clone()).await.ok().flatten()
-            } else {
-                None
-            }
+            context
+                .database
+                .title_job(context.session.clone())
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         };
         let mut interactions: BTreeMap<InteractionId, InboundRequest> = BTreeMap::new();
-        let submitted = std::sync::atomic::AtomicBool::new(false);
+        let submitted = AtomicBool::new(false);
         let request = async {
-            submitted.store(true, std::sync::atomic::Ordering::Release);
+            submitted.store(true, Ordering::Release);
             client
-                .start_prompt(native.clone(), prompt_blocks(&text, &prompt_capabilities)?)
+                .start_prompt(
+                    native.clone(),
+                    prompt_blocks(&text, &capabilities.prompt_capabilities)?,
+                )
                 .await
         };
         tokio::pin!(request);
@@ -551,7 +544,7 @@ async fn run_protocol(
                     Some(AdapterCommand::Cancel { reply }) => {
                         let result = client.cancel(native.clone()).await;
                         for interaction in interactions.values() { let _ = client.answer(interaction, InteractionResponse::Cancel).await; }
-                        if submitted.load(std::sync::atomic::Ordering::Acquire) {
+                        if submitted.load(Ordering::Acquire) {
                             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
                                 while let Some(event) = updates.recv().await {
                                     if matches!(event, WorkerEvent::PromptResponse(_) | WorkerEvent::Closed(_)) { break; }
@@ -621,26 +614,24 @@ async fn run_protocol(
                         break;
                     }
                 }
-                let title_pin = if title_job.is_some() {
-                    context.pins.as_ref().map(|pins| {
-                        pins.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                        TitlePin(pins.clone())
-                    })
-                } else {
-                    None
+                // Pin the worker before publishing the terminal event that makes it idle.
+                let title_job = title_job.map(|model| {
+                    context.pins.fetch_add(1, Ordering::AcqRel);
+                    (model, TitlePin(context.pins.clone()))
+                });
+                let terminal = match response.stop_reason {
+                    super::StopReason::Cancelled => AgentEvent::Cancelled { turn },
+                    _ => AgentEvent::Finished { turn },
                 };
-                if context
-                    .publish(AgentEvent::Finished { turn })
-                    .await
-                    .is_err()
-                {
+                if context.publish(terminal).await.is_err() {
                     break;
                 }
-                if let (Some(model), Some(db)) = (title_job, context.database.clone()) {
+                if let Some((model, pin)) = title_job {
+                    let db = context.database.clone();
                     let (client, native, session) =
                         (client.clone(), native.clone(), context.session.clone());
                     title_tasks.spawn(async move {
-                        let _pin = title_pin;
+                        let _pin = pin;
                         if let Ok(Ok(response)) = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             client.title(&native, &model, &title_text),
@@ -663,12 +654,10 @@ async fn run_protocol(
         }
     }
     title_tasks.shutdown().await;
-    if let Ok(client) = std::sync::Arc::try_unwrap(client) {
+    if let Ok(client) = Arc::try_unwrap(client) {
         client.stop().await;
     }
-    if let Some(reviews) = &context.reviews {
-        let _ = reviews.finish(&context.session, None).await;
-    }
+    let _ = context.reviews.finish(&context.session, None).await;
 }
 
 /// Protocol run identities stay here; only explicit starts become domain facts.
@@ -745,17 +734,21 @@ impl RunState {
                     self.rejected = prompt
                         .clone()
                         .or_else(|| view.view().and_then(|v| v.active_turn.clone()));
-                    if let Some(reviews) = &context.reviews {
-                        reviews.reject_input(&context.session).await?;
-                    }
+                    context.reviews.reject_input(&context.session).await?;
                     let turn = TurnId::generate();
-                    if let Some(database) = &context.database {
-                        database.save_turn_diff(context.session.clone(), turn.clone(), crate::workspace_review::TurnDiff {
-                            status: crate::workspace_review::DiffStatus::Unavailable, files: vec![],
-                            warnings: vec!["Autonomous start is reported after execution began; no whole-run workspace baseline.".into()],
-                            added: 0, removed: 0, next_offset: None,
-                        }).await.map_err(|e| DomainError::Persistence(e.to_string()))?;
-                    }
+                    let diff = crate::workspace_review::TurnDiff {
+                        status: crate::workspace_review::DiffStatus::Unavailable,
+                        files: vec![],
+                        warnings: vec!["Autonomous start is reported after execution began; no whole-run workspace baseline.".into()],
+                        added: 0,
+                        removed: 0,
+                        next_offset: None,
+                    };
+                    context
+                        .database
+                        .save_turn_diff(context.session.clone(), turn.clone(), diff)
+                        .await
+                        .map_err(|e| DomainError::Persistence(e.to_string()))?;
                     context
                         .publish(AgentEvent::AutonomousStarted { turn: turn.clone() })
                         .await?;
@@ -834,20 +827,18 @@ pub struct AdapterContext {
     pub registry: RegistryHandle,
     pub lifecycle: CancellationToken,
     pub pending_interactions: usize,
-    pub(crate) reviews: Option<std::sync::Arc<crate::workspace_reviews::Reviews>>,
-    pub(crate) database: Option<crate::persistence::database::Database>,
-    pub(crate) worker_capabilities: Option<(
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-    )>,
-    pub(crate) pins: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
-    pub(crate) session_harness: String,
+    pub(crate) reviews: Arc<crate::workspace_reviews::Reviews>,
+    pub(crate) database: crate::persistence::database::Database,
+    pub(crate) resumable: Arc<AtomicBool>,
+    pub(crate) background_safe: Arc<AtomicBool>,
+    pub(crate) pins: Arc<AtomicUsize>,
+    pub(crate) session_harness: crate::domain::Harness,
     pub recovery: Option<crate::domain::session::SessionConfig>,
 }
-struct TitlePin(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+struct TitlePin(Arc<AtomicUsize>);
 impl Drop for TitlePin {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 impl AdapterContext {
@@ -926,20 +917,15 @@ impl AdapterContext {
     async fn publish(&self, event: AgentEvent) -> Result<(), DomainError> {
         // Mark protocol ownership terminal before exposing the committed crash.
         // A next prompt must join/replace us, not queue into a dying receiver.
-        if matches!(event, AgentEvent::Crashed { .. }) {
-            self.lifecycle.cancel();
-        }
-        if matches!(
-            event,
-            AgentEvent::Finished { .. } | AgentEvent::Cancelled { .. } | AgentEvent::Crashed { .. }
-        ) {
-            if let Some(reviews) = &self.reviews {
-                let expected = match &event {
-                    AgentEvent::Finished { turn } | AgentEvent::Cancelled { turn } => Some(turn),
-                    _ => None,
-                };
-                reviews.finish(&self.session, expected).await?;
+        match &event {
+            AgentEvent::Crashed { .. } => {
+                self.lifecycle.cancel();
+                self.reviews.finish(&self.session, None).await?;
             }
+            AgentEvent::Finished { turn } | AgentEvent::Cancelled { turn } => {
+                self.reviews.finish(&self.session, Some(turn)).await?;
+            }
+            _ => {}
         }
         self.registry
             .worker_event(self.session.clone(), self.epoch, event)

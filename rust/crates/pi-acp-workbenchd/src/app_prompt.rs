@@ -97,7 +97,7 @@ impl CommandCore {
         let (sender, config) = self.adapter_sender(session.clone()).await?;
         if let Some(handle) = self.coordinator.adapters.lock().await.get_mut(&session) {
             handle.last_user_input_at = activity.0;
-            handle.last_used.store(activity.1, Ordering::Relaxed);
+            handle.last_used = activity.1;
         }
         sender
             .try_send(AdapterCommand::Prompt { turn, text, config })

@@ -17,12 +17,10 @@ pub struct Config {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkersConfig {
-    #[serde(default)]
     pub pi: Option<WorkerConfig>,
-    #[serde(default)]
     pub codex: Option<WorkerConfig>,
-    #[serde(default)]
     pub claude: Option<WorkerConfig>,
+    pub antigravity: Option<WorkerConfig>,
 }
 impl WorkersConfig {
     pub fn get(&self, harness: &crate::domain::Harness) -> Option<&WorkerConfig> {
@@ -30,6 +28,7 @@ impl WorkersConfig {
             crate::domain::Harness::Pi => self.pi.as_ref(),
             crate::domain::Harness::Codex => self.codex.as_ref(),
             crate::domain::Harness::Claude => self.claude.as_ref(),
+            crate::domain::Harness::Antigravity => self.antigravity.as_ref(),
         }
     }
 }
@@ -49,6 +48,7 @@ pub struct SessionsConfig {
     #[serde(default = "default_workers")]
     pub max_workers: usize,
 }
+pub(crate) const MAX_TELEGRAM_INBOX_CAPACITY: usize = 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramConfig {
@@ -85,9 +85,9 @@ fn default_interactions() -> usize {
 }
 impl Config {
     pub fn validate(&self) -> Result<(), DomainError> {
-        let launches: Vec<_> = [&self.workers.pi, &self.workers.codex, &self.workers.claude]
-            .into_iter()
-            .flatten()
+        let launches: Vec<_> = crate::domain::Harness::ALL
+            .iter()
+            .filter_map(|harness| self.workers.get(harness))
             .collect();
         if launches.is_empty()
             || launches.iter().any(|launch| {
@@ -122,7 +122,7 @@ impl Config {
                     });
             if !valid_env
                 || telegram.allowed_chat_ids.is_empty()
-                || !(1..=1024).contains(&telegram.inbox_capacity)
+                || !(1..=MAX_TELEGRAM_INBOX_CAPACITY).contains(&telegram.inbox_capacity)
                 || !telegram.workspace.as_ref().is_dir()
             {
                 return Err(DomainError::Persistence(

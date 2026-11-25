@@ -19,13 +19,21 @@ try {
     target: 'node20',
   });
   const { AgentProcess } = createRequire(import.meta.url)(bundle);
-  for (const harness of ['codex', 'claude']) {
+  const profiles = {
+    codex: { command: 'codex-acp', args: [] },
+    claude: { command: 'claude-agent-acp', args: [] },
+    antigravity: { command: 'agy', args: ['acp'] },
+  };
+  const requested = process.argv.slice(2);
+  for (const harness of requested.length ? requested : ['codex', 'claude']) {
+    assert(Object.hasOwn(profiles, harness), 'Unknown ACP harness');
     const prefix = harness.toUpperCase() + '_ACP_',
       cwd = join(root, harness);
     await mkdir(cwd);
-    const command =
-      process.env[prefix + 'COMMAND'] || (harness === 'codex' ? 'codex-acp' : 'claude-agent-acp');
-    const args = JSON.parse(process.env[prefix + 'ARGS'] || '[]');
+    const command = process.env[prefix + 'COMMAND'] || profiles[harness].command;
+    const args = process.env[prefix + 'ARGS']
+      ? JSON.parse(process.env[prefix + 'ARGS'])
+      : profiles[harness].args;
     let commands = [],
       id;
     const create = () =>
@@ -52,9 +60,8 @@ try {
       await delay(500);
       assert(commands.length > 0, `${harness}: no commands announced`);
     } finally {
-      agent.dispose();
+      await agent.stop();
     }
-    await delay(2000);
     commands = [];
     agent = create();
     try {
@@ -73,9 +80,8 @@ try {
         }),
       );
     } finally {
-      agent.dispose();
+      await agent.stop();
     }
-    await delay(2000);
   }
 } finally {
   await rm(root, { recursive: true, force: true });

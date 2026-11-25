@@ -8,6 +8,7 @@ import type { Preferences } from './workbench-preferences';
 import {
   contentId,
   type ContentRef,
+  type EntryHeader,
   type ClientCommand,
   type SessionView,
 } from '../src/workbench-protocol';
@@ -174,6 +175,9 @@ export function createHistoryView({
     );
     const anchorId = anchor?.dataset.entry;
     const anchorOffset = anchor?.getBoundingClientRect().top;
+    const previousActiveTurn = messages
+      .querySelector('.turn-process.running')
+      ?.closest<HTMLElement>('[data-turn]')?.dataset.turn;
     const previousArticles = new Map(
       [...transcript.querySelectorAll<HTMLElement>('article[data-entry]')].map((node) => [
         node.dataset.entry,
@@ -182,8 +186,14 @@ export function createHistoryView({
     );
     const output = element('section');
     const turns = new Map<
-      string,
-      { box: HTMLElement; process: HTMLDetailsElement; body: HTMLElement }
+      EntryHeader['turn'],
+      {
+        box: HTMLElement;
+        process: HTMLDetailsElement;
+        body: HTMLElement;
+        thoughts: number;
+        tools: number;
+      }
     >();
     if (state?.view?.earlier)
       output.append(
@@ -199,7 +209,6 @@ export function createHistoryView({
       if (message.row.role === 'Agent' && !message.row.image)
         lastAnswers.set(message.row.turn, message.key);
     userInputs = [];
-    const folded = new Set<string>();
     for (const message of projected) {
       const completeText =
         message.inlineText ??
@@ -228,17 +237,13 @@ export function createHistoryView({
           !row.image &&
           snapshot.active_turn !== row.turn &&
           lastAnswers.get(row.turn) !== message.key);
-      if (inActivity && (row.role !== 'Thought' || preferences.showThoughts)) folded.add(row.turn);
       let turn = turns.get(row.turn);
       if (!turn) {
         const box = element('section');
         box.dataset.turn = row.turn;
         box.className = 'turn';
         box.dataset.sessionId = snapshot.id;
-        const previousProcess = [...messages.querySelectorAll<HTMLElement>('[data-turn]')]
-          .find((node) => node.dataset.turn === row.turn)
-          ?.querySelector('.turn-process');
-        if (previousProcess?.classList.contains('running') && snapshot.active_turn !== row.turn)
+        if (previousActiveTurn === row.turn && snapshot.active_turn !== row.turn)
           preferences.setOpen(`${snapshot.id}:turn:${row.turn}`, false);
         const process = disclosure(`${snapshot.id}:turn:${row.turn}`, preferences.activityExpanded);
         process.className = 'turn-process activity-group';
@@ -253,11 +258,14 @@ export function createHistoryView({
         box.append(process);
         const diff = diffView.render(snapshot, row.turn, busy);
         if (diff) box.append(diff);
-        turn = { box, process, body: activityBody };
+        turn = { box, process, body: activityBody, thoughts: 0, tools: 0 };
         turns.set(row.turn, turn);
         output.append(box);
       }
-      if (row.role === 'Thought' && !preferences.showThoughts) continue;
+      if (row.role === 'Thought') {
+        if (!preferences.showThoughts) continue;
+        turn.thoughts++;
+      }
       const definition = JSON.stringify([
         row.id,
         message.entries.at(-1)!.id,
@@ -394,27 +402,14 @@ export function createHistoryView({
       const diff = turn.box.querySelector<HTMLElement>(':scope > [data-turn-review]');
       if (diff) turn.box.append(diff);
     }
-    const visibleTurns = new Set(rows.map((row) => row.turn));
     // Always prioritize the latest settled result, even with scroll-follow off
     // or before IntersectionObserver reports the new layout. Older turns remain
     // viewport-lazy (a recent window in non-layout renderers).
     const latestFinished = [...rows].reverse().find((row) => row.turn !== snapshot.active_turn);
     if (latestFinished) diffView.requestAutomaticDiff(snapshot.id, latestFinished.turn);
     if (!diffObserver)
-      for (const turn of [...visibleTurns].slice(-16))
+      for (const turn of [...turns.keys()].slice(-16))
         diffView.requestAutomaticDiff(snapshot.id, turn);
-    for (const turn of visibleTurns) {
-      const process = turns.get(turn)!.process;
-      process.hidden = !folded.has(turn) && !state?.view?.tools.some((tool) => tool.turn === turn);
-      const thoughtCount = preferences.showThoughts
-        ? projected.filter((message) => message.row.turn === turn && message.row.role === 'Thought')
-            .length
-        : 0;
-      const toolCount = state?.view?.tools.filter((tool) => tool.turn === turn).length || 0;
-      process.querySelector('summary')!.textContent =
-        `${snapshot.active_turn === turn ? '处理中' : '执行过程'} · ${toolCount} 次工具调用${thoughtCount ? ` · ${thoughtCount} 段思考` : ''}`;
-      process.classList.toggle('running', snapshot.active_turn === turn);
-    }
     const cursor = state?.view?.toolCursor;
     if (cursor)
       output.append(
@@ -423,7 +418,9 @@ export function createHistoryView({
         ),
       );
     for (const tool of state?.view?.tools || []) {
-      if (!visibleTurns.has(tool.turn)) continue;
+      const turn = turns.get(tool.turn);
+      if (!turn) continue;
+      turn.tools++;
       const details = disclosure(`${snapshot.id}:tool:${tool.id}`);
       details.className = 'message tool';
       const summary = element(
@@ -464,31 +461,39 @@ export function createHistoryView({
         }
       });
       for (const body of tool.content) {
-        if ('Text' in body) details.append(contentNode(body.Text.content, snapshot.id));
+        if ('Text' in body) bodyNode.append(contentNode(body.Text.content, snapshot.id));
         else if ('Diff' in body) {
-          details.append(element('p', body.Diff.path));
-          if (body.Diff.old_text) details.append(contentNode(body.Diff.old_text, snapshot.id));
-          details.append(contentNode(body.Diff.new_text, snapshot.id));
+          bodyNode.append(element('p', body.Diff.path));
+          if (body.Diff.old_text) bodyNode.append(contentNode(body.Diff.old_text, snapshot.id));
+          bodyNode.append(contentNode(body.Diff.new_text, snapshot.id));
         } else if ('ResourceText' in body) {
-          details.append(
+          bodyNode.append(
             element('p', body.ResourceText.uri),
             contentNode(body.ResourceText.content, snapshot.id),
           );
         } else if ('ResourceLink' in body)
-          details.append(element('p', `${body.ResourceLink.name}: ${body.ResourceLink.uri}`));
+          bodyNode.append(element('p', `${body.ResourceLink.name}: ${body.ResourceLink.uri}`));
         else if ('TerminalReference' in body)
-          details.append(
+          bodyNode.append(
             element(
               'p',
               `Terminal ${body.TerminalReference.id}: metadata-only. This ACP client does not negotiate terminal execution/output; no stdout, stderr or exit status was captured.`,
             ),
           );
-        else details.append(element('p', `Unsupported binary: ${body.Unsupported.kind}`));
+        else bodyNode.append(element('p', `Unsupported binary: ${body.Unsupported.kind}`));
       }
       // Keep native details as the card root, matching the classic tool layout.
-      bodyNode.append(...[...details.children].slice(1));
       details.append(bodyNode);
-      turns.get(tool.turn)!.body.append(details);
+      turn.body.append(details);
+    }
+    const emptyToolTurns = new Set(state?.view?.emptyToolTurns);
+    for (const [id, { process, body, thoughts, tools }] of turns) {
+      const known = tools > 0 || emptyToolTurns.has(id);
+      process.hidden = known && !body.childElementCount;
+      const toolsLabel = known ? `${tools} 次工具调用` : '查看工具调用';
+      process.querySelector('summary')!.textContent =
+        `${snapshot.active_turn === id ? '处理中' : '执行过程'} · ${toolsLabel}${thoughts ? ` · ${thoughts} 段思考` : ''}`;
+      process.classList.toggle('running', snapshot.active_turn === id);
     }
     reconcile(messages, output);
     observeHistoryText();

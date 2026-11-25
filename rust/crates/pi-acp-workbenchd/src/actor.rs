@@ -114,7 +114,25 @@ impl RegistryHandle {
         epoch: u64,
         event: AgentEvent,
     ) -> Result<OwnerReply, DomainError> {
-        self.worker_message(session, epoch, Some(event)).await
+        if !matches!(
+            event,
+            AgentEvent::Finished { .. }
+                | AgentEvent::Cancelled { .. }
+                | AgentEvent::Crashed { .. }
+                | AgentEvent::Usage { .. }
+        ) {
+            return self.worker_message(session, epoch, Some(event)).await;
+        }
+        // Final usage and the terminal event arrive once from the provider.
+        loop {
+            let result = self
+                .worker_message(session.clone(), epoch, Some(event.clone()))
+                .await;
+            if !matches!(result, Err(DomainError::Backpressure)) {
+                return result;
+            }
+            tokio::time::sleep(OWNER_MAILBOX_RETRY).await;
+        }
     }
     async fn worker_message(
         &self,
@@ -151,34 +169,36 @@ impl RegistryHandle {
         session: SessionId,
         epoch: u64,
     ) -> Result<(), DomainError> {
+        self.send_worker_stopped(session, epoch, true).await
+    }
+    pub(crate) async fn worker_stopped(&self, session: SessionId, epoch: u64) {
+        // Physical detachment must reach the owner, even when its mailbox is full.
+        while matches!(
+            self.send_worker_stopped(session.clone(), epoch, false)
+                .await,
+            Err(DomainError::Backpressure)
+        ) {
+            tokio::time::sleep(OWNER_MAILBOX_RETRY).await;
+        }
+    }
+    async fn send_worker_stopped(
+        &self,
+        session: SessionId,
+        epoch: u64,
+        idle_only: bool,
+    ) -> Result<(), DomainError> {
         let (reply, wait) = oneshot::channel();
         self.tx
             .send(RegistryCommand::WorkerStopped {
                 session,
                 epoch,
-                idle_only: true,
+                idle_only,
                 reply,
             })
             .await
             .map_err(|_| DomainError::MailboxClosed)?;
         wait.await.map_err(|_| DomainError::MailboxClosed)??;
         Ok(())
-    }
-    pub(crate) async fn worker_stopped(&self, session: SessionId, epoch: u64) {
-        let (reply, wait) = oneshot::channel();
-        if self
-            .tx
-            .send(RegistryCommand::WorkerStopped {
-                session,
-                epoch,
-                idle_only: false,
-                reply,
-            })
-            .await
-            .is_ok()
-        {
-            let _ = wait.await;
-        }
     }
     #[cfg(test)]
     pub async fn shutdown(&self) {
@@ -204,6 +224,8 @@ impl RegistryHandle {
             .map_err(|_| DomainError::Worker("registry shutdown interrupted".into()))?
     }
 }
+const OWNER_MAILBOX_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+
 fn registry_send_error<T>(error: mpsc::error::TrySendError<T>) -> DomainError {
     match error {
         mpsc::error::TrySendError::Full(_) => DomainError::Backpressure,

@@ -1,3 +1,5 @@
+import { HARNESSES } from '../src/workbench-protocol';
+
 /** Bounded display preferences only; never persist host state or commands. */
 const MAX_DISCLOSURES = 256;
 export class Preferences {
@@ -17,24 +19,19 @@ export class Preferences {
     const record = value as Record<string, unknown>;
     for (const key of ['historyOpen', 'activityExpanded', 'showThoughts', 'autoScroll'] as const)
       if (typeof record[key] === 'boolean') this[key] = record[key];
-    if ('harness' in value && ['Pi', 'Codex', 'Claude'].includes(String(value.harness)))
-      this.harness = String(value.harness);
-    if ('lastSessions' in value && value.lastSessions && typeof value.lastSessions === 'object')
-      for (const name of ['Pi', 'Codex', 'Claude']) {
-        const id = (value.lastSessions as Record<string, unknown>)[name];
+    this.harness = HARNESSES.find((name) => name === record.harness) ?? this.harness;
+    if (record.lastSessions && typeof record.lastSessions === 'object')
+      for (const name of HARNESSES) {
+        const id = (record.lastSessions as Record<string, unknown>)[name];
         if (typeof id === 'string' && id.length <= 1000) this.lastSessions[name] = id;
       }
     if (typeof record.sessionRows === 'number' && [4, 10, 16].includes(record.sessionRows))
       this.sessionRows = record.sessionRows;
-    if (
-      'composerHeight' in value &&
-      typeof value.composerHeight === 'number' &&
-      Number.isFinite(value.composerHeight)
-    )
-      this.composerHeight = Math.max(65, Math.min(1000, value.composerHeight));
+    if (typeof record.composerHeight === 'number' && Number.isFinite(record.composerHeight))
+      this.composerHeight = Math.max(65, Math.min(1000, record.composerHeight));
     if (record.layoutRevision !== 2 && this.composerHeight === 100) this.composerHeight = 80;
-    if ('disclosures' in value && Array.isArray(value.disclosures))
-      for (const row of value.disclosures.slice(-MAX_DISCLOSURES))
+    if (Array.isArray(record.disclosures))
+      for (const row of record.disclosures.slice(-MAX_DISCLOSURES))
         if (
           Array.isArray(row) &&
           row.length === 2 &&

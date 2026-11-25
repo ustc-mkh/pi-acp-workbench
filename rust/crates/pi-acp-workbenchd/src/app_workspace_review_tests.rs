@@ -163,9 +163,6 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
         Err(crate::domain::error::DomainError::Busy)
     ));
     assert_eq!(fs::read_to_string(&modified).unwrap(), "after\n");
-    app.command(DomainCommand::RemoveSession(other))
-        .await
-        .unwrap();
     app.shutdown_checked().await.unwrap();
     let restarted = app_at_with_env(&storage, env);
     let persisted = match restarted
@@ -182,6 +179,26 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
     };
     assert_eq!(persisted.files.len(), 3);
     assert!(restarted.core.coordinator.adapters.lock().await.is_empty());
+    // A nested provider that exits on its own must release its workspace for this undo.
+    prompt(&restarted, &other, "crash").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while restarted
+            .core
+            .coordinator
+            .adapters
+            .lock()
+            .await
+            .contains_key(&other)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("crashed worker stayed registered");
+    assert!(matches!(
+        inspect_view(&restarted, &other).await.status,
+        SessionStatus::Failed(_)
+    ));
     let operation = crate::domain::OperationId::generate();
     let receipt = restarted
         .command_durable(
@@ -197,6 +214,10 @@ async fn workspace_net_diff_survives_restart_and_durable_undo_restores_added_del
     assert!(matches!(receipt, CommandReceipt::UndoCompleted { .. }));
     assert_eq!(fs::read_to_string(&modified).unwrap(), "before\n");
     assert_eq!(fs::metadata(&modified).unwrap().mode() & 0o777, 0o644);
+    restarted
+        .command(DomainCommand::RemoveSession(other))
+        .await
+        .unwrap();
     assert_eq!(fs::read_to_string(deleted).unwrap(), "delete me\n");
     assert!(!workspace.join("added.txt").exists());
     assert!(matches!(

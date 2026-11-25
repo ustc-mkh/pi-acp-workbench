@@ -76,16 +76,19 @@ fn validate_frame(message: &JsonRpcMessage, bytes: usize) -> Result<(), DomainEr
     }
     Err(DomainError::FrameTooLarge)
 }
-fn validate_outbound(message: &JsonRpcMessage) -> Result<(), DomainError> {
-    let bytes = serde_json::to_vec(message).map_err(|e| DomainError::Protocol(e.to_string()))?;
-    validate_frame(message, bytes.len())
+fn encode_frame(message: JsonRpcMessage) -> Result<Vec<u8>, DomainError> {
+    let mut bytes =
+        serde_json::to_vec(&message).map_err(|e| DomainError::Protocol(e.to_string()))?;
+    validate_frame(&message, bytes.len())?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-fn request_deadline(method: &str, now: Instant) -> Option<Instant> {
+fn request_timeout(method: &str) -> Option<Duration> {
     match method {
         "session/prompt" => None,
-        "_pi_workbench/fork" => Some(now + Duration::from_secs(180)),
-        _ => Some(now + REQUEST_TIMEOUT),
+        "_pi_workbench/fork" => Some(Duration::from_secs(180)),
+        _ => Some(REQUEST_TIMEOUT),
     }
 }
 
@@ -98,11 +101,14 @@ pub enum WorkerEvent {
 }
 enum WorkerCommand {
     Send {
-        message: JsonRpcMessage,
+        frame: Vec<u8>,
+        prompt: Option<RequestId>,
         written: oneshot::Sender<Result<(), DomainError>>,
     },
     Request {
-        request: JsonRpcRequest,
+        frame: Vec<u8>,
+        id: RequestId,
+        timeout: Option<Duration>,
         reply: oneshot::Sender<Result<JsonRpcResponse, DomainError>>,
     },
 }
@@ -134,19 +140,34 @@ impl WorkerHandle {
         self.send(JsonRpcMessage::Notification(notification)).await
     }
     async fn send(&self, message: JsonRpcMessage) -> Result<(), DomainError> {
-        validate_outbound(&message)?;
+        let prompt = match &message {
+            JsonRpcMessage::Request(request) => Some(request.id.clone()),
+            _ => None,
+        };
+        let frame = encode_frame(message)?;
         let (written, wait) = oneshot::channel();
         self.tx
-            .try_send(WorkerCommand::Send { message, written })
+            .try_send(WorkerCommand::Send {
+                frame,
+                prompt,
+                written,
+            })
             .map_err(DomainError::mailbox)?;
         wait.await
             .map_err(|_| DomainError::Worker("worker stopped before writing frame".into()))?
     }
     pub async fn request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, DomainError> {
-        validate_outbound(&JsonRpcMessage::Request(request.clone()))?;
+        let id = request.id.clone();
+        let timeout = request_timeout(&request.method);
+        let frame = encode_frame(JsonRpcMessage::Request(request))?;
         let (reply, wait) = oneshot::channel();
         self.tx
-            .try_send(WorkerCommand::Request { request, reply })
+            .try_send(WorkerCommand::Request {
+                frame,
+                id,
+                timeout,
+                reply,
+            })
             .map_err(DomainError::mailbox)?;
         wait.await
             .map_err(|_| DomainError::Worker("worker stopped before response".into()))?
@@ -196,16 +217,6 @@ impl WorkerSupervisor {
         }
     }
     pub fn without_env(mut self, name: String) -> Self {
-        for launch in [
-            &mut self.launches.pi,
-            &mut self.launches.codex,
-            &mut self.launches.claude,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            launch.env.remove(&name);
-        }
         self.private_env.push(name);
         self
     }
@@ -229,9 +240,12 @@ impl WorkerSupervisor {
         &self,
         session: SessionId,
         harness: &crate::domain::Harness,
+        cwd: &std::path::Path,
         events: mpsc::Sender<WorkerEvent>,
     ) -> Result<WorkerHandle, DomainError> {
-        self.spawn_with_capacity(session, harness, events, self.capacity.clone())
+        // Antigravity specifies the project as the ACP process working directory.
+        let launch_dir = (harness == &crate::domain::Harness::Antigravity).then_some(cwd);
+        self.spawn_with_capacity(session, harness, launch_dir, events, self.capacity.clone())
             .await
     }
     pub async fn spawn_metadata(
@@ -241,6 +255,7 @@ impl WorkerSupervisor {
         self.spawn_with_capacity(
             SessionId::generate(),
             &crate::domain::Harness::Pi,
+            None,
             events,
             self.metadata_capacity.clone(),
         )
@@ -250,6 +265,7 @@ impl WorkerSupervisor {
         &self,
         session: SessionId,
         harness: &crate::domain::Harness,
+        launch_dir: Option<&std::path::Path>,
         events: mpsc::Sender<WorkerEvent>,
         capacity: Arc<Semaphore>,
     ) -> Result<WorkerHandle, DomainError> {
@@ -271,12 +287,15 @@ impl WorkerSupervisor {
             return Err(DomainError::Worker("worker supervisor stopping".into()));
         }
         let mut command = Command::new(&launch.command);
+        if let Some(dir) = launch_dir {
+            command.current_dir(dir);
+        }
+        command.envs(&launch.env);
         for name in &self.private_env {
             command.env_remove(name);
         }
         command
             .args(&launch.args)
-            .envs(&launch.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -391,34 +410,29 @@ async fn worker_loop(
             }
             command = commands.recv() => {
                 let Some(command) = command else { break "handle closed".into() };
-                let (message, written) = match command {
-                    WorkerCommand::Send { message, written } => {
-                        if let JsonRpcMessage::Request(request) = &message {
+                let (bytes, written) = match command {
+                    WorkerCommand::Send { frame, prompt, written } => {
+                        if let Some(id) = prompt {
                             if prompt_id.is_some() {
                                 let _ = written.send(Err(DomainError::Busy));
                                 continue;
                             }
-                            prompt_id = Some(request.id.clone());
+                            prompt_id = Some(id);
                         }
-                        (message, Some(written))
+                        (frame, Some(written))
                     }
-                    WorkerCommand::Request { request, reply } => {
-                        if pending.contains_key(&request.id) || pending.len() >= 64 {
+                    WorkerCommand::Request { frame, id, timeout, reply } => {
+                        if pending.contains_key(&id) || pending.len() >= 64 {
                             let _ = reply.send(Err(DomainError::Backpressure));
                             continue;
                         }
                         // A prompt may wait on the agent or a human indefinitely. Only
                         // short control requests use the protocol response deadline.
-                        let deadline = request_deadline(&request.method, Instant::now());
-                        pending.insert(request.id.clone(), PendingRequest { reply, deadline });
-                        (JsonRpcMessage::Request(request), None)
+                        let deadline = timeout.map(|duration| Instant::now() + duration);
+                        pending.insert(id, PendingRequest { reply, deadline });
+                        (frame, None)
                     }
                 };
-                let mut bytes = match serde_json::to_vec(&message) {
-                    Ok(bytes) if validate_frame(&message, bytes.len()).is_ok() => bytes,
-                    _ => break "outbound frame exceeds limit".into(),
-                };
-                bytes.push(b'\n');
                 let write = async { stdin.write_all(&bytes).await?; stdin.flush().await };
                 tokio::select! {
                     _ = stop.cancelled() => break "stopped".into(),

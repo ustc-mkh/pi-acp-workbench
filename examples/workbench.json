@@ -6,7 +6,8 @@
       "env": {}
     },
     "codex": null,
-    "claude": null
+    "claude": null,
+    "antigravity": null
   },
   "sessions": {
     "mailbox": 128,

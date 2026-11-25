@@ -1,6 +1,6 @@
 # Pi ACP Workbench
 
-在 VS Code 和 Telegram 中使用同一个 AI 编码工作台，接入 Pi、Codex、Claude 等 ACP Agent。会话、历史、模型设置和用量由本机服务统一管理；关闭编辑器后，已接受的任务仍可继续运行。
+在 VS Code 和 Telegram 中使用同一个 AI 编码工作台，接入 Pi、Codex、Claude、Antigravity 等 ACP Agent。会话、历史、模型设置和用量由本机服务统一管理；关闭编辑器后，已接受的任务仍可继续运行。
 
 ## 当前功能
 

@@ -93,31 +93,28 @@ pub async fn admit_update(
     };
     if let Some(ref mut action) = action {
         match action {
-            TelegramAction::Control(ControlCommand::Sync { forum, .. }) => {
+            TelegramAction::Control(
+                ControlCommand::Sync { forum, .. }
+                | ControlCommand::Menu {
+                    create_topic: forum,
+                    ..
+                },
+            ) => {
                 if callback.is_some() && *forum != update.forum {
                     *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
                 } else {
                     *forum = update.forum;
                 }
             }
-            TelegramAction::Control(ControlCommand::Menu { create_topic, .. }) => {
-                let forum_general = update.forum;
-                if callback.is_some() && *create_topic != forum_general {
-                    *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
-                } else {
-                    *create_topic = forum_general;
-                }
-            }
             TelegramAction::Control(ControlCommand::NewSession {
                 cwd, create_topic, ..
             }) => match authorize_workspace(cwd, &policy.cwd).await {
                 Ok(canonical) => {
-                    let forum_general = update.forum;
-                    if callback.is_some() && (*cwd != canonical || *create_topic != forum_general) {
+                    if callback.is_some() && (*cwd != canonical || *create_topic != update.forum) {
                         *action = TelegramAction::Rejected(RejectionReason::InvalidCallback);
                     } else {
                         *cwd = canonical;
-                        *create_topic = forum_general;
+                        *create_topic = update.forum;
                     }
                 }
                 Err(_) => *action = TelegramAction::Rejected(RejectionReason::WorkspaceForbidden),
@@ -139,7 +136,6 @@ pub async fn admit_update(
                         .await
                         .is_err()
                     {
-                        callback = None;
                         *action = TelegramAction::Rejected(RejectionReason::WorkspaceForbidden);
                     }
                 }
@@ -154,6 +150,7 @@ pub async fn admit_update(
     }
     store
         .admit(Admission {
+            workspace: policy.cwd.clone(),
             id: update.id,
             sender: Some(update.sender),
             command: action.map(|action| TelegramCommand {

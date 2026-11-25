@@ -3,6 +3,7 @@ import {
   jsonBytes,
   MAX_HISTORY_TURNS,
   type EntryHeader,
+  type HistoryCursor,
   type HistoryPage,
   type SessionId,
 } from './workbench-protocol';
@@ -15,6 +16,45 @@ export function historyFits(entries: readonly EntryHeader[]) {
   return entries.length <= MAX_DISPLAY_ENTRIES && jsonBytes(entries) <= MAX_DISPLAY_BYTES;
 }
 
+export function boundRecentHistory(entries: EntryHeader[]) {
+  let bytes = jsonBytes(entries);
+  let start = 0;
+  while (entries.length - start > MAX_DISPLAY_ENTRIES || bytes > MAX_DISPLAY_BYTES) {
+    bytes -= jsonBytes(entries[start]) + 1;
+    start++;
+  }
+  if (!start) return { entries, partial: false };
+  if (entries[start]?.turn === entries[start - 1].turn) {
+    const firstTurn = entries[start].turn;
+    const next = entries.findIndex((entry, i) => i > start && entry.turn !== firstTurn);
+    if (next < 0) {
+      // Leave room for further output while the oversized turn is still streaming.
+      return { entries: entries.slice(Math.max(start, entries.length - 200)), partial: true };
+    }
+    start = next;
+  }
+  return { entries: entries.slice(start), partial: false };
+}
+
+export function validateHistoryPage(
+  page: HistoryPage,
+  cursor: HistoryCursor,
+  session: SessionId,
+  maxEntrySeq: number,
+) {
+  const { entries, next_cursor: next } = page;
+  if (
+    entries.some(
+      (row, i) => row.seq >= cursor.before_seq || (i > 0 && row.seq <= entries[i - 1].seq),
+    ) ||
+    (next &&
+      (next.session !== session ||
+        next.max_entry_seq !== maxEntrySeq ||
+        next.before_seq !== entries[0]?.seq))
+  )
+    throw new Error('历史分页未向前推进，请重新加载会话。');
+}
+
 /** Assemble complete turn boundaries over bounded, immutable high-water pages.
  * One extra older turn proves the oldest requested turn is complete. */
 export async function loadHistoryTurns(
@@ -24,9 +64,10 @@ export async function loadHistoryTurns(
   maxEntrySeq: number,
   turns: number,
   valid: () => boolean,
-): Promise<HistoryPage | undefined> {
-  let entries = [...initial.entries],
+): Promise<(HistoryPage & { truncated: boolean }) | undefined> {
+  let entries = initial.entries,
     cursor = initial.next_cursor;
+  let bytes = jsonBytes(entries);
   for (let pages = 0; ; pages++) {
     if (!valid()) return;
     const seen = new Set<string>();
@@ -40,13 +81,15 @@ export async function loadHistoryTurns(
         break;
       }
     }
-    if (boundary || !cursor) {
-      const selected = entries.slice(start);
-      if (!historyFits(selected)) throw new Error('完整回合超出历史显示上限，请导出完整历史。');
+    const limit = pages >= 100 || entries.length > MAX_DISPLAY_ENTRIES || bytes > MAX_DISPLAY_BYTES;
+    if (boundary || !cursor || limit) {
+      const selected = boundRecentHistory(entries.slice(start)).entries;
       return {
         entries: selected,
+        truncated:
+          selected.length < entries.length - start || (!boundary && Boolean(cursor) && limit),
         next_cursor:
-          start > 0
+          selected.length && selected.length < entries.length
             ? {
                 version: 3,
                 session,
@@ -56,22 +99,11 @@ export async function loadHistoryTurns(
             : cursor,
       };
     }
-    if (pages >= 100 || !historyFits(entries))
-      throw new Error('完整回合超出历史显示上限，请导出完整历史。');
     const page = await client.call({ method: 'history', session, cursor, limit: 200 });
     if (!valid()) return;
-    if (
-      page.entries.some(
-        (row, i) => row.seq >= cursor!.before_seq || (i > 0 && row.seq <= page.entries[i - 1].seq),
-      ) ||
-      (page.next_cursor &&
-        (!page.entries.length ||
-          page.next_cursor.before_seq >= cursor.before_seq ||
-          page.next_cursor.session !== session ||
-          page.next_cursor.max_entry_seq !== maxEntrySeq ||
-          page.next_cursor.before_seq !== page.entries[0].seq))
-    )
-      throw new Error('历史分页未向前推进，请重新加载会话。');
+    validateHistoryPage(page, cursor, session, maxEntrySeq);
+    // Merging two nonempty JSON arrays removes two brackets and adds a comma.
+    if (page.entries.length) bytes += jsonBytes(page.entries) - (entries.length ? 1 : 2);
     entries = [...page.entries, ...entries];
     cursor = page.next_cursor;
   }

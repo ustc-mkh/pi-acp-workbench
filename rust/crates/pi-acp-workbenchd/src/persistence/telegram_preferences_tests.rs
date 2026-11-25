@@ -2,9 +2,8 @@ use crate::{
     domain::WorkspacePath,
     persistence::{
         database::Database,
-        format::StorageLease,
         inbox::{Admission, TelegramStore},
-        sqlite_tests::Root,
+        sqlite_tests::{open, Root},
     },
     telegram::{
         command::{parse_text, TelegramCommand},
@@ -17,14 +16,17 @@ fn topic(thread: i64) -> TopicKey {
         thread: Some(TopicId::new(thread).unwrap()),
     }
 }
-async fn admit(store: &TelegramStore, id: u64, topic: &TopicKey, text: &str) {
+async fn admit(store: &TelegramStore, id: u64, topic: &TopicKey, text: &str) -> UpdateId {
+    let id = UpdateId::new(id).unwrap();
+    let workspace = WorkspacePath::new("/tmp").unwrap();
     store
         .admit(Admission {
-            id: UpdateId::new(id).unwrap(),
+            workspace: workspace.clone(),
+            id,
             sender: Some(UserId::new(5).unwrap()),
             command: Some(TelegramCommand {
                 topic: topic.clone(),
-                action: parse_text(None, text, &WorkspacePath::new("/tmp").unwrap(), 1).unwrap(),
+                action: parse_text(None, text, &workspace, 1).unwrap(),
             }),
             callback: None,
             callback_query: None,
@@ -32,31 +34,25 @@ async fn admit(store: &TelegramStore, id: u64, topic: &TopicKey, text: &str) {
         })
         .await
         .unwrap();
+    id
 }
 #[tokio::test]
 async fn preference_and_immutable_reply_roll_back_together_and_replay_cannot_overwrite_newer_settings(
 ) {
     let root = Root::new();
-    let lease = StorageLease::lock(&root.data()).unwrap();
-    let database = Database::open(root.data(), &lease).await.unwrap();
+    let (lease, database) = open(&root.data()).await;
     let store = TelegramStore::new(database.clone(), 16);
     store.claim_bot(UserId::new(99).unwrap()).await.unwrap();
     let a = topic(1);
-    admit(&store, 1, &a, "/notifications off").await;
+    let off_id = admit(&store, 1, &a, "/notifications off").await;
+    let off = TopicPreference::Notifications(Some(false));
     database.shutdown().await.unwrap();
     let sql = rusqlite::Connection::open(root.data().join("workbench.sqlite3")).unwrap();
     sql.execute_batch("CREATE TRIGGER reject_preference_reply BEFORE INSERT ON contents BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;").unwrap();
     drop(sql);
     let database = Database::open(root.data(), &lease).await.unwrap();
     let store = TelegramStore::new(database.clone(), 16);
-    assert!(store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Notifications(Some(false))
-        )
-        .await
-        .is_err());
+    assert!(store.preference_reply(&a, off_id, off).await.is_err());
     assert_eq!(
         store.preferences(&a).await.unwrap(),
         TopicPreferences::default()
@@ -76,131 +72,62 @@ async fn preference_and_immutable_reply_roll_back_together_and_replay_cannot_ove
     drop(sql);
     let database = Database::open(root.data(), &lease).await.unwrap();
     let store = TelegramStore::new(database.clone(), 16);
-    let reply = store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Notifications(Some(false)),
-        )
-        .await
-        .unwrap();
+    let reply = store.preference_reply(&a, off_id, off).await.unwrap();
     assert!(reply.starts_with("Notifications: off"));
-    admit(&store, 2, &a, "/silent on").await;
+
+    let query_id = admit(&store, 2, &a, "/silent").await;
+    let query = TopicPreference::Silent(None);
+    let query_reply = store.preference_reply(&a, query_id, query).await.unwrap();
+    assert!(query_reply.starts_with("Silent: off"));
+
+    let silent_id = admit(&store, 3, &a, "/silent on").await;
     store
-        .preference_reply(
-            &a,
-            UpdateId::new(2).unwrap(),
-            TopicPreference::Silent(Some(true)),
-        )
+        .preference_reply(&a, silent_id, TopicPreference::Silent(Some(true)))
         .await
         .unwrap();
-    admit(&store, 3, &a, "/notifications on").await;
+    let on_id = admit(&store, 4, &a, "/notifications on").await;
     store
-        .preference_reply(
-            &a,
-            UpdateId::new(3).unwrap(),
-            TopicPreference::Notifications(Some(true)),
-        )
+        .preference_reply(&a, on_id, TopicPreference::Notifications(Some(true)))
         .await
         .unwrap();
-    // Query replies are frozen too, despite query lanes progressing independently.
-    admit(&store, 4, &a, "/notifications").await;
-    let query = store
-        .preference_reply(
-            &a,
-            UpdateId::new(4).unwrap(),
-            TopicPreference::Notifications(None),
-        )
-        .await
-        .unwrap();
-    admit(&store, 5, &a, "/notifications off").await;
-    store
-        .preference_reply(
-            &a,
-            UpdateId::new(5).unwrap(),
-            TopicPreference::Notifications(Some(false)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .preference_reply(
-                &a,
-                UpdateId::new(4).unwrap(),
-                TopicPreference::Notifications(None)
-            )
-            .await
-            .unwrap(),
-        query
-    );
+
     database.shutdown().await.unwrap();
     let database = Database::open(root.data(), &lease).await.unwrap();
     let store = TelegramStore::new(database.clone(), 16);
     assert_eq!(
-        store
-            .preference_reply(
-                &a,
-                UpdateId::new(1).unwrap(),
-                TopicPreference::Notifications(Some(false))
-            )
-            .await
-            .unwrap(),
+        store.preference_reply(&a, query_id, query).await.unwrap(),
+        query_reply
+    );
+    assert_eq!(
+        store.preference_reply(&a, off_id, off).await.unwrap(),
         reply
     );
     assert_eq!(
         store.preferences(&a).await.unwrap(),
         TopicPreferences {
-            notifications: false,
+            notifications: true,
             silent: true
         }
     );
-    // A later on must also survive replay of an earlier off.
-    admit(&store, 6, &a, "/notifications on").await;
-    store
-        .preference_reply(
-            &a,
-            UpdateId::new(6).unwrap(),
-            TopicPreference::Notifications(Some(true)),
-        )
+    assert!(store
+        .preference_reply(&a, off_id, TopicPreference::Silent(Some(false)))
         .await
-        .unwrap();
-    store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Notifications(Some(false)),
-        )
+        .is_err());
+    assert!(store
+        .preference_reply(&topic(2), off_id, off)
         .await
-        .unwrap();
-    assert!(store.preferences(&a).await.unwrap().notifications);
+        .is_err());
     assert_eq!(
         store.preferences(&topic(2)).await.unwrap(),
         TopicPreferences::default()
     );
-    assert!(store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Silent(Some(false))
-        )
-        .await
-        .is_err());
-    assert!(store
-        .preference_reply(
-            &topic(2),
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Notifications(Some(false))
-        )
-        .await
-        .is_err());
     database.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn older_preferences_schema_is_rejected_without_migration_or_root_reset() {
     let root = Root::new();
-    let lease = StorageLease::lock(&root.data()).unwrap();
-    let database = Database::open(root.data(), &lease).await.unwrap();
+    let (lease, database) = open(&root.data()).await;
     database.shutdown().await.unwrap();
     let sentinel = root.data().join("do-not-delete.txt");
     std::fs::write(&sentinel, "preserved").unwrap();
@@ -216,8 +143,7 @@ async fn older_preferences_schema_is_rejected_without_migration_or_root_reset() 
 #[tokio::test]
 async fn preference_rows_are_bounded_and_resetting_to_defaults_releases_capacity() {
     let root = Root::new();
-    let lease = StorageLease::lock(&root.data()).unwrap();
-    let database = Database::open(root.data(), &lease).await.unwrap();
+    let (lease, database) = open(&root.data()).await;
     let store = TelegramStore::new(database.clone(), 8);
     store.claim_bot(UserId::new(99).unwrap()).await.unwrap();
     database.shutdown().await.unwrap();
@@ -235,36 +161,23 @@ async fn preference_rows_are_bounded_and_resetting_to_defaults_releases_capacity
     let database = Database::open(root.data(), &lease).await.unwrap();
     let store = TelegramStore::new(database.clone(), 8);
     let a = topic(4097);
-    admit(&store, 1, &a, "/silent on").await;
-    assert!(store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Silent(Some(true))
-        )
-        .await
-        .is_err());
+    let silent_id = admit(&store, 1, &a, "/silent on").await;
+    let silent = TopicPreference::Silent(Some(true));
+    assert!(store.preference_reply(&a, silent_id, silent).await.is_err());
     assert_eq!(
         store.preferences(&a).await.unwrap(),
         TopicPreferences::default()
     );
-    admit(&store, 2, &topic(1), "/notifications on").await;
+    let reset_id = admit(&store, 2, &topic(1), "/notifications on").await;
     store
         .preference_reply(
             &topic(1),
-            UpdateId::new(2).unwrap(),
+            reset_id,
             TopicPreference::Notifications(Some(true)),
         )
         .await
         .unwrap();
-    store
-        .preference_reply(
-            &a,
-            UpdateId::new(1).unwrap(),
-            TopicPreference::Silent(Some(true)),
-        )
-        .await
-        .unwrap();
+    store.preference_reply(&a, silent_id, silent).await.unwrap();
     assert!(store.preferences(&a).await.unwrap().silent);
     assert_eq!(
         store.preferences(&topic(1)).await.unwrap(),

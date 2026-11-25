@@ -33,6 +33,11 @@ async fn inspect_and_list_are_bounded_cold_queries_without_broadcasting_echoes()
     ));
     assert_eq!(inspect_view(&app, &session).await.revision.get(), 0);
     assert!(app.core.coordinator.adapters.lock().await.is_empty());
+    let missing = SessionId::generate();
+    assert!(matches!(
+        app.query(QueryCommand::Attach { session: missing.clone() }).await,
+        Err(DomainError::NotFound(id)) if id == missing
+    ));
     app.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();
 }

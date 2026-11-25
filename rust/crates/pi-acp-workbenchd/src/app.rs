@@ -1,4 +1,4 @@
-use crate::workspace_gate::{WorkspaceGate, WorkspaceLease};
+use crate::workspace_gate::WorkspaceGate;
 use crate::{
     acp::adapter::{self, AdapterCommand, AdapterContext},
     actor::Runtime,
@@ -49,51 +49,37 @@ mod prompt;
 use ingress::{IngressHandle, Request};
 
 struct AdapterHandle {
-    registry: crate::actor::RegistryHandle,
-    session: SessionId,
     epoch: u64,
-    _workspace_lease: Option<WorkspaceLease>,
     tx: mpsc::Sender<AdapterCommand>,
     stop: CancellationToken,
     task: OwnedTask,
-    worker_completion: OwnedTask,
     resumable: Arc<std::sync::atomic::AtomicBool>,
     background_safe: Arc<std::sync::atomic::AtomicBool>,
     pins: Arc<std::sync::atomic::AtomicUsize>,
-    last_used: Arc<std::sync::atomic::AtomicU64>,
+    last_used: u64,
     last_user_input_at: u64,
     resident_since: u64,
     context_revision: Option<u64>,
 }
 impl AdapterHandle {
-    async fn cancel_and_stop(self) -> Result<(), DomainError> {
-        if self.stop.is_cancelled() || self.task.is_finished() || self.tx.is_closed() {
-            self.stop().await;
-            return Ok(());
+    fn is_live(&self) -> bool {
+        !self.stop.is_cancelled() && !self.task.is_finished() && !self.tx.is_closed()
+    }
+    async fn cancel_and_stop(self) {
+        if self.is_live() {
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                if self.tx.send(AdapterCommand::Cancel { reply }).await.is_ok() {
+                    let _ = wait.await;
+                }
+            })
+            .await;
         }
-        let (reply, wait) = tokio::sync::oneshot::channel();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            self.tx
-                .send(AdapterCommand::Cancel { reply })
-                .await
-                .map_err(|_| DomainError::Worker("adapter closed during cancellation".into()))?;
-            wait.await
-                .map_err(|_| DomainError::Worker("adapter cancellation interrupted".into()))?
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(DomainError::Worker(
-                "adapter cancellation deadline exceeded".into(),
-            ))
-        });
         self.stop().await;
-        result
     }
     async fn stop(self) {
         self.stop.cancel();
         self.task.join().await;
-        self.worker_completion.join().await;
-        self.registry.worker_stopped(self.session, self.epoch).await;
     }
 }
 #[derive(Clone)]
@@ -241,7 +227,10 @@ impl WorkbenchApp {
             .database
             .activity_list(cursor, limit)
             .await
-            .map_err(|error| DomainError::Persistence(error.to_string()))
+            .map_err(|error| match error {
+                crate::persistence::database::StoreError::Query(error) => DomainError::Query(error),
+                error => DomainError::Persistence(error.to_string()),
+            })
     }
     pub(crate) async fn dispatch_snapshot(
         &self,
@@ -325,6 +314,20 @@ impl WorkbenchApp {
     }
     pub async fn command(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
         self.enqueue_command(None, command)?.wait().await
+    }
+    /// A queued prompt may find a turn left active by a previous host. Recover
+    /// its owner in the session lane without recording a separate user operation.
+    pub(crate) async fn load_queued_prompt_session(
+        &self,
+        session: SessionId,
+    ) -> Result<CommandReceipt, DomainError> {
+        let (reply, wait) = tokio::sync::oneshot::channel();
+        self.ingress.submit(Request::Command {
+            operation: None,
+            command: DomainCommand::LoadSession(session),
+            reply,
+        })?;
+        CommandTicket { wait }.wait().await
     }
     #[cfg(test)]
     pub(crate) async fn journal_snapshot(
@@ -535,83 +538,51 @@ impl CommandCore {
             _ => false,
         };
         let admission = if local {
-            self.journal
-                .admit_local(operation.clone(), &command)
-                .await?
+            self.journal.admit_local(operation, &command).await?
         } else {
-            self.journal.begin(operation.clone(), &command).await?
+            self.journal.begin(operation, &command).await?
         };
         let ticket = match admission {
             Admission::Execute(ticket) => ticket,
             Admission::Replay(result) => return result,
         };
-        let owner_session = match &command {
+        let (owner_session, commits_with_state) = match &command {
             DomainCommand::Prompt { session, .. }
             | DomainCommand::Cancel { session }
-            | DomainCommand::ReleaseWorker { session }
-            | DomainCommand::RequestCancel { session }
-            | DomainCommand::Interrupt { session, .. }
             | DomainCommand::AnswerInteraction { session, .. }
-            | DomainCommand::Fork { session, .. }
             | DomainCommand::SetModel { session, .. }
             | DomainCommand::SetMode { session, .. }
-            | DomainCommand::SetOption { session, .. }
-            | DomainCommand::UndoTurn { session, .. } => Some(session.clone()),
-            DomainCommand::Manage { session, action } if action.external() => Some(session.clone()),
-            _ => None,
-        };
-        if let Some(session) = owner_session {
-            self.runtime
-                .registry
-                .command_admitted(DomainCommand::LoadSession(session))
-                .await?;
-        }
-        if let DomainCommand::Manage { action, .. } = &command {
-            let external = action.external();
-            let result = self
-                .execute_with_operation(command, Some(ticket.clone()))
-                .await;
-            if external || result.is_err() {
-                self.journal.finish(ticket, &result).await?;
+            | DomainCommand::SetOption { session, .. } => (Some(session.clone()), true),
+            DomainCommand::ReleaseWorker { session }
+            | DomainCommand::RequestCancel { session }
+            | DomainCommand::Interrupt { session, .. }
+            | DomainCommand::UndoTurn { session, .. } => (Some(session.clone()), false),
+            DomainCommand::Manage { session, action } if action.external() => {
+                (Some(session.clone()), false)
             }
-            return result;
+            DomainCommand::Manage { .. } | DomainCommand::RemoveSession(_) => (None, true),
+            _ => (None, false),
+        };
+        let result = async {
+            if let Some(session) = owner_session {
+                self.runtime
+                    .registry
+                    .command_admitted(DomainCommand::LoadSession(session))
+                    .await?;
+            }
+            if let DomainCommand::Fork { session, request } = &command {
+                let control = self.coordinator.forks.get(session, &ticket.operation)?;
+                return self.fork_session(session, request, &control.stop).await;
+            }
+            self.execute_with_operation(command, commits_with_state.then(|| ticket.clone()))
+                .await
         }
-        if matches!(command, DomainCommand::UndoTurn { .. }) {
-            let result = self
-                .execute_with_operation(command, Some(ticket.clone()))
-                .await;
+        .await;
+        // A failed preflight settles the original operation just like a rejected
+        // command. Successful state changes already sealed their own receipt.
+        if result.is_err() || !commits_with_state {
             self.journal.finish(ticket, &result).await?;
-            return result;
         }
-        if matches!(
-            command,
-            DomainCommand::Prompt { .. }
-                | DomainCommand::SetModel { .. }
-                | DomainCommand::SetMode { .. }
-                | DomainCommand::SetOption { .. }
-                | DomainCommand::Cancel { .. }
-                | DomainCommand::AnswerInteraction { .. }
-                | DomainCommand::RemoveSession(_)
-        ) {
-            let result = self
-                .execute_with_operation(command, Some(ticket.clone()))
-                .await;
-            // Successful terminal receipts are sealed with their local state.
-            // Only rejected, uncommitted commands need a failed receipt.
-            if result.is_err() {
-                self.journal.finish(ticket, &result).await?;
-            }
-            return result;
-        }
-        let result = if let DomainCommand::Fork { session, request } = &command {
-            match self.coordinator.forks.get(session, &operation) {
-                Ok(control) => self.fork_session(session, request, &control.stop).await,
-                Err(error) => Err(error),
-            }
-        } else {
-            self.execute(command).await
-        };
-        self.journal.finish(ticket, &result).await?;
         result
     }
     async fn execute(&self, command: DomainCommand) -> Result<CommandReceipt, DomainError> {
@@ -735,11 +706,7 @@ impl CommandCore {
                     .lock()
                     .await
                     .get(session)
-                    .is_some_and(|adapter| {
-                        !adapter.stop.is_cancelled()
-                            && !adapter.task.is_finished()
-                            && !adapter.tx.is_closed()
-                    });
+                    .is_some_and(AdapterHandle::is_live);
             if observe {
                 // Observe offerings without reapplying saved preferences: the
                 // explicit edit may be correcting a value no longer offered.
@@ -793,14 +760,8 @@ impl CommandCore {
                     .lock()
                     .await
                     .get(session)
-                    // Failed workers leave a joined/closed handle until the
-                    // next launch. Treat it as cold for local preferences;
-                    // sending Configure to it can only return MailboxClosed.
-                    .filter(|adapter| {
-                        !adapter.stop.is_cancelled()
-                            && !adapter.task.is_finished()
-                            && !adapter.tx.is_closed()
-                    })
+                    // A failed worker can still be joining while preferences are saved.
+                    .filter(|adapter| adapter.is_live())
                     .map(|adapter| adapter.tx.clone())
             };
             if let Some(sender) = sender {

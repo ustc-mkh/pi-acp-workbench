@@ -174,7 +174,26 @@ async fn live_metadata_and_idle_configuration_notifications_preserve_unrelated_f
     assert!(cleared.catalogue.current_model.is_none());
     assert!(cleared.catalogue.commands.is_empty());
     assert_eq!(cleared.catalogue.modes, before.catalogue.modes);
+    prompt(&app, &id, "catalogue-update").await;
+    wait_finished(&mut events).await;
+    let mut observed = inspect(&app, &id).await;
+    app.project_current_choices(&mut observed).await;
+    assert_eq!(observed.config.mode.as_ref().unwrap().as_str(), "low");
+    assert_eq!(
+        observed.catalogue.current_mode.as_ref().unwrap().as_str(),
+        "high"
+    );
     app.shutdown().await;
+    let reopened = app_at(&root);
+    let mut cold = inspect(&reopened, &id).await;
+    assert_eq!(
+        cold.catalogue.current_mode.as_ref().unwrap().as_str(),
+        "high"
+    );
+    reopened.project_current_choices(&mut cold).await;
+    assert!(cold.catalogue.current_mode.is_none());
+    assert_eq!(cold.config.mode.as_ref().unwrap().as_str(), "low");
+    reopened.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

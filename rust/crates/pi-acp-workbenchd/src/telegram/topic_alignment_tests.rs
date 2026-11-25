@@ -28,6 +28,70 @@ async fn rename(app: &WorkbenchApp, session: &SessionId, title: &str) {
 }
 
 #[tokio::test]
+async fn automatic_forum_retries_when_query_capacity_returns() {
+    let root = root();
+    let app = app(&root);
+    let session = desktop(&app).await;
+    let api = Fake::default();
+    api.0.lock().await.forum = true;
+    let context = Context::new(app.clone(), api, &root.join("telegram"), config())
+        .await
+        .unwrap();
+    // Journal lookups occupy the shared background query pool until the writer resumes.
+    let paused = app.database().pause_executor().await.unwrap();
+    let mut lookups = tokio::task::JoinSet::new();
+    let (started, mut ready) = tokio::sync::mpsc::channel(16);
+    for _ in 0..16 {
+        let app = app.clone();
+        let session = session.clone();
+        let started = started.clone();
+        lookups.spawn(async move {
+            started.send(()).await.unwrap();
+            app.operation_result(
+                &crate::domain::OperationId::generate(),
+                &DomainCommand::Cancel { session },
+            )
+            .await
+        });
+    }
+    for _ in 0..16 {
+        ready.recv().await.unwrap();
+    }
+    assert!(matches!(
+        app.list(None, Some(1)).await,
+        Err(crate::domain::error::DomainError::Backpressure)
+    ));
+    let stop = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(super::super::topics::run(context.clone(), stop.clone()));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while context
+            .auto_forum
+            .load(std::sync::atomic::Ordering::Acquire)
+            != -100
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(paused);
+    while let Some(result) = lookups.join_next().await {
+        result.unwrap().unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while context.store.topic(&session).await.unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.cancel();
+    loop_task.await.unwrap().unwrap();
+    app.shutdown_checked().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn desktop_topic_and_classic_title_reconcile_once_including_rename_cycles_and_restart() {
     let root = root();
     let app = app(&root);

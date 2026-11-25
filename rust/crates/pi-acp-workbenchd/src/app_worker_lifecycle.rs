@@ -11,7 +11,7 @@ impl CommandCore {
         if let Some(adapter) = adapter {
             // Native cancel errors do not undo a successful physical stop.
             // cancel_and_stop always joins the process before returning.
-            let _ = adapter.cancel_and_stop().await;
+            adapter.cancel_and_stop().await;
         } else if self.closed.load(Ordering::Acquire) {
             // Root shutdown may temporarily own this adapter outside the map.
             self.coordinator.supervisor.shutdown().await?;
@@ -157,14 +157,10 @@ impl CommandCore {
         ),
         DomainError,
     > {
-        self.runtime
-            .registry
-            .command_admitted(DomainCommand::LoadSession(session.clone()))
-            .await?;
         let view = self
             .runtime
             .registry
-            .command_admitted(DomainCommand::Inspect(session.clone()))
+            .command_admitted(DomainCommand::LoadSession(session.clone()))
             .await?;
         if view.view().is_some_and(|view| view.active_turn.is_some()) {
             return Err(DomainError::Busy);
@@ -211,44 +207,45 @@ impl CommandCore {
                     .iter()
                     .any(|s| &s.id == id && &s.current_value == value)
             });
-        if differs {
-            let restore = crate::domain::session::SessionConfig {
-                model: snapshot.catalogue.current_model.clone(),
-                mode: snapshot.catalogue.current_mode.clone(),
-                options: snapshot
-                    .catalogue
-                    .selects
-                    .iter()
-                    .filter(|s| config.options.contains_key(&s.id))
-                    .map(|s| (s.id.clone(), s.current_value.clone()))
-                    .collect(),
-            };
-            self.commit(DomainCommand::PrepareConfiguration {
+        if !differs {
+            return observed.receipt();
+        }
+        let restore = crate::domain::session::SessionConfig {
+            model: snapshot.catalogue.current_model.clone(),
+            mode: snapshot.catalogue.current_mode.clone(),
+            options: snapshot
+                .catalogue
+                .selects
+                .iter()
+                .filter(|s| config.options.contains_key(&s.id))
+                .map(|s| (s.id.clone(), s.current_value.clone()))
+                .collect(),
+        };
+        self.commit(DomainCommand::PrepareConfiguration {
+            session: session.clone(),
+            intent: crate::domain::session::ConfigurationIntent {
+                requested: config.clone(),
+                restore,
+            },
+        })
+        .await?;
+        let applied = async {
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            sender
+                .try_send(AdapterCommand::Configure { config, reply })
+                .map_err(DomainError::mailbox)?;
+            wait.await.map_err(|_| {
+                DomainError::Worker("adapter stopped while applying saved preferences".into())
+            })??;
+            self.commit(DomainCommand::CommitConfiguration {
                 session: session.clone(),
-                intent: crate::domain::session::ConfigurationIntent {
-                    requested: config.clone(),
-                    restore,
-                },
             })
-            .await?;
-            let applied = async {
-                let (reply, wait) = tokio::sync::oneshot::channel();
-                sender
-                    .try_send(AdapterCommand::Configure { config, reply })
-                    .map_err(DomainError::mailbox)?;
-                wait.await.map_err(|_| {
-                    DomainError::Worker("adapter stopped while applying saved preferences".into())
-                })??;
-                self.commit(DomainCommand::CommitConfiguration {
-                    session: session.clone(),
-                })
-                .await
-            }
-            .await;
-            if let Err(error) = applied {
-                self.stop_session_adapter(&session).await?;
-                return Err(error);
-            }
+            .await
+        }
+        .await;
+        if let Err(error) = applied {
+            self.stop_session_adapter(&session).await?;
+            return Err(error);
         }
         self.runtime
             .registry
@@ -272,9 +269,10 @@ impl CommandCore {
             if self.closed.load(Ordering::Acquire) {
                 return Err(ingress::stopping());
             }
-            if adapters.get(&session).is_some_and(|adapter| {
-                adapter.stop.is_cancelled() || adapter.task.is_finished() || adapter.tx.is_closed()
-            }) {
+            if adapters
+                .get(&session)
+                .is_some_and(|adapter| !adapter.is_live())
+            {
                 adapters.remove(&session)
             } else {
                 None
@@ -284,54 +282,38 @@ impl CommandCore {
         if let Some(adapter) = obsolete {
             adapter.stop().await;
         }
-        let snapshot = self
-            .runtime
-            .registry
-            .command_admitted(DomainCommand::Inspect(session.clone()))
-            .await?;
-        let (harness, cwd, provider_session, config, recovery) = match snapshot.view() {
-            Some(snapshot) => (
-                snapshot.harness.clone(),
-                snapshot.cwd.clone(),
-                snapshot.provider_session.clone(),
-                snapshot.config.clone(),
-                snapshot
-                    .configuration_intent
-                    .as_ref()
-                    .map(|intent| intent.restore.clone()),
-            ),
-            _ => return Err(DomainError::NotFound(session)),
+        let CommandReceipt::Loaded { view } =
+            self.commit(DomainCommand::Inspect(session.clone())).await?
+        else {
+            return Err(DomainError::NotFound(session));
         };
-        {
-            let adapters = self.coordinator.adapters.lock().await;
-            if let Some(adapter) = adapters.get(&session) {
-                return Ok((adapter.tx.clone(), config));
-            }
+        if let Some(adapter) = self.coordinator.adapters.lock().await.get(&session) {
+            return Ok((adapter.tx.clone(), view.config));
         }
         let activity = self
             .database
             .worker_activity(session.clone())
             .await
             .map_err(|e| DomainError::Persistence(e.to_string()))?;
-        let root = crate::workspace_review::canonical(std::path::Path::new(cwd.as_str()))
+        let root = crate::workspace_review::canonical(view.cwd.as_ref())
             .map_err(DomainError::Persistence)?;
         let workspace_lease = self.workspace_gate.enter(root, false)?;
-        let (mut events, mut updates) = mpsc::channel(32);
-        let mut worker = self
-            .coordinator
-            .supervisor
-            .spawn_for(session.clone(), &harness, events)
-            .await;
-        if matches!(worker, Err(DomainError::WorkerCapacity)) {
-            self.reclaim_workers(Some(&session), false).await?;
-            (events, updates) = mpsc::channel(32);
-            worker = self
-                .coordinator
-                .supervisor
-                .spawn_for(session.clone(), &harness, events)
-                .await;
-        }
-        let worker = worker?;
+        let (events, updates) = mpsc::channel(32);
+        let spawn = || {
+            self.coordinator.supervisor.spawn_for(
+                session.clone(),
+                &view.harness,
+                view.cwd.as_ref(),
+                events.clone(),
+            )
+        };
+        let worker = match spawn().await {
+            Err(DomainError::WorkerCapacity) => {
+                self.reclaim_workers(Some(&session), false).await?;
+                spawn().await?
+            }
+            result => result?,
+        };
         let epoch = worker.epoch;
         if let Err(error) = self
             .runtime
@@ -345,62 +327,82 @@ impl CommandCore {
         let (tx, commands) = mpsc::channel(8);
         let stop = self.coordinator.stop.child_token();
         let mut adapters = self.coordinator.adapters.lock().await;
-        if self.closed.load(Ordering::Acquire) {
-            drop(adapters);
-            worker.stop().await;
-            return Err(ingress::stopping());
-        }
-        let resumable = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let background_safe = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let pins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let worker_completion = worker.completion();
-        let task = self.coordinator.tasks.spawn(adapter::run(
-            worker,
-            AdapterContext {
-                session: session.clone(),
-                epoch,
-                cwd,
-                provider_session,
-                registry: self.runtime.registry.clone(),
-                lifecycle: stop.clone(),
-                pending_interactions: self.pending_interactions,
-                reviews: Some(self.coordinator.reviews.clone()),
-                database: Some(self.database.clone()),
-                recovery,
-                worker_capabilities: Some((resumable.clone(), background_safe.clone())),
-                pins: Some(pins.clone()),
-                session_harness: match harness {
-                    crate::domain::Harness::Pi => "Pi",
-                    crate::domain::Harness::Codex => "Codex",
-                    crate::domain::Harness::Claude => "Claude",
+        let startup_error = 'register: {
+            if self.closed.load(Ordering::Acquire) {
+                break 'register ingress::stopping();
+            }
+            let mut scope = match self.coordinator.tasks.entry() {
+                Ok(scope) => scope,
+                Err(error) => break 'register error,
+            };
+            let resumable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let background_safe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let pins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let registry = self.runtime.registry.clone();
+            let worker_completion = worker.completion();
+            let protocol = adapter::run(
+                worker,
+                AdapterContext {
+                    session: session.clone(),
+                    epoch,
+                    cwd: view.cwd,
+                    provider_session: view.provider_session,
+                    registry: registry.clone(),
+                    lifecycle: stop.clone(),
+                    pending_interactions: self.pending_interactions,
+                    reviews: self.coordinator.reviews.clone(),
+                    database: self.database.clone(),
+                    recovery: view.configuration_intent.map(|intent| intent.restore),
+                    resumable: resumable.clone(),
+                    background_safe: background_safe.clone(),
+                    pins: pins.clone(),
+                    session_harness: view.harness,
+                },
+                commands,
+                updates,
+                stop.clone(),
+            );
+            let owners = Arc::downgrade(&self.coordinator.adapters);
+            let completed_session = session.clone();
+            let task = scope.spawn(async move {
+                protocol.await;
+                worker_completion.join().await;
+                drop(workspace_lease);
+                registry
+                    .worker_stopped(completed_session.clone(), epoch)
+                    .await;
+                if let Some(owners) = owners.upgrade() {
+                    let mut adapters = owners.lock().await;
+                    if adapters
+                        .get(&completed_session)
+                        .is_some_and(|h| h.epoch == epoch)
+                    {
+                        adapters.remove(&completed_session);
+                    }
                 }
-                .into(),
-            },
-            commands,
-            updates,
-            stop.clone(),
-        ))?;
-        adapters.insert(
-            session.clone(),
-            AdapterHandle {
-                registry: self.runtime.registry.clone(),
-                session: session.clone(),
-                epoch,
-                _workspace_lease: Some(workspace_lease),
-                tx: tx.clone(),
-                stop,
-                task,
-                worker_completion,
-                resumable,
-                background_safe,
-                pins,
-                last_used: Arc::new(std::sync::atomic::AtomicU64::new(activity.1)),
-                last_user_input_at: activity.0,
-                context_revision: None,
-                resident_since: worker_retention::now(),
-            },
-        );
-        Ok((tx, config))
+            });
+            adapters.insert(
+                session,
+                AdapterHandle {
+                    epoch,
+                    tx: tx.clone(),
+                    stop,
+                    task,
+                    resumable,
+                    background_safe,
+                    pins,
+                    last_used: activity.1,
+                    last_user_input_at: activity.0,
+                    context_revision: None,
+                    resident_since: worker_retention::now(),
+                },
+            );
+            return Ok((tx, view.config));
+        };
+        drop(adapters);
+        worker.stop().await;
+        self.runtime.registry.worker_stopped(session, epoch).await;
+        Err(startup_error)
     }
     pub(super) async fn stop_adapters(&self) {
         self.closed.store(true, Ordering::Release);
@@ -409,9 +411,7 @@ impl CommandCore {
         // Graceful ACP cancellation is bounded and concurrent, never N timeouts.
         let mut stopping = tokio::task::JoinSet::new();
         for (_, adapter) in adapters {
-            stopping.spawn(async move {
-                let _ = adapter.cancel_and_stop().await;
-            });
+            stopping.spawn(adapter.cancel_and_stop());
         }
         while stopping.join_next().await.is_some() {}
     }

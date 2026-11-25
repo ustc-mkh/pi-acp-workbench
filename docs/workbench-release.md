@@ -19,6 +19,18 @@
 
 长期运行可编辑包内 `examples/pi-acp-workbenchd.service`，替换 `ExecStart` 的程序和配置绝对路径，安装为 systemd 用户服务。服务账户需要访问工作区、存储和 Agent 程序；Telegram token 通过环境变量注入。
 
+### 启用 Antigravity
+
+在服务所在机器上用同一账户运行 `agy acp --help` 确认 CLI 支持 ACP，再运行 `agy acp --login` 完成登录。将下面的字段加入 `workbench.json` 的 `workers` 对象。如果服务的 PATH 找不到 `agy`，请填写其绝对路径。[Google Antigravity ACP 文档](https://antigravity.google/docs/cli/acp/)
+
+```json
+"antigravity": { "command": "agy", "args": ["acp"], "env": {} }
+```
+
+重启宿主，在 VS Code 的 Harness 选择器中选择 **Antigravity** 并新建会话，或在 Telegram 发送 `/new antigravity`。省略该字段或设为 `null` 会禁用此 worker。
+
+登录后可在源码目录运行 `npm run test:harness -- antigravity`，用空会话检查原生重连。该检查只创建和恢复会话。
+
 ## 从源码构建
 
 需要 Node.js 22+ 和 Rust/Cargo：
@@ -49,6 +61,6 @@ npm run package
 3. 配套更新 VSIX、宿主、Pi adapter 和配置，先在隔离副本验证，再使用原数据目录启动兼容版本。
 4. 保留旧程序、配置和数据的匹配备份；回退时停止新宿主，保存新数据后恢复整套旧组合。
 
-当前 IPC/storage 合同均为 3，但相同版本数字不保证任意早期开发 schema 兼容。已验证的兼容 2.0.x 数据可保留历史并新增所需设置字段；不兼容、损坏或未版本化的非空目录会拒绝启动。当前没有旧格式导入器：不兼容数据需保留旧环境，新版本使用独立空目录，旧历史不会自动出现。
+当前 IPC/storage 合同均为 3，但相同版本数字不保证任意早期开发 schema 兼容。已验证的兼容 2.0.x 数据可保留历史并新增所需设置字段。首次打开旧会话表时，宿主在事务内扩展 harness 约束并校验外键；不兼容、损坏或未版本化的非空目录会拒绝启动。当前没有旧格式导入器：不兼容数据需保留旧环境，新版本使用独立空目录，旧历史不会自动出现。
 
 不要修改版本标记、删除锁文件或清空数据来绕过检查。新数据目录也不继承旧 Telegram offset、待发送队列和话题绑定，不能默认无缝接续同一 Bot。回退不会撤销已经发生的文件修改、费用或 Telegram 发送。

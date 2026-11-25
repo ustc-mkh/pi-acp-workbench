@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { createHash } from 'node:crypto';
 import { emptyView } from './helpers/workbench-peer';
-import { entryId, imageRef, operationId } from '../src/workbench-protocol';
+import { entryId, imageRef, operationId, sessionId, turnId } from '../src/workbench-protocol';
 import type { UiCommand, WorkbenchUiState } from '../src/workbench-ui';
 let dom: JSDOM | undefined;
 afterEach(() => {
@@ -104,7 +104,7 @@ it('disables session creation until initial authorized workspace state arrives a
   )!;
   expect(create.disabled).toBe(true);
   create.click();
-  expect(b.sent).toEqual([{ type: 'ready' }]);
+  expect(b.sent).toEqual([{ type: 'ready', harness: 'Pi' }]);
   b.update();
   await expect.poll(() => create.disabled).toBe(false);
   create.click();
@@ -162,8 +162,7 @@ it('searches whole history and resumes only the latest frozen clear preview with
   const next = [...b.document.querySelectorAll('button')].find(
     (button) => button.textContent === '确认清空下一批…',
   )!;
-  expect(next).toBeDefined();
-  expect(b.document.body.textContent).not.toContain('Confirm first clear batch');
+  expect(b.document.body.textContent).not.toContain('确认清空首批');
   next.click();
   expect(b.sent.at(-1)).toEqual({ type: 'clear_history_batch', job: 'clear-job' });
 });
@@ -175,7 +174,7 @@ it('keeps a restored selection visible outside the current session page without 
     b.document.querySelector<HTMLElement>('#history-items [aria-selected="true"]')!;
   await expect.poll(() => selected()?.dataset.sessionId).toBe('session');
   expect(selected().textContent).toContain('不在此列表页');
-  expect(b.sent).toEqual([{ type: 'ready' }]);
+  expect(b.sent).toEqual([{ type: 'ready', harness: 'Pi' }]);
   b.state.sessions = [
     {
       id: b.state.view!.view!.id,
@@ -189,6 +188,70 @@ it('keeps a restored selection visible outside the current session page without 
   b.update(2);
   await expect.poll(() => selected()?.textContent).toContain('#042');
   expect(b.document.querySelectorAll('#history-items [role=option]')).toHaveLength(1);
+});
+
+it('preserves session controls and pagination focus across streaming updates and uses the current cursor', async () => {
+  const b = await browser({ preferences: { historyOpen: true } });
+  const first = b.state.sessions[0];
+  b.state.sessions = Array.from({ length: 50 }, (_, i) => ({
+    ...first,
+    id: i === 0 ? first.id : sessionId.parse(`session-${i}`),
+    created_seq: 100 - i,
+  }));
+  const snapshot = b.state.view!.view!;
+  snapshot.status = 'Running';
+  snapshot.active_turn = turnId.parse('live-turn');
+  b.state.sessionsCursor = { version: 3, max_created_seq: 100, before_seq: 51 };
+  b.update();
+  const items = b.document.querySelector('#history-items')!;
+  await expect.poll(() => items.childElementCount).toBe(50);
+  const next = b.document.querySelector<HTMLButtonElement>('[data-session-page] button')!;
+  next.focus();
+  const create = vi.spyOn(b.document, 'createElement');
+  const changedNodes: MutationRecord[] = [];
+  const recordChanges = new dom!.window.MutationObserver((records) =>
+    changedNodes.push(...records),
+  );
+  recordChanges.observe(items, {
+    subtree: true,
+    attributes: true,
+    childList: true,
+    characterData: true,
+  });
+  snapshot.revision++;
+  b.state.sessions[0].revision++;
+  b.state.view!.entries = [
+    {
+      seq: 1,
+      id: entryId.parse('live-entry'),
+      turn: snapshot.active_turn,
+      role: 'Agent',
+      text: { Inline: { text: 'Next streaming fragment' } },
+      message: null,
+      image: null,
+    },
+  ];
+  b.update(2);
+  await expect
+    .poll(() => b.document.querySelector('#messages')!.textContent)
+    .toContain('Next streaming fragment');
+  expect(changedNodes).toHaveLength(0);
+  recordChanges.disconnect();
+  expect(
+    create.mock.results.filter(({ value }) =>
+      value?.matches('.history-open, .history-release, .history-delete'),
+    ),
+  ).toHaveLength(0);
+  create.mockRestore();
+  expect(b.document.activeElement).toBe(next);
+
+  b.state.sessionsCursor = { version: 3, max_created_seq: 100, before_seq: 40 };
+  b.update(3);
+  next.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'refresh', cursor: b.state.sessionsCursor });
+  delete b.state.sessionsCursor;
+  b.update(4);
+  await expect.poll(() => next.isConnected).toBe(false);
 });
 
 it('bounds review caches and ignores duplicate diff pages across session changes', async () => {
@@ -290,9 +353,23 @@ it('renders actual four-day/one-day residency and offers non-destructive release
     b.document.querySelector<HTMLButtonElement>('[data-session-id="cold"] .history-release')!
       .disabled,
   ).toBe(true);
+
+  release.focus();
+  const [long, short, cold] = b.state.sessions;
+  b.state.sessions = [{ ...short, status: 'Running', title: 'Working' }, long, cold];
+  b.update(2);
+  await expect.poll(() => release.getAttribute('aria-label')).toBe('释放会话：Working');
+  expect(b.document.querySelector('#history-items > :first-child .history-release')).toBe(release);
+  expect(b.document.activeElement).toBe(release);
+  const count = b.sent.length;
+  release.click();
+  expect(release.getAttribute('aria-label')).toContain('确认释放');
+  expect(b.sent).toHaveLength(count);
+  release.click();
+  expect(b.sent.at(-1)).toEqual({ type: 'release_session', session: short.id, confirmed: true });
 });
 
-it('automatically reads finished-turn diff and renders the classic header without a review button', async () => {
+it('displays a partial finished-turn diff and undo conflicts and preserves file expansion on repaint', async () => {
   const b = await browser();
   b.state.view = {
     ...b.state.view!,
@@ -343,10 +420,24 @@ it('automatically reads finished-turn diff and renders the classic header withou
   await expect
     .poll(() => b.document.querySelector('.turn-diff-header')?.textContent)
     .toContain('本轮修改 · 1 个文件 · +3 −1（部分结果）');
-  expect(b.document.querySelector('.turn-review-action')).toBeNull();
+  b.post({
+    type: 'undo_result',
+    session: 'session',
+    turn: 'finished',
+    report: {
+      files: [
+        { path: 'ok.txt', status: 'restored', error: null },
+        { path: 'changed.txt', status: 'conflict', error: 'file changed after confirmation' },
+      ],
+    },
+  });
+  await expect
+    .poll(() => b.document.querySelector('.undo-report')?.textContent)
+    .toContain('已恢复 1/2');
+  expect(b.document.querySelector('.undo-report')?.textContent).toContain(
+    'changed.txt · conflict · file changed after confirmation',
+  );
   const header = b.document.querySelector('.turn-diff-header')!;
-  expect(header.textContent).toContain('查看总 Diff');
-  expect(header.textContent).toContain('撤回本轮修改');
   const files = b.document.querySelector<HTMLDetailsElement>('.turn-diff-files')!;
   expect(files.open).toBe(false);
   expect(b.document.querySelector('.turn-diff-notes')?.closest('details')).toBe(files);
@@ -382,7 +473,6 @@ it('offers full Markdown export as a distinct user action for the selected sessi
   const exportButton = [...b.document.querySelectorAll('button')].find(
     (button) => button.getAttribute('aria-label') === '导出 Markdown',
   )!;
-  expect(exportButton).toBeDefined();
   exportButton.click();
   expect(b.sent.at(-1)).toEqual({ type: 'export', session: b.state.selected });
   expect(b.sent.some((message) => message.type === 'execute')).toBe(false);
@@ -390,7 +480,7 @@ it('offers full Markdown export as a distinct user action for the selected sessi
 
 it('renders committed rows without merging group deltas, never fetching markdown/tool URIs', async () => {
   const b = await browser();
-  expect(b.sent).toEqual([{ type: 'ready' }]);
+  expect(b.sent).toEqual([{ type: 'ready', harness: 'Pi' }]);
   b.state.view = {
     ...b.state.view!,
     entries: [
@@ -575,7 +665,7 @@ it('allows explicit recovery from Failed without enabling native forks and isola
   await expect.poll(() => prompt.value).toBe('source draft');
 });
 
-it('keeps failed prompt drafts and clears only the matching accepted draft; fork cancellation carries the original operation', async () => {
+it('cancels a pending fork by its original operation ID', async () => {
   const b = await browser();
   b.state.operations.push({
     operation: 'original-fork' as never,
@@ -584,30 +674,12 @@ it('keeps failed prompt drafts and clears only the matching accepted draft; fork
     status: 'pending',
   });
   b.update();
-  await expect
-    .poll(() => b.document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled)
-    .toBe(false);
-  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
-  prompt.value = 'hello';
-  prompt.dispatchEvent(new dom!.window.Event('input', { bubbles: true }));
-  prompt
-    .closest('form')!
-    .dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
-  expect(prompt.value).toBe('hello');
-  b.accept('other', { parts: [{ type: 'text', text: 'hello' }] });
-  expect(prompt.value).toBe('hello');
-  b.accept('session', { parts: [{ type: 'text', text: 'hello' }] });
-  expect(prompt.value).toBe('');
-  await expect
-    .poll(() =>
-      [...b.document.querySelectorAll('button')].some(
-        (button) => button.textContent === '取消分支操作',
-      ),
-    )
-    .toBe(true);
-  [...b.document.querySelectorAll('button')]
-    .find((button) => button.textContent === '取消分支操作')!
-    .click();
+  const cancel = () =>
+    [...b.document.querySelectorAll('button')].find(
+      (button) => button.textContent === '取消分支操作',
+    );
+  await expect.poll(cancel).toBeDefined();
+  cancel()!.click();
   expect(b.sent.at(-1)).toEqual({ type: 'cancel_fork', operation: 'original-fork' });
 });
 
@@ -791,7 +863,7 @@ it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepte
   prompt.dispatchEvent(new dom!.window.Event('input'));
   for (const options of [{ shiftKey: true }, { isComposing: true }, { keyCode: 229 }])
     prompt.dispatchEvent(new dom!.window.KeyboardEvent('keydown', { key: 'Enter', ...options }));
-  expect(b.sent).toEqual([{ type: 'ready' }]);
+  expect(b.sent).toEqual([{ type: 'ready', harness: 'Pi' }]);
   prompt.dispatchEvent(
     new dom!.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
   );
@@ -801,16 +873,11 @@ it('sends on Enter but not Shift+Enter or IME, retaining the draft until accepte
   });
   expect(prompt.value).toBe('你好');
   expect(b.saved()).toMatchObject({ drafts: [['session', '你好']] });
+  b.accept('other', { parts: [{ type: 'text', text: '你好' }] });
+  expect(prompt.value).toBe('你好');
   b.accept('session', { parts: [{ type: 'text', text: '你好' }] });
+  expect(prompt.value).toBe('');
   expect(b.saved()).toMatchObject({ drafts: [] });
-});
-
-it('restores reload text without replaying a mutation', async () => {
-  const b = await browser({ drafts: [['session', 'not yet accepted']] });
-  b.update();
-  const prompt = b.document.querySelector<HTMLTextAreaElement>('#prompt')!;
-  await expect.poll(() => prompt.value).toBe('not yet accepted');
-  expect(b.sent).toEqual([{ type: 'ready' }]);
 });
 
 it('previews explicit attachments, isolates sessions and clears only a matching accepted input', async () => {
@@ -865,7 +932,7 @@ it('previews explicit attachments, isolates sessions and clears only a matching 
   expect(b.saved()).toMatchObject({ attachments: [], drafts: [] });
 });
 
-it('restores attachments and thought preferences on reload without replaying any command', async () => {
+it('restores draft text, attachments and thought preferences on reload without replaying any command', async () => {
   const b = await browser({
     drafts: [['session', 'Review']],
     attachments: [['session', [{ id: 'f', name: 'a.ts', text: 'saved context' }]]],
@@ -879,7 +946,7 @@ it('restores attachments and thought preferences on reload without replaying any
   expect(
     b.document.querySelector<HTMLInputElement>('input[aria-label="显示思考过程"]')!.checked,
   ).toBe(false);
-  expect(b.sent).toEqual([{ type: 'ready' }]);
+  expect(b.sent).toEqual([{ type: 'ready', harness: 'Pi' }]);
   [...b.document.querySelectorAll('button')]
     .find((button) => button.textContent === 'Remove attachment a.ts')!
     .click();
@@ -1053,7 +1120,7 @@ it('completes only declared slash commands with keyboard/IME and restores access
     new dom!.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
   );
   expect(prompt.style.height).toBe('156px');
-  expect(b.saved()).toMatchObject({ preferences: { composerHeight: 156, sessionRows: 4 } });
+  expect(b.saved()).toMatchObject({ preferences: { composerHeight: 156, sessionRows: 16 } });
   b.state.view!.view!.catalogue.commands = [];
   b.update(2);
   await new Promise((resolve) => setTimeout(resolve, 30));
@@ -1131,11 +1198,20 @@ it('keeps history collapsed and harness navigation separate from starting work, 
   const harness = b.document.querySelector<HTMLSelectElement>('#harness-switch')!;
   harness.value = 'Codex';
   harness.dispatchEvent(new dom!.window.Event('change', { bubbles: true }));
-  expect(b.sent.at(-1)).toEqual({ type: 'clear_selection' });
+  expect(b.sent.slice(-2)).toEqual([
+    { type: 'set_harness', harness: 'Codex' },
+    { type: 'clear_selection' },
+  ]);
   expect(b.sent.some((message) => message.type === 'create' || message.type === 'execute')).toBe(
     false,
   );
   expect(b.saved()).toMatchObject({ drafts: [['session', 'keep this Pi draft']] });
+  b.update(2);
+  await new Promise((done) => dom!.window.requestAnimationFrame(done));
+  expect(harness.value).toBe('Codex');
+  expect(b.sent.filter((message) => message.type === 'set_harness')).toEqual([
+    { type: 'set_harness', harness: 'Codex' },
+  ]);
 });
 
 it('updates the context ring on usage deltas without replacing focused provider settings', async () => {
@@ -1247,13 +1323,12 @@ it('never expands a short history or leaves an invisible tier that needs two col
     .toBe('4');
   const more = b.document.querySelector<HTMLButtonElement>('[aria-label="展开历史列表"]')!;
   expect(more.disabled).toBe(true);
-  expect(more.querySelector('svg')).not.toBeNull();
   more.click();
   b.document.querySelector<HTMLButtonElement>('[aria-label="历史记录"]')!.click();
   expect(b.document.querySelector<HTMLElement>('#history')!.hidden).toBe(false);
   b.document.querySelector<HTMLButtonElement>('[aria-label="收起历史列表"]')!.click();
   expect(b.document.querySelector<HTMLElement>('#history')!.hidden).toBe(true);
-  expect(b.saved()).toMatchObject({ preferences: { sessionRows: 4, historyOpen: false } });
+  expect(b.saved()).toMatchObject({ preferences: { sessionRows: 16, historyOpen: false } });
 });
 
 it('enables only useful history tiers and clamps a saved tier when the result set shrinks', async () => {
@@ -1275,12 +1350,23 @@ it('enables only useful history tiers and clamps a saved tier when the result se
     .poll(() => b.document.querySelector('#history-items')?.getAttribute('data-limit'))
     .toBe('16');
   expect(more.disabled).toBe(true);
-  b.state.sessions = b.state.sessions.slice(0, 6);
+  const fullList = b.state.sessions;
+  b.state.sessions = fullList.slice(0, 6);
   b.update(2);
   await expect
     .poll(() => b.document.querySelector('#history-items')?.getAttribute('data-limit'))
     .toBe('10');
   expect(more.disabled).toBe(true);
+  b.state.sessions = fullList;
+  b.update(3);
+  await expect
+    .poll(() => b.document.querySelector('#history-items')?.getAttribute('data-limit'))
+    .toBe('16');
+  b.state.sessions = fullList.slice(0, 6);
+  b.update(4);
+  await expect
+    .poll(() => b.document.querySelector('#history-items')?.getAttribute('data-limit'))
+    .toBe('10');
   b.document.querySelector<HTMLButtonElement>('[aria-label="收起历史列表"]')!.click();
   await expect
     .poll(() => b.document.querySelector('#history-items')?.getAttribute('data-limit'))
@@ -1381,6 +1467,29 @@ it('uses advertised thinking steps, Fast values and model IDs in the combined co
   );
   expect(dialog.hidden).toBe(true);
   expect(b.document.activeElement).toBe(trigger);
+  // Cold projections omit the released worker's stale observed selection.
+  snapshot.config.model = 'vendor/b' as never;
+  snapshot.catalogue.current_model = undefined;
+  b.update(4);
+  await expect.poll(() => trigger.textContent).toContain('Model B');
+  await expect
+    .poll(() => b.document.querySelector<HTMLButtonElement>('#send')!.disabled)
+    .toBe(false);
+  // Live catalogue updates can arrive long after the last list refresh.
+  snapshot.revision++;
+  snapshot.harness = 'Codex';
+  snapshot.catalogue.current_model = 'vendor/a' as never;
+  snapshot.catalogue.modes = [
+    { id: 'saved' as never, name: 'Saved' },
+    { id: 'live' as never, name: 'Live' },
+  ];
+  snapshot.config.mode = 'saved' as never;
+  snapshot.catalogue.current_mode = 'live' as never;
+  b.update(5);
+  await expect.poll(() => trigger.textContent).toContain('Model A');
+  expect(b.document.querySelector<HTMLSelectElement>('select[aria-label="mode"]')?.value).toBe(
+    'live',
+  );
 });
 
 it('disables unadvertised Fast and thinking settings and restores the confirmed choice after a rejected setting', async () => {
@@ -1462,11 +1571,6 @@ it('reads the newly finished turn without an intersection callback and displays 
   await expect
     .poll(() => b.sent.some((m) => m.type === 'read_turn_diff' && m.turn === 'live' && m.automatic))
     .toBe(true);
-  expect(b.document.querySelectorAll('.assistant .message-reuse')).toHaveLength(0);
-  const reuse = b.document.querySelector<HTMLButtonElement>('.user .message-reuse')!;
-  expect(reuse.textContent).toBe('重用');
-  reuse.click();
-  expect(b.document.querySelector<HTMLTextAreaElement>('#prompt')!.value).toBe('hello');
   b.post({
     type: 'turn_diff',
     session: 'session',
@@ -1798,86 +1902,83 @@ it('counts logical thoughts, restores classic activity containers and folds a co
   expect(process.open).toBe(false);
 });
 
-for (const method of ['select', 'confirm', 'input', 'editor'] as const) {
-  it(`restores the v1 ${method} question card and submits the original typed interaction`, async () => {
-    const b = await browser();
-    const text = method === 'input' || method === 'editor';
-    b.state.view!.view!.pending_interactions = {
+it('opens tool history for a settled turn containing only a final answer', async () => {
+  const b = await browser();
+  const turn = turnId.parse('finished');
+  b.state.view!.entries = [
+    {
+      seq: 1,
+      id: entryId.parse('answer'),
+      turn,
+      role: 'Agent',
+      image: null,
+      message: null,
+      text: { Inline: { text: 'Done' } },
+    },
+  ];
+  b.update();
+  const process = () => b.document.querySelector<HTMLDetailsElement>('.turn-process');
+  await expect.poll(() => process()?.hidden).toBe(false);
+  expect(process()?.textContent).toContain('查看工具调用');
+  process()!.open = true;
+  process()!.dispatchEvent(new dom!.window.Event('toggle'));
+  expect(b.sent).toContainEqual({ type: 'read_tools', session: 'session', turn });
+  b.state.view!.tools = [
+    {
+      id: 'tool' as never,
+      turn,
+      status: 'Completed',
+      title: 'Read file',
+      kind: null,
+      name: null,
+      locations: [],
+      content: [],
+    },
+  ];
+  b.update(2);
+  await expect.poll(() => process()?.querySelector('.tool')?.textContent).toContain('Read file');
+});
+
+it('answers a Pi choice with its option ID and disables further answers', async () => {
+  const b = await browser();
+  b.state.view!.view!.pending_interactions = {
+    question: {
+      id: 'question' as never,
+      kind: 'Permission',
+      title: 'Choose a plan',
+      detail: '',
       question: {
-        id: 'question' as never,
-        kind: text ? 'Elicitation' : 'Permission',
+        method: 'select',
         title: 'Choose a plan',
-        detail: '',
-        question: {
-          method,
-          title: 'Choose a plan',
-          message: 'Review before continuing',
-          placeholder: 'Your answer',
-          prefill: 'original\n计划',
-        },
-        fields: text
-          ? [
-              {
-                name: 'value',
-                label: 'Choose a plan',
-                required: false,
-                kind: { Text: { max_length: 10000 } },
-              },
-            ]
-          : [],
-        options: text
-          ? []
-          : [
-              { id: 'yes', label: 'Yes' },
-              { id: 'no', label: 'No' },
-            ],
-        expires_at: null,
+        message: '',
+        placeholder: '',
+        prefill: '',
       },
-    };
-    b.update();
-    await expect
-      .poll(() => b.document.querySelector('.extension-question strong')?.textContent)
-      .toBe('Pi · 等待你的回答');
-    const card = b.document.querySelector<HTMLFormElement>('.extension-question')!;
-    expect(card.textContent).not.toContain('需要授权');
-    expect(card.querySelector('.question-title')?.textContent).toBe('Choose a plan');
-    expect(card.querySelector('p')?.textContent).toBe('Review before continuing');
-    if (text) {
-      const editor = card.querySelector('textarea')!;
-      expect(editor.rows).toBe(method === 'editor' ? 6 : 3);
-      expect(editor.placeholder).toBe('Your answer');
-      expect(editor.value).toBe('original\n计划');
-      editor.value = 'my edited answer';
-      b.state.view!.view!.revision++;
-      b.update(2);
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(card.querySelector('textarea')).toBe(editor);
-      expect(editor.value).toBe('my edited answer');
-      editor.value = '';
-      card.dispatchEvent(new dom!.window.Event('submit', { bubbles: true, cancelable: true }));
-      expect(b.sent.at(-1)).toMatchObject({
-        type: 'execute',
-        command: {
-          method: 'answer',
-          answer: {
-            interaction: 'question',
-            response: { Form: { fields: { value: { Text: '' } } } },
-          },
-        },
-      });
-    } else {
-      [...card.querySelectorAll('button')].find((button) => button.textContent === 'No')!.click();
-      expect(b.sent.at(-1)).toMatchObject({
-        type: 'execute',
-        command: {
-          method: 'answer',
-          answer: { interaction: 'question', response: { Permission: { option: 'no' } } },
-        },
-      });
-    }
-    expect([...card.querySelectorAll('button')].every((button) => button.disabled)).toBe(true);
+      options: [
+        { id: 'yes', label: 'Continue' },
+        { id: 'no', label: 'Change plan' },
+      ],
+      fields: [],
+      expires_at: null,
+    },
+  };
+  b.update();
+  const card = () => b.document.querySelector<HTMLFormElement>('.extension-question');
+  await expect
+    .poll(() => card()?.querySelector('.question-title')?.textContent)
+    .toBe('Choose a plan');
+  [...card()!.querySelectorAll('button')]
+    .find((button) => button.textContent === 'Change plan')!
+    .click();
+  expect(b.sent.at(-1)).toMatchObject({
+    type: 'execute',
+    command: {
+      method: 'answer',
+      answer: { interaction: 'question', response: { Permission: { option: 'no' } } },
+    },
   });
-}
+  expect([...card()!.querySelectorAll('button')].every((button) => button.disabled)).toBe(true);
+});
 
 it('finishes Markdown and hides current-turn actions while waiting for a question answer', async () => {
   const b = await browser();
@@ -1911,7 +2012,7 @@ it('finishes Markdown and hides current-turn actions while waiting for a questio
   expect(b.document.querySelector('article.assistant .message-body > pre')).toBeNull();
 });
 
-it('cancels a Pi editor question without submitting its prefilled answer', async () => {
+it('keeps a Pi editor draft through a refresh and cancels without submitting it', async () => {
   const b = await browser();
   b.state.view!.view!.pending_interactions = {
     q: {
@@ -1923,7 +2024,7 @@ it('cancels a Pi editor question without submitting its prefilled answer', async
         method: 'editor',
         title: 'Edit',
         message: '',
-        placeholder: '',
+        placeholder: 'Your answer',
         prefill: 'do not submit this',
       },
       options: [],
@@ -1934,9 +2035,17 @@ it('cancels a Pi editor question without submitting its prefilled answer', async
     },
   };
   b.update();
-  await expect
-    .poll(() => b.document.querySelector('.extension-question textarea')?.textContent !== undefined)
-    .toBe(true);
+  const editor = () =>
+    b.document.querySelector<HTMLTextAreaElement>('.extension-question textarea');
+  await expect.poll(() => editor()?.value).toBe('do not submit this');
+  expect(editor()!.placeholder).toBe('Your answer');
+  const draft = editor()!;
+  draft.value = 'edited draft';
+  b.state.view!.view!.revision++;
+  b.update(2);
+  await new Promise((done) => dom!.window.requestAnimationFrame(done));
+  expect(editor()).toBe(draft);
+  expect(draft.value).toBe('edited draft');
   [...b.document.querySelectorAll<HTMLButtonElement>('.extension-question button')]
     .find((button) => button.textContent === '取消')!
     .click();

@@ -47,6 +47,7 @@ fn telegram_100k_completed_inbox_is_not_read_by_offset_pending_admit_or_complete
         Some(&session)
     );
     let make_admission = |expected| Admission {
+        workspace: crate::domain::WorkspacePath::new("/tmp").unwrap(),
         id: UpdateId::new(100000).unwrap(),
         sender: Some(UserId::new(2).unwrap()),
         command: Some(TelegramCommand {

@@ -9,7 +9,7 @@ import { renderInteractions } from './workbench-interactions';
 import { renderSettings } from './workbench-settings';
 import { buildClassicShell, decorateIcon } from './workbench-shell';
 import { createHistoryView } from './workbench-history-view';
-import { reconcile } from './workbench-dom';
+import { createSessionList } from './workbench-session-list';
 import { installComposerResize } from './composer-resize';
 import { PaintScheduler } from './paint-scheduler';
 import { Drafts } from './workbench-drafts';
@@ -19,6 +19,7 @@ import { AttachmentDrafts } from './workbench-attachment-drafts';
 import { composePrompt } from '../src/workbench-input';
 import { createRenderer, selectionWithMath } from './markdown';
 import {
+  HARNESSES,
   type ClientCommand,
   type ImageAsset,
   type ImageRef,
@@ -150,7 +151,7 @@ const header = element('header');
 const harness = element('select');
 harness.id = 'harness-switch';
 harness.setAttribute('aria-label', '切换 Harness');
-for (const name of ['Pi', 'Codex', 'Claude']) {
+for (const name of HARNESSES) {
   const option = element(
     'option',
     name === 'Pi' ? 'Pi Agent' : name === 'Claude' ? 'Claude Code' : name,
@@ -167,17 +168,19 @@ const newSession = button(
       type: 'create',
       command: {
         method: 'create',
-        harness: harness.value as 'Pi' | 'Codex' | 'Claude',
+        harness: harness.value as SessionView['harness'],
         cwd: state.workspace,
       },
     });
   },
   true,
 );
+let displayedSession: SessionView['id'] | undefined;
 harness.value = preferences.harness;
 harness.addEventListener('change', () => {
   saveDraft();
   preferences.harness = harness.value;
+  send({ type: 'set_harness', harness: harness.value as SessionView['harness'] });
   persist();
   const last = preferences.lastSessions[harness.value];
   const target =
@@ -210,56 +213,13 @@ document.addEventListener('keydown', (event) => {
 });
 const viewOptions = element('section');
 advanced.append(advancedSummary, viewOptions, login, telegramSetup, refresh);
-const historySearch = element('input');
-historySearch.type = 'search';
-historySearch.placeholder = '搜索会话名称、目录…';
-historySearch.setAttribute('aria-label', '搜索全部会话');
-historySearch.maxLength = 300;
-const historyHarness = element('select');
-historyHarness.setAttribute('aria-label', 'History harness filter');
-for (const value of ['', 'Pi', 'Codex', 'Claude']) {
-  const option = element('option', value || '全部 Agent');
-  option.value = value;
-  historyHarness.append(option);
-}
-const historyFilter = (): import('../src/workbench-protocol').SessionFilter => ({
-  text: historySearch.value.trim(),
-  harness: (historyHarness.value ||
-    null) as import('../src/workbench-protocol').SessionFilter['harness'],
+const sessionList = createSessionList({
+  getState: () => state,
+  preferences,
+  send,
+  persist,
+  close: () => classic.showHistory(false),
 });
-const historyControls = element('section');
-historyControls.className = 'history-search-controls';
-historyControls.append(
-  historySearch,
-  historyHarness,
-  button('Search history', () => send({ type: 'refresh', filter: historyFilter() })),
-);
-historySearch.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.isComposing)
-    send({ type: 'refresh', filter: historyFilter() });
-});
-const clearProgress = element('section');
-let historyReleaseConfirm: string | undefined;
-const sessions = element('div');
-sessions.id = 'history-items';
-sessions.setAttribute('role', 'listbox');
-sessions.setAttribute('aria-label', '会话历史');
-const historyPanel = element('section');
-historyPanel.id = 'history';
-const historyHeading = element('div', '会话历史');
-historyHeading.className = 'section-label';
-const historyActions = element('span');
-historyControls.hidden = true;
-historyActions.append(
-  button('搜索', () => {
-    historyControls.hidden = !historyControls.hidden;
-    if (!historyControls.hidden) historySearch.focus();
-  }),
-  button('刷新', () => send({ type: 'refresh' })),
-  button('清空', () => send({ type: 'prepare_history_clear', filter: historyFilter() })),
-);
-historyHeading.append(historyActions);
-historyPanel.append(historyHeading, historyControls, clearProgress, sessions);
 const status = element('p'),
   error = element('p'),
   settings = element('section'),
@@ -701,33 +661,6 @@ const activity = button('展开执行过程', () => {
   schedule();
 });
 activity.id = 'toggle-activity';
-const historySize = element('div');
-historySize.className = 'history-controls';
-const lessHistory = button('收起历史列表', () => {
-  if (preferences.sessionRows === 4) classic.showHistory(false);
-  else {
-    preferences.sessionRows = preferences.sessionRows === 16 ? 10 : 4;
-    persist();
-    schedule();
-  }
-});
-const moreHistory = button('展开历史列表', () => {
-  const available = state?.sessions.length || 0;
-  if (preferences.sessionRows >= available || preferences.sessionRows === 16) return;
-  preferences.sessionRows = preferences.sessionRows === 4 ? 10 : 16;
-  persist();
-  schedule();
-});
-for (const [control, path, label] of [
-  [lessHistory, 'M4 12l6-6 6 6', '收起历史列表'],
-  [moreHistory, 'M4 8l6 6 6-6', '展开历史列表'],
-] as const) {
-  control.setAttribute('aria-label', label);
-  control.title = label;
-  control.innerHTML = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="${path}"/></svg>`;
-}
-historySize.append(lessHistory, moreHistory);
-historyPanel.append(historySize);
 const classic = buildClassicShell({
   root,
   header,
@@ -739,7 +672,7 @@ const classic = buildClassicShell({
     { node: models, icon: 'settings', label: '模型设置' },
     { node: statistics, icon: 'stats', label: '用量统计' },
   ],
-  history: historyPanel,
+  history: sessionList.panel,
   status,
   error: errorBanner,
   historyStatus: earlierStatus,
@@ -894,11 +827,13 @@ function render() {
       ? earlierLoaded
         ? `正在加载更早消息，已加载 ${earlierLoaded} 轮…`
         : '正在加载更早消息…'
-      : earlierLoaded === undefined
-        ? ''
-        : earlierLoaded > 0
-          ? `已加载 ${earlierLoaded} 轮更早消息，向上滚动查看。`
-          : '没有更早的消息了。');
+      : state.view?.historyTruncated
+        ? '当前只显示部分最近消息，可导出完整历史。'
+        : earlierLoaded === undefined
+          ? ''
+          : earlierLoaded > 0
+            ? `已加载 ${earlierLoaded} 轮更早消息，向上滚动查看。`
+            : '没有更早的消息了。');
   if (earlierStatus.textContent !== historyFeedback) earlierStatus.textContent = historyFeedback;
   earlierStatus.hidden = !historyFeedback;
   if (selected !== state.selected) {
@@ -918,144 +853,7 @@ function render() {
     delete planPanel.dataset.definition;
     transcript.scrollTop = 0;
   }
-  clearProgress.replaceChildren();
-  const jobs = new Map<string, import('../src/workbench-protocol').HistoryClearReport>();
-  for (const op of state.operations)
-    if (op.historyClear) jobs.set(op.historyClear.job, op.historyClear);
-  for (const report of jobs.values()) {
-    clearProgress.append(
-      element(
-        'p',
-        `Shared clear job ${report.job}: ${report.total} frozen targets, ${report.remaining} pending, ${report.failed} failed; preview included ${report.active} active tasks and ${report.pending_deliveries} pending deliveries. Includes Telegram and all matching harnesses/directories; native files, usage and delivery/dedup identities are retained.`,
-      ),
-    );
-    if (report.remaining)
-      clearProgress.append(
-        button(report.preview ? 'Confirm first clear batch…' : 'Confirm next clear batch…', () =>
-          send({ type: 'clear_history_batch', job: report.job }),
-        ),
-      );
-  }
-  const historyRows = element('div');
-  sessions.dataset.selected = state.selected || '';
-  const maximumTier = state.sessions.length <= 4 ? 4 : state.sessions.length <= 10 ? 10 : 16;
-  if (preferences.sessionRows > maximumTier) {
-    preferences.sessionRows = maximumTier;
-    persist();
-  }
-  moreHistory.disabled =
-    preferences.sessionRows >= state.sessions.length || preferences.sessionRows === 16;
-  sessions.dataset.limit = String(preferences.sessionRows);
-  const listedSessions = state.sessions.map((session) => ({ ...session, outside: false }));
-  const restored = current();
-  if (restored && !listedSessions.some((session) => session.id === restored.id))
-    listedSessions.unshift({
-      id: restored.id,
-      harness: restored.harness,
-      cwd: restored.cwd,
-      status: restored.status,
-      revision: restored.revision,
-      created_seq: 0,
-      title: '当前会话（不在此列表页）',
-      outside: true,
-    });
-  for (const session of listedSessions) {
-    const row = element('div');
-    row.className = 'history-row' + (session.id === state.selected ? ' current' : '');
-    row.dataset.key = `history:${session.id}`;
-    row.setAttribute('role', 'option');
-    row.setAttribute('aria-selected', String(session.id === state.selected));
-    row.dataset.sessionId = session.id;
-    const open = button(
-      session.title || `新对话 #${session.created_seq}`,
-      () => {
-        send({ type: 'select', session: session.id });
-        classic.showHistory(false);
-      },
-      false,
-      false,
-    );
-    open.className = 'history-open';
-    open.title = `${session.harness} · ${session.cwd}`;
-    const number = element(
-      'span',
-      session.outside ? '当前' : '#' + String(session.created_seq).padStart(3, '0'),
-    );
-    number.className = 'session-number';
-    number.dataset.retention = String(session.retention_days || 0);
-    number.classList.toggle('alive-long', session.retention_days === 4);
-    number.classList.toggle('alive-short', session.retention_days === 1);
-    number.title =
-      session.retention_days === 4
-        ? '驻留保留 4 天（按最后用户输入）'
-        : session.retention_days === 1
-          ? '驻留保留 1 天（按最后用户输入）'
-          : '当前未驻留；使用时恢复会话';
-    const phase = element('span');
-    phase.className = 'session-indicator';
-    phase.dataset.phase = typeof session.status === 'string' ? session.status : 'Failed';
-    phase.title = phase.dataset.phase;
-    phase.classList.toggle('running', phase.dataset.phase === 'Running');
-    phase.innerHTML =
-      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-5 3v-3H3V4.5a1 1 0 0 1 1-1Z"/></svg>';
-    const provider = element('span', session.harness);
-    provider.className = 'history-harness';
-    provider.hidden = session.harness === 'Pi';
-    const removeHistory = button(
-      '删除会话',
-      () => {
-        send({ type: 'remove_session', session: session.id });
-      },
-      !state.trusted,
-    );
-    removeHistory.className = 'history-delete';
-    removeHistory.setAttribute('aria-label', `删除会话：${session.title || session.id}`);
-    removeHistory.title = '删除会话（保留原生数据）';
-    removeHistory.innerHTML =
-      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M7 5.5V3h6v2.5M5 5.5l.8 11h8.4l.8-11M8 8v5.5M12 8v5.5"/></svg>';
-    const running = ['Running', 'Waiting', 'Cancelling'].includes(
-      typeof session.status === 'string' ? session.status : '',
-    );
-    const release = button(
-      '释放会话',
-      () => {
-        if (running && historyReleaseConfirm !== session.id) {
-          historyReleaseConfirm = session.id;
-          schedule();
-          return;
-        }
-        send({ type: 'release_session', session: session.id, confirmed: running });
-        historyReleaseConfirm = undefined;
-      },
-      !state.trusted || !session.retention_days,
-    );
-    release.className = 'history-release';
-    release.setAttribute(
-      'aria-label',
-      `${historyReleaseConfirm === session.id ? '确认释放会停止当前任务：' : '释放会话：'}${session.title || session.id}`,
-    );
-    release.title =
-      historyReleaseConfirm === session.id
-        ? '再次点击停止任务并释放；保留历史'
-        : '释放后台会话（保留历史）';
-    release.innerHTML =
-      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2v8M5.5 4.5a7 7 0 1 0 9 0"/></svg>';
-    row.append(phase, number, provider, open, release, removeHistory);
-    historyRows.append(row);
-  }
-  if (!listedSessions.length) historyRows.append(element('p', '还没有保存的会话。'));
-  reconcile(sessions, historyRows);
-  document.querySelector('[data-session-page]')?.remove();
-  const nextSessions = state.sessionsCursor;
-  if (nextSessions) {
-    const page = element('div');
-    page.dataset.sessionPage = 'true';
-    page.append(
-      button('Next session page', () => send({ type: 'refresh', cursor: nextSessions })),
-      button('Latest session page', () => send({ type: 'refresh' })),
-    );
-    sessions.after(page);
-  }
+  sessionList.render(state);
   const visibleImages = new Set<string>(
     (state.view?.entries || []).flatMap((row) => (row.image ? [row.image.id as string] : [])),
   );
@@ -1089,15 +887,20 @@ function render() {
   if (state.preparing && state.preparing === snapshot?.id)
     status.textContent = '正在加载模型与偏好…';
   status.title = `连接：${state.view?.status || '未选择'}${snapshot ? ` · revision ${snapshot.revision}` : ''}`;
-  if (snapshot) {
+  if (snapshot && displayedSession !== snapshot.id) {
     harness.value = snapshot.harness;
-    preferences.harness = snapshot.harness;
+    if (preferences.harness !== snapshot.harness) {
+      preferences.harness = snapshot.harness;
+      send({ type: 'set_harness', harness: snapshot.harness });
+    }
     preferences.lastSessions[snapshot.harness] = snapshot.id;
   }
+  displayedSession = snapshot?.id;
   const summary = state.sessions.find((item) => item.id === snapshot?.id);
   activity.textContent = preferences.activityExpanded ? '收起执行过程' : '展开执行过程';
   activity.setAttribute('aria-pressed', String(preferences.activityExpanded));
   activity.hidden = !snapshot;
+  const emptyToolTurns = new Set(state.view?.emptyToolTurns);
   classic.update({
     hasSession: Boolean(snapshot),
     title: snapshot ? summary?.title || `${snapshot.harness} · #${summary?.created_seq ?? ''}` : '',
@@ -1111,7 +914,7 @@ function render() {
     preview: previewActive && !snapshot,
     historical: state.view?.historical || state.view?.loadingEarlier,
     hasActivity: Boolean(
-      state.view?.entries.some((row) => row.role === 'Thought') ||
+      state.view?.entries.some((row) => row.role === 'Thought' || !emptyToolTurns.has(row.turn)) ||
         hasIntermediateAnswers(state.view?.entries || [], snapshot?.active_turn) ||
         state.view?.tools.length ||
         preferences.activityExpanded,
@@ -1143,7 +946,6 @@ function render() {
   renderCommands();
   management.setView(snapshot, state.sessions, state.operations, state.error);
   if (snapshot) {
-    sessions.dataset.limit = String(preferences.sessionRows);
     renderSettings(snapshot, {
       settings,
       viewOptions,
@@ -1202,6 +1004,15 @@ function render() {
   if (state.operations.some((operation) => operation.status === 'uncertain'))
     operations.append(
       button('Check operation receipts (never resend)', () => send({ type: 'recover_operations' })),
+    );
+  const unknown = state.operations.filter(
+    (op) => op.status === 'uncertain' && op.code === 'unknown',
+  );
+  if (unknown.length)
+    operations.append(
+      button(`停止跟踪 ${unknown.length} 项未找到回执的操作（仅本地）`, () =>
+        send({ type: 'stop_tracking_unknown', operations: unknown.map((op) => op.operation) }),
+      ),
     );
   for (const operation of state.operations.slice(-12)) {
     const row = element(
@@ -1325,4 +1136,4 @@ window.addEventListener('unload', () => {
   historyView.clear();
   diffView.clear();
 });
-send({ type: 'ready' });
+send({ type: 'ready', harness: harness.value as SessionView['harness'] });

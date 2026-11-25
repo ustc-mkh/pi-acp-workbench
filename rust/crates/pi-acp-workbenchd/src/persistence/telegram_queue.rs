@@ -1,7 +1,6 @@
 //! Existing inbox is the input queue. Only known Busy rejections may get a
 //! new attempt ID; unknown/accepted operations always recover the original ID.
 use super::*;
-use crate::telegram::{state::InboxOutcome, types::UpdateId};
 use crate::{
     domain::{
         transition::{DeliveryIntent, DeliveryPayload},
@@ -19,29 +18,6 @@ fn source(record: &InboxRecord) -> Option<&SessionId> {
         _ => None,
     }
 }
-fn frozen(
-    db: &Connection,
-    bot: i64,
-    offset: u64,
-    id: UpdateId,
-) -> Result<InboxRecord, DomainError> {
-    let mut statement = db
-        .prepare(&format!(
-            "SELECT {INBOX_COLUMNS} FROM telegram_inbox WHERE bot_id=?1 AND update_id=?2"
-        ))
-        .map_err(failure)?;
-    let mut rows = statement
-        .query(params![bot, safe(id.get())?])
-        .map_err(failure)?;
-    record(
-        db,
-        bot,
-        offset,
-        rows.next()
-            .map_err(failure)?
-            .ok_or_else(|| failure("queue inbox missing"))?,
-    )
-}
 pub(super) fn attempt(
     db: &Connection,
     bot: i64,
@@ -49,7 +25,7 @@ pub(super) fn attempt(
     id: UpdateId,
     change: Option<(Option<OperationId>, OperationId)>,
 ) -> Result<Output, DomainError> {
-    let record = frozen(db, bot, offset, id)?;
+    let record = inbox_record(db, bot, offset, id)?;
     if source(&record).is_none() {
         return Err(DomainError::OperationConflict);
     }
@@ -82,7 +58,7 @@ pub(super) fn barrier(
     id: UpdateId,
     limit: usize,
 ) -> Result<Output, DomainError> {
-    let control = frozen(db, bot, offset, id)?;
+    let control = inbox_record(db, bot, offset, id)?;
     if !matches!(
         &control.command.action,
         TelegramAction::Control(ControlCommand::Cancel { .. } | ControlCommand::Interrupt { .. })
@@ -99,7 +75,7 @@ pub(super) fn barrier(
         return Err(DomainError::OperationConflict);
     }
     let mut cancelled = vec![];
-    for mut record in pending(db, bot, offset, limit)? {
+    for record in pending(db, bot, offset, limit)? {
         if record.id >= id
             || record.command.topic != control.command.topic
             || source(&record) != source(&control)
@@ -107,9 +83,8 @@ pub(super) fn barrier(
         {
             continue;
         }
-        record.status = InboxStatus::Completed(InboxOutcome::Cancelled { by: id });
-        db.execute("UPDATE telegram_inbox SET command_json=?3,status='Completed',outcome_json=?4 WHERE bot_id=?1 AND update_id=?2 AND status='Pending'", params![bot, safe(record.id.get())?, json(&record)?, json(&InboxOutcome::Cancelled { by: id })?]).map_err(failure)?;
         cancelled.push(record.id);
+        complete_record(db, bot, record, InboxOutcome::Cancelled { by: id })?;
     }
     let content = notice_content(&NoticeContent {
         id: notice,
@@ -136,15 +111,31 @@ pub(super) fn queued_notice(
     if view.active_turn.is_none() && count == 0 {
         return Ok(());
     }
-    let notice = NoticeContent { id: NoticeId::new(format!("queued-{}", record.id.get()))?, text: format!("Input {} queued ({count} earlier inputs). /queue shows pending IDs; /stop cancels earlier queued inputs; /interrupt TEXT stops then replaces them.", record.id.get()) };
+    notice(db, bot, &record.command.topic, view.cwd, record.id, "queued",
+        format!("Input {} queued ({count} earlier inputs). /queue shows pending IDs; /stop cancels earlier queued inputs; /interrupt TEXT stops then replaces them.", record.id.get()))
+}
+pub(super) fn notice(
+    db: &Connection,
+    bot: i64,
+    topic: &TopicKey,
+    cwd: crate::domain::WorkspacePath,
+    update: UpdateId,
+    kind: &str,
+    text: String,
+) -> Result<(), DomainError> {
+    let key = format!("{kind}-{}", update.get());
+    let notice = NoticeContent {
+        id: NoticeId::new(&key)?,
+        text,
+    };
     let value = notice_content(&notice).map_err(failure)?;
     super::super::content::put_text(db, &value).map_err(failure)?;
     super::super::query::put_delivery(
         db,
         &DeliveryIntent {
-            id: DeliveryId::new(format!("queued-{}", record.id.get()))?,
-            revision: safe(record.id.get())?,
-            target: record.command.topic.delivery_target(bot, view.cwd),
+            id: DeliveryId::new(key)?,
+            revision: safe(update.get())?,
+            target: topic.delivery_target(bot, cwd),
             payload: DeliveryPayload::Notice {
                 content: value.content,
             },

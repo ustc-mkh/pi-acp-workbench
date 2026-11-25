@@ -29,13 +29,6 @@ pub(super) fn stage(
         return Err(StoreError::Invalid("only Pi has a context profile"));
     }
     super::management::save_model_config(&tx, &view.harness, action)?;
-    if matches!(action, ManagementAction::Context { .. }) {
-        tx.execute("INSERT INTO model_settings(harness,model,hidden,context_override) VALUES('Pi',?1,0,?2) ON CONFLICT(harness,model) DO UPDATE SET context_override=excluded.context_override",params![model,context_window.map(|n|n as i64)])?;
-    }
-    let count: u32 = tx.query_row("SELECT count(*) FROM model_settings", [], |r| r.get(0))?;
-    if count > 1500 {
-        return Err(StoreError::Invalid("model settings budget exceeded"));
-    }
     let revision: u64 = tx.query_row(
         "UPDATE model_context_clock SET revision=revision+1 WHERE id=1 RETURNING revision",
         [],

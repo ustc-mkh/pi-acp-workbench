@@ -1,4 +1,4 @@
-use super::*;
+use super::{fork_tests::inspect, *};
 
 fn config(root: &std::path::Path) -> Config {
     let peer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../test/contract-agent.mjs");
@@ -22,10 +22,11 @@ fn config(root: &std::path::Path) -> Config {
             pi: Some(launch("pi")),
             codex: Some(codex),
             claude: Some(launch("claude")),
+            antigravity: Some(launch("antigravity")),
         },
         sessions: SessionsConfig {
             mailbox: 128,
-            max_workers: 3,
+            max_workers: 4,
         },
         telegram: None,
         storage: StorageConfig { root: root.into() },
@@ -34,12 +35,9 @@ fn config(root: &std::path::Path) -> Config {
         },
     }
 }
-async fn inspect(app: &WorkbenchApp, id: &SessionId) -> super::fork_tests::Evidence {
-    super::fork_tests::inspect(app, id).await
-}
 
 #[tokio::test]
-async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_cold_restart_preserves_patches(
+async fn standard_tool_details_for_synthetic_profiles_are_committed_and_cold_restart_preserves_patches(
 ) {
     use crate::domain::{
         tool::{ToolKind, ToolStatus},
@@ -50,7 +48,7 @@ async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_co
     let app = WorkbenchApp::new(config(&root)).unwrap();
     let mut saved = Vec::new();
     let mut events = app.subscribe();
-    for harness in [Harness::Pi, Harness::Codex, Harness::Claude] {
+    for harness in Harness::ALL {
         let created = app
             .command(DomainCommand::CreateSession {
                 harness,
@@ -97,58 +95,42 @@ async fn standard_tool_details_for_three_synthetic_profiles_are_committed_and_co
 }
 
 #[tokio::test]
-async fn app_routes_each_harness_to_its_launch_and_disabled_harness_is_inspectable_but_never_prompted(
-) {
+async fn disabled_harness_keeps_previous_sessions_readable_and_rejects_prompt_and_create() {
     let root = std::env::temp_dir().join(format!("workbench-providers-{}", uuid::Uuid::new_v4()));
     let first = WorkbenchApp::new(config(&root)).unwrap();
-    let mut ids = Vec::new();
+    let CommandReceipt::Created { summary } = first
+        .command(DomainCommand::CreateSession {
+            harness: Harness::Codex,
+            cwd: WorkspacePath::new("/tmp").unwrap(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("create")
+    };
+    let id = summary.id;
     let mut events = first.subscribe();
-    for (harness, name) in [
-        (Harness::Pi, "pi"),
-        (Harness::Codex, "codex"),
-        (Harness::Claude, "claude"),
-    ] {
-        let created = first
-            .command(DomainCommand::CreateSession {
-                harness: harness.clone(),
-                cwd: WorkspacePath::new("/tmp").unwrap(),
-            })
-            .await
-            .unwrap();
-        let CommandReceipt::Created { summary: snapshot } = created else {
-            panic!("create")
-        };
-        let id = snapshot.id.clone();
-        prompt(&first, &id, "worker-profile").await;
-        wait_finished(&mut events).await;
-        let snapshot = inspect(&first, &id).await;
-        assert_eq!(snapshot.harness, harness);
-        assert!(snapshot
-            .transcript
-            .entries
-            .iter()
-            .any(|entry| entry.text == format!("{name}:{name}")));
-        ids.push(id);
-    }
+    prompt(&first, &id, "worker-profile").await;
+    wait_finished(&mut events).await;
     first.shutdown().await;
     let mut disabled = config(&root);
     disabled.workers.codex = None;
     let second = WorkbenchApp::new(disabled).unwrap();
     second
-        .command(DomainCommand::LoadSession(ids[1].clone()))
+        .command(DomainCommand::LoadSession(id.clone()))
         .await
         .unwrap();
-    let before = inspect(&second, &ids[1]).await;
+    let before = inspect(&second, &id).await;
     assert!(matches!(
         second
             .command(DomainCommand::Prompt {
-                session: ids[1].clone(),
+                session: id.clone(),
                 prompt: Prompt::new("must not execute").unwrap()
             })
             .await,
         Err(DomainError::ProviderNotConfigured)
     ));
-    let after = inspect(&second, &ids[1]).await;
+    let after = inspect(&second, &id).await;
     assert_eq!(after.revision, before.revision);
     assert_eq!(
         after.transcript.entries.len(),
@@ -163,14 +145,14 @@ async fn app_routes_each_harness_to_its_launch_and_disabled_harness_is_inspectab
             .await,
         Err(DomainError::ProviderNotConfigured)
     ));
-    assert_eq!(second.list(None, None).await.unwrap().sessions.len(), 3);
+    assert_eq!(second.list(None, None).await.unwrap().sessions.len(), 1);
     second.shutdown().await;
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
 #[tokio::test]
-async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_crash_and_native_restart(
-) {
+async fn all_synthetic_profiles_cover_plan_usage_permission_forms_cancel_crash_and_native_restart()
+{
     use crate::domain::{
         interaction::{FieldValue, InteractionAnswer, InteractionResponse},
         plan::PlanStatus,
@@ -184,6 +166,7 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
         ("pi", config.workers.pi.as_mut().unwrap()),
         ("codex", config.workers.codex.as_mut().unwrap()),
         ("claude", config.workers.claude.as_mut().unwrap()),
+        ("antigravity", config.workers.antigravity.as_mut().unwrap()),
     ] {
         launch.env.insert(
             "WORKBENCH_CONTRACT_TRACE".into(),
@@ -203,6 +186,7 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
         (Harness::Pi, "pi"),
         (Harness::Codex, "codex"),
         (Harness::Claude, "claude"),
+        (Harness::Antigravity, "antigravity"),
     ] {
         let created = app
             .command(DomainCommand::CreateSession {
@@ -341,10 +325,10 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
         })
         .await
         .unwrap();
-        assert!(matches!(
-            inspect(&app, &id).await.status,
-            SessionStatus::Failed(_)
-        ));
+        let failed = inspect_view(&app, &id).await;
+        assert!(matches!(failed.status, SessionStatus::Failed(_)));
+        assert!(failed.active_turn.is_none());
+        assert_eq!(failed.provider_session, native);
         prompt(&app, &id, "after crash").await;
         wait_finished(&mut events).await;
         let recovered = inspect(&app, &id).await;
@@ -401,9 +385,14 @@ async fn all_three_synthetic_profiles_cover_plan_usage_permission_forms_cancel_c
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert!(records.iter().any(
-            |record| record.method == "session/load" && record.native == after.provider_session
-        ));
+        let method = if name == "antigravity" {
+            "session/resume"
+        } else {
+            "session/load"
+        };
+        assert!(records
+            .iter()
+            .any(|record| record.method == method && record.native == after.provider_session));
     }
     app.shutdown_checked().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();

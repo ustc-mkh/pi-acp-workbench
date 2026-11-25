@@ -5,6 +5,7 @@ import {
   clientCommand,
   commandPool,
   durableCommand,
+  expectedQueryKind,
   ipcMessage,
   operationId,
   MAX_FRAME_BYTES,
@@ -49,7 +50,6 @@ interface Pending {
   command: ClientCommand;
   operation?: OperationId;
   sent: boolean;
-  settled: boolean;
   pool: ReturnType<typeof commandPool>;
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -193,8 +193,6 @@ export class WorkbenchClient {
     }
   }
   private connect(): Promise<void> {
-    if (this.closed)
-      return Promise.reject(new WorkbenchError('closed', 'Workbench client is closed'));
     if (this.connection) return this.connection.ready;
     let socket: Socket;
     try {
@@ -237,22 +235,19 @@ export class WorkbenchClient {
     connection.stopReader();
     connection.socket.destroy();
     for (const [id, pending] of this.pending) {
-      this.finish(id);
-      if (!pending.settled)
-        pending.reject(
-          new WorkbenchError(
-            code,
-            message,
-            pending.operation,
-            pending.sent && pending.operation !== undefined,
-          ),
-        );
+      this.finish(id, pending);
+      pending.reject(
+        new WorkbenchError(
+          code,
+          message,
+          pending.operation,
+          pending.sent && pending.operation !== undefined,
+        ),
+      );
     }
     if (!this.closed) this.notify('lost', error);
   }
-  private finish(id: number) {
-    const pending = this.pending.get(id);
-    if (!pending) return;
+  private finish(id: number, pending: Pending) {
     clearTimeout(pending.timer);
     this.pending.delete(id);
     this.pools[pending.pool]--;
@@ -282,40 +277,25 @@ export class WorkbenchClient {
       ) {
         result = message.session;
       } else if (message.type === 'query') {
-        const kinds = {
-          operation: 'operation',
-          list: 'list',
-          search: 'list',
-          inspect: 'view',
-          history: 'history',
-          history_turns: 'history_turns',
-          content_batch: 'content_batch',
-          tools: 'tools',
-          content: 'content',
-          management: 'management',
-          validate_undo: 'validate_undo',
-          turn_diff: 'turn_diff',
-          turn_diff_content: 'turn_diff_content',
-          attach: 'attached',
-        } as const;
-        const method = pending.command.method;
-        if (!(method in kinds) || kinds[method as keyof typeof kinds] !== message.result.kind)
+        if (expectedQueryKind(pending.command.method) !== message.result.kind)
           throw new Error('Unexpected query response kind');
         result = message.result.value;
       } else throw new Error('Unexpected workbench response kind');
     }
-    this.finish(message.id);
-    if (pending.settled) return;
+    this.finish(message.id, pending);
     if (message.type === 'error')
       pending.reject(
         new WorkbenchError(
           message.code,
           message.message,
           pending.operation,
-          pending.operation !== undefined,
+          pending.operation !== undefined &&
+            message.code !== 'not_admitted' &&
+            message.code !== 'admission_backpressure' &&
+            !(pending.command.method === 'create' && message.code === 'provider_not_configured'),
         ),
       );
-    else pending.resolve(result!);
+    else pending.resolve(result);
   }
   request<C extends ClientCommand>(command: C, options: RequestOptions = {}): RequestTicket<C> {
     if (this.closed) throw new WorkbenchError('closed', 'Workbench client is closed');
@@ -326,12 +306,9 @@ export class WorkbenchClient {
         'invalid_input',
         'This query/subscription cannot have a durable operation',
       );
-    const operation =
-      options.operation !== undefined
-        ? operationId.parse(options.operation)
-        : durableCommand(parsed)
-          ? operationId.parse(randomUUID())
-          : undefined;
+    const operation = durableCommand(parsed)
+      ? operationId.parse(options.operation === undefined ? randomUUID() : options.operation)
+      : undefined;
     if (
       options.timeoutMs !== undefined &&
       (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0)
@@ -342,9 +319,7 @@ export class WorkbenchClient {
     if (this.nextId >= Number.MAX_SAFE_INTEGER)
       throw new WorkbenchError('backpressure', 'Workbench request IDs exhausted', operation);
     const id = ++this.nextId;
-    const body =
-      JSON.stringify({ version: 3, id, command: parsed, ...(operation ? { operation } : {}) }) +
-      '\n';
+    const body = JSON.stringify({ version: 3, id, command: parsed, operation }) + '\n';
     if (Buffer.byteLength(body) - 1 > WORKBENCH_LIMITS.frameBytes)
       throw new WorkbenchError('invalid_input', 'Workbench request is too large', operation);
     let resolve!: Pending['resolve'], reject!: Pending['reject'];
@@ -357,15 +332,13 @@ export class WorkbenchClient {
       operation,
       pool,
       sent: false,
-      settled: false,
       resolve,
       reject,
     };
     this.pending.set(id, pending);
     this.pools[pool]++;
     const abandon = (code = 'abandoned') => {
-      if (this.pending.get(id) !== pending || pending.settled) return;
-      pending.settled = true;
+      if (!this.pending.has(id)) return;
       clearTimeout(pending.timer);
       pending.reject(
         new WorkbenchError(
@@ -375,8 +348,8 @@ export class WorkbenchClient {
           pending.sent && operation !== undefined,
         ),
       );
-      // Already-sent requests retain their quota until reply/disconnect, bounding unobserved work.
-      if (!pending.sent) this.finish(id);
+      // The promise stays rejected. Sent requests still occupy a slot until reply/disconnect.
+      if (!pending.sent) this.finish(id, pending);
     };
     if (options.timeoutMs) {
       pending.timer = setTimeout(() => abandon('timeout'), options.timeoutMs);
@@ -384,32 +357,30 @@ export class WorkbenchClient {
     }
     void this.connect()
       .then(() => {
-        if (this.pending.get(id) !== pending) return;
+        if (!this.pending.has(id)) return;
         const socket = this.connection?.socket;
         if (!socket || socket.destroyed) throw new Error();
         if (socket.writableLength + Buffer.byteLength(body) > WORKBENCH_LIMITS.frameBytes) {
-          this.finish(id);
-          if (!pending.settled)
-            pending.reject(
-              new WorkbenchError('backpressure', 'Workbench write queue is full', operation),
-            );
+          this.finish(id, pending);
+          pending.reject(
+            new WorkbenchError('backpressure', 'Workbench write queue is full', operation),
+          );
           return;
         }
         pending.sent = true;
         socket.write(body);
       })
       .catch(() => {
-        if (this.pending.get(id) !== pending) return;
-        this.finish(id);
-        if (!pending.settled)
-          pending.reject(
-            new WorkbenchError(
-              'disconnected',
-              'Workbench request could not complete; not resent',
-              operation,
-              pending.sent && operation !== undefined,
-            ),
-          );
+        if (!this.pending.has(id)) return;
+        this.finish(id, pending);
+        pending.reject(
+          new WorkbenchError(
+            'disconnected',
+            'Workbench request could not complete; not resent',
+            operation,
+            pending.sent && operation !== undefined,
+          ),
+        );
       });
     return { id, operation, result, abandon: () => abandon() };
   }

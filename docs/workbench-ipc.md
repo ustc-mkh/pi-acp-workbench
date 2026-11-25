@@ -12,9 +12,15 @@
 {"version":3,"id":3,"command":{"method":"attach","session":"SESSION_ID"}}
 ```
 
+`create.harness` 接受 `Pi`、`Codex`、`Claude` 和 `Antigravity`。创建会话要求宿主已配置对应的 worker。
+
 mutation 返回 `type: reply` 和类型化 receipt；普通查询返回 `type: query`、`result: {kind,value}`；图片使用 `type: image`；错误使用 `type: error`、请求 ID、code 和 message。
 
 相同 operation 和参数返回原已提交结果，不同参数拒绝。prompt 的 Accepted 只表示输入已持久接受，不表示模型执行成功。`operation {operation}` 查询 `unknown`、`uncertain`、`expired`、`completed` 或 `failed`；断线或未知结果不授权自动重新发送。
+
+守护进程在接收写请求之前拒绝时返回 `admission_backpressure` 或 `not_admitted`。创建会话时返回 `provider_not_configured` 表示配置预检失败。这些请求在桌面端直接标记为失败并释放操作名额。对于已发送但结果未知的请求，桌面端保留原操作 ID。查询返回 `unknown` 后，用户可在会话选项中手动停止跟踪并释放名额，操作记录保留原 ID，此操作仅改变本地跟踪状态。
+
+例如，取消一个不存在的会话会返回 `not_found`。查询该 operation 会得到 `failed`，宿主重启后用相同 operation 和参数重试仍返回 `not_found`。
 
 ## 输入和设置
 
@@ -54,6 +60,8 @@ mutation 返回 `type: reply` 和类型化 receipt；普通查询返回 `type: q
 ## 订阅与恢复
 
 `attach {session}` 先注册观察，再原子读取视图和近期历史，建立初始 revision。后续 `type: batch` 包含 session、revision、可选替换视图、已提交消息摘要和工具更新；无变化操作不增加 revision。
+
+在 attach 和 batch 的视图中，桌面端优先显示服务方报告的 `catalogue.current_model` 和 `catalogue.current_mode`。worker 已释放后，如果 `config` 中保存的选择仍在可用目录中，且与历史观察值相异，宿主会省略对应的 current 字段，让桌面端显示已保存的选择。
 
 重复 revision 被忽略，缺口或订阅积压触发 `resync_required` 并断开。客户端重新 attach，不重发 mutation。`detach {session}` 只结束观察；取消请求观察者也不撤销宿主工作。删除会话通过持久 tombstone revision 发布终态。
 

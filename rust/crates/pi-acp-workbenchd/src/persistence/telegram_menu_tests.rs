@@ -80,6 +80,7 @@ async fn menu_callback_capacity_reserves_authorization_and_reclaims_only_expired
         .await
         .unwrap();
     let admission = |command| Admission {
+        workspace: crate::domain::WorkspacePath::new("/tmp").unwrap(),
         id: UpdateId::new(1).unwrap(),
         sender: Some(UserId::new(5).unwrap()),
         command: Some(TelegramCommand {

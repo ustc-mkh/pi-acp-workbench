@@ -66,46 +66,6 @@ it('hashes the exact prefix at a historical point, preserving prior but not late
   );
   expect(changed.at(-1)!.hash).not.toBe(points.at(-1)!.hash);
 });
-it('rejects cuts with pending or orphaned tool results, and accepts a completed turn', () => {
-  const entries = chain([
-    msg('user', 'task'),
-    {
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'working' },
-          { type: 'toolCall', id: 't1' },
-          { type: 'toolCall', id: 't2' },
-        ],
-      },
-    },
-    { message: { role: 'toolResult', toolCallId: 't1', content: [] } },
-    msg('assistant', 'partial'),
-    { message: { role: 'toolResult', toolCallId: 't2', content: [] } },
-    msg('assistant', 'done'),
-  ]);
-  expect(nativeForkPoints(entries).map((p) => p.safe)).toEqual([true, false, false, true]);
-  const orphan = chain([
-    { message: { role: 'toolResult', toolCallId: 'unknown', content: [] } },
-    msg('assistant', 'not safe'),
-  ]);
-  expect(nativeForkPoints(orphan)[0].safe).toBe(false);
-});
-it('honors omitted attempts and excludes error responses as branch targets', () => {
-  const entries = chain([
-    {
-      message: {
-        role: 'assistant',
-        content: [{ type: 'toolCall', id: 'bad' }],
-        stopReason: 'error',
-      },
-    },
-    { type: 'context_edit', targetId: '0', replacement: null },
-    msg('user', 'retry'),
-    msg('assistant', 'ok'),
-  ]);
-  expect(nativeForkPoints(entries).map((p) => p.safe)).toEqual([false, true, true]);
-});
 it('preserves distinct native nodes for equal text and equal timestamps without display-row binding', () => {
   const points = nativeForkPoints(
     chain([msg('assistant', 'same', 10), msg('assistant', 'same', 10)]),

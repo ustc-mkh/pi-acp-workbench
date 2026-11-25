@@ -14,6 +14,8 @@ use crate::{
     },
 };
 use tokio::sync::oneshot;
+pub(crate) const CONTROL_RESERVE: usize = 4;
+pub(crate) const MAX_PENDING: usize = crate::config::MAX_TELEGRAM_INBOX_CAPACITY + CONTROL_RESERVE;
 #[derive(Clone)]
 pub struct TelegramStore {
     pub(super) database: Database,
@@ -22,10 +24,12 @@ pub struct TelegramStore {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmissionResult {
     Accepted,
+    QueueFull,
     Ignored,
     Duplicate,
 }
 pub struct Admission {
+    pub workspace: crate::domain::WorkspacePath,
     pub id: UpdateId,
     pub sender: Option<UserId>,
     pub command: Option<TelegramCommand>,
@@ -255,7 +259,7 @@ impl TelegramStore {
     }
     pub async fn pending(&self, limit: usize) -> Result<Vec<InboxRecord>, DomainError> {
         match self
-            .request(Action::Pending(limit.min(self.max_pending)))
+            .request(Action::Pending(limit.min(MAX_PENDING)))
             .await?
         {
             Output::Pending(value) => Ok(value),
@@ -279,4 +283,13 @@ pub(super) fn operation(id: UpdateId) -> Result<OperationId, DomainError> {
 }
 pub(super) fn failure(error: impl std::fmt::Display) -> DomainError {
     DomainError::Persistence(error.to_string())
+}
+pub(crate) fn session_read_error(
+    error: super::database::StoreError,
+    session: &SessionId,
+) -> DomainError {
+    match error {
+        super::database::StoreError::NotFound => DomainError::NotFound(session.clone()),
+        error => failure(error),
+    }
 }
